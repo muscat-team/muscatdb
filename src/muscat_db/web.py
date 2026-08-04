@@ -4460,16 +4460,71 @@ def _bjd_to_yymmdd(bjd: float) -> str:
         return ""
 
 
+# Kepler's BKJD zero point. timer wrote ``tc.txt`` as ``t0 + ref_time - 2454833``
+# until john-livingston/timer@de8180f ("tc.txt: report transit times in data
+# native time system, drop hardcoded kepler offset"), after which the file
+# carries the light curve's own time system -- BJD_TDB, since muscat-db never
+# sets timer's ``timeoffset``. Both conventions are on disk: every run predating
+# the engine update on this host holds BKJD, every run after it holds BJD, so
+# tc.txt has to be normalised per run rather than offset unconditionally.
+_BKJD_TO_BJD = 2454833.0
+
+# Any BKJD transit center is < 10^5; any BJD one is > 2.4 x 10^6. Used only when
+# a run's reference time is unavailable.
+_BJD_FLOOR = 2_400_000.0
+
+
+def _timer_ref_time(rdir: pathlib.Path) -> float | None:
+    """The ``ref. time`` timer subtracted from a run's light curves, or None.
+
+    timer logs one line per input dataset; the log is truncated per run, so the
+    first line belongs to the run being read. Datasets of one run share a night,
+    hence a single line is enough to anchor the time system.
+    """
+    log_file = rdir / "timer-fit.log"
+    if not log_file.is_file():
+        return None
+    try:
+        with open(log_file) as lf:
+            for line in lf:
+                if "ref. time:" in line:
+                    try:
+                        return float(line.split("ref. time:")[-1].strip())
+                    except ValueError:
+                        return None
+    except OSError:
+        logger.debug("failed to read ref. time from %s", log_file, exc_info=True)
+    return None
+
+
+def _tc_txt_to_bjd(value: float, ref_time: float | None) -> float:
+    """Normalise a ``tc.txt`` transit center to BJD, whichever timer wrote it.
+
+    The two candidate readings sit 2454833 days apart while a transit center
+    stays near the night it was observed, so picking the candidate nearest
+    ``ref_time`` identifies the convention unambiguously -- with a margin no
+    plausible fit can close, not a tuned tolerance.
+    """
+    if ref_time is None:
+        return value if value > _BJD_FLOOR else value + _BKJD_TO_BJD
+    return min(
+        (value, value + _BKJD_TO_BJD),
+        key=lambda candidate: abs(candidate - ref_time),
+    )
+
+
 def _get_run_fitted_params(inst: str, date: str, target: str, run_id: str | None) -> dict:
     """Per-planet fitted ephemeris from a run's outputs (the Fitted Parameters
     Summary), not the input ``sys.yaml`` priors.
 
     Returns ``{planet: {"tc", "unc", "dur", "dur_unc"}}`` with whatever is
     available. The transit center (``tc``, BJD) comes from ``out/tc.txt`` when
-    present, otherwise from ``out/summary.csv`` (``t0[idx]`` + the run's
-    reference time). The transit duration (``dur``, hours) comes from
-    ``summary.csv`` (``dur[idx]``, stored in days). ``period`` is deliberately
-    not read here: it is held fixed in the fit and never appears in the summary.
+    present -- normalised by :func:`_tc_txt_to_bjd`, since the file's time
+    system depends on the timer version that wrote it -- otherwise from
+    ``out/summary.csv`` (``t0[idx]`` + the run's reference time). The transit
+    duration (``dur``, hours) comes from ``summary.csv`` (``dur[idx]``, stored
+    in days). ``period`` is deliberately not read here: it is held fixed in the
+    fit and never appears in the summary.
     """
     import csv
     import yaml
@@ -4486,6 +4541,10 @@ def _get_run_fitted_params(inst: str, date: str, target: str, run_id: str | None
                 cfg = yaml.safe_load(f) or {}
                 planets_fitted = str(cfg.get("planets", "b"))
 
+        # Anchors both readers below: tc.txt is written in the light curves'
+        # own time system, summary.csv relative to this value.
+        ref_time = _timer_ref_time(rdir)
+
         # Transit centers from tc.txt take precedence for t0 when present.
         tc_txt = out_dir / "tc.txt"
         if tc_txt.is_file():
@@ -4495,23 +4554,12 @@ def _get_run_fitted_params(inst: str, date: str, target: str, run_id: str | None
                     if len(parts) >= 3:
                         pl = parts[0]
                         entry = fitted.setdefault(pl, {})
-                        entry["tc"] = float(parts[1]) + 2454833.0  # Kepler -> BJD
+                        entry["tc"] = _tc_txt_to_bjd(float(parts[1]), ref_time)
                         entry["unc"] = float(parts[2])
 
         # Fitted Parameters Summary: t0[idx] (if not already from tc.txt) and dur[idx].
         summary_csv = out_dir / "summary.csv"
         if summary_csv.is_file():
-            ref_time = None
-            log_file = rdir / "timer-fit.log"
-            if log_file.is_file():
-                with open(log_file) as lf:
-                    for line in lf:
-                        if "ref. time:" in line:
-                            try:
-                                ref_time = int(line.split("ref. time:")[-1].strip())
-                            except ValueError:
-                                ref_time = None
-                            break
             with open(summary_csv) as f:
                 reader = csv.reader(f)
                 headers = next(reader)

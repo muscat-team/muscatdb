@@ -864,6 +864,88 @@ def test_ephemeris_target_info_lists_only_full_transit_fit_runs(
     assert "run_type" not in datasets[0]
 
 
+def _write_timer_run(rdir, tc_line, ref_time=2460114, summary=None):
+    """A minimal timer run directory: fit.yaml, timer-fit.log and out/tc.txt."""
+    out = rdir / "out"
+    out.mkdir(parents=True, exist_ok=True)
+    (rdir / "fit.yaml").write_text("planets: b\n")
+    (rdir / "timer-fit.log").write_text(
+        "2026-08-04 13:45:02 - INFO - loading data: lc_gp.csv\n"
+        f"2026-08-04 13:45:02 - INFO - ref. time: {ref_time}\n"
+    )
+    if tc_line is not None:
+        (out / "tc.txt").write_text(tc_line + "\n")
+    if summary is not None:
+        (out / "summary.csv").write_text(summary)
+    return rdir
+
+
+@pytest.mark.parametrize(
+    ("tc_line", "expected_tc"),
+    [
+        # Post-de8180f timer writes the light curve's own system (BJD_TDB).
+        ("b 2460114.529475892 0.001763186", 2460114.529475892),
+        # Pre-de8180f timer subtracted the Kepler zero point.
+        ("b 5281.529475892 0.001763186", 2460114.529475892),
+    ],
+    ids=["native_bjd", "legacy_bkjd"],
+)
+def test_run_fitted_params_normalises_tc_txt_time_system(
+    tmp_path, monkeypatch, tc_line, expected_tc
+):
+    """Both timer conventions for tc.txt must resolve to the same BJD.
+
+    timer dropped its hardcoded -2454833 offset in de8180f, so runs written
+    either side of the engine update coexist on disk and cannot be offset
+    unconditionally.
+    """
+    from muscat_db import web
+
+    rdir = _write_timer_run(tmp_path / "run", tc_line)
+    monkeypatch.setattr(web.fit, "fit_output_dir", lambda *args: rdir)
+
+    fitted = web._get_run_fitted_params("muscat2", "230618", "TOI01404.01", "default")
+
+    assert fitted["b"]["tc"] == pytest.approx(expected_tc, abs=1e-6)
+    assert fitted["b"]["unc"] == pytest.approx(0.001763186)
+
+
+def test_run_fitted_params_tc_txt_falls_back_to_magnitude_without_ref_time(
+    tmp_path, monkeypatch
+):
+    """Without timer-fit.log the reading is still separable by magnitude alone."""
+    from muscat_db import web
+
+    rdir = _write_timer_run(tmp_path / "run", "b 5281.529475892 0.001763186")
+    (rdir / "timer-fit.log").unlink()
+    monkeypatch.setattr(web.fit, "fit_output_dir", lambda *args: rdir)
+
+    fitted = web._get_run_fitted_params("muscat2", "230618", "TOI01404.01", "default")
+
+    assert fitted["b"]["tc"] == pytest.approx(2460114.529475892, abs=1e-6)
+
+
+def test_run_fitted_params_summary_t0_is_relative_to_ref_time(tmp_path, monkeypatch):
+    """summary.csv t0 is always relative, so it takes ref_time and no offset."""
+    from muscat_db import web
+
+    rdir = _write_timer_run(
+        tmp_path / "run",
+        tc_line=None,
+        summary=(
+            ",mean,sd\n"
+            "t0[0],0.529475892,0.001763186\n"
+            "dur[0],0.125,0.002\n"
+        ),
+    )
+    monkeypatch.setattr(web.fit, "fit_output_dir", lambda *args: rdir)
+
+    fitted = web._get_run_fitted_params("muscat2", "230618", "TOI01404.01", "default")
+
+    assert fitted["b"]["tc"] == pytest.approx(2460114.529475892, abs=1e-6)
+    assert fitted["b"]["dur"] == pytest.approx(3.0)
+
+
 @pytest.mark.parametrize(
     ("start", "end", "expected"),
     [
