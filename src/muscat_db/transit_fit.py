@@ -28,7 +28,8 @@ from muscat_db import __meta__, __muscatdb_version__, __version__
 from muscat_db.instruments import INSTRUMENTS
 from muscat_db.photometry import (
     output_base, valid_date, _conda_env_python, _tail, _to_float, _get_error_desc,
-    SINISTRO_SITES, SINISTRO_MODES,
+    SINISTRO_SITES, MULTISITE_INSTRUMENTS, MULTISITE_SITES,
+    MULTISITE_MODES, _TELESCOPE_PREFIX,
 )
 from muscat_db.cache import register_cache
 
@@ -189,26 +190,29 @@ def fit_job_key(inst: str, date: str, target: str, run_id: str = "") -> str:
     return f"{base}/{run_id}" if run_id else base
 
 
-def csv_site_mode(name: str) -> tuple[str | None, str | None, str | None]:
-    """``(site, telescope, canonical_mode)`` parsed from a sinistro lightcurve
-    CSV name.
+def csv_site_mode(name: str, inst: str = "sinistro") -> tuple[str | None, str | None, str | None]:
+    """``(site, telescope, canonical_mode)`` parsed from a multi-site
+    instrument's (sinistro/sbig/qhy600) lightcurve CSV name.
 
     Mirrors prose ``build_stem``: the LCO site is an ``_<site>_`` token, the
     physical telescope is an ``_tel<NN>_`` token right after it (a TELESCOP
-    header value compacted, e.g. ``'1m0-05'`` -> ``'tel05'``), and the readout
-    mode is the trailing ``_full`` token (``full_frame``; absence means
-    ``central_2k_2x2``). ``site``/``telescope`` are ``None`` when their token
-    is absent.
+    header value compacted, e.g. ``'1m0-05'`` -> ``'tel05'``, ``'0m4-06'`` ->
+    ``'tel06'``), and the readout mode is the trailing ``_full`` token
+    (``full_frame``; absence means the instrument's default mode).
+    ``site``/``telescope`` are ``None`` when their token is absent.
     """
     stem = name[:-4] if name.lower().endswith(".csv") else name
-    mode = "central_2k_2x2"
+    inst_modes = MULTISITE_MODES.get(inst)
+    mode = inst_modes[0] if inst_modes else "central_2k_2x2"
     if stem.endswith("_full"):
         mode = "full_frame"
         stem = stem[:-5]
     tokens = stem.lower().split("_")
-    site = next((t for t in tokens if t in SINISTRO_SITES), None)
+    inst_sites = MULTISITE_SITES.get(inst, SINISTRO_SITES)
+    site = next((t for t in tokens if t in inst_sites), None)
+    tel_prefix = _TELESCOPE_PREFIX.get(inst, "1m0")
     telescope = next(
-        (f"1m0-{t[3:]}" for t in tokens if t.startswith("tel") and t[3:].isdigit()),
+        (f"{tel_prefix}-{t[3:]}" for t in tokens if t.startswith("tel") and t[3:].isdigit()),
         None,
     )
     return site, telescope, mode
@@ -219,11 +223,12 @@ def selected_site_mode(inst: str, csv_names: list[str]) -> tuple[str, str, str]:
     selected CSVs.
 
     Single shared value -> that value; more than one -> ``mixed`` (mixing is
-    allowed); none / non-sinistro -> ``""``. Used to compose the run id.
+    allowed); none / not a multi-site instrument -> ``""``. Used to compose
+    the run id.
     """
-    if inst != "sinistro" or not csv_names:
+    if inst not in MULTISITE_INSTRUMENTS or not csv_names:
         return "", "", ""
-    parsed = [csv_site_mode(n) for n in csv_names]
+    parsed = [csv_site_mode(n, inst) for n in csv_names]
     sites = {s for s, _tel, _m in parsed if s}
     telescopes = {tel for _s, tel, _m in parsed if tel}
     modes = {m for _s, _tel, m in parsed if m}
@@ -240,10 +245,10 @@ def validate_no_duplicate_datasets(inst: str, date: str, csvs: list[pathlib.Path
         parts = c.name.split(f"_{inst}_")
         raw_band = parts[1].split(f"_{date}")[0] if len(parts) > 1 else "gp"
         mapped_band = _normalize_band(raw_band)
-        site, telescope, mode = csv_site_mode(c.name)
+        site, telescope, mode = csv_site_mode(c.name, inst)
         key = (site or "", telescope or "", mode or "", mapped_band)
         if key in seen_keys:
-            if inst == "sinistro":
+            if inst in MULTISITE_INSTRUMENTS:
                 site_str = f" (site: {site})" if site else ""
                 telescope_str = f" (telescope: {telescope})" if telescope else ""
                 mode_str = f" (mode: {mode})" if mode else ""
@@ -689,9 +694,12 @@ def _normalize_band(raw: str) -> str:
     and dropped the narrow bands from chromatic plots.
     """
     low = raw.strip().lower()
-    # Strip site code prefix if present (e.g. cpt_, lsc_ for Sinistro site codes)
-    # so that the actual filter name is extracted and normalized correctly.
-    for site in SINISTRO_SITES:
+    # Strip site code prefix if present (e.g. cpt_, lsc_ for any multi-site
+    # instrument's LCO site codes -- sinistro/sbig/qhy600's site sets overlap,
+    # so the union covers all of them) so the actual filter name is extracted
+    # and normalized correctly.
+    all_multisite_codes = {s for sites in MULTISITE_SITES.values() for s in sites}
+    for site in all_multisite_codes:
         if low.startswith(f"{site}_"):
             low = low[len(site) + 1:]
             break
@@ -1930,17 +1938,24 @@ def _parse_run_dir_name(name: str) -> tuple[str, str, str, str]:
     """Best-effort split of a run-id dir name into (site, telescope, mode, run_name).
 
     Used only as a fallback when meta.yaml lacks identity keys. Components are
-    hyphen-joined and never themselves contain ``-``. Newer sinistro run ids
-    omit the default ``central_2k_2x2`` mode, so a site/telescope-prefixed name
-    with no explicit mode is treated as central mode.
+    hyphen-joined and never themselves contain ``-``. Newer multi-site run ids
+    omit the default (non-"full") mode, so a site/telescope-prefixed name
+    with no explicit mode is treated as central mode. This helper has no
+    instrument context, so site/mode detection uses the union across all
+    multi-site instruments (safe: their site/mode code sets don't collide);
+    the "central_2k_2x2" default is sinistro's specifically and may be wrong
+    for a qhy600 dir name missing its mode token -- acceptable since this is
+    already documented as a best-effort fallback path.
     """
+    all_sites = {s for sites in MULTISITE_SITES.values() for s in sites}
+    all_modes = {m for modes in MULTISITE_MODES.values() for m in modes}
     parts = name.split("-")
     site = telescope = mode = ""
-    if parts and parts[0] in (set(SINISTRO_SITES) | {"mixed"}):
+    if parts and parts[0] in (all_sites | {"mixed"}):
         site, parts = parts[0], parts[1:]
     if parts and (parts[0] == "mixed" or (parts[0].startswith("tel") and parts[0][3:].isdigit())):
         telescope, parts = parts[0], parts[1:]
-    if parts and parts[0] in (set(SINISTRO_MODES) | {"mixed"}):
+    if parts and parts[0] in (all_modes | {"mixed"}):
         mode, parts = parts[0], parts[1:]
     elif site or telescope:
         mode = "central_2k_2x2"

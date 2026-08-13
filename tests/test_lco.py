@@ -122,6 +122,46 @@ class LcoTest(unittest.TestCase):
         self.assertEqual(inst_config["extra_params"]["bin_x"], 2)
         self.assertEqual(inst_config["extra_params"]["bin_y"], 2)
 
+    def test_build_requestgroup_qhy600(self):
+        params = {
+            "name": "Test QHY600 Request",
+            "proposal": "LCO2026A-001",
+            "target_name": "WASP-12",
+            "ra": "06:30:33",
+            "dec": "+29:40:20",
+            "kind": "qhy600",
+            "exposure_time": 60,
+            "exposure_count": 5,
+            "filter": "rp",
+            "windows": [{"start": "2026-07-01T00:00:00Z", "end": "2026-07-01T01:00:00Z"}],
+            "max_airmass": 1.8,
+            "readout_mode": "central30x30",
+        }
+        rg = lco.build_requestgroup("qhy600", params)
+        request = rg["requests"][0]
+        self.assertEqual(request["instrument_type"], "0M4-SCICAM-QHY600")
+        self.assertEqual(request["location"]["telescope_class"], "0m4")
+
+        config = request["configurations"][0]
+        inst_config = config["instrument_configs"][0]
+        self.assertEqual(inst_config["exposure_time"], 60)
+        self.assertEqual(inst_config["optical_elements"]["filter"], "rp")
+        self.assertEqual(inst_config["mode"], "central30x30")
+        # Unlike sinistro's central_2k_2x2 (2x2 binning), qhy600 has no
+        # binning mode -- always 1x1 regardless of readout mode.
+        self.assertEqual(inst_config["extra_params"]["bin_x"], 1)
+        self.assertEqual(inst_config["extra_params"]["bin_y"], 1)
+
+    def test_defocus_rejects_out_of_range_for_qhy600(self):
+        params = {
+            "name": "n", "proposal": "p", "target_name": "t",
+            "ra": 10.0, "dec": -5.0, "kind": "qhy600", "defocus": 1.0,
+            "exposure_time": 60, "filter": "rp",
+            "windows": [{"start": "2026-07-01T00:00:00Z", "end": "2026-07-01T01:00:00Z"}],
+        }
+        with self.assertRaises(lco.LcoError):
+            lco.build_requestgroup("qhy600", params)
+
     def test_defocus_defaults_to_zero(self):
         params = {
             "name": "n", "proposal": "p", "target_name": "t",
@@ -1134,7 +1174,7 @@ class RequestgroupToParamsTest(unittest.TestCase):
             lco.requestgroup_to_params({"name": "x", "requests": []})
 
     def test_rejects_unknown_instrument_type(self):
-        rg = {"requests": [{"instrument_type": "0M4-SCICAM-QHY600", "configurations": [{}]}]}
+        rg = {"requests": [{"instrument_type": "SOAR_GHTS_REDCAM", "configurations": [{}]}]}
         with self.assertRaises(lco.LcoError):
             lco.requestgroup_to_params(rg)
 
@@ -1179,3 +1219,31 @@ class ApiRedirectTest(unittest.TestCase):
     def test_downgrade_to_http_is_refused(self):
         with self.assertRaises(lco.LcoError):
             self._redirect_to("http://observe.lco.global/api/proposals/")
+
+
+class InferArchiveInstrumentTest(unittest.TestCase):
+    """Header/filename shapes verified against real /data/SBIGSTL6303 archive
+    frames (e.g. ogg0m406-kb27-20200724-0218-e91.fits)."""
+
+    def test_sbig_frame_by_metadata_fields(self):
+        frame = {"SITEID": "ogg", "TELID": "0m4b", "INSTRUME": "kb27"}
+        self.assertEqual(lco.infer_archive_instrument(frame), "sbig")
+
+    def test_sbig_frame_by_filename_only(self):
+        frame = {"filename": "ogg0m406-kb27-20200724-0218-e91.fits"}
+        self.assertEqual(lco.infer_archive_instrument(frame), "sbig")
+
+    def test_sinistro_frame_unaffected_by_0m4_handling(self):
+        frame = {"SITEID": "lsc", "TELID": "1m0a", "INSTRUME": "fa15"}
+        self.assertEqual(lco.infer_archive_instrument(frame), "sinistro")
+
+    def test_0m4_frame_with_unrecognized_instrume_raises(self):
+        # Real, but not "kb"-prefixed -- qhy600's INSTRUME prefix is not yet
+        # known, so this must fail loudly rather than guess.
+        frame = {"SITEID": "ogg", "TELID": "0m4b", "INSTRUME": "unknown01"}
+        with self.assertRaises(lco.LcoError):
+            lco.infer_archive_instrument(frame)
+
+    def test_unrecognized_frame_raises(self):
+        with self.assertRaises(lco.LcoError):
+            lco.infer_archive_instrument({"SITEID": "xyz", "TELID": "9m9x"})

@@ -98,12 +98,53 @@ SINISTRO = InstrumentConfig(
     use_alt_ut_key=True,
 )
 
+# LCO 0.4m network. Archival-only: SBIG STL-6303 CCDs, retired -- no LCO API
+# instrument_type code exists today (confirmed against the live
+# https://observe.lco.global/api/instruments/ list), so it cannot be
+# scheduled, only downloaded/reduced from the archive. Header key set and
+# specs (read_noise/gain/pixel_scale) verified on real /data/SBIGSTL6303
+# BANZAI e91 headers.
+SBIG = InstrumentConfig(
+    name="sbig",
+    nccd=1,
+    data_subdir="SBIGSTL6303",
+    prefix="",
+    ep_names=[""],
+    keys=["OBJECT", "MJD-OBS", "UTSTART", "EXPTIME", "CONFMODE", "FILTER", "RA", "DEC", "AIRMASS", "FOCPOSN"],
+    csv_header="FRAME,OBJECT,JD-STRT,UT-STRT,EXPTIME (s),READ_MODE,FILTER,RA,DEC,AIRMASS,FOCUS (mm)",
+    has_pa=False,
+    focus_label="FOCUS (mm)",
+    airmass_key="AIRMASS",
+    use_alt_ut_key=True,
+)
+
+# LCO 0.4m network. Current/live: QHY600 CMOS on DeltaRho 350 (replaced
+# SBIG). Schedulable today (instrument_type "0M4-SCICAM-QHY600", confirmed
+# via LCO's live configdb). Header key set mirrors sbig/sinistro's BANZAI
+# convention -- unverified against a real archived QHY600CMOS frame
+# (/data/QHY600CMOS is currently empty); sanity-check on the first real run.
+QHY600 = InstrumentConfig(
+    name="qhy600",
+    nccd=1,
+    data_subdir="QHY600CMOS",
+    prefix="",
+    ep_names=[""],
+    keys=["OBJECT", "MJD-OBS", "UTSTART", "EXPTIME", "CONFMODE", "FILTER", "RA", "DEC", "AIRMASS", "FOCPOSN"],
+    csv_header="FRAME,OBJECT,JD-STRT,UT-STRT,EXPTIME (s),READ_MODE,FILTER,RA,DEC,AIRMASS,FOCUS (mm)",
+    has_pa=False,
+    focus_label="FOCUS (mm)",
+    airmass_key="AIRMASS",
+    use_alt_ut_key=True,
+)
+
 INSTRUMENTS: dict[str, InstrumentConfig] = {
     "muscat": MUSCAT,
     "muscat2": MUSCAT2,
     "muscat3": MUSCAT3,
     "muscat4": MUSCAT4,
     "sinistro": SINISTRO,
+    "sbig": SBIG,
+    "qhy600": QHY600,
 }
 
 

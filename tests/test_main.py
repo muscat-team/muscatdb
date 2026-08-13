@@ -116,7 +116,7 @@ class TestInstruments:
         assert MUSCAT4.use_alt_ut_key is True
 
     def test_instruments_dict(self):
-        assert set(INSTRUMENTS) == {"muscat", "muscat2", "muscat3", "muscat4", "sinistro"}
+        assert set(INSTRUMENTS) == {"muscat", "muscat2", "muscat3", "muscat4", "sinistro", "sbig", "qhy600"}
 
     def test_get_instrument_ok(self):
         assert get_instrument("muscat3") is MUSCAT3

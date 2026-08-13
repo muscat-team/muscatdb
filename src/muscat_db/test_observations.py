@@ -17,7 +17,16 @@ from typing import Any
 from muscat_db.database import db_path
 
 ANALYSIS_VERSION = "test-observation-v1"
-SUPPORTED = {"muscat3", "muscat4", "sinistro"}
+# qhy600 is schedulable (LCO instrument_type "0M4-SCICAM-QHY600", confirmed
+# via LCO's live https://observe.lco.global/api/instruments/ list) and gets
+# the single-filter exposure-plan shape (nccd=1, same as sinistro). sbig is
+# deliberately excluded: it's archival-only -- no live LCO instrument_type
+# code exists to submit a test observation request for it.
+SUPPORTED = {"muscat3", "muscat4", "sinistro", "qhy600"}
+# nccd=1 kinds: one filter per exposure, so the exposure plan uses a single
+# {filter: exposure_time} pair rather than muscat3/muscat4's simultaneous
+# {g,r,i,z: exposure_time} dict.
+SINGLE_FILTER_KINDS = {"sinistro", "qhy600"}
 STATES = {"draft", "validated", "submitted", "pending", "downloading", "analyzing", "complete", "partial", "failed"}
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS test_observations (
@@ -68,7 +77,7 @@ def _focus_values(nominal: float, capabilities: dict) -> tuple[list[float], str 
 def generate_plan(payload: dict) -> dict:
     kind = str(payload.get("kind") or "").lower()
     if kind not in SUPPORTED:
-        raise TestObservationError("test observations support muscat3, muscat4, and sinistro")
+        raise TestObservationError(f"test observations support {', '.join(sorted(SUPPORTED))}")
     fovs = list(payload.get("fov_candidates") or [])[:2]
     if len(fovs) != 2:
         raise TestObservationError("best and fallback FOV candidates are required")
@@ -81,7 +90,7 @@ def generate_plan(payload: dict) -> dict:
     minimum, maximum = float(limits.get("min", 0.1)), float(limits.get("max", 600.0))
     removed: list[dict] = []
 
-    if kind == "sinistro":
+    if kind in SINGLE_FILTER_KINDS:
         nominal: dict[str, float] = {str(payload.get("filter") or "rp"): _number(payload.get("exposure_time"), "exposure time")}
     else:
         raw = payload.get("exposure_times") or {}
@@ -139,7 +148,7 @@ def request_configurations(plan: dict, base: dict) -> list[dict]:
     result = []
     for item in plan["configurations"]:
         override = {"type": "EXPOSE", "exposure_count": item["repeats"], "defocus": item["defocus_mm"]}
-        if plan["kind"] == "sinistro":
+        if plan["kind"] in SINGLE_FILTER_KINDS:
             override.update(exposure_time=item["exposure_time"], filter=next(iter(item["exposure_times"])))
         else:
             override["exposure_times"] = item["exposure_times"]

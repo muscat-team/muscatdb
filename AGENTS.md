@@ -6,13 +6,14 @@
 ## Data
 * do not delete muscat.db and data/
 * always make a daily backup of muscat.db in $HOME/temp. Delete if the backup is stale.
-* there are currently five unique instruments: muscat, muscat2, muscat3, muscat4, sinistro
+* there are currently seven unique instruments: muscat, muscat2, muscat3, muscat4, sinistro, sbig, qhy600
 * each instrument has telescope and camera specifications defined in prose2/data/*.telescope files read by prose package
 * header keyword should precede over hardcoded parameters keeping in mind that the header keyword may change over time
-* muscat and muscat2 has no wcs in header. muscat3, muscat4, sinistro has wcs. muscat4 may have constant wcs offset.
+* muscat and muscat2 has no wcs in header. muscat3, muscat4, sinistro, sbig, qhy600 has wcs. muscat4 may have constant wcs offset.
 * muscat and muscat2 fits require calibration first before photometry
-* muscat3, muscat4, and sinistro has been reduced or calibrated with BANZAI-pipeline
+* muscat3, muscat4, sinistro, and sbig has been reduced or calibrated with BANZAI-pipeline; qhy600 is assumed to be BANZAI-reduced too (LCO standardized BANZAI across the whole 0.4m network) but this is unverified against a real archived QHY600CMOS frame -- /data/QHY600CMOS is currently empty. Sanity-check the first real run.
 * for BANZAI-reduced fits data, saturation unit is e- when gain is 1 in header
+* sbig (SBIG STL-6303, the LCO 0.4m network's old CCD camera) is archival-only: LCO's live instrument API (observe.lco.global/api/instruments/) has no instrument_type code for it, so it cannot be scheduled, only downloaded from the archive and reduced. qhy600 (QHY600 CMOS on DeltaRho 350, the current 0.4m camera) is live and schedulable (instrument_type "0M4-SCICAM-QHY600"). Both are multi-site like sinistro (deployed across all 6 LCO sites, unlike sinistro's 5 -- sinistro has no unit at ogg). prose2's get_instrument() can only auto-detect sbig from a FITS header today (verified via real archive headers: TELID starts with "0m4", INSTRUME starts with "kb"); qhy600's INSTRUME camera-code prefix is unknown until a real archived frame exists, so it is not yet auto-detected from headers -- run_photometry.py has no --instrument override, so this remains a real gap for qhy600 until then.
 * muscat.db is updated daily via a cronjob
 * do not modify fits files directly, store metadata if needed
 * the target page should cross-match using catalog CSV coordinates. If the target is in neither catalog, resolve via SIMBAD. As a last resort (not in any catalog and unresolved by SIMBAD), use the header pointing centre (the per-target coord_repr median RA/Dec).

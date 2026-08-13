@@ -41,7 +41,7 @@ ENV_VARS: tuple[EnvVar, ...] = (
     EnvVar(
         "MUSCAT_DATA_DIR",
         "/data",
-        "Common raw FITS root containing MuSCAT, MuSCAT2, MuSCAT3, MuSCAT4, and Sinistro",
+        "Common raw FITS root containing MuSCAT, MuSCAT2, MuSCAT3, MuSCAT4, Sinistro, SBIGSTL6303, and QHY600CMOS",
     ),
     EnvVar(
         "MUSCAT_OBSLOG_DIR",
@@ -117,7 +117,7 @@ ENV_VARS: tuple[EnvVar, ...] = (
         None,
         "nova.astrometry.net WCS solving for muscat/muscat2 calibration "
         "(--wcs_method astrometry.net; not needed with --wcs_method twirl, "
-        "or for BANZAI muscat3/muscat4/sinistro)",
+        "or for BANZAI muscat3/muscat4/sinistro/sbig/qhy600)",
         secret=True,
     ),
     EnvVar(

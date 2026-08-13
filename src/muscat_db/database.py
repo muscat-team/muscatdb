@@ -478,19 +478,20 @@ def _summary_rows(conn: sqlite3.Connection, *, instrument: str | None = None, ob
         where.append("obsdate = ?")
         params.append(obsdate)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
-    # Telescope is a Sinistro-only grouping dimension.  Extract its physical
-    # telescope/camera prefix from an LCO filename (e.g. ``lsc1m005`` from
-    # ``lsc1m005-fa15-20250806-0058-e91``).  A malformed Sinistro filename is
-    # kept as its own group rather than silently combining different physical
-    # telescopes.  MuSCAT filenames must use one shared empty key: using the
-    # whole filename here makes every frame a separate "summary" row.
+    # Telescope is a grouping dimension only for the multi-site instruments
+    # (sinistro, sbig, qhy600).  Extract its physical telescope/camera prefix
+    # from an LCO filename (e.g. ``lsc1m005`` from
+    # ``lsc1m005-fa15-20250806-0058-e91``).  A malformed multi-site filename
+    # is kept as its own group rather than silently combining different
+    # physical telescopes.  MuSCAT filenames must use one shared empty key:
+    # using the whole filename here makes every frame a separate "summary" row.
     raw = conn.execute(
         f"""WITH keyed AS (
                SELECT *,
                       CASE
-                          WHEN instrument = 'sinistro' AND INSTR(filename, '-') > 0
+                          WHEN instrument IN ('sinistro', 'sbig', 'qhy600') AND INSTR(filename, '-') > 0
                           THEN SUBSTR(filename, 1, INSTR(filename, '-') - 1)
-                          WHEN instrument = 'sinistro' THEN filename
+                          WHEN instrument IN ('sinistro', 'sbig', 'qhy600') THEN filename
                           ELSE ''
                       END AS telescope
                FROM frames

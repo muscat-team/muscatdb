@@ -803,7 +803,14 @@ class TestRunOptions:
             phot.normalize_run_options({"bands": ["gp", "rp"], "ref_band": "gp"}),
             inst="sinistro",
         )
-        assert err and "multi-band sinistro" in err.lower()
+        assert err and "multi-band reductions on multi-site instruments" in err.lower()
+
+    def test_validate_rejects_sbig_reference_band_for_multiband(self):
+        err = phot.validate_run_options(
+            phot.normalize_run_options({"bands": ["gp", "rp"], "ref_band": "gp"}),
+            inst="sbig",
+        )
+        assert err and "multi-band reductions on multi-site instruments" in err.lower()
 
     def test_validate_allows_sinistro_reference_band_for_single_band(self):
         err = phot.validate_run_options(
@@ -1874,7 +1881,7 @@ class TestRoutes:
             "test_run": False,
             "options": {"bands": ["gp", "rp"], "site": "lsc", "ref_band": "gp"},
         })
-        assert "multi-band sinistro" in (r.json()["error"] or "").lower()
+        assert "multi-band reductions on multi-site instruments" in (r.json()["error"] or "").lower()
 
     def test_sinistro_command_allows_single_band_ref_and_avoid_ids(self, client, tmp_path):
         self._insert_two_sites(tmp_path)

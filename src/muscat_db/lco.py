@@ -52,6 +52,8 @@ _DOWNLOAD_INSTRUMENT_DIRS = {
     "muscat2": "MuSCAT2",
     "muscat3": "MuSCAT3",
     "muscat4": "MuSCAT4",
+    "sbig": "SBIGSTL6303",
+    "qhy600": "QHY600CMOS",
 }
 _DOWNLOAD_HOSTS = frozenset({
     "archive-api.lco.global",
@@ -68,13 +70,16 @@ _API_HOSTS = frozenset({
 
 # Secondary-mirror defocus offset limits (mm), from LCO's live instrument
 # capabilities schema (observe.lco.global/api/instruments/): the InstrumentConfig
-# "defocus" extra_param is capped at +/-8mm for 2M0-SCICAM-MUSCAT and +/-5mm for
-# 1M0-SCICAM-SINISTRO.
+# "defocus" extra_param is capped at +/-8mm for 2M0-SCICAM-MUSCAT, +/-5mm for
+# 1M0-SCICAM-SINISTRO, and +/-0.5mm for 0M4-SCICAM-QHY600. sbig has no entry:
+# it has no live LCO instrument_type (retired/archival-only), so it is never
+# schedulable and this limit is never consulted for it.
 _DEFOCUS_LIMIT_MM = {
     "muscat": 8.0,
     "muscat3": 8.0,
     "muscat4": 8.0,
     "sinistro": 5.0,
+    "qhy600": 0.5,
 }
 
 
@@ -402,12 +407,19 @@ def infer_archive_instrument(frame: dict) -> str:
             tel = "2m0"
         elif "1m0" in filename:
             tel = "1m0"
+        elif "0m4" in filename:
+            tel = "0m4"
 
     if not instrume and filename:
         if "-ep" in filename or "muscat" in filename:
             instrume = "muscat"
-        elif "-fa" in filename or "-kb" in filename or "sinistro" in filename:
+        elif "-fa" in filename or "sinistro" in filename:
             instrume = "sinistro"
+        elif "-kb" in filename:
+            # LCO 0.4m network SBIG STL-6303 camera-unit codes (kb23, kb27,
+            # kb82, kb95, kb99, ...), verified against real /data/SBIGSTL6303
+            # archive headers. Not sinistro (that's -fa).
+            instrume = "sbig"
 
     if site == "ogg" and tel.startswith("2m0") and ("muscat" in instrume or "ep" in instrume):
         return "muscat3"
@@ -415,6 +427,17 @@ def infer_archive_instrument(frame: dict) -> str:
         return "muscat4"
     if tel.startswith("1m0"):
         return "sinistro"
+    if tel.startswith("0m4"):
+        if instrume.startswith("kb") or instrume == "sbig":
+            return "sbig"
+        # TODO: route to "qhy600" once a real archived QHY600CMOS frame
+        # confirms its INSTRUME camera-code prefix -- do not guess it here
+        # (unlike sbig's "kb" prefix, which is verified against real data).
+        # Until then, fail loudly rather than silently misroute.
+        raise LcoError(
+            "Could not disambiguate 0.4m camera generation (sbig vs qhy600)",
+            detail=f"site={site}, tel={tel}, instrume={instrume}, filename={filename}",
+        )
 
     raise LcoError(
         "Could not infer destination instrument",
@@ -1644,6 +1667,10 @@ def _clip_windows_to_observability(kind: str, params: dict, max_airmass, min_lun
 _INSTRUMENT_TYPE_TO_KIND = {
     "2M0-SCICAM-MUSCAT": "muscat",
     "1M0-SCICAM-SINISTRO": "sinistro",
+    # Confirmed via LCO's live https://observe.lco.global/api/instruments/
+    # list. sbig has no entry: it has no live instrument_type (retired), so
+    # there is nothing to clone.
+    "0M4-SCICAM-QHY600": "qhy600",
 }
 
 
@@ -1710,7 +1737,7 @@ def requestgroup_to_params(rg: dict) -> dict:
         params["narrowband"] = {
             b: optical.get(f"narrowband_{b}_position", "out") for b in ("g", "r", "i", "z")
         }
-    else:  # sinistro
+    else:  # single-filter kinds: sinistro, qhy600
         if optical.get("filter") is not None:
             params["filter"] = optical["filter"]
         if ic.get("exposure_time") is not None:
@@ -1873,6 +1900,43 @@ def build_requestgroup(kind: str, params: dict, configurations: list[dict] | Non
             "constraints": constraints,
             "target": target
         })
+    elif kind == "qhy600":
+        # Specs sourced from LCO's live configdb
+        # (https://observe.lco.global/api/instruments/0M4-SCICAM-QHY600/),
+        # not a real archived header -- sanity-check against the first real
+        # scheduled run. Unlike sinistro's central_2k_2x2 (a 2x2-binned
+        # readout), "central30x30" is a crop/subframe mode with no binning
+        # of its own (LCO's schema lists no bin params for it, and
+        # full_frame is fixed at bin_x=bin_y=1), so bin_x/bin_y stay 1
+        # regardless of mode.
+        mode = params.get("readout_mode", "central30x30")
+        qhy_config_type = params.get("type") or "EXPOSE"
+        qhy_exposure_count = 1 if qhy_config_type == "REPEAT_EXPOSE" else params.get("exposure_count", 1)
+        defocus = _validated_defocus(params, _DEFOCUS_LIMIT_MM["qhy600"])
+        instrument_configs = [{
+            "exposure_count": qhy_exposure_count,
+            "exposure_time": params.get("exposure_time", 60),
+            "mode": mode,
+            "optical_elements": {"filter": params.get("filter", "rp")},
+            "extra_params": {
+                "bin_x": 1,
+                "bin_y": 1,
+                "offset_ra": 0,
+                "offset_dec": 0,
+                "defocus": defocus,
+                "sub_expose": params.get("sub_expose", False),
+            },
+        }]
+        instrument_type = "0M4-SCICAM-QHY600"
+        configurations.append({
+            **_config_type_block(params, "EXPOSE"),
+            "instrument_type": instrument_type,
+            "instrument_configs": instrument_configs,
+            "acquisition_config": {"mode": "OFF"},
+            "guiding_config": {"mode": params.get("guiding_config", "ON"), "optional": True},
+            "constraints": constraints,
+            "target": target
+        })
     else:
         raise LcoError(f"Unsupported instrument kind for scheduling: {kind}", status=400)
 
@@ -1880,7 +1944,8 @@ def build_requestgroup(kind: str, params: dict, configurations: list[dict] | Non
     # telescope_class behind site produced an invalid empty location and made
     # "any site on this class" impossible to express (LCO's accepted requests
     # carry telescope_class with no site when the network picks the site).
-    location = {"telescope_class": "1m0" if kind == "sinistro" else "2m0"}
+    _TELESCOPE_CLASS_FOR_KIND = {"sinistro": "1m0", "qhy600": "0m4"}
+    location = {"telescope_class": _TELESCOPE_CLASS_FOR_KIND.get(kind, "2m0")}
     if params.get("site"):
         location["site"] = params["site"]
     

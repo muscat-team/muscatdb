@@ -167,9 +167,10 @@
         <option value="">none</option>
       </select>
     </div>
-    <div class="lco-field"><label for="sch-kind">Instrument <span class="help-tooltip" title="Imaging instrument. MuSCAT (2m) has 4 simultaneous bands; Sinistro (1m) uses a single filter.">?</span></label>
+    <div class="lco-field"><label for="sch-kind">Instrument <span class="help-tooltip" title="Imaging instrument. MuSCAT (2m) has 4 simultaneous bands; Sinistro (1m) and QHY600 (0.4m) use a single filter.">?</span></label>
       <select id="sch-kind">
         <option value="sinistro">1M0-SCICAM-SINISTRO</option>
+        <option value="qhy600">0M4-SCICAM-QHY600</option>
         <option value="muscat">2M0-SCICAM-MUSCAT</option>
       </select>
     </div>
@@ -177,7 +178,7 @@
     <div class="lco-field muscat-only"><label for="sch-count">Exp count <span class="help-tooltip" title="Number of exposures per visit. Each exposure covers all 4 bands simultaneously.">?</span></label>
       <input id="sch-count" type="number" min="1" value="1"></div>
     <div class="lco-field sinistro-only"><label for="sch-sin-count">Exp count <span class="help-tooltip" title="Number of exposures per visit.">?</span></label><input id="sch-sin-count" type="number" min="1" value="1"></div>
-    <div class="lco-field"><label>Site <span class="help-tooltip" title="Observing site. Auto-filled from the checked window(s): the shared best site when they agree, or left blank when they differ so LCO's scheduler picks an observable 1m node. For MuSCAT3 choose ogg (Maui) or coj (Siding Spring); for Sinistro choose any LCO 1m node, or leave blank to let LCO pick.">?</span></label>
+    <div class="lco-field"><label>Site <span class="help-tooltip" title="Observing site. Auto-filled from the checked window(s): the shared best site when they agree, or left blank when they differ so LCO's scheduler picks an observable node. For MuSCAT3 choose ogg (Maui) or coj (Siding Spring); for Sinistro choose any LCO 1m node (no unit at ogg); for QHY600 choose any LCO 0.4m node (all 6 sites, including ogg); or leave blank to let LCO pick.">?</span></label>
       <div class="muscat-only" style="display: none;">
         <select id="sch-muscat-site">
           <option value="">— select —</option>
@@ -188,7 +189,6 @@
       <div class="sinistro-only" style="display: none;">
         <select id="sch-site">
           <option value="">— select —</option>
-          <option value="ogg">ogg (Haleakala)</option>
           <option value="coj">coj (Siding Spring)</option>
           <option value="lsc">lsc (Cerro Tololo)</option>
           <option value="cpt">cpt (Sutherland)</option>
@@ -198,7 +198,7 @@
       </div>
     </div>
     <div class="lco-field sinistro-only" style="display: none;">
-      <label for="sch-effective-filter">Filter <span class="help-tooltip" title="LCO Sinistro filters: Pan-STARRS (rp/gp/ip/up/zs/w) and Bessell (U/B/V/R/I). central_2k_2x2 readout only calibrates up/gp/rp/ip/zs/w.">?</span></label>
+      <label for="sch-effective-filter">Filter <span class="help-tooltip" title="LCO Sinistro filters: Pan-STARRS (rp/gp/ip/up/zs/w) and Bessell (U/B/V/R/I). central_2k_2x2 readout only calibrates up/gp/rp/ip/zs/w. QHY600 offers a wider set incl. narrowband (OIII, S[II], H-Alpha).">?</span></label>
       <select id="sch-effective-filter">
         <option value="rp">rp</option>
         <option value="up">up</option>
@@ -208,11 +208,11 @@
       </select>
     </div>
     <div class="lco-field sinistro-only" style="display: none;">
-      <label for="sch-effective-exptime">Exp time (s) <span class="help-tooltip" title="Exposure time in seconds for Sinistro observations.">?</span></label>
+      <label for="sch-effective-exptime">Exp time (s) <span class="help-tooltip" title="Exposure time in seconds for Sinistro/QHY600 observations.">?</span></label>
       <input id="sch-effective-exptime" type="text" inputmode="decimal" placeholder="60">
     </div>
     <div class="lco-field sinistro-only" style="display: none;">
-      <label for="sch-effective-mode">Readout <span class="help-tooltip" title="Readout mode for Sinistro: 2k 2x2 uses central CCD region; full uses entire frame.">?</span></label>
+      <label for="sch-effective-mode">Readout <span class="help-tooltip" title="Readout mode. Sinistro: 2k 2x2 uses central CCD region, full uses entire frame. QHY600: central30x30 crops to a 30'x30' subframe (default, no binning), full uses entire frame.">?</span></label>
       <select id="sch-effective-mode">
         <option value="central_2k_2x2">2k 2x2</option>
         <option value="full_frame">full</option>
@@ -264,7 +264,7 @@
         <option value="OFF" selected>OFF</option>
       </select>
     </div>
-    <div class="lco-field"><label for="sch-defocus">Defocus (mm) <span class="help-tooltip" id="hint-defocus" title="Secondary-mirror offset from focus, in mm, to prevent CCD saturation on bright targets. 0 = focused. Limits: ±8mm for MuSCAT, ±5mm for Sinistro.">?</span></label><input id="sch-defocus" type="number" step="any" value="0" min="-8" max="8"></div>
+    <div class="lco-field"><label for="sch-defocus">Defocus (mm) <span class="help-tooltip" id="hint-defocus" title="Secondary-mirror offset from focus, in mm, to prevent CCD saturation on bright targets. 0 = focused. Limits: ±8mm for MuSCAT, ±5mm for Sinistro, ±0.5mm for QHY600.">?</span></label><input id="sch-defocus" type="number" step="any" value="0" min="-8" max="8"></div>
   </div>
   <div class="lco-actions">
     <button class="btn" type="button" id="btn-exp" title="Calculate exposure times for this target">Show Exp</button>
@@ -276,7 +276,7 @@
       <thead><tr><th>Dates (obs)</th><th>Instrument</th><th>Filter</th><th>Readout</th><th>Defocus</th><th>Exp (s)</th><th>Frames</th></tr></thead>
       <tbody id="obslog-body"></tbody>
     </table>
-    <p class="lco-note" style="margin-top: 0.4rem;">Click a row to apply its exposure time. Sinistro fills the Exp time field; MuSCAT fills the band matching the row's filter (g/r/i/z).</p>
+    <p class="lco-note" style="margin-top: 0.4rem;">Click a row to apply its exposure time. Sinistro/QHY600 fill the Exp time field; MuSCAT fills the band matching the row's filter (g/r/i/z).</p>
   </div>
   <p class="lco-note">These scheduling inputs are separate from the archive page.</p>
 </details>
@@ -637,6 +637,55 @@
     if (val('sch-effective-filter')) lastSinistroFields.filter = val('sch-effective-filter');
   }
 
+  // Single-filter kinds share the .sinistro-only field group (sch-site,
+  // sch-effective-filter/exptime/mode, sch-sin-count) -- their per-kind
+  // differences (site list, filter/mode options, defocus limit) are handled
+  // in applyKind()/updateDefocusLimits(). sbig is deliberately absent: it
+  // has no live LCO instrument_type (retired/archival-only), so it is never
+  // schedulable and never appears in #sch-kind.
+  var SINGLE_FILTER_KINDS = { sinistro: true, qhy600: true };
+  function isSingleFilterKind(k) { return !!SINGLE_FILTER_KINDS[k]; }
+
+  // Per-kind site list for the shared #sch-site select (value -> label).
+  // sinistro: LCO 1m network, no unit at ogg. qhy600: LCO 0.4m network, all
+  // 6 sites including ogg.
+  var SINGLE_FILTER_SITES = {
+    sinistro: [
+      ['coj', 'coj (Siding Spring)'], ['lsc', 'lsc (Cerro Tololo)'],
+      ['cpt', 'cpt (Sutherland)'], ['tfn', 'tfn (Tenerife)'], ['elp', 'elp (McDonald)'],
+    ],
+    qhy600: [
+      ['ogg', 'ogg (Haleakala)'], ['coj', 'coj (Siding Spring)'], ['lsc', 'lsc (Cerro Tololo)'],
+      ['cpt', 'cpt (Sutherland)'], ['tfn', 'tfn (Tenerife)'], ['elp', 'elp (McDonald)'],
+    ],
+  };
+  // Per-kind filter options for #sch-effective-filter.
+  var SINGLE_FILTER_FILTERS = {
+    sinistro: [
+      ['rp', 'rp (Pan-STARRS r)'], ['gp', 'gp (Pan-STARRS g)'], ['ip', 'ip (Pan-STARRS i)'],
+      ['up', 'up (SDSS u)'], ['zs', 'zs (Pan-STARRS z-short)'], ['w', 'w (Pan-STARRS w)'],
+      ['U', 'U (Bessell U)'], ['B', 'B (Bessell B)'], ['V', 'V (Bessell V)'],
+      ['R', 'R (Bessell R)'], ['I', 'I (Bessell I)'],
+    ],
+    // LCO live configdb (0M4-SCICAM-QHY600): 13 schedulable filters.
+    qhy600: [
+      ['rp', 'rp (Pan-STARRS r)'], ['gp', 'gp (Pan-STARRS g)'], ['ip', 'ip (Pan-STARRS i)'],
+      ['up', 'up (SDSS u)'], ['zs', 'zs (Pan-STARRS z-short)'], ['w', 'w (Pan-STARRS w)'],
+      ['V', 'V (Johnson V)'], ['B', 'B (Johnson B)'],
+      ['OIII', 'OIII (narrowband)'], ['S[II]', 'S[II] (narrowband)'],
+      ['H-Alpha', 'H-Alpha (narrowband)'], ['Astrodon-Exo', 'Astrodon-Exo'],
+    ],
+  };
+  // Per-kind readout-mode options for #sch-effective-mode. qhy600's codes
+  // are sourced from LCO's live configdb, not a real archived header.
+  var SINGLE_FILTER_MODES = {
+    sinistro: [['central_2k_2x2', 'central_2k_2x2'], ['full_frame', 'full_frame']],
+    qhy600: [['central30x30', 'central30x30'], ['full_frame', 'full_frame']],
+  };
+  // Secondary-mirror defocus limit (mm), from LCO's live instrument
+  // capabilities schema (mirrors muscat_db.lco._DEFOCUS_LIMIT_MM).
+  var DEFOCUS_LIMIT_MM = { muscat: 8, muscat3: 8, muscat4: 8, sinistro: 5, qhy600: 0.5 };
+
   function setSelectValue(id, v) {
     var e = el(id);
     if (!e) return;
@@ -689,7 +738,7 @@
       var overhead = 5;
       var count = Math.floor((windowSec - 60) / (maxExpTime + overhead));
       return count >= 1 ? Math.max(1, count) : null;
-    } else if (kind === 'sinistro') {
+    } else if (isSingleFilterKind(kind)) {
       // Same REPEAT_EXPOSE constraint as MuSCAT above: repeat_duration is
       // derived from the window span (lco.py's _repeat_duration), so packing
       // exposure_count to fill the window leaves no room to repeat that block
@@ -711,7 +760,7 @@
     var count = computeExposureCount(kind, windowSec, val('sch-type'), times, num('sch-effective-exptime'));
     if (count === null) return;
     if (kind === 'muscat' || kind === 'muscat3' || kind === 'muscat4') setVal('sch-count', String(count));
-    else if (kind === 'sinistro') setVal('sch-sin-count', String(count));
+    else if (isSingleFilterKind(kind)) setVal('sch-sin-count', String(count));
   }
 
   function updateScheduleFields() {
@@ -735,8 +784,8 @@
   }
 
   function updateDefocusLimits() {
-    var muscat = val('sch-kind') !== 'sinistro';
-    var limit = muscat ? 8 : 5;
+    var kind = val('sch-kind');
+    var limit = DEFOCUS_LIMIT_MM[kind] !== undefined ? DEFOCUS_LIMIT_MM[kind] : 8;
     var defocusEl = el('sch-defocus');
     var hint = el('hint-defocus');
     if (defocusEl) {
@@ -768,24 +817,18 @@
     if (effFilter) effFilter.disabled = muscat;
     setSelectValue('sch-guiding-config', 'OFF');
     if (!muscat) {
-      if (effMode) {
-        effMode.innerHTML = 
-          '<option value="central_2k_2x2">central_2k_2x2</option>' +
-          '<option value="full_frame">full_frame</option>'
+      var singleKind = isSingleFilterKind(k) ? k : 'sinistro';
+      function optHtml(pairs) {
+        return pairs.map(function (p) { return '<option value="' + p[0] + '">' + p[1] + '</option>'; }).join('');
       }
-      if (effFilter) {
-        effFilter.innerHTML =
-          '<option value="rp">rp (Pan-STARRS r)</option>' +
-          '<option value="gp">gp (Pan-STARRS g)</option>' +
-          '<option value="ip">ip (Pan-STARRS i)</option>' +
-          '<option value="up">up (SDSS u)</option>' +
-          '<option value="zs">zs (Pan-STARRS z-short)</option>' +
-          '<option value="w">w (Pan-STARRS w)</option>' +
-          '<option value="U">U (Bessell U)</option>' +
-          '<option value="B">B (Bessell B)</option>' +
-          '<option value="V">V (Bessell V)</option>' +
-          '<option value="R">R (Bessell R)</option>' +
-          '<option value="I">I (Bessell I)</option>';
+      if (effMode) effMode.innerHTML = optHtml(SINGLE_FILTER_MODES[singleKind]);
+      if (effFilter) effFilter.innerHTML = optHtml(SINGLE_FILTER_FILTERS[singleKind]);
+      var siteSelEl = el('sch-site');
+      if (siteSelEl) {
+        var prevSite = siteSelEl.value;
+        siteSelEl.innerHTML = '<option value="">— select —</option>' + optHtml(SINGLE_FILTER_SITES[singleKind]);
+        var stillValid = Array.prototype.some.call(siteSelEl.options, function (o) { return o.value === prevSite; });
+        siteSelEl.value = stillValid ? prevSite : '';
       }
       setVal('sch-effective-exptime', lastSinistroFields.exptime);
       setVal('sch-effective-mode', lastSinistroFields.mode);
@@ -1268,7 +1311,7 @@
       name += '_M3';
     } else if (kind === 'muscat4') {
       name += '_M4';
-    } else if (kind === 'sinistro') {
+    } else if (isSingleFilterKind(kind)) {
       var site = val('sch-site') || siteForWindow(firstWin) || '';
       var band = val('sch-effective-filter');
       if (site) name += '_' + site;
@@ -1461,7 +1504,7 @@
 
   function siteForWindow(w) {
     if (w.observability && w.observability.best_site) return w.observability.best_site;
-    var sites = { muscat: 'ogg', muscat3: 'ogg', muscat4: 'coj', sinistro: 'lsc' };
+    var sites = { muscat: 'ogg', muscat3: 'ogg', muscat4: 'coj', sinistro: 'lsc', qhy600: 'lsc' };
     return sites[val('sch-kind')] || 'ogg';
   }
 
@@ -1484,7 +1527,10 @@
     return uniq.length === 1 ? uniq[0] : '';
   }
 
-  // Sites that host 2m telescopes (MuSCAT). 1m-only sites default to Sinistro.
+  // Sites that host 2m telescopes (MuSCAT). Sites without a 2m default to
+  // Sinistro (a manual switch to QHY600 is respected -- see desiredKind
+  // below -- both share the same non-2m sites, plus qhy600 also covers ogg
+  // where sinistro has no unit).
   var _2M_SITES = { ogg: true, coj: true };
 
   var lastAutoSite = null;  // value applyAutoConfig last wrote; guards a manual override
@@ -1492,13 +1538,13 @@
 
   function exptimeCacheKey() {
     var kind = val('sch-kind');
-    var site = kind === 'sinistro' ? val('sch-site') : val('sch-muscat-site');
-    var filter = kind === 'sinistro' ? val('sch-effective-filter') : '';
+    var site = isSingleFilterKind(kind) ? val('sch-site') : val('sch-muscat-site');
+    var filter = isSingleFilterKind(kind) ? val('sch-effective-filter') : '';
     return (val('sch-target') || '') + '|' + (val('sch-planet') || '') + '|' + kind + '|' + (site || '') + '|' + filter;
   }
   function clearExptimeFields() {
-    var muscat = val('sch-kind') !== 'sinistro';
-    (muscat ? ['sch-exp-g', 'sch-exp-r', 'sch-exp-i', 'sch-exp-z'] : ['sch-effective-exptime']).forEach(function (id) {
+    var single = isSingleFilterKind(val('sch-kind'));
+    (single ? ['sch-effective-exptime'] : ['sch-exp-g', 'sch-exp-r', 'sch-exp-i', 'sch-exp-z']).forEach(function (id) {
       setVal(id, '');
     });
   }
@@ -1507,8 +1553,11 @@
     var site = autoSiteFromSelection();
     if (site === null || !site) return;
 
-    // Auto-set instrument from site: 1m-only sites get Sinistro, sites with
-    // 2m (ogg, coj) default to MuSCAT. Respect manual override.
+    // Auto-set instrument from site: sites without a 2m default to Sinistro
+    // (the long-standing default; switch to QHY600 manually -- e.g. at ogg,
+    // where Sinistro has no unit -- and the manual choice is respected
+    // below rather than being auto-overwritten). Sites with 2m (ogg, coj)
+    // default to MuSCAT.
     var desiredKind = _2M_SITES[site] ? 'muscat' : 'sinistro';
     var kindEl = el('sch-kind');
     if (kindEl && desiredKind !== kindEl.value && (!kindEl.value || kindEl.value === lastAutoKind)) {
@@ -1520,7 +1569,7 @@
     }
 
     // Auto-set site for the (possibly changed) instrument.
-    var selId = (val('sch-kind') === 'sinistro') ? 'sch-site' : 'sch-muscat-site';
+    var selId = isSingleFilterKind(val('sch-kind')) ? 'sch-site' : 'sch-muscat-site';
     var sel = el(selId);
     if (!sel) return;
     if (site) {
@@ -2169,8 +2218,10 @@
     invalidateGeneratedWindows();
     resetDraftState();
     resetSplitSubmitState();
-    var muscat = p.kind !== 'sinistro';
-    setSelectValue('sch-kind', muscat ? 'muscat' : 'sinistro');
+    // p.kind (from requestgroup_to_params/_INSTRUMENT_TYPE_TO_KIND) is one of
+    // "muscat", "sinistro", "qhy600" -- never muscat3/muscat4, which aren't
+    // real #sch-kind options (they're view-only instrument identities).
+    setSelectValue('sch-kind', isSingleFilterKind(p.kind) ? p.kind : 'muscat');
     applyKind();
     if (p.proposal != null && p.proposal !== '') setSelectValue('sch-proposal', String(p.proposal));
     if (p.target_name != null) setVal('sch-target', p.target_name);
@@ -2298,7 +2349,7 @@
       var hasExp = false;
       ['g', 'r', 'i', 'z'].forEach(function (b) { if (num('sch-exp-' + b) !== null) hasExp = true; });
       if (!hasExp) { msg('msg-split-ipp', 'Enter at least one exposure time (g, r, i, or z)', 'err'); return; }
-    } else if (kind === 'sinistro') {
+    } else if (isSingleFilterKind(kind)) {
       if (num('sch-effective-exptime') === null) { msg('msg-split-ipp', 'Enter an exposure time (s)', 'err'); return; }
     }
     resetSplitSubmitState();
@@ -2481,7 +2532,7 @@
   }
   function applyObslogExposure(row) {
     var exp = Math.round(row.exptime);
-    if (val('sch-kind') === 'sinistro') {
+    if (isSingleFilterKind(val('sch-kind'))) {
       setVal('sch-effective-exptime', String(exp));
       saveOptions();
       msg('msg-obslog', 'Exp time set to ' + exp + ' s (from ' + row.instrument + ' ' + fmtObsDate(row.last_date) + ').', 'ok');
@@ -2544,7 +2595,10 @@
   var currentTestRecord = null;
   var currentTestHash = null;
   function testKind(params) {
-    if (params.kind === 'sinistro') return 'sinistro';
+    // Mirrors muscat_db.test_observations.SUPPORTED. sbig is absent: it has
+    // no live LCO instrument_type (retired/archival-only), so it can't be
+    // test-scheduled.
+    if (params.kind === 'sinistro' || params.kind === 'qhy600') return params.kind;
     if (params.site === 'ogg') return 'muscat3';
     if (params.site === 'coj') return 'muscat4';
     return '';
@@ -2552,7 +2606,7 @@
   el('btn-test-observation').addEventListener('click', function () {
     var p = buildParams();
     p.kind = testKind(p);
-    if (!p.kind) { showMessageModal('Unsupported test', 'Select MuSCAT site OGG (MuSCAT3), COJ (MuSCAT4), or Sinistro.'); return; }
+    if (!p.kind) { showMessageModal('Unsupported test', 'Select MuSCAT site OGG (MuSCAT3), COJ (MuSCAT4), Sinistro, or QHY600.'); return; }
     if (!p.target_name || p.ra === null || p.dec === null) {
       showMessageModal('Incomplete schedule', 'Enter a target and coordinates.'); return;
     }

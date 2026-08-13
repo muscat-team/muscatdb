@@ -245,10 +245,7 @@
         </div>
         <div class="exp-field" id="confmode-field" style="display:none;">
           <label for="sel-confmode">Readout mode</label>
-          <select id="sel-confmode">
-            <option value="central_2k_2x2">central_2k_2x2 (default)</option>
-            <option value="full_frame">full_frame</option>
-          </select>
+          <select id="sel-confmode"></select>
         </div>
         <div class="exp-field" style="grid-column: span 2;">
           <label for="target-name">Target name</label>
@@ -413,6 +410,13 @@
   var selInst = document.getElementById('sel-inst');
   var confmodeField = document.getElementById('confmode-field');
   var selConfmode = document.getElementById('sel-confmode');
+  // Mode-capable multi-site instruments and their readout-mode codes
+  // (mirrors muscat_db.photometry.MULTISITE_MODES). qhy600's default mode
+  // is listed first so it becomes the select's default, matching sinistro.
+  var CONFMODES_BY_INST = {
+    sinistro: [['central_2k_2x2', 'central_2k_2x2 (default)'], ['full_frame', 'full_frame']],
+    qhy600: [['central30x30', 'central30x30 (default)'], ['full_frame', 'full_frame']],
+  };
   var targetName = document.getElementById('target-name');
   var lookupBtn = document.getElementById('lookup-btn');
   var lookupStatus = document.getElementById('lookup-status');
@@ -517,7 +521,7 @@
     try { s = JSON.parse(localStorage.getItem(STORE_KEY) || '{}'); } catch (e) { s = {}; }
     if (!selInst.value && s.inst) selInst.value = s.inst;
     updateConfmodeVisibility();
-    if (s.confmode && selInst.value === 'sinistro') selConfmode.value = s.confmode;
+    if (s.confmode && CONFMODES_BY_INST[selInst.value]) selConfmode.value = s.confmode;
     if (!targetName.value && s.target) targetName.value = s.target;
     if (s.mags) magInputs.forEach(function (inp) { if (s.mags[inp.dataset.band] !== undefined) { inp.value = s.mags[inp.dataset.band]; markFilled(inp); } });
     if (s.focus !== undefined) focusMm.value = s.focus;
@@ -533,9 +537,13 @@
 
   // ---- Confmode visibility ----
   function updateConfmodeVisibility() {
-    if (selInst.value === 'sinistro') {
+    var modes = CONFMODES_BY_INST[selInst.value];
+    if (modes) {
+      selConfmode.innerHTML = modes.map(function (m) {
+        return '<option value="' + m[0] + '">' + m[1] + '</option>';
+      }).join('');
       confmodeField.style.display = '';
-      if (!selConfmode.value) selConfmode.value = 'central_2k_2x2';
+      if (!selConfmode.value) selConfmode.value = modes[0][0];
     } else {
       confmodeField.style.display = 'none';
     }
@@ -717,8 +725,8 @@
       airmass: parseFloat(airmass.value) || 1.1,
       mode: mode
     };
-    if (inst === 'sinistro') {
-      payload.confmode = selConfmode.value || 'central_2k_2x2';
+    if (CONFMODES_BY_INST[inst]) {
+      payload.confmode = selConfmode.value || CONFMODES_BY_INST[inst][0][0];
     }
     if (mode === 'exptime') {
       if (satFrac.value === 'custom') payload.target_adu = parseFloat(customAdu.value);
