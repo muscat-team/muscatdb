@@ -420,6 +420,11 @@ def infer_archive_instrument(frame: dict) -> str:
             # kb82, kb95, kb99, ...), verified against real /data/SBIGSTL6303
             # archive headers. Not sinistro (that's -fa).
             instrume = "sbig"
+        elif "-sq" in filename:
+            # LCO 0.4m network QHY600 camera-unit codes (sq30-33, sq36, sq38,
+            # sq40, sq41, sq46, ...), confirmed via the LCO archive API across
+            # coj/elp/ogg/tfn (e.g. coj0m416-sq36-20260804-0098-e91).
+            instrume = "qhy600"
 
     if site == "ogg" and tel.startswith("2m0") and ("muscat" in instrume or "ep" in instrume):
         return "muscat3"
@@ -430,10 +435,8 @@ def infer_archive_instrument(frame: dict) -> str:
     if tel.startswith("0m4"):
         if instrume.startswith("kb") or instrume == "sbig":
             return "sbig"
-        # TODO: route to "qhy600" once a real archived QHY600CMOS frame
-        # confirms its INSTRUME camera-code prefix -- do not guess it here
-        # (unlike sbig's "kb" prefix, which is verified against real data).
-        # Until then, fail loudly rather than silently misroute.
+        if instrume.startswith("sq") or instrume == "qhy600":
+            return "qhy600"
         raise LcoError(
             "Could not disambiguate 0.4m camera generation (sbig vs qhy600)",
             detail=f"site={site}, tel={tel}, instrume={instrume}, filename={filename}",
@@ -1901,13 +1904,15 @@ def build_requestgroup(kind: str, params: dict, configurations: list[dict] | Non
             "target": target
         })
     elif kind == "qhy600":
-        # Specs sourced from LCO's live configdb
-        # (https://observe.lco.global/api/instruments/0M4-SCICAM-QHY600/),
-        # not a real archived header -- sanity-check against the first real
-        # scheduled run. Unlike sinistro's central_2k_2x2 (a 2x2-binned
-        # readout), "central30x30" is a crop/subframe mode with no binning
-        # of its own (LCO's schema lists no bin params for it, and
-        # full_frame is fixed at bin_x=bin_y=1), so bin_x/bin_y stay 1
+        # Submission-schema specs (extra_params, mode set) sourced from
+        # LCO's live configdb
+        # (https://observe.lco.global/api/instruments/0M4-SCICAM-QHY600/);
+        # "central30x30" itself is independently confirmed on a real
+        # archived header (coj0m416-sq36-20260804-0098-e91, 2400x2400 px,
+        # no asymmetric binning). Unlike sinistro's central_2k_2x2 (a
+        # 2x2-binned readout), "central30x30" is a crop/subframe mode with
+        # no binning of its own (LCO's schema lists no bin params for it,
+        # and full_frame is fixed at bin_x=bin_y=1), so bin_x/bin_y stay 1
         # regardless of mode.
         mode = params.get("readout_mode", "central30x30")
         qhy_config_type = params.get("type") or "EXPOSE"

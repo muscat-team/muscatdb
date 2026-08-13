@@ -1222,8 +1222,14 @@ class ApiRedirectTest(unittest.TestCase):
 
 
 class InferArchiveInstrumentTest(unittest.TestCase):
-    """Header/filename shapes verified against real /data/SBIGSTL6303 archive
-    frames (e.g. ogg0m406-kb27-20200724-0218-e91.fits)."""
+    """Header/filename shapes verified against real LCO archive frames:
+    SBIG (ogg0m406-kb27-20200724-0218-e91.fits, /data/SBIGSTL6303) and
+    QHY600 (coj0m416-sq36-20260804-0098-e91.fits.fz, fetched live from
+    archive-api.lco.global and confirmed by its actual downloaded FITS
+    header: TELID=0m4a, INSTRUME=sq36, GAIN=1.0, SATURATE=47400.0,
+    CONFMODE=central30x30). A network-wide archive scan (2026-08,
+    coj/elp/ogg/tfn, 8 distinct camera units) confirmed every QHY600 unit
+    uses an "sq"-prefixed INSTRUME code, disjoint from SBIG's "kb" prefix."""
 
     def test_sbig_frame_by_metadata_fields(self):
         frame = {"SITEID": "ogg", "TELID": "0m4b", "INSTRUME": "kb27"}
@@ -1233,13 +1239,32 @@ class InferArchiveInstrumentTest(unittest.TestCase):
         frame = {"filename": "ogg0m406-kb27-20200724-0218-e91.fits"}
         self.assertEqual(lco.infer_archive_instrument(frame), "sbig")
 
+    def test_qhy600_frame_by_metadata_fields(self):
+        frame = {"SITEID": "coj", "TELID": "0m4a", "INSTRUME": "sq36"}
+        self.assertEqual(lco.infer_archive_instrument(frame), "qhy600")
+
+    def test_qhy600_frame_by_filename_only(self):
+        frame = {"filename": "coj0m416-sq36-20260804-0098-e91.fits.fz"}
+        self.assertEqual(lco.infer_archive_instrument(frame), "qhy600")
+
+    def test_qhy600_frame_other_camera_units(self):
+        # Distinct real units seen across sites in the archive scan.
+        for site, tel, instrume in [
+            ("coj", "0m4b", "sq38"), ("elp", "0m4a", "sq31"),
+            ("elp", "0m4a", "sq41"), ("elp", "0m4b", "sq46"),
+            ("ogg", "0m4b", "sq30"), ("ogg", "0m4c", "sq40"),
+            ("tfn", "0m4a", "sq32"), ("tfn", "0m4b", "sq33"),
+        ]:
+            frame = {"SITEID": site, "TELID": tel, "INSTRUME": instrume}
+            self.assertEqual(lco.infer_archive_instrument(frame), "qhy600", instrume)
+
     def test_sinistro_frame_unaffected_by_0m4_handling(self):
         frame = {"SITEID": "lsc", "TELID": "1m0a", "INSTRUME": "fa15"}
         self.assertEqual(lco.infer_archive_instrument(frame), "sinistro")
 
     def test_0m4_frame_with_unrecognized_instrume_raises(self):
-        # Real, but not "kb"-prefixed -- qhy600's INSTRUME prefix is not yet
-        # known, so this must fail loudly rather than guess.
+        # Neither "kb" (sbig) nor "sq" (qhy600) -- must fail loudly rather
+        # than guess.
         frame = {"SITEID": "ogg", "TELID": "0m4b", "INSTRUME": "unknown01"}
         with self.assertRaises(lco.LcoError):
             lco.infer_archive_instrument(frame)

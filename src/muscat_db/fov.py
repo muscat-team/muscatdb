@@ -70,17 +70,21 @@ SINISTRO_MODES: dict[str, float] = {
 _FALLBACK_HALF_ARCSEC["sinistro"] = SINISTRO_MODES["central_2k_2x2"]  # default
 
 # LCO 0.4m network readout modes (half-width in arcsec). qhy600's codes/specs
-# come from LCO's live configdb (https://observe.lco.global/api/instruments/
-# 0M4-SCICAM-QHY600/), not a real archived header. sbig has a single
-# CONFMODE="default" on real archive headers (no multi-mode split needed).
-# Shorter chip axis used for both (square-footprint approximation, so the
-# assumed square field never overstates true rectangular coverage):
-#   sbig:    2042 px (real BANZAI-trimmed SCI dim) @ 0.58 "/pix  = 9.9' half
-#   qhy600:  6388 px (nominal sensor dim, untrimmed) @ 0.734 "/pix = 39.1' half
+# sbig's is a real BANZAI-trimmed SCI dim; qhy600's central30x30 is verified
+# on a real archived header (coj0m416-sq36-20260804-0098-e91: NAXIS 2400x2400
+# @ PIXSCALE=0.74"/pix); full_frame remains inferred from the nominal
+# (untrimmed) sensor size -- not yet confirmed against a real frame taken in
+# that mode. sbig has a single CONFMODE="default" on real archive headers
+# (no multi-mode split needed). Shorter chip axis used for both
+# (square-footprint approximation, so the assumed square field never
+# overstates true rectangular coverage):
+#   sbig:    2042 px (real BANZAI-trimmed SCI dim) @ 0.58 "/pix = 9.9' half
+#   qhy600 central30x30: 2400 px (real) @ 0.74 "/pix           = 14.8' half
+#   qhy600 full_frame:   6388 px (nominal, untrimmed) @ 0.74 "/pix = 39.4' half
 _FALLBACK_HALF_ARCSEC["sbig"] = 0.58 * 2042 / 2.0
 QHY600_MODES: dict[str, float] = {
-    "central30x30": 15.0 * 60 / 2.0,     # LCO configdb: "central 30x30 arcmin" ~ 15' half
-    "full_frame": 0.734 * 6388 / 2.0,    # ~39.1' half (nominal, unverified vs trimmed BANZAI output)
+    "central30x30": 0.74 * 2400 / 2.0,
+    "full_frame": 0.74 * 6388 / 2.0,
 }
 _FALLBACK_HALF_ARCSEC["qhy600"] = QHY600_MODES["central30x30"]  # default
 

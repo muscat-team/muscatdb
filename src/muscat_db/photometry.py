@@ -129,8 +129,8 @@ MULTISITE_SITES: dict[str, tuple[str, ...]] = {
 }
 # Instruments with multiple readout/config modes needing --mode
 # disambiguation. sbig is deliberately absent (single CONFMODE="default" on
-# real archive headers). qhy600's codes come from LCO's live configdb, not a
-# local file -- unverified against a real archived QHY600CMOS header.
+# real archive headers). qhy600's "central30x30" is confirmed verbatim on a
+# real archived header (coj0m416-sq36-20260804-0098-e91).
 MULTISITE_MODES: dict[str, tuple[str, ...]] = {
     "sinistro": ("central_2k_2x2", "full_frame"),
     "qhy600": ("central30x30", "full_frame"),

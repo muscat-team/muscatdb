@@ -133,12 +133,11 @@ INSTRUMENT_PARAMS = {
     # e- at GAIN=1.0, PIXSCALE=0.58. Aperture is the LCO 0.4m network's
     # historical 400mm optical tube.
     "sbig": {"full_well": 102400, "gain": 1.0, "pixel_scale": 0.58, "aperture_m": 0.4},
-    # gain/pixel_scale/aperture_m from LCO's live configdb
-    # (0M4-SCICAM-QHY600) and the DeltaRho 350's published 350mm aperture.
-    # full_well deliberately omitted -- no real archived QHY600CMOS header
-    # exists yet to confirm SATURATE, so this falls back to the generic
-    # 100000 default in _full_well_gain() rather than a fabricated number.
-    "qhy600": {"gain": 1.0, "pixel_scale": 0.734, "aperture_m": 0.35},
+    # Verified on a real archived QHY600CMOS header
+    # (coj0m416-sq36-20260804-0098-e91, central30x30 mode): SATURATE=MAXLIN=
+    # 47400 e- at GAIN=1.0, PIXSCALE=0.74. Aperture is the DeltaRho 350's
+    # published 350mm optical tube.
+    "qhy600": {"full_well": 47400, "gain": 1.0, "pixel_scale": 0.74, "aperture_m": 0.35},
 }
 
 # Empirical coefficients for MuSCAT3 from peak_count_estimator.

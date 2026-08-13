@@ -120,9 +120,8 @@ SBIG = InstrumentConfig(
 
 # LCO 0.4m network. Current/live: QHY600 CMOS on DeltaRho 350 (replaced
 # SBIG). Schedulable today (instrument_type "0M4-SCICAM-QHY600", confirmed
-# via LCO's live configdb). Header key set mirrors sbig/sinistro's BANZAI
-# convention -- unverified against a real archived QHY600CMOS frame
-# (/data/QHY600CMOS is currently empty); sanity-check on the first real run.
+# via LCO's live configdb). Header key set confirmed against a real
+# archived frame (coj0m416-sq36-20260804-0098-e91.fits.fz).
 QHY600 = InstrumentConfig(
     name="qhy600",
     nccd=1,
