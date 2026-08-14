@@ -80,6 +80,7 @@ The pipeline is launched with `start_new_session=True` and prose spawns multipro
 ## Testing
 * The default suite is fast: `pyproject.toml` sets `addopts = "-m 'not slow'"`, so anything marked `@pytest.mark.slow` is deselected unless you opt in with `pytest -m slow`.
 * `tests/test_slow_runs.py` holds heavyweight full-pipeline runtime-profiling runs (real `prose`/`timer`/`harmonic` conda tools + real data on the production host). They `pytest.skip` cleanly when raw data, CSV lightcurves, or the external conda envs are absent, so they collect/skip safely anywhere and only do real work on the host. Run them on the host with `uv run pytest -m slow`.
+* A bugfix test has to red-green: run it with the fix reverted and confirm it fails, then restore the fix and confirm it passes. A test written against already-fixed code routinely passes for the wrong reason and then reads as coverage it does not provide. Two cases found in review: a stale-sidecar test that `build_db` already satisfied in its preserve step before the code under test ran, and a negative-declination test that could only fail under prose's Python 3.11, never under our own 3.12.
 * Verify transit and visibility from https://exoplanetarchive.ipac.caltech.edu/docs/transit/transit_API.html
 
 ## Prompt
