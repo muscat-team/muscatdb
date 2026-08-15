@@ -7,7 +7,9 @@ name: Slack Notification Bridge
 # one signal that needs picking up promptly.
 on:
   pull_request:
-    types: [opened, closed]
+    # `reopened` is a distinct action from `opened`; without it a closed then
+    # reopened PR leaves the channel showing "closed" while it is open again.
+    types: [opened, reopened, closed]
   pull_request_review:
     types: [submitted]
   issues:
@@ -45,7 +47,7 @@ jobs:
                   text="PR #${PR_NUMBER} closed without merging: ${PR_TITLE}"; color="#7f8c8d"
                 fi
               else
-                text="PR #${PR_NUMBER} opened: ${PR_TITLE}"; color="good"
+                text="PR #${PR_NUMBER} ${ACTION}: ${PR_TITLE}"; color="good"
               fi
               ;;
             pull_request_review)
