@@ -122,3 +122,38 @@ def test_build_db_never_removes_destination_file_itself(tmp_path, monkeypatch):
 
     assert str(target) not in removed_paths
 
+
+
+def test_build_db_clears_sidecars_held_by_a_live_connection(tmp_path, monkeypatch):
+    """A stale ``-wal`` at the destination silently masks the rebuilt database.
+
+    The other two build_db tests here pass whether or not the sidecar removal in
+    ``build_db`` exists, because the preserve-step connection checkpoints and
+    deletes the WAL when it closes, so a sidecar with no live owner disappears on
+    its own. Production is the case where another connection still holds the
+    destination open: the WAL then survives into ``os.replace``, SQLite replays
+    it over the freshly built file, and every reader keeps seeing pre-rebuild
+    data with ``PRAGMA integrity_check`` still reporting ``ok``.
+    """
+    import sqlite3
+    from muscat_db.database import build_db
+
+    target = tmp_path / "muscat.db"
+    monkeypatch.setenv("MUSCAT_DB_PATH", str(target))
+
+    live = sqlite3.connect(str(target))
+    live.execute("PRAGMA journal_mode=WAL;")
+    live.execute("PRAGMA wal_autocheckpoint=0;")
+    live.execute("CREATE TABLE db_meta (key TEXT PRIMARY KEY, value TEXT)")
+    live.executemany(
+        "INSERT INTO db_meta (key, value) VALUES (?, ?)",
+        [(f"k{i}", "stale") for i in range(200)],
+    )
+    live.commit()
+    try:
+        assert (tmp_path / "muscat.db-wal").exists(), "setup: the WAL must be live"
+        build_db(str(target))
+        assert not (tmp_path / "muscat.db-wal").exists()
+        assert not (tmp_path / "muscat.db-shm").exists()
+    finally:
+        live.close()
