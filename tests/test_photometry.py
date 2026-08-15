@@ -2984,3 +2984,39 @@ class TestBandsFromFilters:
     def test_empty_and_blank(self):
         assert phot.bands_from_filters([]) == []
         assert phot.bands_from_filters(["", None]) == []
+
+
+class TestTargetCoordFlag:
+    """``--target_coord`` argument construction, including the argparse guard.
+
+    The guard exists for prose, which runs on Python 3.11, where argparse reads a
+    bare ``-45:00:42`` as a flag and fails ``--target_coord``'s ``nargs=2``. From
+    3.12 the same input parses fine, and muscat-db itself requires 3.12, so the
+    bug cannot be reproduced by round-tripping through argparse here. These
+    assert on the emitted token instead, which is the part muscat-db controls.
+    """
+
+    def test_negative_declination_is_space_prefixed(self):
+        cmd = phot.build_command(
+            "muscat3", "260101", "TOI-1",
+            options={"target_coord": "15:13:47.515 -45:00:42.12"},
+        )
+        i = cmd.index("--target_coord")
+        assert cmd[i + 1] == "15:13:47.515"
+        assert cmd[i + 2] == " -45:00:42.12"
+
+    def test_positive_declination_is_unchanged(self):
+        cmd = phot.build_command(
+            "muscat3", "260101", "TOI-1",
+            options={"target_coord": "07:13:56 +48:18:35"},
+        )
+        i = cmd.index("--target_coord")
+        assert cmd[i + 2] == "+48:18:35"
+
+    def test_decimal_degrees_negative_declination(self):
+        cmd = phot.build_command(
+            "muscat3", "260101", "TOI-1",
+            options={"target_coord": "108.5 -45.01"},
+        )
+        i = cmd.index("--target_coord")
+        assert cmd[i + 2] == " -45.01"
