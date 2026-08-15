@@ -73,11 +73,16 @@ jobs:
         uses: rtCamp/action-slack-notify@v2
         env:
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
-          SLACK_TITLE: ${{ steps.summary.outputs.text }}
-          SLACK_MESSAGE: ${{ steps.summary.outputs.url }}
+          # The summary goes in SLACK_MESSAGE, not SLACK_TITLE: MSG_MINIMAL
+          # suppresses the title, so a title-only summary renders as a bare URL.
+          SLACK_TITLE: ''
+          SLACK_MESSAGE: |
+            ${{ steps.summary.outputs.text }}
+            ${{ steps.summary.outputs.url }}
           SLACK_COLOR: ${{ steps.summary.outputs.color }}
           SLACK_USERNAME: 'GitHub Repository Watcher'
           SLACK_ICON: https://github.githubassets.com/favicons/favicon.png
           # Drops the Ref / Commit / Actions URL block, which carries the
           # default branch head on issue events and is meaningless there.
           MSG_MINIMAL: true
+          SLACK_FOOTER: ''
