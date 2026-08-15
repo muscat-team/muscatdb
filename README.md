@@ -665,7 +665,7 @@ this reads as an internal inconsistency rather than a missing feature:
   this "may differ from the directory name (obs-night vs UT date)" and build
   regexes accepting any 6-digit date token to paper over the mismatch.
 
-### If this is ever fixed, two constraints matter
+### Two constraints shaped the fix
 
 **1. Use the filename's DAY-OBS token, not local-evening date.**
 `_lco_observing_date()` is the obvious function to reach for and is the wrong
@@ -684,8 +684,9 @@ requires no site table.
 derives both the instrument and the obslog path from that directory's name. A
 night spanning two `obsdate` directories cannot be reduced in one run by
 regrouping in SQL alone — that fixes the browsing view while leaving photometry
-unable to act on it. Any real fix has to either consolidate the frames on disk
-or teach the pipeline to accept multiple input directories.
+unable to act on it. A fix has to either consolidate the frames on disk or teach
+the pipeline to accept multiple input directories; the tool below takes the
+disk-consolidation path.
 
 ### Repairing a split (disk consolidation)
 
