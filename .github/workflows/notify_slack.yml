@@ -1,32 +1,83 @@
 name: Slack Notification Bridge
 
-# Trigger the workflow on multiple repository events
+# Only events worth interrupting someone for. `issue_comment` is deliberately
+# absent: it fired on every comment on every issue and pull request, which is
+# the bulk of repository activity and is better read on GitHub. Review
+# submissions are included because an approval or a changes-requested is the
+# one signal that needs picking up promptly.
 on:
-  issues:
-    types: [opened, closed]
-  issue_comment:
-    types: [created]
   pull_request:
+    types: [opened, closed]
+  pull_request_review:
+    types: [submitted]
+  issues:
     types: [opened, closed]
 
 jobs:
   notify:
     runs-on: ubuntu-latest
     steps:
-      - name: Send Rich Slack Notification
+      - name: Build the summary line
+        id: summary
+        # Titles are author-controlled, so they are passed through env rather
+        # than interpolated into the script, which would be a shell injection.
+        env:
+          EVENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          MERGED: ${{ github.event.pull_request.merged }}
+          REVIEW_STATE: ${{ github.event.review.state }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_URL: ${{ github.event.issue.html_url }}
+        run: |
+          set -euo pipefail
+          skip=false
+          url="${PR_URL:-$ISSUE_URL}"
+          case "$EVENT" in
+            pull_request)
+              if [ "$ACTION" = "closed" ]; then
+                if [ "$MERGED" = "true" ]; then
+                  text="PR #${PR_NUMBER} merged: ${PR_TITLE}"; color="good"
+                else
+                  text="PR #${PR_NUMBER} closed without merging: ${PR_TITLE}"; color="#7f8c8d"
+                fi
+              else
+                text="PR #${PR_NUMBER} opened: ${PR_TITLE}"; color="good"
+              fi
+              ;;
+            pull_request_review)
+              case "$REVIEW_STATE" in
+                approved)          text="PR #${PR_NUMBER} approved: ${PR_TITLE}"; color="good" ;;
+                changes_requested) text="PR #${PR_NUMBER} changes requested: ${PR_TITLE}"; color="danger" ;;
+                *)                 skip=true; text=""; color="" ;;
+              esac
+              ;;
+            issues)
+              text="Issue #${ISSUE_NUMBER} ${ACTION}: ${ISSUE_TITLE}"; color="good"
+              ;;
+          esac
+          echo "skip=${skip}" >> "$GITHUB_OUTPUT"
+          echo "color=${color}" >> "$GITHUB_OUTPUT"
+          echo "url=${url}" >> "$GITHUB_OUTPUT"
+          {
+            echo "text<<SUMMARY_EOF"
+            echo "${text}"
+            echo "SUMMARY_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Send Slack notification
+        if: steps.summary.outputs.skip != 'true'
         uses: rtCamp/action-slack-notify@v2
         env:
-          # Uses your secure Slack Webhook URL stored in GitHub Secrets
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
-
-          # Customizes the message dynamically based on what actually happened
-          SLACK_TITLE: "${{ github.event_name }} notification"
-          SLACK_MESSAGE: |
-            *Event:* `${{ github.event_name }}` (Action: `${{ github.event.action }}`)
-            *Triggered by:* ${{ github.actor }}
-            *Repository:* ${{ github.repository }}
-            *Link to Event:* ${{ github.event.comment.html_url || github.event.issue.html_url || github.event.pull_request.html_url }}
-
-          SLACK_COLOR: '#36A64F'
+          SLACK_TITLE: ${{ steps.summary.outputs.text }}
+          SLACK_MESSAGE: ${{ steps.summary.outputs.url }}
+          SLACK_COLOR: ${{ steps.summary.outputs.color }}
           SLACK_USERNAME: 'GitHub Repository Watcher'
           SLACK_ICON: https://github.githubassets.com/favicons/favicon.png
+          # Drops the Ref / Commit / Actions URL block, which carries the
+          # default branch head on issue events and is meaningless there.
+          MSG_MINIMAL: true
