@@ -1779,6 +1779,14 @@ class TestRoutes:
     def test_command_route_reports_validation_error(self, client):
         r = client.post("/api/photometry/command", json={
             "inst": INST, "date": DATE, "target": TARGET,
+            "options": {"aper_radii": "10,20,2"},  # missing annulus
+        })
+        assert r.status_code == 200
+        assert "annulus" in r.json()["error"]
+
+    def test_command_route_reports_fwhm_validation_error(self, client):
+        r = client.post("/api/photometry/command", json={
+            "inst": INST, "date": DATE, "target": TARGET,
             "options": {"aper_unit": "fwhm"},  # missing aper_radii
         })
         assert r.status_code == 200

@@ -72,7 +72,7 @@ RUN_DEFAULTS: dict = {
     "ref_select": "position",  # position (legacy) | quality (local temporal persistence)
     "ref_select_top_k": 5,     # local catalogs registered when ref_select=quality
     "aper_radii": "",          # "MIN,MAX,DR"; "" -> Gaia heuristic
-    "annulus": "",             # "RIN,ROUT"; "" -> auto/pipeline default
+    "annulus": "",             # "RIN,ROUT"; required with aper_radii
     "aper_unit": "pix",        # pix | fwhm (only applies with aper_radii)
     "make_gif": True,
     "plot_gaia_sources": True,
