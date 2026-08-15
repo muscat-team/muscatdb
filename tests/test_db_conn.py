@@ -5,6 +5,7 @@ whenever the body raised between the two. get_conn() is a contextmanager that
 guarantees close on every path and standardizes timeout/row_factory.
 """
 
+import os
 import sqlite3
 
 import pytest
@@ -84,4 +85,40 @@ def test_build_db_preserves_destination_file(tmp_path, monkeypatch):
 
     assert target.exists()
     assert not sidecar.exists()
+
+
+def test_build_db_never_removes_destination_file_itself(tmp_path, monkeypatch):
+    """The pre-swap sidecar cleanup must only ever touch -wal/-shm, never the
+    destination path itself.
+
+    ``os.replace`` is what makes the swap atomic -- a reader always sees the
+    old inode or the new one, never neither. Removing the destination file
+    ahead of the replace (as ``_remove_sqlite_tmp``'s ``("", "-wal", "-shm",
+    "-journal")`` suffix list would, since "" is the bare path) throws that
+    guarantee away and opens a window where the database doesn't exist at
+    all. A before/after existence check can't catch that window because the
+    file exists again by the time the assertion runs; asserting the bare
+    path is never passed to ``os.remove`` can.
+    """
+    from muscat_db.database import build_db
+
+    target = tmp_path / "muscat.db"
+    monkeypatch.setenv("MUSCAT_DB_PATH", str(target))
+
+    with get_conn(str(target)) as conn:
+        conn.execute("CREATE TABLE db_meta (key TEXT PRIMARY KEY, value TEXT)")
+        conn.commit()
+
+    removed_paths = []
+    real_remove = os.remove
+
+    def tracking_remove(path, *args, **kwargs):
+        removed_paths.append(str(path))
+        return real_remove(path, *args, **kwargs)
+
+    monkeypatch.setattr("muscat_db.database.os.remove", tracking_remove)
+
+    build_db(str(target))
+
+    assert str(target) not in removed_paths
 
