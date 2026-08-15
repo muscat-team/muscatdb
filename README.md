@@ -401,30 +401,25 @@ muscat-db serve              # http://0.0.0.0:8000
 muscat-db serve --port 8080  # custom port
 ```
 
-### Build & publish the static documentation site (GitHub Pages)
+### Static documentation site (GitHub Pages)
 
-Publish the project's documentation to GitHub Pages: the pipeline guide as the
-landing page, followed by a static, navigable snapshot of the web UI (nav pages
-+ representative example detail pages, with real figures) reachable from it.
-Build on the host, where the real `muscat.db` and figure trees live:
+Published automatically: on every push to `main`/`test`, GitHub Actions
+(`.github/workflows/pages.yml`) builds the pipeline guide as the landing page,
+followed by a static, navigable snapshot of the web UI (nav pages +
+representative example detail pages) against a synthetic database, and
+deploys it to GitHub Pages — no host access or real `muscat.db` needed.
+
+To preview the real-data build locally, on the host where the real
+`muscat.db` and figure trees live:
 
 ```bash
-# Preview locally, exactly as Pages serves it:
-muscat-db build-static-site --out /tmp/site      # scrubs notes/usernames by default
-cd /tmp/site && python -m http.server 8080
-
-# Build and publish in one step:
-scripts/deploy_static_site.sh
+muscat-db build-static-site --out site      # scrubs notes/usernames by default
+cd site && python -m http.server 8080
 ```
 
 The snapshot is **not** committed to `main`/`test` (it is gitignored) so that
-regenerated binary figures never accumulate in the repository history.
-`scripts/deploy_static_site.sh` builds the populated site on the host and
-force-pushes it as a single orphan commit to the `pages` branch;
-`.github/workflows/pages.yml` then deploys that branch (Pages source: GitHub
-Actions). The script refuses to publish a data-less build whose navbar would
-404. See [docs/gh-page.md](docs/gh-page.md) for the design, privacy notes, and
-options.
+regenerated binary figures never accumulate in the repository history. See
+[docs/gh-page.md](docs/gh-page.md) for the design, privacy notes, and options.
 
 ## Web Frontend
 
@@ -536,7 +531,9 @@ For an alternative modern documentation interface with client code snippet gener
 ## Cron (daily)
 
 ```cron
-0 6 * * * cd /path/to/muscat-db && uv run muscat-db scan-yesterday && uv run muscat-db build-db
+MUSCAT_OBSLOG_DIR=/ut2/muscat/obslog
+MUSCATDB_ROOT=/ut2/jerome/github/research/project/muscat-db
+30 17 * * * cd $MUSCATDB_ROOT && bash scripts/download_catalogs.sh >> $MUSCATDB_ROOT/logs/download_catalogs.log 2>&1 && /ut2/jerome/.local/bin/uv run muscat-db scan-yesterday >> $MUSCATDB_ROOT/logs/scan.log 2>&1 && /ut2/jerome/.local/bin/uv run muscat-db build-db >> $MUSCATDB_ROOT/logs/build-db.log 2>&1
 ```
 
 The production cron also runs `scripts/download_catalogs.sh` before scanning;
