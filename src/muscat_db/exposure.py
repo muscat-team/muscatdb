@@ -177,9 +177,19 @@ INSTRUMENT_PARAMS = {
     # Verified on a real archived QHY600CMOS header
     # (coj0m416-sq36-20260804-0098-e91, central30x30 mode): SATURATE=MAXLIN=
     # 47400 e- at GAIN=1.0, PIXSCALE=0.74. Aperture is the DeltaRho 350's
-    # published 350mm optical tube. No site/fov/bands/url yet, same reason as
-    # sbig above.
-    "qhy600": {"full_well": 47400, "gain": 1.0, "pixel_scale": 0.74, "aperture_m": 0.35},
+    # published 350mm optical tube. fov is the central30x30 readout mode (the
+    # one muscat-db uses, matching pixel_scale/full_well above), quoted from
+    # lco.global; the wider full_frame mode (1.9deg x 1.2deg) is not used here.
+    "qhy600": {
+        "full_well": 47400,
+        "gain": 1.0,
+        "pixel_scale": 0.74,
+        "aperture_m": 0.35,
+        "site": "LCO 0.4m Global Network (DeltaRho 350)",
+        "fov": "30' × 30'",
+        "bands": "Broadband + narrowband filters",
+        "url": "https://lco.global/observatory/instruments/qhy600-delta-rho-350/",
+    },
 }
 
 # Empirical coefficients for MuSCAT3 from peak_count_estimator.

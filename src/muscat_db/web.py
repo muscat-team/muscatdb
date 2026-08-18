@@ -444,7 +444,11 @@ _index_cache = LRUCache(maxsize=_INDEX_CACHE_MAX)
 
 @app.get("/", response_class=HTMLResponse)
 def home_page():
-    return _render("home.html", instruments=exp_calc.INSTRUMENT_PARAMS)
+    # sbig is archival-only (no longer schedulable), so it is excluded from the
+    # summary table of currently operating instruments; it stays in
+    # INSTRUMENT_PARAMS itself for exposure-calculator/photometry use.
+    instruments = {k: v for k, v in exp_calc.INSTRUMENT_PARAMS.items() if k != "sbig"}
+    return _render("home.html", instruments=instruments)
 
 
 @app.get("/targets", response_class=HTMLResponse)
