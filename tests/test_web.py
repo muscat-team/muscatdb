@@ -484,11 +484,11 @@ def test_jobs_lco_archive_ingest_date_endpoint(mock_db, monkeypatch):
     assert called["args"][1:] == ("muscat3", "260102")
 
 
-def test_target_without_name_redirects_to_database_search(mock_db):
+def test_target_without_name_redirects_to_targets_table(mock_db):
     response = TestClient(app).get("/target", follow_redirects=False)
 
     assert response.status_code == 303
-    assert response.headers["location"] == "/"
+    assert response.headers["location"] == "/targets"
 
 
 def test_index_exposes_normalized_target_direct_link(mock_db, monkeypatch):

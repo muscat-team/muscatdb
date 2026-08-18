@@ -596,7 +596,7 @@ def target_page(name: str = ""):
     tpl_mtime = str(tpl_path.stat().st_mtime_ns) if tpl_path.is_file() else ""
 
     if not name:
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse("/targets", status_code=303)
     else:
         # Single target view - normalize the input name
         norm_name = _normalize_target_name(name)
