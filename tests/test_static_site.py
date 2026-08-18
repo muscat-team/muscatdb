@@ -253,6 +253,23 @@ def test_home_page_is_published_without_overwriting_targets(tiny_db, tmp_path):
     assert "<title>Targets" in _read(out / "targets" / "index.html")
 
 
+def test_home_page_static_build_does_not_call_the_live_weather_api(tiny_db, tmp_path):
+    """Regression: home/ used to be silently overwritten by /targets before the
+    ``/`` vs ``/targets`` collision was fixed, so its live weather-fetch
+    JavaScript never actually reached the published site. Now that home/
+    publishes for real, that fetch must stay off for a static build, or every
+    visitor's browser calls weather-api.lco.global unattended (AGENTS.md: do
+    not send requests that overload an external service)."""
+    out = tmp_path / "site"
+    build_site(out, db_path=tiny_db, n_examples=1, include_figures=False, log=lambda _m: None)
+
+    home = _read(out / "home" / "index.html")
+    assert "const STATIC_SITE = true;" in home
+    assert "if (!STATIC_SITE) loadWeather();" in home
+    assert "Connecting to LCO Weather API" not in home
+    assert "Live weather is unavailable in this static snapshot." in home
+
+
 def test_no_live_data_notice_only_on_live_api_pages(tiny_db, tmp_path):
     out = tmp_path / "site"
     build_site(out, db_path=tiny_db, n_examples=1, include_figures=False, log=lambda _m: None)

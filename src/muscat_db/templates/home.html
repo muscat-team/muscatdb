@@ -108,7 +108,11 @@
   <!-- Right Column: Live LCO Weather & Observatory Status -->
   <div class="card" style="padding: 1.25rem; background: var(--surface); border: 1px solid var(--border); border-radius: 12px;">
     <div id="weather-cards-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 0.85rem;">
+      {% if is_static_site() %}
+      <div style="color: var(--text-dim); font-size: 0.85rem;">Live weather is unavailable in this static snapshot.</div>
+      {% else %}
       <div style="color: var(--text-dim); font-size: 0.85rem;">Connecting to LCO Weather API…</div>
+      {% endif %}
     </div>
   </div>
 </div>
@@ -236,6 +240,11 @@
 
 <script>
   (function () {
+    // Static docs snapshot has no server to proxy the LCO weather API through,
+    // so a visitor's browser would otherwise hit weather-api.lco.global
+    // directly on every page load for no useful result.
+    const STATIC_SITE = {{ 'true' if is_static_site() else 'false' }};
+
     const SITES = [
       { id: 'muscat3', code: 'ogg', name: 'MuSCAT3 (OGG)', loc: 'Haleakala, Hawaii', lat: 20.7082, lon: -156.2570 },
       { id: 'muscat2', code: 'tfn', name: 'MuSCAT2 (TFN)', loc: 'Teide, Canary Is.', lat: 28.3003, lon: -16.5101 },
@@ -724,9 +733,9 @@
     }
 
     const refreshBtn = document.getElementById('refresh-weather-btn');
-    if (refreshBtn) refreshBtn.addEventListener('click', loadWeather);
+    if (refreshBtn && !STATIC_SITE) refreshBtn.addEventListener('click', loadWeather);
 
-    loadWeather();
+    if (!STATIC_SITE) loadWeather();
 
     // Expandable Image Lightbox Modal
     document.querySelectorAll('.expandable-image').forEach(img => {
