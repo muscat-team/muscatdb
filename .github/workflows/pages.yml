@@ -6,7 +6,11 @@ name: Pages
 
 on:
   push:
-    branches: [main, test]
+    # main only. The github-pages environment permits deployments from `main`
+    # and `pages`, so a push to `test` starts this job and the environment gate
+    # refuses it seconds later with no steps run. Publishing from `test` would
+    # also put unreleased documentation on the public site.
+    branches: [main]
   workflow_dispatch:
 
 # Allow one concurrent deployment; let an in-progress run finish.
