@@ -225,6 +225,46 @@ class TestScanner:
         result = scan_date("muscat", "999999", max_workers=1)
         assert not result
 
+    def test_scan_date_no_files_leaves_no_obslog_directory(self, tmp_obslog, tmp_data):
+        """A zero-result scan must not create a marker directory.
+
+        scan_missing_dates() treats the obslog date-directory's existence as
+        "already scanned", regardless of whether it holds a CSV. Creating that
+        directory unconditionally — the previous behaviour — permanently hid
+        any date scanned before its data had fully arrived (e.g. LCO archive
+        delivery lagging past the next day's scan-yesterday cron): the empty
+        directory outlives the empty result, and nothing ever retries it.
+        """
+        from muscat_db.scanner import scan_date
+        obsdate = "999999"
+        result = scan_date("muscat", obsdate, max_workers=1)
+        assert not result
+        assert not os.path.isdir(f"{tmp_obslog}/muscat/{obsdate}")
+
+    def test_scan_missing_dates_retries_a_date_that_arrived_after_an_earlier_empty_scan(
+        self, tmp_obslog, tmp_data,
+    ):
+        """Regression test: a date scanned before its FITS arrived must stay
+        eligible for scan_missing_dates() once the files show up, rather than
+        being silently and permanently skipped.
+        """
+        from muscat_db.scanner import scan_date, scan_missing_dates
+        inst = INSTRUMENTS["muscat"]
+        obsdate = "260101"
+
+        # Simulate the premature cron scan: no FITS have landed yet.
+        early_result = scan_date("muscat", obsdate, max_workers=1)
+        assert not early_result
+
+        # The archive catches up later.
+        self._make_fits_for_instrument(tmp_data, inst, obsdate, 0, 3)
+
+        dates = scan_missing_dates("muscat", "26", max_workers=1)
+        assert obsdate in dates
+
+        csv_path = f"{tmp_obslog}/muscat/{obsdate}/obslog-muscat-{obsdate}-ccd0.csv"
+        assert os.path.isfile(csv_path)
+
     def test_scan_date_multiple_ccds(self, tmp_obslog, tmp_data):
         from muscat_db.scanner import scan_date
         inst = INSTRUMENTS["muscat"]
