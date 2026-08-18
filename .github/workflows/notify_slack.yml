@@ -18,6 +18,10 @@ on:
 jobs:
   notify:
     runs-on: ubuntu-latest
+    permissions:
+      # Read-only lookup of an issue's closing event, to tell a merge-closed
+      # issue apart from a manually-closed one. Nothing here writes back.
+      issues: read
     steps:
       - name: Build the summary line
         id: summary
@@ -34,6 +38,7 @@ jobs:
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           ISSUE_TITLE: ${{ github.event.issue.title }}
           ISSUE_URL: ${{ github.event.issue.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           skip=false
@@ -58,7 +63,23 @@ jobs:
               esac
               ;;
             issues)
-              text="Issue #${ISSUE_NUMBER} ${ACTION}: ${ISSUE_TITLE}"; color="good"
+              if [ "$ACTION" = "closed" ]; then
+                # A closing keyword in a merged PR fires this the same as a
+                # manual close, and the merge already posted its own
+                # message. Only post here when the close did not come from
+                # a commit. A lookup failure falls back to posting, which
+                # is the old (duplicating) behaviour rather than a silently
+                # dropped notification.
+                commit_id=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}/events" \
+                  --jq '[.[] | select(.event == "closed")] | last | .commit_id // empty' || echo "")
+                if [ -n "$commit_id" ]; then
+                  skip=true; text=""; color=""
+                else
+                  text="Issue #${ISSUE_NUMBER} closed: ${ISSUE_TITLE}"; color="good"
+                fi
+              else
+                text="Issue #${ISSUE_NUMBER} ${ACTION}: ${ISSUE_TITLE}"; color="good"
+              fi
               ;;
           esac
           echo "skip=${skip}" >> "$GITHUB_OUTPUT"
