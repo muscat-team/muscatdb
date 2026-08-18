@@ -526,7 +526,10 @@ def test_index_exposes_normalized_target_direct_link(mock_db, monkeypatch):
     assert "V1298Tau_b V1298TAU" in html
 
 
-def test_target_detail_stores_last_viewed_target(mock_db, monkeypatch):
+def test_target_detail_has_no_standalone_target_nav_item(mock_db, monkeypatch):
+    """An individual target page lives under the Targets nav item rather than
+    getting its own -- no separate "Target" link or per-target remember-me
+    plumbing, just the shared photometry/transit-fit/ephemeris ones."""
     monkeypatch.setattr(
         "muscat_db.web._get_datasets_for_normalized_target",
         lambda _db, norm_name: ([], "2026-07-01"),
@@ -536,11 +539,12 @@ def test_target_detail_stores_last_viewed_target(mock_db, monkeypatch):
 
     assert response.status_code == 200
     html = response.text
-    assert 'id="target-nav-link" href="/target"' in html
+    assert 'id="target-nav-link"' not in html
+    assert "rememberTarget" not in html
+    assert 'href="/targets" data-nav-section="targets"' in html
     assert 'id="photometry-nav-link" href="/photometry"' in html
     assert 'id="transit-fit-nav-link" href="/transit-fit"' in html
     assert 'id="ephemeris-nav-link" href="/ephemeris"' in html
-    assert "MuscatRouteState.rememberTarget(\"V1298TAU\")" in html
 
 
 def test_target_detail_has_lco_schedule_and_archive_buttons(mock_db, monkeypatch):

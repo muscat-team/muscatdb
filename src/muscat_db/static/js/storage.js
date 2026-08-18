@@ -81,7 +81,6 @@ window.MuscatOptions = (function (storage) {
 })(window.MuscatStorage);
 
 window.MuscatRouteState = (function (storage) {
-  var TARGET_KEY = "target:lastName";
   var PHOTOMETRY_KEY = "photometry:lastContext";
   var TRANSIT_FIT_KEY = "transitFit:lastContext";
   var EPHEMERIS_TARGET_KEY = "muscat-ephem-selected-target";
@@ -98,17 +97,6 @@ window.MuscatRouteState = (function (storage) {
       if (value) params.push(key + "=" + encodeURIComponent(value));
     });
     return params.length ? path + "?" + params.join("&") : path;
-  }
-
-  function rememberTarget(targetName) {
-    targetName = cleanText(targetName);
-    if (!targetName) return false;
-    return storage.set(TARGET_KEY, targetName);
-  }
-
-  function targetUrl() {
-    var targetName = cleanText(storage.get(TARGET_KEY, ""));
-    return targetName ? "/target?name=" + encodeURIComponent(targetName) : "/target";
   }
 
   function rememberPhotometry(context) {
@@ -140,7 +128,6 @@ window.MuscatRouteState = (function (storage) {
 
   function applyNavbar() {
     var links = [
-      ["target-nav-link", targetUrl()],
       ["photometry-nav-link", photometryUrl()],
       ["transit-fit-nav-link", transitFitUrl()],
       ["ephemeris-nav-link", ephemerisUrl()],
@@ -153,10 +140,8 @@ window.MuscatRouteState = (function (storage) {
 
   return {
     applyNavbar: applyNavbar,
-    rememberTarget: rememberTarget,
     rememberPhotometry: rememberPhotometry,
     rememberTransitFit: rememberTransitFit,
-    targetUrl: targetUrl,
     photometryUrl: photometryUrl,
     transitFitUrl: transitFitUrl,
     ephemerisUrl: ephemerisUrl,
