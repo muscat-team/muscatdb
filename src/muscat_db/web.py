@@ -3723,7 +3723,13 @@ def _ttv_windows(payload: dict, duration_h: float) -> dict:
     start_jd = _iso_date_to_jd(str(start_dt), end_of_day=False)
     end_jd = _iso_date_to_jd(str(end_dt), end_of_day=True)
 
-    windows = []
+    req_ra = payload.get("ra")
+    req_dec = payload.get("dec")
+    has_coord = req_ra not in (None, "") and req_dec not in (None, "")
+    ra_deg = float(req_ra) if has_coord else None
+    dec_deg = float(req_dec) if has_coord else None
+
+    raw_windows = []  # (epoch_abs, mid_bjd, start_jd_win, end_jd_win)
     for point in points:
         try:
             mid_bjd = float(point["tc"]) + t_offset
@@ -3734,16 +3740,34 @@ def _ttv_windows(payload: dict, duration_h: float) -> dict:
             continue
         start_jd_win = mid_bjd - (half / 24.0) - (pad_before / 1440.0)
         end_jd_win = mid_bjd + (half / 24.0) + (pad_after / 1440.0)
+        raw_windows.append((epoch_abs, mid_bjd, start_jd_win, end_jd_win))
+        if len(raw_windows) > 1000:
+            break
+
+    # mid_bjd is BJD_TDB; convert to true JD_UTC when target coordinates are
+    # known, same correction as lco.generate_windows. The offset drifts by
+    # about a minute per week, negligible over one transit's padded span, so
+    # the per-transit correction computed from mid_bjd is reused for that
+    # transit's start/end rather than converting all three separately.
+    if has_coord and raw_windows:
+        mid_jds_utc = transit_obs.bjd_tdb_to_jd_utc(
+            [w[1] for w in raw_windows], ra_deg, dec_deg,
+        )
+    else:
+        mid_jds_utc = [w[1] for w in raw_windows]
+
+    windows = []
+    for (epoch_abs, mid_bjd, start_jd_win, end_jd_win), mid_jd_utc in zip(raw_windows, mid_jds_utc):
+        mid_jd_utc = float(mid_jd_utc)
+        correction = mid_jd_utc - mid_bjd
         windows.append({
             "epoch": 0,  # replaced below, once the first in-range epoch is known
             "epoch_abs": epoch_abs,
             "mid_bjd": mid_bjd,
-            "mid": transit_obs._jd_to_iso_z(mid_bjd),
-            "start": transit_obs._jd_to_iso_z(start_jd_win),
-            "end": transit_obs._jd_to_iso_z(end_jd_win),
+            "mid": transit_obs._jd_to_iso_z(mid_jd_utc),
+            "start": transit_obs._jd_to_iso_z(start_jd_win + correction),
+            "end": transit_obs._jd_to_iso_z(end_jd_win + correction),
         })
-        if len(windows) > 1000:
-            break
 
     # Match generate_windows: displayed epoch is relative to the first in range.
     if windows:
@@ -3919,6 +3943,8 @@ def api_lco_windows(request: Request, payload: dict = Body(...)):
                 status_code=400,
             )
 
+        req_ra = payload.get("ra")
+        req_dec = payload.get("dec")
         windows = lco.generate_windows(
             float(t0),
             float(period),
@@ -3927,6 +3953,8 @@ def api_lco_windows(request: Request, payload: dict = Body(...)):
             payload.get("range_end"),
             float(payload.get("pad_before_min") or 0),
             float(payload.get("pad_after_min") or 0),
+            ra_deg=float(req_ra) if req_ra not in (None, "") else None,
+            dec_deg=float(req_dec) if req_dec not in (None, "") else None,
         )
         result = {
             "ok": True,
