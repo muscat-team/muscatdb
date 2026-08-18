@@ -797,7 +797,10 @@
       defocusEl.min = -limit;
       defocusEl.max = limit;
       var current = num('sch-defocus');
-      if (current !== null && Math.abs(current) > limit) setVal('sch-defocus', 0);
+      // Clamp to the new instrument's limit rather than silently resetting to
+      // 0 -- e.g. typing 5 for sinistro then switching to qhy600 (±0.5mm)
+      // used to drop the value with no indication anything changed.
+      if (current !== null && Math.abs(current) > limit) setVal('sch-defocus', String(current > 0 ? limit : -limit));
     }
     if (hint) hint.title = 'Secondary-mirror offset from focus, in mm, to prevent CCD saturation on bright targets. 0 = focused. Limit for this instrument: ±' + limit + 'mm.';
   }
@@ -835,6 +838,18 @@
         var stillValid = Array.prototype.some.call(siteSelEl.options, function (o) { return o.value === prevSite; });
         siteSelEl.value = stillValid ? prevSite : '';
       }
+      // Split-relay legs (sch-site-a/-b) submit real per-site requests, so
+      // their static option lists must narrow with the kind too -- otherwise
+      // a hand-picked site absent from this kind's network (e.g. ogg for
+      // sinistro) sits there as a selectable value LCO then refuses.
+      ['sch-site-a', 'sch-site-b'].forEach(function (legId) {
+        var legEl = el(legId);
+        if (!legEl) return;
+        var prevLeg = legEl.value;
+        legEl.innerHTML = '<option value="">— select —</option>' + optHtml(SINGLE_FILTER_SITES[singleKind]);
+        var legStillValid = Array.prototype.some.call(legEl.options, function (o) { return o.value === prevLeg; });
+        legEl.value = legStillValid ? prevLeg : '';
+      });
       setVal('sch-effective-exptime', lastSinistroFields.exptime);
       setVal('sch-effective-mode', lastSinistroFields.mode);
       setVal('sch-effective-filter', lastSinistroFields.filter);
