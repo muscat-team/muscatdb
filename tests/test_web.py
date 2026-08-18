@@ -484,11 +484,11 @@ def test_jobs_lco_archive_ingest_date_endpoint(mock_db, monkeypatch):
     assert called["args"][1:] == ("muscat3", "260102")
 
 
-def test_target_without_name_redirects_to_database_search(mock_db):
+def test_target_without_name_redirects_to_targets_table(mock_db):
     response = TestClient(app).get("/target", follow_redirects=False)
 
     assert response.status_code == 303
-    assert response.headers["location"] == "/"
+    assert response.headers["location"] == "/targets"
 
 
 def test_index_exposes_normalized_target_direct_link(mock_db, monkeypatch):
@@ -516,7 +516,7 @@ def test_index_exposes_normalized_target_direct_link(mock_db, monkeypatch):
         }],
     )
 
-    response = TestClient(app).get("/")
+    response = TestClient(app).get("/targets")
 
     assert response.status_code == 200
     html = response.text
@@ -2652,7 +2652,7 @@ def test_toi_decorated_db_target_uses_canonical_link_and_dataset(mock_db, monkey
 
     # The homepage uses the same normalizer for its target link.
     web._index_cache.clear()
-    homepage = TestClient(app).get("/")
+    homepage = TestClient(app).get("/targets")
     assert homepage.status_code == 200
     assert 'data-norm-name="TOI179"' in homepage.text
     assert 'href="/target?name=TOI179"' in homepage.text

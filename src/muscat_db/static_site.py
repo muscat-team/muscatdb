@@ -11,11 +11,11 @@ Design notes
 ------------
 * **The guide is the site root.** This tree is published as the project's
   documentation, so a visitor lands on the written pipeline guide, not on the
-  application's target table. The app's landing page keeps its own directory
-  (``targets/``). The masthead resolves to the site root rather than following
-  the route map there, so ``targets/`` is currently published but unlinked until
-  the navbar gains its own Targets entry. The UI capture below is then
-  what it has always been: a tour reached from the documentation.
+  application's own home page. The app's home page keeps its own directory
+  (``home/``); the targets table has its own (``targets/``). The masthead
+  resolves to the site root rather than following the route map there. The UI
+  capture below is then what it has always been: a tour reached from the
+  documentation.
 * **Representative subset, not a full mirror.** All navigation pages plus a few
   example detail / drill-down pages (chosen from what actually has data and
   figures on disk). This keeps the published site small while still documenting
@@ -56,9 +56,11 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 _TABLE_ROW_LIMIT = 10
 
 # The published tree is documentation first, so the guide is served at the site
-# root and the application's landing page moves into its own directory.
+# root and the application's own home page (``/``) moves into its own directory,
+# distinct from the targets table's (``/targets``) so the two routes never
+# collide on one output directory.
 _LANDING_ROUTE = "/guide"
-_APP_HOME_SITEDIR = "targets"
+_APP_HOME_SITEDIR = "home"
 
 # Pages captured with no query parameters. Order controls nothing here; the
 # navbar defines the visible order. The three parametric parents
@@ -68,6 +70,7 @@ _APP_HOME_SITEDIR = "targets"
 # (see ``_PARAM_PARENTS`` handling in ``_enumerate``).
 _NAV_PAGES: tuple[str, ...] = (
     "/",
+    "/targets",
     "/logs",
     "/guide",
     "/jobs",
@@ -233,17 +236,18 @@ def _inject_no_live_data(html: str, sitedir: str) -> str:
 def _url_to_sitedir(path: str, query: str = "") -> str:
     """Map a captured URL to its output directory (relative, no leading slash).
 
-    ``/guide`` → ``""`` (site root), ``/`` → ``targets``, ``/logs`` → ``logs``,
-    ``/muscat/231201/ccd0`` → ``muscat/231201/ccd0``,
+    ``/guide`` → ``""`` (site root), ``/`` → ``home``, ``/targets`` → ``targets``,
+    ``/logs`` → ``logs``, ``/muscat/231201/ccd0`` → ``muscat/231201/ccd0``,
     ``/target?name=X`` → ``target/<slug>``,
     ``/photometry?inst=&date=&target=`` → ``photometry/<inst>/<date>/<slug>``.
 
-    The guide, not the application's own landing page, is the site root: this
+    The guide, not the application's own home page, is the site root: this
     tree is published as the project's documentation, so a visitor should arrive
-    at the written guide rather than at a table of observation targets they
-    cannot query. The app's landing page keeps its own directory. Every internal
-    link is rewritten through ``route_map`` and every page's ``../`` prefix is
-    derived from its output directory, so both moves propagate on their own.
+    at the written guide rather than at the app's own landing page. The app's
+    home page keeps its own directory, distinct from the targets table's, so the
+    two never collide on one output directory. Every internal link is rewritten
+    through ``route_map`` and every page's ``../`` prefix is derived from its
+    output directory, so both moves propagate on their own.
     """
     p = path.strip("/")
     if not p:
@@ -587,8 +591,8 @@ def _rewrite_link(
 
     # The bare root "/" always resolves to the site root (the guide landing
     # page), regardless of which route_map entry claims it.  In the published
-    # tree the guide lives at the root and the app's own landing page is in
-    # targets/; a brand link or "Back" link must not silently redirect there.
+    # tree the guide lives at the root and the app's own home page is in
+    # home/; a brand link or "Back" link must not silently redirect there.
     if path == "/":
         return prefix or "./"
 

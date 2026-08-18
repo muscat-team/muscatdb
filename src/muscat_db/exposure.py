@@ -118,26 +118,78 @@ _VIZIER_BACKOFF_SEC = 1.0
 # since it's the safer threshold for precision photometry. This remains a
 # per-instrument approximation -- individual sites can differ.
 INSTRUMENT_PARAMS = {
-    "muscat":  {"full_well": 55000, "gain": 1.0, "pixel_scale": 0.358, "aperture_m": 1.88},
-    "muscat2": {"full_well": 62000, "gain": 1.0, "pixel_scale": 0.44, "aperture_m": 1.52},
+    "muscat": {
+        "full_well": 55000,
+        "gain": 1.0,
+        "pixel_scale": 0.358,
+        "aperture_m": 1.88,
+        "site": "Okayama Astrophysical Observatory (1.88m)",
+        "fov": "6.1' × 6.1'",
+        "bands": "3 (g, r, z_s)",
+        "url": "https://arxiv.org/abs/1509.03154",
+    },
+    "muscat2": {
+        "full_well": 62000,
+        "gain": 1.0,
+        "pixel_scale": 0.44,
+        "aperture_m": 1.52,
+        "site": "Teide Observatory (1.52m TCS)",
+        "fov": "7.4' × 7.4'",
+        "bands": "4 (g, r, i, z_s)*",
+        "url": "https://arxiv.org/abs/1807.01908",
+    },
     "muscat3": {
         "full_well": {"gp": 113684, "rp": 114894, "ip": 82001, "zs": 90000},
-        "gain": 1.8, "pixel_scale": 0.267, "aperture_m": 2.0,
+        "gain": 1.8,
+        "pixel_scale": 0.267,
+        "aperture_m": 2.0,
+        "site": "Faulkes Telescope North (2.0m FTN / Haleakala)",
+        "fov": "9.1' × 9.1'",
+        "bands": "4 (g', r', i', z_s)*",
+        "url": "https://ui.adsabs.harvard.edu/abs/2020SPIE11447E..5KN/abstract",
     },
     "muscat4": {
         "full_well": {"gp": 115200, "rp": 115200, "ip": 82800, "zs": 115200},
-        "gain": 1.8, "pixel_scale": 0.267, "aperture_m": 2.0,
+        "gain": 1.8,
+        "pixel_scale": 0.267,
+        "aperture_m": 2.0,
+        "site": "Siding Spring Observatory (2.0m FTS / COJ)",
+        "fov": "9.1' × 9.1'",
+        "bands": "4 (g', r', i', z_s)*",
+        "url": "https://ui.adsabs.harvard.edu/abs/2020SPIE11447E..5KN/abstract",
     },
-    "sinistro": {"full_well": 246400, "gain": 1.0, "pixel_scale": 0.39, "aperture_m": 1.0},
+    "sinistro": {
+        "full_well": 246400,
+        "gain": 1.0,
+        "pixel_scale": 0.39,
+        "aperture_m": 1.0,
+        "site": "LCO 1.0m Global Network",
+        "fov": "26.5' × 26.5'",
+        "bands": "Broadband optical filters",
+        "url": "https://lco.global/observatory/instruments/sinistro/",
+    },
     # Verified on real /data/SBIGSTL6303 BANZAI e91 headers: SATURATE=102400
     # e- at GAIN=1.0, PIXSCALE=0.58. Aperture is the LCO 0.4m network's
-    # historical 400mm optical tube.
+    # historical 400mm optical tube. No site/fov/bands/url yet: unlike the
+    # instruments above, no prose2 .telescope file exists for this camera to
+    # verify field of view or filter set against.
     "sbig": {"full_well": 102400, "gain": 1.0, "pixel_scale": 0.58, "aperture_m": 0.4},
     # Verified on a real archived QHY600CMOS header
     # (coj0m416-sq36-20260804-0098-e91, central30x30 mode): SATURATE=MAXLIN=
     # 47400 e- at GAIN=1.0, PIXSCALE=0.74. Aperture is the DeltaRho 350's
-    # published 350mm optical tube.
-    "qhy600": {"full_well": 47400, "gain": 1.0, "pixel_scale": 0.74, "aperture_m": 0.35},
+    # published 350mm optical tube. fov is the central30x30 readout mode (the
+    # one muscat-db uses, matching pixel_scale/full_well above), quoted from
+    # lco.global; the wider full_frame mode (1.9deg x 1.2deg) is not used here.
+    "qhy600": {
+        "full_well": 47400,
+        "gain": 1.0,
+        "pixel_scale": 0.74,
+        "aperture_m": 0.35,
+        "site": "LCO 0.4m Global Network (DeltaRho 350)",
+        "fov": "30' × 30'",
+        "bands": "Broadband + narrowband filters",
+        "url": "https://lco.global/observatory/instruments/qhy600-delta-rho-350/",
+    },
 }
 
 # Empirical coefficients for MuSCAT3 from peak_count_estimator.

@@ -305,8 +305,6 @@ async def _nginx_auth_middleware(request: Request, call_next):
 # instrument/date page and returns HTML where the QuickLook client expects JSON.
 app.include_router(proxy_router)
 
-# Mount static assets (shared stylesheet, etc.) before the dynamic routes so a
-# request like /static/styles.css is not captured by the /{inst}/{date} route.
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
@@ -445,6 +443,15 @@ _index_cache = LRUCache(maxsize=_INDEX_CACHE_MAX)
 
 
 @app.get("/", response_class=HTMLResponse)
+def home_page():
+    # sbig is archival-only (no longer schedulable), so it is excluded from the
+    # summary table of currently operating instruments; it stays in
+    # INSTRUMENT_PARAMS itself for exposure-calculator/photometry use.
+    instruments = {k: v for k, v in exp_calc.INSTRUMENT_PARAMS.items() if k != "sbig"}
+    return _render("home.html", instruments=instruments)
+
+
+@app.get("/targets", response_class=HTMLResponse)
 def index():
     db = _db_path()
     tpl_path = TEMPLATE_DIR / "index.html"
@@ -589,7 +596,7 @@ def target_page(name: str = ""):
     tpl_mtime = str(tpl_path.stat().st_mtime_ns) if tpl_path.is_file() else ""
 
     if not name:
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse("/targets", status_code=303)
     else:
         # Single target view - normalize the input name
         norm_name = _normalize_target_name(name)
