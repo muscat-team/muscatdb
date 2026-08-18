@@ -50,7 +50,8 @@ the science lives in the packages themselves.
 
 - Python ≥ 3.12
 - FITS files below the common data root (`MUSCAT_DATA_DIR`, default `/data`) in
-  `MuSCAT`, `MuSCAT2`, `MuSCAT3`, `MuSCAT4`, and `Sinistro` subdirectories
+  `MuSCAT`, `MuSCAT2`, `MuSCAT3`, `MuSCAT4`, `Sinistro`, `SBIGSTL6303`, and
+  `QHY600CMOS` subdirectories
 - A writable obslog directory (`MUSCAT_OBSLOG_DIR`, default
   `$HOME/muscat/obslog`)
 
@@ -571,8 +572,10 @@ spellings consistent when writing documentation, commands, imports, or paths:
 | muscat3 | 4 | `ogg2m001-` | `/data/MuSCAT3` |
 | muscat4 | 4 | `coj2m002-` | `/data/MuSCAT4` |
 | sinistro | 1 | `*` (any LCO 1m site) | `/data/Sinistro`  |
+| sbig | 1 | `*` (any LCO 0.4m site) | `/data/SBIGSTL6303` |
+| qhy600 | 1 | `*` (any LCO 0.4m site) | `/data/QHY600CMOS` |
 
-Sinistro scans the reduced `*e91.fits` frames produced by LCO BANZAI, regardless of site prefix (`elp1m008-`, `coj1m003-`, `cpt1m013-`, …).
+Sinistro/sbig/qhy600 scan the reduced `*e91.fits` frames produced by LCO BANZAI, regardless of site prefix (`elp1m008-`, `coj1m003-`, `cpt1m013-`, `ogg0m406-`, `coj0m416-`, …). sbig (SBIG STL-6303, `INSTRUME` prefix `kb`) is archival-only -- LCO's live instrument API has no schedulable instrument_type for it. qhy600 (QHY600 CMOS on DeltaRho 350, `INSTRUME` prefix `sq`) is the current live 0.4m camera and is schedulable; both prefixes and the full header convention (WCS, `GAIN=1`, `CONFMODE`) are confirmed against real archived frames.
 
 The exposure calculator uses these instrument references when scaling its
 MuSCAT3 calibration. Full well is in electrons, gain in electrons/ADU, pixel
@@ -585,6 +588,8 @@ scale in arcsec/pixel, and aperture in metres.
 | muscat3 | 99,000 | 1.8 | 0.267 | 2.0 |
 | muscat4 | 99,000 | 1.8 | 0.267 | 2.0 |
 | sinistro | 100,000 | 1.5 | 0.39 | 1.0 |
+| sbig | 102,400 | 1.0 | 0.58 | 0.4 |
+| qhy600 | 47,400 | 1.0 | 0.74 | 0.35 |
 
 ## Known limitation: the UTC-midnight dataset split
 

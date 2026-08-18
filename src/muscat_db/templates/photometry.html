@@ -74,10 +74,10 @@
       {% endfor %}
     </select>
   </label>
-  {% if sel_inst == 'sinistro' %}
+  {% if sel_inst in ('sinistro', 'sbig', 'qhy600') %}
   {# Only expose a filter when the obslog offers a real choice (>1 value). #}
   {% if available_sites | length > 1 %}
-  <label for="opt-site"><span>Site <span class="help-tooltip" title="Only reduce frames from this LCO site (corresponds to --site; sinistro only). Empty = all sites.">?</span></span>
+  <label for="opt-site"><span>Site <span class="help-tooltip" title="Only reduce frames from this LCO site (corresponds to --site; multi-site instruments only). Empty = all sites.">?</span></span>
     <select id="opt-site" title="--site; empty → all sites">
       <option value="">— all —</option>
       {% for s in available_sites %}
@@ -87,7 +87,7 @@
   </label>
   {% endif %}
   {% if available_telescopes | length > 1 %}
-  <label for="opt-telescope"><span>Telescope <span class="help-tooltip" title="Only reduce frames from this physical LCO 1m telescope (corresponds to --telescope; sinistro only, matched against the TELESCOP header). Empty = all telescopes.">?</span></span>
+  <label for="opt-telescope"><span>Telescope <span class="help-tooltip" title="Only reduce frames from this physical LCO telescope (corresponds to --telescope; multi-site instruments only, matched against the TELESCOP header). Empty = all telescopes.">?</span></span>
     <select id="opt-telescope" title="--telescope; empty → all telescopes">
       <option value="">— all —</option>
       {% for tel in available_telescopes %}
@@ -97,7 +97,7 @@
   </label>
   {% endif %}
   {% if available_modes | length > 1 %}
-  <label for="opt-mode"><span>Mode <span class="help-tooltip" title="Only reduce frames in this readout mode (corresponds to --mode; sinistro only). Empty = all modes.">?</span></span>
+  <label for="opt-mode"><span>Mode <span class="help-tooltip" title="Only reduce frames in this readout mode (corresponds to --mode; mode-capable instruments only). Empty = all modes.">?</span></span>
     <select id="opt-mode" title="--mode; empty → all modes">
       <option value="">— all —</option>
       {% for m in available_modes %}
@@ -402,12 +402,12 @@
           <summary>Reference & Alignment <span class="help-tooltip" title="Settings to establish the reference frame and coordinate source alignment.">?</span></summary>
           <div style="grid-column: 1 / -1; display: grid; grid-template-columns: repeat(4, 1fr); gap: 1.25rem;">
             <div class="opt">
-              <label for="opt-ref_band">Reference band <span class="help-tooltip" title="Band used as alignment reference (corresponds to --ref_band). Empty means per-band self-reference. For Sinistro, enabled only when exactly one band is selected; multi-band Sinistro must self-reference per band.">?</span></label>
+              <label for="opt-ref_band">Reference band <span class="help-tooltip" title="Band used as alignment reference (corresponds to --ref_band). Empty means per-band self-reference. For multi-site instruments (sinistro/sbig/qhy600), enabled only when exactly one band is selected; multi-band runs on those must self-reference per band (simultaneous bands can be from different telescopes/pointings).">?</span></label>
               <select id="opt-ref_band" style="width: 100%;">
                 <option value="">per-band self-reference</option>
                 {% for b in band_choices %}<option value="{{ b }}">{{ b }}</option>{% endfor %}
               </select>
-              {% if sel_inst == 'sinistro' %}<span class="hint">Sinistro: enabled for one selected band, disabled for multi-band</span>{% endif %}
+              {% if sel_inst in ('sinistro', 'sbig', 'qhy600') %}<span class="hint">Multi-site instrument: enabled for one selected band, disabled for multi-band</span>{% endif %}
             </div>
             <div class="opt">
               <label for="opt-refid">Reference frame ID <span class="help-tooltip" title="FITS file frame number (4-digit suffix, e.g. 1480 for MCT20_1911191480). Empty means auto (first frame for self-reference, middle frame if a reference band is set, or the quality-selected anchor with a persistent source catalog when Reference selection = quality below). An explicit value here always overrides.">?</span></label>
@@ -613,6 +613,8 @@
 <script>
 (function () {
   var inst   = {{ sel_inst|tojson }};
+  // Mirrors muscat_db.photometry.MULTISITE_INSTRUMENTS.
+  var MULTISITE_INSTRUMENTS = ['sinistro', 'sbig', 'qhy600'];
   var date   = {{ sel_date|tojson }};
   var routeTarget = {{ sel_target|tojson }};
   var target = {{ dataset_target|tojson }};
@@ -1057,7 +1059,7 @@
   }
   function updateSinistroReferenceBand() {
     var refBand = document.getElementById('opt-ref_band');
-    if (!refBand || inst !== 'sinistro') return;
+    if (!refBand || MULTISITE_INSTRUMENTS.indexOf(inst) === -1) return;
     var bands = selectedBands();
     var singleBand = bands.length === 1;
     refBand.disabled = !singleBand;

@@ -1370,58 +1370,69 @@ def export_targets_csv():
     )
 
 
-_LCO_TELESCOPE_FILENAME_RE = re.compile(r"^[a-z]{3}1m0(\d{2})-")
+def _lco_telescope_filename_re(inst: str) -> re.Pattern:
+    """Filename-prefix regex for an instrument's TELESCOP-style unit token,
+    e.g. ``cpt1m010-`` for sinistro (``1m0``) or ``ogg0m406-`` for sbig/qhy600
+    (``0m4``)."""
+    prefix = re.escape(phot._TELESCOPE_PREFIX.get(inst, "1m0"))
+    return re.compile(rf"^[a-z]{{3}}{prefix}(\d{{2}})-")
 
 
 def _sinistro_obslog_choices(
     db: str, inst: str, date: str, target: str, site: str = ""
 ) -> tuple[list[str], list[str], list[str]]:
-    """``(sites, telescopes, modes)`` present in the obslog for a sinistro
-    target+date, optionally scoping the telescope list to one ``site``.
+    """``(sites, telescopes, modes)`` present in the obslog for a multi-site
+    instrument's (sinistro/sbig/qhy600) target+date, optionally scoping the
+    telescope list to one ``site``.
 
     The LCO site is the 3-char filename prefix (e.g. ``cpt1m010-...``); the
-    physical telescope is the 2-digit unit number right after ``1m0`` in that
-    same prefix (e.g. ``cpt1m010-`` -> unit ``10``, reconstructed as the
-    canonical TELESCOP-style value ``'1m0-10'``); the mode is ``read_mode``
-    (CONFMODE). Site/mode are intersected with the known valid sets so a stray
-    prefix or non-canonical read_mode (MUSCAT_FAST/SLOW) can't leak in;
-    telescope is open-ended (LCO's 1m fleet changes over time) so only the
-    filename shape is validated. Empty lists for non-sinistro or on error.
+    physical telescope is the 2-digit unit number right after the telescope
+    class token in that same prefix (e.g. ``cpt1m010-`` -> unit ``10``,
+    reconstructed as the canonical TELESCOP-style value ``'1m0-10'``); the
+    mode is ``read_mode`` (CONFMODE). Site/mode are intersected with the
+    instrument's known valid sets so a stray prefix or non-canonical
+    read_mode (MUSCAT_FAST/SLOW) can't leak in; telescope is open-ended
+    (LCO's fleet changes over time) so only the filename shape is validated.
+    Empty lists for non-multi-site instruments or on error.
     """
-    if inst != "sinistro" or not (date and target):
+    if inst not in phot.MULTISITE_INSTRUMENTS or not (date and target):
         return [], [], []
     try:
+        tel_prefix = phot._TELESCOPE_PREFIX.get(inst, "1m0")
+        tel_re = _lco_telescope_filename_re(inst)
+        inst_sites = phot.MULTISITE_SITES.get(inst, ())
+        inst_modes = phot.MULTISITE_MODES.get(inst, ())
         with get_conn(db) as conn:
             cur = conn.execute(
                 "SELECT DISTINCT filename FROM frames WHERE instrument = ? AND obsdate = ? AND object = ? AND filename IS NOT NULL AND filename != ''",
                 (inst, date, target),
             )
             filenames = [row[0].lower() for row in cur.fetchall() if row[0]]
-            sites = sorted({fn[:3] for fn in filenames} & set(phot.SINISTRO_SITES))
+            sites = sorted({fn[:3] for fn in filenames} & set(inst_sites))
             scoped = [fn for fn in filenames if not site or fn.startswith(site)]
             telescopes = sorted({
-                f"1m0-{m.group(1)}"
+                f"{tel_prefix}-{m.group(1)}"
                 for fn in scoped
-                if (m := _LCO_TELESCOPE_FILENAME_RE.match(fn))
+                if (m := tel_re.match(fn))
             })
             cur = conn.execute(
                 "SELECT DISTINCT read_mode FROM frames WHERE instrument = ? AND obsdate = ? AND object = ? AND read_mode IS NOT NULL AND read_mode != ''",
                 (inst, date, target),
             )
-            modes = sorted({row[0].lower() for row in cur.fetchall() if row[0]} & set(phot.SINISTRO_MODES))
+            modes = sorted({row[0].lower() for row in cur.fetchall() if row[0]} & set(inst_modes))
         return sites, telescopes, modes
     except Exception:
         return [], [], []
 
 
 def _site_required_error(db: str, inst: str, date: str, target: str, options: dict) -> str | None:
-    """Block a sinistro run that would silently merge multiple sites.
+    """Block a multi-site instrument run that would silently merge multiple sites.
 
     When the obslog holds more than one site for this target+date and no site is
     chosen, prose would combine frames from different telescopes into one
     mislabeled reduction (prose2 now aborts on this too). Require a choice.
     """
-    if inst != "sinistro":
+    if inst not in phot.MULTISITE_INSTRUMENTS:
         return None
     if (options.get("site") or "").strip():
         return None
@@ -1432,14 +1443,15 @@ def _site_required_error(db: str, inst: str, date: str, target: str, options: di
 
 
 def _telescope_required_error(db: str, inst: str, date: str, target: str, options: dict) -> str | None:
-    """Block a sinistro run that would silently merge multiple physical telescopes.
+    """Block a multi-site instrument run that would silently merge multiple
+    physical telescopes.
 
     Mirrors :func:`_site_required_error`: when the obslog (scoped to the chosen
-    site, if any) holds more than one physical 1m telescope for this
+    site, if any) holds more than one physical telescope for this
     target+date and none is chosen, prose would combine frames from different
     telescopes into one mislabeled reduction (prose2 aborts on this too).
     """
-    if inst != "sinistro":
+    if inst not in phot.MULTISITE_INSTRUMENTS:
         return None
     if (options.get("telescope") or "").strip():
         return None
@@ -1481,20 +1493,20 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
     inst = inst if inst in INSTRUMENTS else ""
     date = date if phot.valid_date(date) else ""
     target = (target or "").strip()
-    # Site/telescope/mode are sinistro-only view filters (which LCO
-    # site/physical telescope/readout mode's products to show). Site/mode are
-    # validated against the known sets here; telescope is open-ended (no fixed
-    # whitelist, LCO's 1m fleet changes over time) so only its shape is
-    # checked. Whether any of them are actually present is decided by
-    # list_outputs from the filenames.
+    # Site/telescope/mode are multi-site-instrument-only view filters (which
+    # LCO site/physical telescope/readout mode's products to show). Site/mode
+    # are validated against the instrument's known sets here; telescope is
+    # open-ended (no fixed whitelist, LCO's fleet changes over time) so only
+    # its shape is checked. Whether any of them are actually present is
+    # decided by list_outputs from the filenames.
     site = site.strip().lower()
-    if inst != "sinistro" or site not in phot.SINISTRO_SITES:
+    if inst not in phot.MULTISITE_INSTRUMENTS or site not in phot.MULTISITE_SITES.get(inst, ()):
         site = ""
     telescope = telescope.strip().lower()
-    if inst != "sinistro" or not phot.TELESCOPE_RE.match(telescope):
+    if inst not in phot.MULTISITE_INSTRUMENTS or not phot.TELESCOPE_RE.match(telescope):
         telescope = ""
     mode = mode.strip().lower()
-    if inst != "sinistro" or mode not in phot.SINISTRO_MODES:
+    if inst not in phot.MULTISITE_MODES or mode not in phot.MULTISITE_MODES.get(inst, ()):
         mode = ""
 
     route_target = target.replace(" ", "")
@@ -1524,9 +1536,12 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
 
     dates: list[str] = []
     targets: list[str] = []
-    available_sites: list[str] = ["lsc", "cpt", "coj", "tfn", "elp"]
+    # Instrument-specific fallback shown only until the real obslog query
+    # (below) narrows it; must not leak sinistro's site/mode codes into an
+    # sbig/qhy600 page (or vice versa) when that query comes back empty.
+    available_sites: list[str] = list(phot.MULTISITE_SITES.get(inst, ()))
     available_telescopes: list[str] = []
-    available_modes: list[str] = ["central_2k_2x2", "full_frame"]
+    available_modes: list[str] = list(phot.MULTISITE_MODES.get(inst, ()))
     outputs = None
     runs: list = []
     sel_run: str | None = None
@@ -1552,7 +1567,7 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
     available_bands: list[str] = []
     if inst and date and target:
         runs, run_outputs = phot.list_photometry_runs(inst, date, target)
-        if inst == "sinistro":
+        if inst in phot.MULTISITE_INSTRUMENTS:
             if site:
                 runs = [r for r in runs if r.is_legacy or r.site == site or not r.site]
             if telescope:
@@ -1687,17 +1702,17 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
     inst = inst if inst in INSTRUMENTS else ""
     date = date if phot.valid_date(date) else ""
     target = (target or "").strip()
-    # Sinistro-only view filters (which site / physical telescope / readout
-    # mode's lightcurves to list). Telescope is open-ended (no fixed whitelist)
-    # so only its shape is checked.
+    # Multi-site-instrument-only view filters (which site / physical
+    # telescope / readout mode's lightcurves to list). Telescope is
+    # open-ended (no fixed whitelist) so only its shape is checked.
     site = site.strip().lower()
-    if inst != "sinistro" or site not in phot.SINISTRO_SITES:
+    if inst not in phot.MULTISITE_INSTRUMENTS or site not in phot.MULTISITE_SITES.get(inst, ()):
         site = ""
     telescope = telescope.strip().lower()
-    if inst != "sinistro" or not phot.TELESCOPE_RE.match(telescope):
+    if inst not in phot.MULTISITE_INSTRUMENTS or not phot.TELESCOPE_RE.match(telescope):
         telescope = ""
     mode = mode.strip().lower()
-    if inst != "sinistro" or mode not in phot.SINISTRO_MODES:
+    if inst not in phot.MULTISITE_MODES or mode not in phot.MULTISITE_MODES.get(inst, ()):
         mode = ""
 
     run = (run or "").strip()
@@ -1754,20 +1769,20 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
                 created_at = datetime.datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M:%S')
             except Exception:
                 mtime, created_at = 0.0, "Unknown"
-            csite, ctelescope, cmode = fit.csv_site_mode(c.name) if inst == "sinistro" else (None, None, None)
+            csite, ctelescope, cmode = fit.csv_site_mode(c.name, inst) if inst in phot.MULTISITE_INSTRUMENTS else (None, None, None)
             crun = c.parent.name if "_runs" in c.parts else ""
             rows.append({"path": str(c), "name": c.name, "created_at": created_at,
                          "_mtime": mtime, "_site": csite, "_telescope": ctelescope, "_mode": cmode, "run_id": crun})
 
-        if inst == "sinistro":
-            # A sinistro date+target can hold multiple sites / physical
-            # telescopes / readout modes with identical bands. The picker
-            # defaults to showing ALL lightcurves (so the user can fit one
-            # site/telescope or deliberately combine several); the
+        if inst in phot.MULTISITE_INSTRUMENTS:
+            # A multi-site instrument's date+target can hold multiple sites /
+            # physical telescopes / readout modes with identical bands. The
+            # picker defaults to showing ALL lightcurves (so the user can fit
+            # one site/telescope or deliberately combine several); the
             # Site/Telescope/Mode chips optionally narrow the list. The run's
             # identity is derived from whatever is actually selected at launch.
             csv_sites = sorted({r["_site"] for r in rows if r["_site"]})
-            sel_site = site  # validated against SINISTRO_SITES above; "" == all
+            sel_site = site  # validated against MULTISITE_SITES[inst] above; "" == all
             csv_telescopes = sorted({
                 r["_telescope"] for r in rows
                 if r["_telescope"] and (not sel_site or r["_site"] == sel_site)
@@ -1791,7 +1806,7 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
         # ``run`` unspecified -> newest; ``__legacy__`` -> the legacy single-dir
         # run (run_id ""); an explicit run_id -> that run.
         runs = fit.list_fit_runs(inst, date, target)
-        if inst == "sinistro":
+        if inst in phot.MULTISITE_INSTRUMENTS:
             if sel_site:
                 runs = [r for r in runs if r.is_legacy or r.site == sel_site or not r.site]
             if sel_telescope:
@@ -2782,7 +2797,8 @@ def exposure_calculate(payload: dict = Body(...)):
     mode = payload.get("mode", "exptime")
     exptime = payload.get("exptime")
     target_adu = payload.get("target_adu")
-    confmode = payload.get("confmode", "central_2k_2x2") if inst == "sinistro" else None
+    _inst_modes = phot.MULTISITE_MODES.get(inst)
+    confmode = payload.get("confmode", _inst_modes[0]) if _inst_modes else None
     if exptime is not None:
         exptime = float(exptime)
     if target_adu is not None:
@@ -3090,12 +3106,15 @@ def fov_page(inst: str = "", target: str = ""):
     readout_modes: dict[str, list[dict[str, str]]] = {}
     fov_sizes = {}
     for name in _FOV_INSTRUMENTS:
-        if name == "sinistro":
-            # Show the default (central_2k_2x2) size; full_frame is a selectable option
-            size_arcmin = fov_opt.SINISTRO_MODES["central_2k_2x2"] * 2.0 / 60.0
+        inst_modes = fov_opt.MULTISITE_MODE_HALFSIZES.get(name)
+        if inst_modes:
+            # Show the default (first-listed) mode's size; the rest are
+            # selectable options.
+            default_half = next(iter(inst_modes.values()))
+            size_arcmin = default_half * 2.0 / 60.0
             readout_modes[name] = [
                 {"value": mode, "label": f"{mode} ({round(half_arcsec * 2.0 / 60.0, 1)}′)"}
-                for mode, half_arcsec in fov_opt.SINISTRO_MODES.items()
+                for mode, half_arcsec in inst_modes.items()
             ]
         else:
             size_arcmin = fov_opt.load_fov_halfsize_arcsec(name) * 2.0 / 60.0

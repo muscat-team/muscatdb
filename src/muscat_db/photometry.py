@@ -107,16 +107,47 @@ RUN_DEFAULTS: dict = {
     "wcs_method": "astrometry.net",
     "centroid_method": "auto",  # auto | quad | com (mirrors prose2's --centroid_method)
     "calib_dir": "",
-    "site": "",                # sinistro only: "" -> all sites; else one of SINISTRO_SITES
-    "mode": "",                # sinistro only: "" -> all modes; else one of SINISTRO_MODES
-    "telescope": "",           # sinistro only: "" -> all telescopes; else a TELESCOP
-                               # header value, e.g. "1m0-05" (open-ended: LCO's 1m
-                               # fleet changes over time, unlike the 5 fixed sites).
+    "site": "",                # multi-site instruments only: "" -> all sites; else one
+                               # of MULTISITE_SITES[inst]
+    "mode": "",                # mode-capable instruments only: "" -> all modes; else
+                               # one of MULTISITE_MODES[inst]
+    "telescope": "",           # multi-site instruments only: "" -> all telescopes; else
+                               # a TELESCOP header value, e.g. "1m0-05"/"0m4-06"
+                               # (open-ended: LCO's fleet changes over time, unlike the
+                               # fixed site lists).
 }
 
-# Valid sinistro --site / --mode values, mirrored from prose2's run_photometry.py.
-SINISTRO_SITES = ("lsc", "cpt", "coj", "tfn", "elp")
-SINISTRO_MODES = ("central_2k_2x2", "full_frame")
+# LCO instruments deployed across multiple sites/telescope units, needing
+# --site/--telescope disambiguation (unlike the single-site muscat/muscat2/
+# muscat3/muscat4). Mirrored from prose2's run_photometry.py.
+# sinistro: lsc/cpt/coj/tfn/elp (no unit at ogg).
+# sbig/qhy600 (0.4m network): all 6 LCO sites, including ogg.
+MULTISITE_INSTRUMENTS = ("sinistro", "sbig", "qhy600")
+MULTISITE_SITES: dict[str, tuple[str, ...]] = {
+    "sinistro": ("lsc", "cpt", "coj", "tfn", "elp"),
+    "sbig": ("lsc", "cpt", "coj", "tfn", "elp", "ogg"),
+    "qhy600": ("lsc", "cpt", "coj", "tfn", "elp", "ogg"),
+}
+# Instruments with multiple readout/config modes needing --mode
+# disambiguation. sbig is deliberately absent (single CONFMODE="default" on
+# real archive headers). qhy600's "central30x30" is confirmed verbatim on a
+# real archived header (coj0m416-sq36-20260804-0098-e91).
+MULTISITE_MODES: dict[str, tuple[str, ...]] = {
+    "sinistro": ("central_2k_2x2", "full_frame"),
+    "qhy600": ("central30x30", "full_frame"),
+}
+# Backwards-compatible aliases (still imported by transit_fit.py and others).
+SINISTRO_SITES = MULTISITE_SITES["sinistro"]
+SINISTRO_MODES = MULTISITE_MODES["sinistro"]
+
+# TELESCOP-value prefix per multi-site instrument, e.g. "1m0-05"/"0m4-06".
+# Used to reconstruct the canonical TELESCOP value from a filename's compact
+# "telNN" token (see _telescope_token_to_value).
+_TELESCOPE_PREFIX: dict[str, str] = {
+    "sinistro": "1m0",
+    "sbig": "0m4",
+    "qhy600": "0m4",
+}
 
 # --telescope is open-ended (no whitelist): format-validated only, against the
 # TELESCOP header shape ("1m0-05") or a lowercase alnum/hyphen token generally.
@@ -295,12 +326,12 @@ def build_run_id(
 ) -> str:
     """Compose a photometry run id using the shared run-id convention.
 
-    Non-sinistro runs are identified by the run-name slug only, so
-    site/telescope/mode are forced blank; sinistro runs include site, telescope
-    and only the non-default readout mode. See :func:`muscat_db.jobs.build_run_id`
-    for the canonical join rules.
+    Single-site runs are identified by the run-name slug only, so
+    site/telescope/mode are forced blank; multi-site runs (sinistro/sbig/
+    qhy600) include site, telescope and only the non-default readout mode.
+    See :func:`muscat_db.jobs.build_run_id` for the canonical join rules.
     """
-    if inst != "sinistro":
+    if inst not in MULTISITE_INSTRUMENTS:
         return jobs.build_run_id("", "", run_name)
     return jobs.build_run_id(site, mode, run_name, telescope=telescope)
 
@@ -315,18 +346,19 @@ def run_output_dir(inst: str, date: str, target: str, run_id: str | None = None)
 
 def _parse_run_dir_name(inst: str, name: str) -> tuple[str, str, str, str]:
     """Best-effort split of a run-id dir name into (site, telescope, mode, run_name)."""
-    if inst != "sinistro":
+    if inst not in MULTISITE_INSTRUMENTS:
         return "", "", "", name
     parts = name.split("-")
     site = telescope = mode = ""
-    if parts and parts[0] in SINISTRO_SITES:
+    if parts and parts[0] in MULTISITE_SITES.get(inst, ()):
         site, parts = parts[0], parts[1:]
     if parts and parts[0].startswith("tel") and parts[0][3:].isdigit():
         telescope, parts = parts[0], parts[1:]
-    if parts and parts[0] in SINISTRO_MODES:
+    inst_modes = MULTISITE_MODES.get(inst, ())
+    if parts and parts[0] in inst_modes:
         mode, parts = parts[0], parts[1:]
-    elif site or telescope:
-        mode = "central_2k_2x2"
+    elif (site or telescope) and inst_modes:
+        mode = inst_modes[0]  # default (non-full) mode for this instrument
     return site, telescope, mode, "-".join(parts)
 
 
@@ -386,11 +418,15 @@ def discovered_targets(inst: str, date: str) -> list[str]:
     return sorted(found)
 
 
-def _telescope_token_to_value(digits: str | None) -> str | None:
+def _telescope_token_to_value(digits: str | None, inst: str = "sinistro") -> str | None:
     """Reconstruct the canonical TELESCOP-style value from a filename token's
-    captured digits, e.g. ``'05'`` -> ``'1m0-05'`` (the inverse of
+    captured digits, e.g. ``'05'`` -> ``'1m0-05'`` for sinistro or
+    ``'06'`` -> ``'0m4-06'`` for sbig/qhy600 (the inverse of
     ``jobs.slugify_telescope``). ``None``/blank input -> ``None``."""
-    return f"1m0-{digits}" if digits else None
+    if not digits:
+        return None
+    prefix = _TELESCOPE_PREFIX.get(inst, "1m0")
+    return f"{prefix}-{digits}"
 
 
 def list_outputs(
@@ -459,27 +495,30 @@ def list_outputs(
     inst_esc = re.escape(inst)
     t_esc = re.escape(t)
 
-    # Sinistro filenames optionally carry a site token between inst and the
-    # band/date when reduced with ``--site`` (prose ``build_stem``):
-    #   <target>_sinistro_<site>_<date6>            (summary)
-    #   <target>_sinistro_<site>_<band>_<date6>     (per-band)
+    # Multi-site instrument filenames optionally carry a site token between
+    # inst and the band/date when reduced with ``--site`` (prose
+    # ``build_stem``):
+    #   <target>_<inst>_<site>_<date6>            (summary)
+    #   <target>_<inst>_<site>_<band>_<date6>     (per-band)
     # Constrain the token to the known site codes so it can't be confused with a
     # band name that itself contains underscores (e.g. g_narrow, Na_D). For all
     # other instruments there is no site token and this slot is omitted.
-    site_opt = (
-        rf"(?:(?P<site>{'|'.join(SINISTRO_SITES)})_)?" if inst == "sinistro" else ""
-    )
-    # Sinistro filenames optionally carry a telescope token right after the
-    # site (prose ``build_stem``, ``_telescope_stem_token``): the physical LCO
-    # 1m unit id compacted from the TELESCOP header, e.g. '1m0-05' -> 'tel05'.
-    # The 'tel' prefix keeps it unambiguous against band names.
+    inst_sites = MULTISITE_SITES.get(inst, ())
+    site_opt = rf"(?:(?P<site>{'|'.join(inst_sites)})_)?" if inst_sites else ""
+    # Multi-site instrument filenames optionally carry a telescope token right
+    # after the site (prose ``build_stem``, ``_telescope_stem_token``): the
+    # physical LCO unit id compacted from the TELESCOP header, e.g.
+    # '1m0-05' -> 'tel05' / '0m4-06' -> 'tel06'. The 'tel' prefix keeps it
+    # unambiguous against band names.
     telescope_opt = (
-        r"(?:tel(?P<telescope>[0-9]+)_)?" if inst == "sinistro" else ""
+        r"(?:tel(?P<telescope>[0-9]+)_)?" if inst in MULTISITE_INSTRUMENTS else ""
     )
-    # Prose appends ``_full`` after the date for full_frame; central_2k_2x2 has
-    # no token. Captured between the date and the product suffix (e.g.
-    # ..._250710_full_lightcurves.png, ..._250710_full.npz, ..._gp_250710_full.csv).
-    mode_opt = r"(?P<mode>_full)?" if inst == "sinistro" else ""
+    # Prose appends ``_full`` after the date for the instrument's "full"
+    # readout mode; the default/central mode has no token. Captured between
+    # the date and the product suffix (e.g. ..._250710_full_lightcurves.png,
+    # ..._250710_full.npz, ..._gp_250710_full.csv). Only meaningful for
+    # mode-capable instruments (see MULTISITE_MODES).
+    mode_opt = r"(?P<mode>_full)?" if inst in MULTISITE_MODES else ""
 
     # Summary stems exist in two generations:
     #   <target>_<inst>_[<site>_][<tel>_]<date6>[_full]                (legacy)
@@ -499,23 +538,29 @@ def list_outputs(
         rf"^{t_esc}_{inst_esc}_{site_opt}{telescope_opt}(?P<band>[A-Za-z0-9_]+?)_(?P<file_date>\d{{6}}){mode_opt}(?P<rest>.*)$"
     )
 
+    inst_modes = MULTISITE_MODES.get(inst, ())
+
     def _mode_of(m: re.Match) -> str:
         """Canonical readout mode for a matched product file."""
-        return "full_frame" if m.groupdict().get("mode") else "central_2k_2x2"
+        if m.groupdict().get("mode"):
+            return "full_frame"
+        # inst_modes[1] is always the "full" mode, inst_modes[0] the default.
+        return inst_modes[0] if inst_modes else "full_frame"
 
     def _telescope_of(m: re.Match) -> str | None:
         """Canonical TELESCOP-style value for a matched product file."""
-        return _telescope_token_to_value(m.groupdict().get("telescope"))
+        return _telescope_token_to_value(m.groupdict().get("telescope"), inst)
 
-    # First pass (sinistro only): discover which sites and readout modes are
-    # present so multi-site/multi-mode dates expose one chip per value and default
-    # to the most recently reduced combination rather than a newest-wins mix.
-    # Mode chips are scoped to the chosen site (each site may carry its own modes),
-    # so switching site never lands on an empty (site, mode) pairing by default.
+    # First pass (multi-site instruments only): discover which sites and
+    # readout modes are present so multi-site/multi-mode dates expose one
+    # chip per value and default to the most recently reduced combination
+    # rather than a newest-wins mix. Mode chips are scoped to the chosen
+    # site (each site may carry its own modes), so switching site never
+    # lands on an empty (site, mode) pairing by default.
     effective_site: str | None = None
     effective_telescope: str | None = None
     effective_mode: str | None = None
-    if inst == "sinistro":
+    if inst in MULTISITE_INSTRUMENTS:
         # records: (site_or_None, telescope_or_None, canonical_mode, mtime)
         records: list[tuple[str | None, str | None, str, float]] = []
         for p in rdir.iterdir():
@@ -1121,8 +1166,8 @@ def validate_run_options(o: dict, inst: str | None = None) -> str | None:
     if any(not _BAND_RE.match(b) for b in o["bands"]):
         return "band names may only contain letters, digits and underscores"
     ref_band = (o.get("ref_band") or "").strip()
-    if inst == "sinistro" and ref_band and len(o.get("bands") or []) > 1:
-        return "reference band is disabled for multi-band Sinistro reductions because simultaneous bands can be from different telescopes/pointings"
+    if inst in MULTISITE_INSTRUMENTS and ref_band and len(o.get("bands") or []) > 1:
+        return "reference band is disabled for multi-band reductions on multi-site instruments because simultaneous bands can be from different telescopes/pointings"
     if ref_band and ref_band not in set(o.get("bands") or []):
         return "reference band must be one of the selected bands"
     if (o.get("avoid_comparison_ids") or "").strip() and not (o.get("ref_band") or "").strip():
@@ -1302,15 +1347,17 @@ def build_command(
         args += ["--wcs_method", o["wcs_method"]]
     if o.get("centroid_method", "auto") != "auto":
         args += ["--centroid_method", o["centroid_method"]]
-    # --site / --telescope / --mode are sinistro-only filters; ignore for other
-    # instruments.
-    if inst == "sinistro":
+    # --site / --telescope are multi-site-only filters; --mode is further
+    # restricted to mode-capable instruments (see MULTISITE_MODES). Ignored
+    # for other instruments.
+    if inst in MULTISITE_INSTRUMENTS:
         site = (o.get("site") or "").strip()
         if site:
             args += ["--site", site]
         telescope = (o.get("telescope") or "").strip()
         if telescope:
             args += ["--telescope", telescope]
+    if inst in MULTISITE_MODES:
         mode = (o.get("mode") or "").strip()
         if mode:
             args += ["--mode", mode]
@@ -1515,9 +1562,9 @@ def start_run(
         return {"ok": False, "error": f"raw data not found: {rawdir}"}
 
     run_name = str(opts.get("run_name") or "").strip()
-    site = (opts.get("site") or "").strip().lower() if inst == "sinistro" else ""
-    telescope = (opts.get("telescope") or "").strip().lower() if inst == "sinistro" else ""
-    mode = (opts.get("mode") or "").strip().lower() if inst == "sinistro" else ""
+    site = (opts.get("site") or "").strip().lower() if inst in MULTISITE_INSTRUMENTS else ""
+    telescope = (opts.get("telescope") or "").strip().lower() if inst in MULTISITE_INSTRUMENTS else ""
+    mode = (opts.get("mode") or "").strip().lower() if inst in MULTISITE_MODES else ""
     run_id = build_run_id(inst, site, mode, run_name, telescope=telescope)
     key = job_key(inst, date, target, run_id)
     run_type = "test" if test_run else "full"
@@ -2161,9 +2208,9 @@ def sync_jobs() -> None:
                     inst, opts.get("site"), opts.get("mode"), opts.get("run_name"),
                     telescope=opts.get("telescope"),
                 )
-                site = p.get("site", opts.get("site", "")) if inst == "sinistro" else ""
-                telescope = p.get("telescope", opts.get("telescope", "")) if inst == "sinistro" else ""
-                mode = p.get("mode", opts.get("mode", "")) if inst == "sinistro" else ""
+                site = p.get("site", opts.get("site", "")) if inst in MULTISITE_INSTRUMENTS else ""
+                telescope = p.get("telescope", opts.get("telescope", "")) if inst in MULTISITE_INSTRUMENTS else ""
+                mode = p.get("mode", opts.get("mode", "")) if inst in MULTISITE_MODES else ""
                 run_name = p.get("run_name", opts.get("run_name", ""))
                 key = job_key(inst, date, target, run_id)
                 cmd = build_command(inst, date, target, opts, test_run=test_run, run_id=run_id)
