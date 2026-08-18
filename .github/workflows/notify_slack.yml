@@ -93,7 +93,7 @@ jobs:
 
       - name: Send Slack notification
         if: steps.summary.outputs.skip != 'true'
-        uses: rtCamp/action-slack-notify@v2
+        uses: rtCamp/action-slack-notify@33fa0808da52e41c8dcec3cc101c0027442ed173 # v2
         env:
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
           # The summary goes in SLACK_MESSAGE, not SLACK_TITLE: MSG_MINIMAL
