@@ -882,10 +882,24 @@ class TestRunOptions:
         assert err and "required in custom mode" in err.lower()
 
     def test_validate_aper_requires_annulus(self):
-        err = phot.validate_run_options(
-            phot.normalize_run_options({"aper_radii": "10,20,2"})
-        )
+        opts = phot.normalize_run_options({"bands": ["gp"], "aper_radii": "10,20,2"})
+        err = phot.validate_run_options(opts)
         assert err and "annulus" in err
+
+    def test_validate_annulus_requires_aper(self):
+        opts = phot.normalize_run_options({"bands": ["gp"], "annulus": "25,40"})
+        err = phot.validate_run_options(opts)
+        assert err and "aperture radii" in err
+
+    def test_validate_cutout_size_too_small(self):
+        opts = phot.normalize_run_options({"bands": ["gp"], "aper_radii": "10,20,2", "annulus": "25,40", "cutout_size": 35})
+        err = phot.validate_run_options(opts)
+        assert err and "cutout size (35) is too small" in err and "minimum is 85" in err
+
+    def test_validate_fwhm_unit_requires_aper_radii(self):
+        opts = phot.normalize_run_options({"bands": ["gp"], "aper_unit": "fwhm"})
+        err = phot.validate_run_options(opts)
+        assert err and "fwhm" in err.lower() and "aperture radii" in err.lower()
 
     def test_validate_bad_aper_format(self):
         err = phot.validate_run_options(
@@ -1777,6 +1791,14 @@ class TestRoutes:
         assert r.status_code == 200
         assert "annulus" in r.json()["error"]
 
+    def test_command_route_reports_fwhm_validation_error(self, client):
+        r = client.post("/api/photometry/command", json={
+            "inst": INST, "date": DATE, "target": TARGET,
+            "options": {"aper_unit": "fwhm"},  # missing aper_radii
+        })
+        assert r.status_code == 200
+        assert "fwhm" in r.json()["error"].lower()
+
     def test_page_has_options_form(self, client):
         r = client.get(f"/photometry?inst={INST}&date={DATE}&target={TARGET}")
         assert r.status_code == 200
@@ -2330,6 +2352,250 @@ class TestRoutes:
         data3 = r3.json()
         assert data3["ok"] is True
         assert data3["pl_name"] == data["pl_name"]  # Should get same result
+
+    @pytest.fixture
+    def multiplanet_toi_csv(self, monkeypatch, tmp_path):
+        """A TOI catalog holding two candidates (.01 and .02) around one star."""
+        from muscat_db import web
+
+        data_dir = tmp_path / "data"
+        data_dir.mkdir(exist_ok=True)
+        (data_dir / "TOIs.csv").write_text(
+            "TOI,Planet Name,TIC ID,Stellar Eff Temp (K),"
+            "Stellar Eff Temp (K) err,Stellar Log(g) (cm/s^2),"
+            "Stellar Log(g) (cm/s^2) err,Period (days),Period (days) err,"
+            "Epoch (BJD),Epoch (BJD) err,Duration (hours),"
+            "Duration (hours) err\n"
+            "1404.01,TOI-1404.01,352239069,6051.5,118.3,4.4,0.1,"
+            "6.8674054,0.0000327,2459908.512546,0.0032007,3.488,0.659\n"
+            "1404.02,TOI-1404.02,352239069,6051.5,118.3,4.4,0.1,"
+            "14.431887,0.0000513,2459908.522961,0.0020763,3.265,0.29\n",
+        )
+        monkeypatch.setattr(web, "HERE", tmp_path / "src" / "muscat_db")
+        return data_dir
+
+    @pytest.fixture
+    def reordered_toi_csv(self, monkeypatch, tmp_path):
+        """A TOI catalog listing .02 *before* .01, as TOI-1726 and TOI-1772 do."""
+        from muscat_db import web
+
+        data_dir = tmp_path / "data"
+        data_dir.mkdir(exist_ok=True)
+        (data_dir / "TOIs.csv").write_text(
+            "TOI,Planet Name,TIC ID,Stellar Eff Temp (K),"
+            "Stellar Eff Temp (K) err,Stellar Log(g) (cm/s^2),"
+            "Stellar Log(g) (cm/s^2) err,Period (days),Period (days) err,"
+            "Epoch (BJD),Epoch (BJD) err,Duration (hours),"
+            "Duration (hours) err\n"
+            "1726.02,TOI-1726.02,130181866,5700,100,4.5,0.1,"
+            "20.54,0.001,2458800.5,0.002,4.1,0.3\n"
+            "1726.01,TOI-1726.01,130181866,5700,100,4.5,0.1,"
+            "7.11,0.0005,2458790.2,0.001,3.2,0.2\n",
+        )
+        monkeypatch.setattr(web, "HERE", tmp_path / "src" / "muscat_db")
+        return data_dir
+
+    @pytest.mark.parametrize("target", ["TOI-1726", "TIC 130181866"])
+    def test_transit_fit_query_archive_toi_star_query_defaults_to_first_candidate(
+        self, client, reordered_toi_csv, target,
+    ):
+        """A star-level query resolves to .01 regardless of catalog row order.
+
+        TOI-1726 and TOI-1772 store .02 ahead of .01, so honouring file order
+        would hand back the wrong planet for a query that names no candidate.
+        """
+        r = client.get(
+            "/api/transit-fit/query-archive", params={"target": target, "source": "toi"},
+        )
+        data = r.json()
+        assert data["ok"] is True
+        assert data["pl_name"] == "TOI-1726.01"
+        assert data["params"]["period"] == 7.11
+        assert data["params"]["planets"] == "b"
+
+    def test_transit_fit_query_archive_toi_reordered_candidate_still_exact(
+        self, client, reordered_toi_csv,
+    ):
+        """Explicit .02 still wins even when it precedes .01 in the file."""
+        r = client.get(
+            "/api/transit-fit/query-archive",
+            params={"target": "TOI-1726.02", "source": "toi"},
+        )
+        data = r.json()
+        assert data["pl_name"] == "TOI-1726.02"
+        assert data["params"]["period"] == 20.54
+        assert data["params"]["planets"] == "c"
+
+    def test_transit_fit_query_archive_toi_remote_star_query_prefers_first_candidate(
+        self, client, mocker,
+    ):
+        """The archive fallback must not inherit response row order either."""
+        import httpx
+
+        async def reversed_rows(url, **kwargs):
+            return httpx.Response(
+                200,
+                json=[
+                    {"toi": "1726.02", "toidisplay": "TOI-1726.02", "pl_orbper": 20.54},
+                    {"toi": "1726.01", "toidisplay": "TOI-1726.01", "pl_orbper": 7.11},
+                ],
+                request=httpx.Request("GET", url),
+            )
+
+        mocker.patch("muscat_db.web._async_get", side_effect=reversed_rows)
+
+        r = client.get(
+            "/api/transit-fit/query-archive",
+            params={"target": "TOI-1726", "source": "toi"},
+        )
+        data = r.json()
+        assert data["ok"] is True
+        assert data["pl_name"] == "TOI-1726.01"
+        assert data["params"]["period"] == 7.11
+        assert data["params"]["planets"] == "b"
+
+    @pytest.mark.parametrize(
+        "target",
+        ["TOI-1404.02", "toi1404.02", "1404.02", "TOI 1404.02", "toi01404.02"],
+    )
+    def test_transit_fit_query_archive_toi_resolves_candidate_index(
+        self, client, multiplanet_toi_csv, target,
+    ):
+        """A ``.02`` query must return the .02 row, not the first ``1404.*`` row.
+
+        The candidate index is the only thing separating two planets around the
+        same star, so dropping it silently loaded the wrong ephemeris.
+        """
+        r = client.get(
+            "/api/transit-fit/query-archive", params={"target": target, "source": "toi"},
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["ok"] is True
+        assert data["pl_name"] == "TOI-1404.02"
+        assert data["params"]["period"] == 14.431887
+        assert data["params"]["t0"] == 2459908.522961
+        assert data["params"]["dur"] == 3.265
+
+    def test_transit_fit_query_archive_toi_candidate_index_sets_letter(
+        self, client, multiplanet_toi_csv,
+    ):
+        """``.01`` maps to planet b and ``.02`` to planet c."""
+        r1 = client.get(
+            "/api/transit-fit/query-archive",
+            params={"target": "TOI-1404.01", "source": "toi"},
+        )
+        assert r1.json()["params"]["planets"] == "b"
+
+        r2 = client.get(
+            "/api/transit-fit/query-archive",
+            params={"target": "TOI-1404.02", "source": "toi"},
+        )
+        assert r2.json()["params"]["planets"] == "c"
+
+    def test_transit_fit_query_archive_toi_bare_host_prefers_first_candidate(
+        self, client, multiplanet_toi_csv,
+    ):
+        """A query without ``.NN`` keeps the historical .01 default."""
+        r = client.get(
+            "/api/transit-fit/query-archive",
+            params={"target": "TOI-1404", "source": "toi"},
+        )
+        data = r.json()
+        assert data["ok"] is True
+        assert data["pl_name"] == "TOI-1404.01"
+        assert data["params"]["period"] == 6.8674054
+        assert data["params"]["planets"] == "b"
+
+    def test_transit_fit_query_archive_toi_unknown_candidate_is_not_found(
+        self, client, monkeypatch, multiplanet_toi_csv,
+    ):
+        """An index with no row must miss rather than fall back to a sibling."""
+        import httpx
+        from muscat_db import web
+
+        async def empty_archive(url, **kwargs):
+            return httpx.Response(200, content=b"[]", request=httpx.Request("GET", url))
+
+        monkeypatch.setattr(web, "_async_get", empty_archive)
+
+        r = client.get(
+            "/api/transit-fit/query-archive",
+            params={"target": "TOI-1404.07", "source": "toi"},
+        )
+        assert r.json()["ok"] is False
+
+    def test_transit_fit_query_archive_toi_remote_keeps_candidate_index(
+        self, client, mocker,
+    ):
+        """The archive fallback must query and accept only the named candidate.
+
+        ``mocker.patch`` marks ``_async_get`` as mocked, which makes the endpoint
+        skip the local CSV and exercise the remote path.
+        """
+        import httpx
+
+        seen_queries = []
+
+        async def side_effect(url, **kwargs):
+            from urllib.parse import parse_qs, urlparse
+            seen_queries.append(parse_qs(urlparse(url).query).get("query", [""])[0])
+            # The archive answers a LIKE with both candidates of the star.
+            return httpx.Response(
+                200,
+                json=[
+                    {"toi": "1404.01", "toidisplay": "TOI-1404.01", "pl_orbper": 6.8674054},
+                    {"toi": "1404.02", "toidisplay": "TOI-1404.02", "pl_orbper": 14.431887},
+                ],
+                request=httpx.Request("GET", url),
+            )
+
+        mocker.patch("muscat_db.web._async_get", side_effect=side_effect)
+
+        r = client.get(
+            "/api/transit-fit/query-archive",
+            params={"target": "TOI-1404.02", "source": "toi"},
+        )
+        data = r.json()
+        assert data["ok"] is True
+        assert data["pl_name"] == "TOI-1404.02"
+        assert data["params"]["period"] == 14.431887
+        assert data["params"]["planets"] == "c"
+        assert "1404.02" in seen_queries[0], seen_queries
+
+    def test_transit_fit_query_archive_toi_remote_rejects_sibling_only_result(
+        self, client, mocker,
+    ):
+        """A remote answer holding only a sibling candidate is not a match."""
+        import httpx
+
+        async def sibling_only(url, **kwargs):
+            return httpx.Response(
+                200,
+                json=[{"toi": "1404.01", "toidisplay": "TOI-1404.01", "pl_orbper": 6.8674054}],
+                request=httpx.Request("GET", url),
+            )
+
+        mocker.patch("muscat_db.web._async_get", side_effect=sibling_only)
+
+        r = client.get(
+            "/api/transit-fit/query-archive",
+            params={"target": "TOI-1404.02", "source": "toi"},
+        )
+        assert r.json()["ok"] is False
+
+    def test_transit_fit_query_archive_toi_tic_lookup_prefers_first_candidate(
+        self, client, multiplanet_toi_csv,
+    ):
+        """A TIC-ID query carries no candidate index; it must stay deterministic."""
+        r = client.get(
+            "/api/transit-fit/query-archive",
+            params={"target": "TIC 352239069", "source": "toi"},
+        )
+        data = r.json()
+        assert data["ok"] is True
+        assert data["pl_name"] == "TOI-1404.01"
+        assert data["params"]["planets"] == "b"
 
     def test_jobs_page(self, client, monkeypatch):
         mock_jobs = [

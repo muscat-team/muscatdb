@@ -28,6 +28,7 @@ import datetime
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import shlex
@@ -1199,6 +1200,26 @@ def validate_run_options(o: dict, inst: str | None = None) -> str | None:
         return "annulus (RIN,ROUT) is required when aperture radii is set"
     if an and not ar:
         return "aperture radii (MIN,MAX,DR) is required when annulus is set"
+    if o.get("aper_unit") == "fwhm" and not ar:
+        return "aperture unit 'fwhm' requires specifying aperture radii"
+    max_r = 0.0
+    if an and _PAIR_RE.match(an):
+        try:
+            _, rout = [float(x) for x in an.split(",")]
+            max_r = max(max_r, rout)
+        except ValueError:
+            pass
+    if ar and _TRIPLE_RE.match(ar):
+        try:
+            _, rmax, _ = [float(x) for x in ar.split(",")]
+            max_r = max(max_r, rmax)
+        except ValueError:
+            pass
+    if max_r > 0:
+        min_cutout = int(math.ceil(2 * max_r + 5))
+        curr_cutout = o.get("cutout_size")
+        if curr_cutout is not None and curr_cutout < min_cutout:
+            return f"cutout size ({curr_cutout}) is too small for annulus/aperture radii (minimum is {min_cutout} pix)"
     ct = (o.get("ccd_trim") or "").replace(" ", "")
     if ct and not _INTPAIR_RE.match(ct):
         return "CCD trim must be two integers Y,X (e.g. 10,10)"
@@ -1271,7 +1292,12 @@ def build_command(
     if o.get("target_coord") not in (None, ""):
         parts = o["target_coord"].split(None, 1)
         if len(parts) == 2:
-            args += ["--target_coord", *parts]
+            ra, dec = parts[0].strip(), parts[1].strip()
+            if dec.startswith("-"):
+                # Prepend a space to prevent Python's argparse from misinterpreting
+                # a negative declination (e.g. -45:00:42) as a CLI flag.
+                dec = f" {dec}"
+            args += ["--target_coord", ra, dec]
     if o.get("target_id") not in (None, ""):
         args += ["--tID", o["target_id"]]
     if o.get("comparison_ids") not in (None, ""):
