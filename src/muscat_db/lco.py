@@ -219,6 +219,41 @@ class _ValidatedApiRedirectHandler(urllib.request.HTTPRedirectHandler):
 _API_OPENER = urllib.request.build_opener(_ValidatedApiRedirectHandler)
 
 
+def _friendly_lco_error_detail(raw_body: str, status: int) -> str:
+    """Turn an LCO error response body into something worth showing a user.
+
+    LCO's DRF API returns JSON on a validation failure (e.g.
+    ``{"non_field_errors": [...]}``), which is already useful and passed
+    through unchanged. An unhandled exception on LCO's own backend instead
+    returns Django's default HTML error page, which is meaningless to a user
+    and was being dumped verbatim ("LCO API request failed with HTTP 500 —
+    <!doctype html>..."). Empirically, a 500 with an HTML body correlates
+    with the proposal having no time allocation for the request's telescope
+    class/instrument (e.g. a QHY600/0.4m request under a 1m-only proposal),
+    so that is offered as the likely cause rather than the raw markup.
+    """
+    stripped = raw_body.strip()
+    if not stripped:
+        return raw_body
+    try:
+        json.loads(stripped)
+        return raw_body
+    except ValueError:
+        pass
+    if stripped.lower().startswith(("<!doctype html", "<html")):
+        if status >= 500:
+            return (
+                "LCO's server returned an internal error with no further detail. "
+                "This most often means the proposal has no time allocation for "
+                "the requested instrument or site (e.g. a QHY600/0.4m request "
+                "submitted under a proposal without 0.4m time) -- confirm the "
+                "proposal's allocation at https://observe.lco.global/proposals, "
+                "or try a different proposal."
+            )
+        return f"LCO returned an HTML error page (HTTP {status}) with no further detail."
+    return raw_body
+
+
 def _lco_api_request(
     url: str,
     method: str = "GET",
@@ -247,16 +282,18 @@ def _lco_api_request(
         with _API_OPENER.open(req, timeout=15) as response:
             if 200 <= response.status < 300:
                 return json.loads(response.read().decode())
+            raw = response.read().decode()
             raise LcoError(
                 f"LCO API returned HTTP {response.status}",
                 status=response.status,
-                detail=response.read().decode(),
+                detail=_friendly_lco_error_detail(raw, response.status),
             )
     except urllib.error.HTTPError as e:
         try:
-            detail = e.read().decode()
+            raw = e.read().decode()
         except Exception:
-            detail = str(e)
+            raw = str(e)
+        detail = _friendly_lco_error_detail(raw, e.code)
         raise LcoError(f"LCO API request failed with HTTP {e.code}", status=e.code, detail=detail)
     except LcoError:
         raise

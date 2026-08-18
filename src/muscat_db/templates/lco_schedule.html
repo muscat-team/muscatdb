@@ -414,6 +414,22 @@
     e.className = 'lco-msg' + (kind ? ' ' + kind : '');
   }
 
+  // Backend error/detail text (e.g. lco.py's friendly HTML-500 fallback)
+  // occasionally points back to our own LCO portal. Escape the whole message
+  // first, then linkify only these fixed, known-safe URLs by exact
+  // substring match -- never an arbitrary URL parsed out of the (untrusted)
+  // error text itself, which could otherwise make attacker-controlled
+  // content clickable.
+  var _LCO_MSG_LINK_URLS = ['https://observe.lco.global/proposals'];
+  function errMsg(id, error, detail, kind) {
+    var html = escapeHtml((error || 'failed') + (detail ? ' — ' + detail : ''));
+    _LCO_MSG_LINK_URLS.forEach(function (url) {
+      var esc = escapeHtml(url);
+      html = html.split(esc).join('<a href="' + esc + '" target="_blank" rel="noopener">' + esc + '</a>');
+    });
+    msgHtml(id, html, kind || 'err');
+  }
+
   function updateGenWindowsButtonState() {
     var hasCoords = !!val('sch-coords');
     var btn = el('btn-gen-windows');
@@ -2113,7 +2129,7 @@
     el('btn-submit').disabled = true;
     fetch('/api/lco/build', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(buildParams()) })
       .then(function (r) { return r.json(); }).then(function (d) {
-        if (!d.ok) { msg('msg-ipp', (d.error || 'failed') + (d.detail ? ' — ' + d.detail : ''), 'err'); return; }
+        if (!d.ok) { errMsg('msg-ipp', d.error, d.detail); return; }
         el('payload-pre').value = JSON.stringify(d.payload, null, 2);
         el('ipp-summary').textContent = '';
         el('ipp-result').style.display = '';
@@ -2141,7 +2157,7 @@
     el('btn-submit').disabled = true;
     fetch('/api/lco/ipp', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requestgroup: rg }) })
       .then(function (r) { return r.json(); }).then(function (d) {
-        if (!d.ok) { msg('msg-ipp', (d.error || 'failed') + (d.detail ? ' — ' + d.detail : ''), 'err'); return; }
+        if (!d.ok) { errMsg('msg-ipp', d.error, d.detail); return; }
         lastDryRunHash = d.payload_hash;
         var ipp = d.ipp || {};
         var lcoErrors = formatLcoErrors(ipp);
@@ -2292,7 +2308,7 @@
     if (!id) { msg('msg-clone', 'Enter an LCO request or group ID', 'err'); return; }
     msg('msg-clone', 'Loading request ' + id + '…');
     fetch('/api/lco/clone/' + encodeURIComponent(id)).then(function (r) { return r.json(); }).then(function (d) {
-      if (!d.ok) { msg('msg-clone', (d.error || 'clone failed') + (d.detail ? ' — ' + d.detail : ''), 'err'); return; }
+      if (!d.ok) { errMsg('msg-clone', d.error || 'clone failed', d.detail); return; }
       applyClonedParams(d.params || {});
       msg('msg-clone', 'Loaded from ' + (d.source === 'local' ? 'local record' : 'LCO') + ' — fetch ephemeris and generate windows, then submit', 'ok');
       var target = el('sch-target');
@@ -2319,7 +2335,7 @@
     msg('msg-ipp', 'Submitting…');
     fetch('/api/lco/submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
       .then(function (r) { return r.json(); }).then(function (d) {
-        if (!d.ok) { msg('msg-ipp', (d.error || 'failed') + (d.detail ? ' — ' + d.detail : ''), 'err'); return; }
+        if (!d.ok) { errMsg('msg-ipp', d.error, d.detail); return; }
         refreshMonitoredRequests();
         var ids = extractRequestIds(d.result);
         if (ids.length) {
@@ -2377,7 +2393,7 @@
     fetch('/api/lco/split-ipp', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(params) })
       .then(function (r) { return r.json(); }).then(function (d) {
         if (!d.ok) {
-          msg('msg-split-ipp', 'Leg ' + (d.leg === 'leg_b' ? 'B' : 'A') + ' failed: ' + (d.error || 'failed') + (d.detail ? ' — ' + d.detail : ''), 'err');
+          errMsg('msg-split-ipp', 'Leg ' + (d.leg === 'leg_b' ? 'B' : 'A') + ' failed: ' + (d.error || 'failed'), d.detail);
           return;
         }
         el('split-ipp-result').style.display = '';
@@ -2416,7 +2432,7 @@
     msg('msg-split-ipp', 'Submitting leg ' + which.toUpperCase() + '…');
     fetch('/api/lco/submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
       .then(function (r) { return r.json(); }).then(function (d) {
-        if (!d.ok) { msg('msg-split-ipp', 'Leg ' + which.toUpperCase() + ' failed: ' + (d.error || 'failed') + (d.detail ? ' — ' + d.detail : ''), 'err'); return; }
+        if (!d.ok) { errMsg('msg-split-ipp', 'Leg ' + which.toUpperCase() + ' failed: ' + (d.error || 'failed'), d.detail); return; }
         refreshMonitoredRequests();
         var ids = extractRequestIds(d.result);
         // This leg is now a real booking -- disable its own button and

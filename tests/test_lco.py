@@ -10,6 +10,7 @@ import shutil
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -564,6 +565,50 @@ class LcoTest(unittest.TestCase):
         result = lco.get_proposals()
         self.assertIn("results", result)
         self.assertEqual(len(result["results"]), 1)
+
+    @patch.dict(os.environ, {"LCO_API_TOKEN": "test-token"})
+    @patch("muscat_db.lco._API_OPENER")
+    def test_get_proposals_html_500_gets_friendly_detail(self, mock_urlopen):
+        # Real failure mode: a proposal with no allocation for the request's
+        # telescope class (e.g. 0.4m/QHY600) makes LCO's own backend raise an
+        # unhandled exception, returning Django's default HTML error page
+        # instead of its usual DRF-formatted JSON error body. Dumping that
+        # markup verbatim in the UI ("LCO API request failed with HTTP 500 —
+        # <!doctype html>...") is meaningless to a user.
+        html_body = (
+            b"<!doctype html>\n<html lang=\"en\">\n<head>\n"
+            b"  <title>Server Error (500)</title>\n</head>\n<body>\n"
+            b"  <h1>Server Error (500)</h1><p></p>\n</body>\n</html>"
+        )
+        mock_urlopen.open.side_effect = urllib.error.HTTPError(
+            "https://observe.lco.global/api/proposals/?state=ACTIVE",
+            500, "Internal Server Error", None, io.BytesIO(html_body),
+        )
+
+        with self.assertRaises(lco.LcoError) as cm:
+            lco.get_proposals()
+
+        detail = cm.exception.detail
+        self.assertNotIn("<html", detail.lower())
+        self.assertNotIn("doctype", detail.lower())
+        self.assertIn("allocation", detail.lower())
+        self.assertIn("https://observe.lco.global/proposals", detail)
+
+    @patch.dict(os.environ, {"LCO_API_TOKEN": "test-token"})
+    @patch("muscat_db.lco._API_OPENER")
+    def test_get_proposals_json_error_detail_passes_through(self, mock_urlopen):
+        # A JSON error body (LCO's normal DRF validation-error shape) is
+        # already useful and must survive unchanged.
+        mock_urlopen.open.side_effect = urllib.error.HTTPError(
+            "https://observe.lco.global/api/proposals/?state=ACTIVE",
+            400, "Bad Request", None,
+            io.BytesIO(b'{"non_field_errors": ["proposal is required"]}'),
+        )
+
+        with self.assertRaises(lco.LcoError) as cm:
+            lco.get_proposals()
+
+        self.assertIn("non_field_errors", cm.exception.detail)
 
     @patch.dict(os.environ, {"LCO_API_TOKEN": "test-token"})
     @patch("muscat_db.lco._API_OPENER")
