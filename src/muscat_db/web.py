@@ -2027,8 +2027,10 @@ async def transit_fit_query_archive(target: str, source: str = "nasa", inst: str
                         best_row = row
                         break
 
-                # Match TIC ID by numeric value.  A TIC query names a star, not a
-                # planet, so it inherits the lowest-candidate rule above.
+                # Match TIC ID by numeric value. A bare TIC query names a star,
+                # not a planet, so it inherits the lowest-candidate rule above --
+                # but an explicit ".NN" on the query (e.g. "TIC 12345.02") must
+                # still be honored exactly, same as the TOI branch above.
                 if tic_id:
                     tic_num = extract_number(tic_id)
                     tic_clean = re.sub(r"[^0-9a-zA-Z]", "", tic_id.lower())
@@ -2038,7 +2040,12 @@ async def transit_fit_query_archive(target: str, source: str = "nasa", inst: str
                         or (tic_num and target_clean == f"tic{tic_num}")
                     )
                     if matches_tic:
-                        if prefer(row, split_toi(toi)[1]):
+                        toi_sub = split_toi(toi)[1]
+                        if target_sub is None:
+                            if prefer(row, toi_sub):
+                                break
+                        elif target_sub == toi_sub:
+                            best_row, best_sub = row, toi_sub
                             break
                         continue
 
