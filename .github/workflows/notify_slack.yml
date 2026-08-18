@@ -71,8 +71,11 @@ jobs:
                 # a commit. A lookup failure falls back to posting, which
                 # is the old (duplicating) behaviour rather than a silently
                 # dropped notification.
+                # `--jq` runs per page under `--paginate`, so picking `last`
+                # inside jq would pick the last of each page. Emit one line per
+                # closed event instead and take the final one in the shell.
                 commit_id=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}/events" \
-                  --jq '[.[] | select(.event == "closed")] | last | .commit_id // empty' || echo "")
+                  --jq '.[] | select(.event == "closed") | .commit_id // ""' 2>/dev/null | tail -1 || echo "")
                 if [ -n "$commit_id" ]; then
                   skip=true; text=""; color=""
                 else
