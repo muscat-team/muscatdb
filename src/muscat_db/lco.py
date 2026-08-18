@@ -26,6 +26,7 @@ import uuid
 from zoneinfo import ZoneInfo
 
 from muscat_db.catalog import _angular_sep_arcsec, _normalize_target_name
+from muscat_db.dayobs import dayobs_from_filename
 from muscat_db.coord import (
     CoordRepr,
     unpack as _unpack_coord,
@@ -52,6 +53,8 @@ _DOWNLOAD_INSTRUMENT_DIRS = {
     "muscat2": "MuSCAT2",
     "muscat3": "MuSCAT3",
     "muscat4": "MuSCAT4",
+    "sbig": "SBIGSTL6303",
+    "qhy600": "QHY600CMOS",
 }
 _DOWNLOAD_HOSTS = frozenset({
     "archive-api.lco.global",
@@ -68,13 +71,16 @@ _API_HOSTS = frozenset({
 
 # Secondary-mirror defocus offset limits (mm), from LCO's live instrument
 # capabilities schema (observe.lco.global/api/instruments/): the InstrumentConfig
-# "defocus" extra_param is capped at +/-8mm for 2M0-SCICAM-MUSCAT and +/-5mm for
-# 1M0-SCICAM-SINISTRO.
+# "defocus" extra_param is capped at +/-8mm for 2M0-SCICAM-MUSCAT, +/-5mm for
+# 1M0-SCICAM-SINISTRO, and +/-0.5mm for 0M4-SCICAM-QHY600. sbig has no entry:
+# it has no live LCO instrument_type (retired/archival-only), so it is never
+# schedulable and this limit is never consulted for it.
 _DEFOCUS_LIMIT_MM = {
     "muscat": 8.0,
     "muscat3": 8.0,
     "muscat4": 8.0,
     "sinistro": 5.0,
+    "qhy600": 0.5,
 }
 
 
@@ -213,6 +219,41 @@ class _ValidatedApiRedirectHandler(urllib.request.HTTPRedirectHandler):
 _API_OPENER = urllib.request.build_opener(_ValidatedApiRedirectHandler)
 
 
+def _friendly_lco_error_detail(raw_body: str, status: int) -> str:
+    """Turn an LCO error response body into something worth showing a user.
+
+    LCO's DRF API returns JSON on a validation failure (e.g.
+    ``{"non_field_errors": [...]}``), which is already useful and passed
+    through unchanged. An unhandled exception on LCO's own backend instead
+    returns Django's default HTML error page, which is meaningless to a user
+    and was being dumped verbatim ("LCO API request failed with HTTP 500 —
+    <!doctype html>..."). Empirically, a 500 with an HTML body correlates
+    with the proposal having no time allocation for the request's telescope
+    class/instrument (e.g. a QHY600/0.4m request under a 1m-only proposal),
+    so that is offered as the likely cause rather than the raw markup.
+    """
+    stripped = raw_body.strip()
+    if not stripped:
+        return raw_body
+    try:
+        json.loads(stripped)
+        return raw_body
+    except ValueError:
+        pass
+    if stripped.lower().startswith(("<!doctype html", "<html")):
+        if status >= 500:
+            return (
+                "LCO's server returned an internal error with no further detail. "
+                "This most often means the proposal has no time allocation for "
+                "the requested instrument or site (e.g. a QHY600/0.4m request "
+                "submitted under a proposal without 0.4m time) -- confirm the "
+                "proposal's allocation at https://observe.lco.global/proposals, "
+                "or try a different proposal."
+            )
+        return f"LCO returned an HTML error page (HTTP {status}) with no further detail."
+    return raw_body
+
+
 def _lco_api_request(
     url: str,
     method: str = "GET",
@@ -241,16 +282,18 @@ def _lco_api_request(
         with _API_OPENER.open(req, timeout=15) as response:
             if 200 <= response.status < 300:
                 return json.loads(response.read().decode())
+            raw = response.read().decode()
             raise LcoError(
                 f"LCO API returned HTTP {response.status}",
                 status=response.status,
-                detail=response.read().decode(),
+                detail=_friendly_lco_error_detail(raw, response.status),
             )
     except urllib.error.HTTPError as e:
         try:
-            detail = e.read().decode()
+            raw = e.read().decode()
         except Exception:
-            detail = str(e)
+            raw = str(e)
+        detail = _friendly_lco_error_detail(raw, e.code)
         raise LcoError(f"LCO API request failed with HTTP {e.code}", status=e.code, detail=detail)
     except LcoError:
         raise
@@ -402,12 +445,24 @@ def infer_archive_instrument(frame: dict) -> str:
             tel = "2m0"
         elif "1m0" in filename:
             tel = "1m0"
+        elif "0m4" in filename:
+            tel = "0m4"
 
     if not instrume and filename:
         if "-ep" in filename or "muscat" in filename:
             instrume = "muscat"
-        elif "-fa" in filename or "-kb" in filename or "sinistro" in filename:
+        elif "-fa" in filename or "sinistro" in filename:
             instrume = "sinistro"
+        elif "-kb" in filename:
+            # LCO 0.4m network SBIG STL-6303 camera-unit codes (kb23, kb27,
+            # kb82, kb95, kb99, ...), verified against real /data/SBIGSTL6303
+            # archive headers. Not sinistro (that's -fa).
+            instrume = "sbig"
+        elif "-sq" in filename:
+            # LCO 0.4m network QHY600 camera-unit codes (sq30-33, sq36, sq38,
+            # sq40, sq41, sq46, ...), confirmed via the LCO archive API across
+            # coj/elp/ogg/tfn (e.g. coj0m416-sq36-20260804-0098-e91).
+            instrume = "qhy600"
 
     if site == "ogg" and tel.startswith("2m0") and ("muscat" in instrume or "ep" in instrume):
         return "muscat3"
@@ -415,6 +470,15 @@ def infer_archive_instrument(frame: dict) -> str:
         return "muscat4"
     if tel.startswith("1m0"):
         return "sinistro"
+    if tel.startswith("0m4"):
+        if instrume.startswith("kb") or instrume == "sbig":
+            return "sbig"
+        if instrume.startswith("sq") or instrume == "qhy600":
+            return "qhy600"
+        raise LcoError(
+            "Could not disambiguate 0.4m camera generation (sbig vs qhy600)",
+            detail=f"site={site}, tel={tel}, instrume={instrume}, filename={filename}",
+        )
 
     raise LcoError(
         "Could not infer destination instrument",
@@ -754,20 +818,33 @@ def frame_dest(instrument: str, obsdate: str, filename: str) -> Path:
 
 
 def frame_destination(frame: dict) -> tuple[str, str, Path]:
-    """Return the inferred instrument, YYMMDD directory, and path for a frame."""
+    """Return the inferred instrument, YYMMDD directory, and path for a frame.
+
+    The directory is the DAY-OBS token LCO stamps into the filename: the UTC
+    date at the *start* of the observing night, which stays constant across
+    local midnight. ``DATE_OBS`` is the frame's own UTC timestamp and rolls over
+    mid-night at sites whose nights straddle 00:00 UTC, filing one continuous
+    night into two directories — see the "UTC-midnight dataset split" section of
+    README.md. It survives only as a last-resort fallback for frames whose names
+    carry no token (hand-copied or non-standard files).
+    """
     filename = frame.get("filename") or frame.get("basename")
     if not filename:
         raise LcoError("Frame metadata has no filename")
     instrument = infer_archive_instrument(frame)
-    date_obs = str(
-        frame.get("DATE_OBS")
-        or frame.get("observation_date")
-        or frame.get("DAY_OBS")
-        or ""
-    ).split("T")[0].replace("-", "")
-    if len(date_obs) < 6:
-        raise LcoError("Could not determine obsdate")
-    obsdate = date_obs[2:]
+    obsdate = dayobs_from_filename(str(filename))
+    if obsdate is None:
+        # DAY_OBS is the archive's own night label, so prefer it over the
+        # per-frame timestamp when the filename cannot be read.
+        raw = str(
+            frame.get("DAY_OBS")
+            or frame.get("DATE_OBS")
+            or frame.get("observation_date")
+            or ""
+        ).split("T")[0].replace("-", "")
+        if len(raw) < 6:
+            raise LcoError("Could not determine obsdate")
+        obsdate = raw[2:]
     return instrument, obsdate, frame_dest(instrument, obsdate, str(filename))
 
 
@@ -1644,6 +1721,10 @@ def _clip_windows_to_observability(kind: str, params: dict, max_airmass, min_lun
 _INSTRUMENT_TYPE_TO_KIND = {
     "2M0-SCICAM-MUSCAT": "muscat",
     "1M0-SCICAM-SINISTRO": "sinistro",
+    # Confirmed via LCO's live https://observe.lco.global/api/instruments/
+    # list. sbig has no entry: it has no live instrument_type (retired), so
+    # there is nothing to clone.
+    "0M4-SCICAM-QHY600": "qhy600",
 }
 
 
@@ -1710,7 +1791,7 @@ def requestgroup_to_params(rg: dict) -> dict:
         params["narrowband"] = {
             b: optical.get(f"narrowband_{b}_position", "out") for b in ("g", "r", "i", "z")
         }
-    else:  # sinistro
+    else:  # single-filter kinds: sinistro, qhy600
         if optical.get("filter") is not None:
             params["filter"] = optical["filter"]
         if ic.get("exposure_time") is not None:
@@ -1873,6 +1954,45 @@ def build_requestgroup(kind: str, params: dict, configurations: list[dict] | Non
             "constraints": constraints,
             "target": target
         })
+    elif kind == "qhy600":
+        # Submission-schema specs (extra_params, mode set) sourced from
+        # LCO's live configdb
+        # (https://observe.lco.global/api/instruments/0M4-SCICAM-QHY600/);
+        # "central30x30" itself is independently confirmed on a real
+        # archived header (coj0m416-sq36-20260804-0098-e91, 2400x2400 px,
+        # no asymmetric binning). Unlike sinistro's central_2k_2x2 (a
+        # 2x2-binned readout), "central30x30" is a crop/subframe mode with
+        # no binning of its own (LCO's schema lists no bin params for it,
+        # and full_frame is fixed at bin_x=bin_y=1), so bin_x/bin_y stay 1
+        # regardless of mode.
+        mode = params.get("readout_mode", "central30x30")
+        qhy_config_type = params.get("type") or "EXPOSE"
+        qhy_exposure_count = 1 if qhy_config_type == "REPEAT_EXPOSE" else params.get("exposure_count", 1)
+        defocus = _validated_defocus(params, _DEFOCUS_LIMIT_MM["qhy600"])
+        instrument_configs = [{
+            "exposure_count": qhy_exposure_count,
+            "exposure_time": params.get("exposure_time", 60),
+            "mode": mode,
+            "optical_elements": {"filter": params.get("filter", "rp")},
+            "extra_params": {
+                "bin_x": 1,
+                "bin_y": 1,
+                "offset_ra": 0,
+                "offset_dec": 0,
+                "defocus": defocus,
+                "sub_expose": params.get("sub_expose", False),
+            },
+        }]
+        instrument_type = "0M4-SCICAM-QHY600"
+        configurations.append({
+            **_config_type_block(params, "EXPOSE"),
+            "instrument_type": instrument_type,
+            "instrument_configs": instrument_configs,
+            "acquisition_config": {"mode": "OFF"},
+            "guiding_config": {"mode": params.get("guiding_config", "ON"), "optional": True},
+            "constraints": constraints,
+            "target": target
+        })
     else:
         raise LcoError(f"Unsupported instrument kind for scheduling: {kind}", status=400)
 
@@ -1880,7 +2000,8 @@ def build_requestgroup(kind: str, params: dict, configurations: list[dict] | Non
     # telescope_class behind site produced an invalid empty location and made
     # "any site on this class" impossible to express (LCO's accepted requests
     # carry telescope_class with no site when the network picks the site).
-    location = {"telescope_class": "1m0" if kind == "sinistro" else "2m0"}
+    _TELESCOPE_CLASS_FOR_KIND = {"sinistro": "1m0", "qhy600": "0m4"}
+    location = {"telescope_class": _TELESCOPE_CLASS_FOR_KIND.get(kind, "2m0")}
     if params.get("site"):
         location["site"] = params["site"]
     

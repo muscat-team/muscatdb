@@ -478,19 +478,20 @@ def _summary_rows(conn: sqlite3.Connection, *, instrument: str | None = None, ob
         where.append("obsdate = ?")
         params.append(obsdate)
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
-    # Telescope is a Sinistro-only grouping dimension.  Extract its physical
-    # telescope/camera prefix from an LCO filename (e.g. ``lsc1m005`` from
-    # ``lsc1m005-fa15-20250806-0058-e91``).  A malformed Sinistro filename is
-    # kept as its own group rather than silently combining different physical
-    # telescopes.  MuSCAT filenames must use one shared empty key: using the
-    # whole filename here makes every frame a separate "summary" row.
+    # Telescope is a grouping dimension only for the multi-site instruments
+    # (sinistro, sbig, qhy600).  Extract its physical telescope/camera prefix
+    # from an LCO filename (e.g. ``lsc1m005`` from
+    # ``lsc1m005-fa15-20250806-0058-e91``).  A malformed multi-site filename
+    # is kept as its own group rather than silently combining different
+    # physical telescopes.  MuSCAT filenames must use one shared empty key:
+    # using the whole filename here makes every frame a separate "summary" row.
     raw = conn.execute(
         f"""WITH keyed AS (
                SELECT *,
                       CASE
-                          WHEN instrument = 'sinistro' AND INSTR(filename, '-') > 0
+                          WHEN instrument IN ('sinistro', 'sbig', 'qhy600') AND INSTR(filename, '-') > 0
                           THEN SUBSTR(filename, 1, INSTR(filename, '-') - 1)
-                          WHEN instrument = 'sinistro' THEN filename
+                          WHEN instrument IN ('sinistro', 'sbig', 'qhy600') THEN filename
                           ELSE ''
                       END AS telescope
                FROM frames
@@ -861,6 +862,11 @@ def build_db(db_path: str, progress=None) -> int:
         _remove_sqlite_tmp(tmp_path)
         raise
 
+    for suffix in ("-wal", "-shm"):
+        try:
+            os.remove(db_path + suffix)
+        except OSError:
+            pass
     os.replace(tmp_path, db_path)
     clear_all_caches()
     return count
@@ -897,7 +903,7 @@ def ingest_date(db_path: str, instrument: str, obsdate: str, progress=None) -> i
     try:
         conn.create_aggregate("coord_repr", 2, CoordRepr)
         conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA synchronous=OFF;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
         conn.execute("PRAGMA cache_size=100000;")
         # Keep GROUP BY / sort spills on the DB's own (roomy) volume, not /tmp.
         _set_temp_store_dir(conn, db_path)
@@ -1036,6 +1042,36 @@ def get_dates(db_path: str, instrument: str) -> list[dict]:
             (instrument,),
         )
         return [{"obsdate": r[0], "nccd": r[1], "nframes": r[2]} for r in cur.fetchall()]
+
+
+def clear_stale_date(db_path: str, instrument: str, obsdate: str) -> None:
+    """Remove all frames/summaries rows for a date with no obslog CSVs left.
+
+    ``ingest_date`` refuses to run against zero CSVs (a real signal for its
+    other callers, e.g. a typo'd CLI date), but ``normalize-obsdates`` can
+    legitimately drain a directory to nothing when every frame in it belonged
+    to a different night. Without this, the pre-move rows for that date would
+    survive forever, pointing at files that no longer live there.
+    """
+    conn = sqlite3.connect(db_path, timeout=30)
+    try:
+        # _replace_target_rows -> _target_rows calls the coord_repr aggregate.
+        conn.create_aggregate("coord_repr", 2, CoordRepr)
+        old_objects = {
+            row[0] for row in conn.execute(
+                "SELECT DISTINCT object FROM summaries WHERE instrument = ? AND obsdate = ?",
+                (instrument, obsdate),
+            ).fetchall()
+            if row[0] is not None
+        }
+        conn.execute("DELETE FROM frames WHERE instrument = ? AND obsdate = ?", (instrument, obsdate))
+        conn.execute("DELETE FROM summaries WHERE instrument = ? AND obsdate = ?", (instrument, obsdate))
+        if old_objects:
+            _replace_target_rows(conn, old_objects)
+        conn.commit()
+    finally:
+        conn.close()
+    clear_all_caches()
 
 
 def get_summaries(db_path: str, instrument: str, obsdate: str) -> list[dict]:

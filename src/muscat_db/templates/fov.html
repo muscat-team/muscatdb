@@ -773,7 +773,7 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           instrument: params.inst,
-          sinistro_mode: params.inst === 'sinistro' ? params.readoutMode : null,
+          sinistro_mode: READOUT_MODES[params.inst] ? params.readoutMode : null,
           target: params.target,
           ra: params.ra || null,
           dec: params.dec || null,
@@ -880,7 +880,7 @@
       ra: lastResult.ra,
       dec: lastResult.dec,
       instrument: inst,
-      sinistro_mode: inst === 'sinistro' ? $('fov-sinistro-mode').value : null,
+      sinistro_mode: READOUT_MODES[inst] ? $('fov-sinistro-mode').value : null,
       comps: (lastResult.brightest_in_field || []).slice(0, COMP_HANDOFF_N),
     };
     try {

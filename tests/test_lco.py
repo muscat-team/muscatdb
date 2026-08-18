@@ -10,6 +10,7 @@ import shutil
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -121,6 +122,46 @@ class LcoTest(unittest.TestCase):
         self.assertIn("extra_params", inst_config)
         self.assertEqual(inst_config["extra_params"]["bin_x"], 2)
         self.assertEqual(inst_config["extra_params"]["bin_y"], 2)
+
+    def test_build_requestgroup_qhy600(self):
+        params = {
+            "name": "Test QHY600 Request",
+            "proposal": "LCO2026A-001",
+            "target_name": "WASP-12",
+            "ra": "06:30:33",
+            "dec": "+29:40:20",
+            "kind": "qhy600",
+            "exposure_time": 60,
+            "exposure_count": 5,
+            "filter": "rp",
+            "windows": [{"start": "2026-07-01T00:00:00Z", "end": "2026-07-01T01:00:00Z"}],
+            "max_airmass": 1.8,
+            "readout_mode": "central30x30",
+        }
+        rg = lco.build_requestgroup("qhy600", params)
+        request = rg["requests"][0]
+        self.assertEqual(request["instrument_type"], "0M4-SCICAM-QHY600")
+        self.assertEqual(request["location"]["telescope_class"], "0m4")
+
+        config = request["configurations"][0]
+        inst_config = config["instrument_configs"][0]
+        self.assertEqual(inst_config["exposure_time"], 60)
+        self.assertEqual(inst_config["optical_elements"]["filter"], "rp")
+        self.assertEqual(inst_config["mode"], "central30x30")
+        # Unlike sinistro's central_2k_2x2 (2x2 binning), qhy600 has no
+        # binning mode -- always 1x1 regardless of readout mode.
+        self.assertEqual(inst_config["extra_params"]["bin_x"], 1)
+        self.assertEqual(inst_config["extra_params"]["bin_y"], 1)
+
+    def test_defocus_rejects_out_of_range_for_qhy600(self):
+        params = {
+            "name": "n", "proposal": "p", "target_name": "t",
+            "ra": 10.0, "dec": -5.0, "kind": "qhy600", "defocus": 1.0,
+            "exposure_time": 60, "filter": "rp",
+            "windows": [{"start": "2026-07-01T00:00:00Z", "end": "2026-07-01T01:00:00Z"}],
+        }
+        with self.assertRaises(lco.LcoError):
+            lco.build_requestgroup("qhy600", params)
 
     def test_defocus_defaults_to_zero(self):
         params = {
@@ -527,6 +568,50 @@ class LcoTest(unittest.TestCase):
 
     @patch.dict(os.environ, {"LCO_API_TOKEN": "test-token"})
     @patch("muscat_db.lco._API_OPENER")
+    def test_get_proposals_html_500_gets_friendly_detail(self, mock_urlopen):
+        # Real failure mode: a proposal with no allocation for the request's
+        # telescope class (e.g. 0.4m/QHY600) makes LCO's own backend raise an
+        # unhandled exception, returning Django's default HTML error page
+        # instead of its usual DRF-formatted JSON error body. Dumping that
+        # markup verbatim in the UI ("LCO API request failed with HTTP 500 —
+        # <!doctype html>...") is meaningless to a user.
+        html_body = (
+            b"<!doctype html>\n<html lang=\"en\">\n<head>\n"
+            b"  <title>Server Error (500)</title>\n</head>\n<body>\n"
+            b"  <h1>Server Error (500)</h1><p></p>\n</body>\n</html>"
+        )
+        mock_urlopen.open.side_effect = urllib.error.HTTPError(
+            "https://observe.lco.global/api/proposals/?state=ACTIVE",
+            500, "Internal Server Error", None, io.BytesIO(html_body),
+        )
+
+        with self.assertRaises(lco.LcoError) as cm:
+            lco.get_proposals()
+
+        detail = cm.exception.detail
+        self.assertNotIn("<html", detail.lower())
+        self.assertNotIn("doctype", detail.lower())
+        self.assertIn("allocation", detail.lower())
+        self.assertIn("https://observe.lco.global/proposals", detail)
+
+    @patch.dict(os.environ, {"LCO_API_TOKEN": "test-token"})
+    @patch("muscat_db.lco._API_OPENER")
+    def test_get_proposals_json_error_detail_passes_through(self, mock_urlopen):
+        # A JSON error body (LCO's normal DRF validation-error shape) is
+        # already useful and must survive unchanged.
+        mock_urlopen.open.side_effect = urllib.error.HTTPError(
+            "https://observe.lco.global/api/proposals/?state=ACTIVE",
+            400, "Bad Request", None,
+            io.BytesIO(b'{"non_field_errors": ["proposal is required"]}'),
+        )
+
+        with self.assertRaises(lco.LcoError) as cm:
+            lco.get_proposals()
+
+        self.assertIn("non_field_errors", cm.exception.detail)
+
+    @patch.dict(os.environ, {"LCO_API_TOKEN": "test-token"})
+    @patch("muscat_db.lco._API_OPENER")
     def test_archive_search_ok(self, mock_urlopen):
         mock_response = MagicMock()
         mock_response.status = 200
@@ -599,6 +684,65 @@ class LcoTest(unittest.TestCase):
         expected_end = datetime.datetime(2026, 7, 1, 0, 31, tzinfo=datetime.timezone.utc)
         self.assertLess(abs((start - expected_start).total_seconds()), 0.001)
         self.assertLess(abs((end - expected_end).total_seconds()), 0.001)
+
+class FrameDestinationDayobsTest(unittest.TestCase):
+    """The download directory must come from the filename's DAY-OBS token.
+
+    DATE_OBS is the frame's own UTC timestamp, so at sites whose nights straddle
+    00:00 UTC it rolls over mid-night and splits one observing night across two
+    directories. LCO already stamps the night into the filename; that token is
+    constant for the whole night.
+    """
+
+    def setUp(self):
+        self._env = patch.dict(os.environ, {"MUSCAT_LCO_DIR": "/tmp/lco-root"}, clear=False)
+        self._env.start()
+        self.addCleanup(self._env.stop)
+
+    def test_filename_dayobs_wins_over_a_rolled_over_date_obs(self):
+        # The real TOI 6715.01 case: taken 00:01 UTC on 18 Apr, but it belongs
+        # to the night of the 17th and its filename says so.
+        instrument, obsdate, dest = lco.frame_destination({
+            "filename": "lsc1m004-fa03-20240417-0093-e91.fits",
+            "SITEID": "lsc", "TELID": "1m0a", "INSTRUME": "fa03",
+            "DATE_OBS": "2024-04-18T00:01:28.123",
+        })
+        self.assertEqual(instrument, "sinistro")
+        self.assertEqual(obsdate, "240417")
+        self.assertEqual(dest.parent.name, "240417")
+
+    def test_filename_dayobs_agrees_with_date_obs_when_no_rollover(self):
+        _instrument, obsdate, _dest = lco.frame_destination({
+            "filename": "ogg2m001-ep05-20260102-0001-e91.fits.fz",
+            "SITEID": "ogg", "TELID": "2m0a", "INSTRUME": "ep05",
+            "DATE_OBS": "2026-01-02T05:00:00",
+        })
+        self.assertEqual(obsdate, "260102")
+
+    def test_falls_back_to_day_obs_field_without_a_filename_token(self):
+        _instrument, obsdate, _dest = lco.frame_destination({
+            "filename": "hand-copied-frame.fits",
+            "SITEID": "lsc", "TELID": "1m0a", "INSTRUME": "fa03",
+            "DAY_OBS": "2024-04-17",
+            "DATE_OBS": "2024-04-18T00:01:28",
+        })
+        self.assertEqual(obsdate, "240417")
+
+    def test_falls_back_to_date_obs_as_a_last_resort(self):
+        _instrument, obsdate, _dest = lco.frame_destination({
+            "filename": "hand-copied-frame.fits",
+            "SITEID": "lsc", "TELID": "1m0a", "INSTRUME": "fa03",
+            "DATE_OBS": "2024-04-18T00:01:28",
+        })
+        self.assertEqual(obsdate, "240418")
+
+    def test_raises_when_no_date_can_be_determined(self):
+        with self.assertRaises(lco.LcoError):
+            lco.frame_destination({
+                "filename": "hand-copied-frame.fits",
+                "SITEID": "lsc", "TELID": "1m0a", "INSTRUME": "fa03",
+            })
+
 
 class FrameDestSecurityTest(unittest.TestCase):
     """frame_dest / URL validation must block path traversal and SSRF."""
@@ -1134,7 +1278,7 @@ class RequestgroupToParamsTest(unittest.TestCase):
             lco.requestgroup_to_params({"name": "x", "requests": []})
 
     def test_rejects_unknown_instrument_type(self):
-        rg = {"requests": [{"instrument_type": "0M4-SCICAM-QHY600", "configurations": [{}]}]}
+        rg = {"requests": [{"instrument_type": "SOAR_GHTS_REDCAM", "configurations": [{}]}]}
         with self.assertRaises(lco.LcoError):
             lco.requestgroup_to_params(rg)
 
@@ -1179,3 +1323,56 @@ class ApiRedirectTest(unittest.TestCase):
     def test_downgrade_to_http_is_refused(self):
         with self.assertRaises(lco.LcoError):
             self._redirect_to("http://observe.lco.global/api/proposals/")
+
+
+class InferArchiveInstrumentTest(unittest.TestCase):
+    """Header/filename shapes verified against real LCO archive frames:
+    SBIG (ogg0m406-kb27-20200724-0218-e91.fits, /data/SBIGSTL6303) and
+    QHY600 (coj0m416-sq36-20260804-0098-e91.fits.fz, fetched live from
+    archive-api.lco.global and confirmed by its actual downloaded FITS
+    header: TELID=0m4a, INSTRUME=sq36, GAIN=1.0, SATURATE=47400.0,
+    CONFMODE=central30x30). A network-wide archive scan (2026-08,
+    coj/elp/ogg/tfn, 8 distinct camera units) confirmed every QHY600 unit
+    uses an "sq"-prefixed INSTRUME code, disjoint from SBIG's "kb" prefix."""
+
+    def test_sbig_frame_by_metadata_fields(self):
+        frame = {"SITEID": "ogg", "TELID": "0m4b", "INSTRUME": "kb27"}
+        self.assertEqual(lco.infer_archive_instrument(frame), "sbig")
+
+    def test_sbig_frame_by_filename_only(self):
+        frame = {"filename": "ogg0m406-kb27-20200724-0218-e91.fits"}
+        self.assertEqual(lco.infer_archive_instrument(frame), "sbig")
+
+    def test_qhy600_frame_by_metadata_fields(self):
+        frame = {"SITEID": "coj", "TELID": "0m4a", "INSTRUME": "sq36"}
+        self.assertEqual(lco.infer_archive_instrument(frame), "qhy600")
+
+    def test_qhy600_frame_by_filename_only(self):
+        frame = {"filename": "coj0m416-sq36-20260804-0098-e91.fits.fz"}
+        self.assertEqual(lco.infer_archive_instrument(frame), "qhy600")
+
+    def test_qhy600_frame_other_camera_units(self):
+        # Distinct real units seen across sites in the archive scan.
+        for site, tel, instrume in [
+            ("coj", "0m4b", "sq38"), ("elp", "0m4a", "sq31"),
+            ("elp", "0m4a", "sq41"), ("elp", "0m4b", "sq46"),
+            ("ogg", "0m4b", "sq30"), ("ogg", "0m4c", "sq40"),
+            ("tfn", "0m4a", "sq32"), ("tfn", "0m4b", "sq33"),
+        ]:
+            frame = {"SITEID": site, "TELID": tel, "INSTRUME": instrume}
+            self.assertEqual(lco.infer_archive_instrument(frame), "qhy600", instrume)
+
+    def test_sinistro_frame_unaffected_by_0m4_handling(self):
+        frame = {"SITEID": "lsc", "TELID": "1m0a", "INSTRUME": "fa15"}
+        self.assertEqual(lco.infer_archive_instrument(frame), "sinistro")
+
+    def test_0m4_frame_with_unrecognized_instrume_raises(self):
+        # Neither "kb" (sbig) nor "sq" (qhy600) -- must fail loudly rather
+        # than guess.
+        frame = {"SITEID": "ogg", "TELID": "0m4b", "INSTRUME": "unknown01"}
+        with self.assertRaises(lco.LcoError):
+            lco.infer_archive_instrument(frame)
+
+    def test_unrecognized_frame_raises(self):
+        with self.assertRaises(lco.LcoError):
+            lco.infer_archive_instrument({"SITEID": "xyz", "TELID": "9m9x"})

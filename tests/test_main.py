@@ -46,6 +46,7 @@ _OBSLOG_MODULES = [
     "muscat_db.scanner",
     "muscat_db.summarizer",
     "muscat_db.database",
+    "muscat_db.obsdate_normalize",
 ]
 # Modules that import INSTRUMENTS from instruments
 _INST_MODULES = _OBSLOG_MODULES + [
@@ -116,7 +117,7 @@ class TestInstruments:
         assert MUSCAT4.use_alt_ut_key is True
 
     def test_instruments_dict(self):
-        assert set(INSTRUMENTS) == {"muscat", "muscat2", "muscat3", "muscat4", "sinistro"}
+        assert set(INSTRUMENTS) == {"muscat", "muscat2", "muscat3", "muscat4", "sinistro", "sbig", "qhy600"}
 
     def test_get_instrument_ok(self):
         assert get_instrument("muscat3") is MUSCAT3
@@ -223,6 +224,46 @@ class TestScanner:
         from muscat_db.scanner import scan_date
         result = scan_date("muscat", "999999", max_workers=1)
         assert not result
+
+    def test_scan_date_no_files_leaves_no_obslog_directory(self, tmp_obslog, tmp_data):
+        """A zero-result scan must not create a marker directory.
+
+        scan_missing_dates() treats the obslog date-directory's existence as
+        "already scanned", regardless of whether it holds a CSV. Creating that
+        directory unconditionally — the previous behaviour — permanently hid
+        any date scanned before its data had fully arrived (e.g. LCO archive
+        delivery lagging past the next day's scan-yesterday cron): the empty
+        directory outlives the empty result, and nothing ever retries it.
+        """
+        from muscat_db.scanner import scan_date
+        obsdate = "999999"
+        result = scan_date("muscat", obsdate, max_workers=1)
+        assert not result
+        assert not os.path.isdir(f"{tmp_obslog}/muscat/{obsdate}")
+
+    def test_scan_missing_dates_retries_a_date_that_arrived_after_an_earlier_empty_scan(
+        self, tmp_obslog, tmp_data,
+    ):
+        """Regression test: a date scanned before its FITS arrived must stay
+        eligible for scan_missing_dates() once the files show up, rather than
+        being silently and permanently skipped.
+        """
+        from muscat_db.scanner import scan_date, scan_missing_dates
+        inst = INSTRUMENTS["muscat"]
+        obsdate = "260101"
+
+        # Simulate the premature cron scan: no FITS have landed yet.
+        early_result = scan_date("muscat", obsdate, max_workers=1)
+        assert not early_result
+
+        # The archive catches up later.
+        self._make_fits_for_instrument(tmp_data, inst, obsdate, 0, 3)
+
+        dates = scan_missing_dates("muscat", "26", max_workers=1)
+        assert obsdate in dates
+
+        csv_path = f"{tmp_obslog}/muscat/{obsdate}/obslog-muscat-{obsdate}-ccd0.csv"
+        assert os.path.isfile(csv_path)
 
     def test_scan_date_multiple_ccds(self, tmp_obslog, tmp_data):
         from muscat_db.scanner import scan_date
@@ -843,6 +884,60 @@ class TestDatabase:
         finally:
             os.unlink(db_path)
 
+    def test_clear_stale_date_removes_rows_and_refreshes_targets(self, tmp_obslog):
+        from muscat_db.database import build_db, clear_stale_date
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            db_path = f.name
+        try:
+            build_db(db_path)
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                "INSERT INTO frames (instrument, obsdate, ccd, filename, object,"
+                " jd_start, ut_start, exptime, read_mode, filter, ra, declination, airmass, focus)"
+                " VALUES ('sinistro', '260619', 0, 'f1.fits', 'TOI-1404.01',"
+                " 60123.5, '00:01:00', 20.0, 'central_2k_2x2', 'ip', 10.0, -5.0, 1.1, 0.0)"
+            )
+            conn.execute(
+                "INSERT INTO summaries (instrument, obsdate, ccd, object, exptime,"
+                " read_mode, telescope, frame_start, frame_end, ut_start, ut_end,"
+                " nframes, filter, ra, declination, airmass_min, airmass_max)"
+                " VALUES ('sinistro', '260619', 0, 'TOI-1404.01', 20.0,"
+                " 'central_2k_2x2', 'lsc1m005', 'f1.fits', 'f1.fits', '00:01:00',"
+                " '00:01:00', 1, 'ip', 10.0, -5.0, 1.1, 1.1)"
+            )
+            conn.execute(
+                "INSERT INTO targets (object, n_dates, n_frames, dates, filters,"
+                " airmass_min, airmass_max, inst_dates, ra, declination)"
+                " VALUES ('TOI-1404.01', 1, 1, '260619', 'ip', 1.1, 1.1,"
+                " 'sinistro:260619', 10.0, -5.0)"
+            )
+            conn.commit()
+            conn.close()
+
+            clear_stale_date(db_path, "sinistro", "260619")
+
+            conn = sqlite3.connect(db_path)
+            frames = conn.execute(
+                "SELECT COUNT(*) FROM frames WHERE instrument = ? AND obsdate = ?",
+                ("sinistro", "260619"),
+            ).fetchone()[0]
+            summaries = conn.execute(
+                "SELECT COUNT(*) FROM summaries WHERE instrument = ? AND obsdate = ?",
+                ("sinistro", "260619"),
+            ).fetchone()[0]
+            target = conn.execute(
+                "SELECT COUNT(*) FROM targets WHERE object = ?",
+                ("TOI-1404.01",),
+            ).fetchone()[0]
+            conn.close()
+
+            assert frames == 0
+            assert summaries == 0
+            # No frames left anywhere for this object, so its target row is gone too.
+            assert target == 0
+        finally:
+            os.unlink(db_path)
+
 
 # ── Tests: CLI ───────────────────────────────────────────────────────────────
 
@@ -910,3 +1005,62 @@ class TestCLI:
                       "build-db", "serve"]:
             r = self._invoke(cmd, "--help")
             assert r.exit_code == 0, f"{cmd} --help failed: {r.output}"
+
+    def test_normalize_obsdates_apply_drains_directory_without_crashing(
+        self, tmp_obslog, tmp_data
+    ):
+        """Regression: a directory whose every frame moves out (a genuine
+        midnight split, not just an offset relabel) leaves nothing for
+        scan_date to write a CSV for. ingest_date's "no CSVs" guard used to
+        propagate as a hard CLI failure, aborting the whole normalize-obsdates
+        run — including instruments queued after the one that hit it — and
+        leaving the pre-move DB rows for that date stale forever.
+        """
+        from muscat_db.database import build_db
+
+        sinistro_dir = f"{tmp_data}/sinistro"
+        # Every frame in 260101 actually belongs to 260102 (its DAY-OBS
+        # token); consolidating it should drain 260101 to nothing.
+        os.makedirs(f"{sinistro_dir}/260101", exist_ok=True)
+        os.makedirs(f"{sinistro_dir}/260102", exist_ok=True)
+        _make_fits(
+            f"{sinistro_dir}/260101/lsc1m005-fa15-20260102-0001-e91.fits",
+            {"OBJECT": "TOI-1404.01", "MJD-OBS": 60676.001, "UTSTART": "00:01:00",
+             "EXPTIME": 20.0, "CONFMODE": "central_2k_2x2", "FILTER": "ip",
+             "RA": "10:00:00", "DEC": "-05:00:00", "AIRMASS": 1.1, "FOCPOSN": 0.0},
+        )
+
+        db_path = f"{tmp_obslog}/normalize.db"
+        build_db(db_path)
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "INSERT INTO frames (instrument, obsdate, ccd, filename, object, exptime)"
+            " VALUES ('sinistro', '260101', 0, 'stale.fits', 'TOI-1404.01', 20.0)"
+        )
+        conn.commit()
+        conn.close()
+
+        r = self._invoke("normalize-obsdates", "sinistro", "--apply", "--db", db_path)
+
+        assert r.exit_code == 0, r.output
+        assert "0 frames remain" in r.output
+
+        conn = sqlite3.connect(db_path)
+        stale = conn.execute(
+            "SELECT COUNT(*) FROM frames WHERE instrument = ? AND obsdate = ?",
+            ("sinistro", "260101"),
+        ).fetchone()[0]
+        moved = conn.execute(
+            "SELECT COUNT(*) FROM frames WHERE instrument = ? AND obsdate = ?",
+            ("sinistro", "260102"),
+        ).fetchone()[0]
+        conn.close()
+
+        assert stale == 0
+        assert moved == 1
+        assert not os.path.exists(
+            f"{sinistro_dir}/260101/lsc1m005-fa15-20260102-0001-e91.fits"
+        )
+        assert os.path.exists(
+            f"{sinistro_dir}/260102/lsc1m005-fa15-20260102-0001-e91.fits"
+        )

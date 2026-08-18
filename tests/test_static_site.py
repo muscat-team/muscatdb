@@ -23,7 +23,13 @@ from muscat_db.database import (
     _summary_rows,
     set_note,
 )
-from muscat_db.static_site import _rewrite_link, _scrub_host_paths, build_site
+from muscat_db.static_site import (
+    _NAV_PAGES,
+    _rewrite_link,
+    _scrub_host_paths,
+    _url_to_sitedir,
+    build_site,
+)
 
 _SECRET_NOTE = "SECRETNOTE12345"
 
@@ -195,7 +201,7 @@ def test_navbar_links_resolve_after_the_root_swap(tiny_db, tmp_path):
 
     logs = _read(out / "logs" / "index.html")
     assert 'href="../"' in logs, "site root unreachable from a nested page"
-    assert 'href="../targets/"' not in logs, "masthead redirects into the app's target table"
+    assert 'href="../targets/"' in logs, "Targets link should be present in navbar"
     assert 'href="../logs/"' in logs or 'href="./"' in logs
 
     root = _read(out / "index.html")
@@ -206,24 +212,62 @@ def test_navbar_links_resolve_after_the_root_swap(tiny_db, tmp_path):
     assert 'href=""' not in root
 
 
-def test_app_landing_page_is_published_but_currently_unlinked(tiny_db, tmp_path):
-    """Records a known gap rather than letting it pass silently.
-
-    The masthead was the only link to the application's landing page, so routing
-    it to the site root leaves ``targets/`` built and reachable by URL but absent
-    from every page's navigation. Closing that needs a Targets entry in the navbar
-    (muscat-team/muscatdb#40). When it lands this assertion should flip.
-    """
+def test_targets_page_is_published_and_linked(tiny_db, tmp_path):
+    """Verify that targets/ is published and linked from navbar (#40)."""
     out = tmp_path / "site"
     build_site(out, db_path=tiny_db, n_examples=1, include_figures=False, log=lambda _m: None)
 
-    assert (out / "targets" / "index.html").is_file(), "app landing page should still be published"
+    assert (out / "targets" / "index.html").is_file(), "targets page should be published"
     linking = [
         page.relative_to(out).as_posix()
         for page in out.rglob("index.html")
         if 'href="targets/"' in _read(page) or 'href="../targets/"' in _read(page)
     ]
-    assert linking == [], f"targets/ is linked again, update #40 and this test: {linking}"
+    assert len(linking) > 0, "targets/ should be linked in navigation"
+
+
+def test_nav_pages_do_not_collide_on_output_directory():
+    """Regression (#62): every top-level nav route must get its own output
+    directory. ``_APP_HOME_SITEDIR`` used to still be ``"targets"`` from when
+    ``/`` *was* the targets page; once ``/`` became the home page, that left
+    ``/`` and ``/targets`` both mapping to ``"targets"``. Since ``/targets`` is
+    captured second in ``_NAV_PAGES``, it silently overwrote the home page's
+    output with the targets table on every build, and no test caught it
+    because the existing checks only assert that ``targets/index.html``
+    exists, not which page actually wrote it last."""
+    sitedirs: dict[str, list[str]] = {}
+    for page in _NAV_PAGES:
+        sitedirs.setdefault(_url_to_sitedir(page), []).append(page)
+    collisions = {d: pages for d, pages in sitedirs.items() if len(pages) > 1}
+    assert not collisions, f"nav routes collide on the same output directory: {collisions}"
+
+
+def test_home_page_is_published_without_overwriting_targets(tiny_db, tmp_path):
+    """Regression (#62): ``/`` (the app's home page) must publish to its own
+    directory rather than being overwritten by ``/targets``'s capture."""
+    out = tmp_path / "site"
+    build_site(out, db_path=tiny_db, n_examples=1, include_figures=False, log=lambda _m: None)
+
+    assert (out / "home" / "index.html").is_file(), "home page should be published"
+    assert "<title>Home" in _read(out / "home" / "index.html")
+    assert "<title>Targets" in _read(out / "targets" / "index.html")
+
+
+def test_home_page_static_build_does_not_call_the_live_weather_api(tiny_db, tmp_path):
+    """Regression: home/ used to be silently overwritten by /targets before the
+    ``/`` vs ``/targets`` collision was fixed, so its live weather-fetch
+    JavaScript never actually reached the published site. Now that home/
+    publishes for real, that fetch must stay off for a static build, or every
+    visitor's browser calls weather-api.lco.global unattended (AGENTS.md: do
+    not send requests that overload an external service)."""
+    out = tmp_path / "site"
+    build_site(out, db_path=tiny_db, n_examples=1, include_figures=False, log=lambda _m: None)
+
+    home = _read(out / "home" / "index.html")
+    assert "const STATIC_SITE = true;" in home
+    assert "if (!STATIC_SITE) loadWeather();" in home
+    assert "Connecting to LCO Weather API" not in home
+    assert "Live weather is unavailable in this static snapshot." in home
 
 
 def test_no_live_data_notice_only_on_live_api_pages(tiny_db, tmp_path):

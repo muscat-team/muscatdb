@@ -54,7 +54,7 @@
     <span class="lco-msg" id="msg-search" style="margin: 0;"></span>
   </div>
   <p class="lco-note">By default the <strong>Object</strong> name is resolved to sky coordinates (NASA/TOI catalog, then SIMBAD) and every frame whose footprint <em>covers</em> that position is returned — robust to naming variants (WASP-12 / Wasp-12 / WASP12). Enable <strong>Fuzzy name match</strong> to fall back to matching the raw OBJECT header text instead.</p>
-  <p class="lco-note">Files save to <code>&lt;MUSCAT_LCO_DIR&gt;/&lt;inferred instrument&gt;/&lt;date&gt;/</code> (or that instrument's data dir). The destination instrument is inferred from the archive metadata: OGG 2m0 MuSCAT → muscat3, COJ 2m0 MuSCAT → muscat4, and LCO 1m0 → sinistro.</p>
+  <p class="lco-note">Files save to <code>&lt;MUSCAT_LCO_DIR&gt;/&lt;inferred instrument&gt;/&lt;date&gt;/</code> (or that instrument's data dir). The destination instrument is inferred from the archive metadata: OGG 2m0 MuSCAT → muscat3, COJ 2m0 MuSCAT → muscat4, LCO 1m0 → sinistro, and LCO 0.4m → sbig (SBIG STL-6303, "kb"-prefixed camera code) or qhy600 (QHY600 CMOS, "sq"-prefixed camera code).</p>
 </details>
 
 <details class="lco-section section-fold" open>
@@ -112,7 +112,9 @@
     muscat: 'MuSCAT',
     muscat2: 'MuSCAT2',
     muscat3: 'MuSCAT3',
-    muscat4: 'MuSCAT4'
+    muscat4: 'MuSCAT4',
+    sbig: 'SBIGSTL6303',
+    qhy600: 'QHY600CMOS'
   };
 
   // Destination directory a frame will be saved to: <root>/<instrument>/<obsdate>/

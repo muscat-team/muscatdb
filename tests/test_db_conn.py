@@ -5,6 +5,7 @@ whenever the body raised between the two. get_conn() is a contextmanager that
 guarantees close on every path and standardizes timeout/row_factory.
 """
 
+import os
 import sqlite3
 
 import pytest
@@ -61,3 +62,98 @@ def test_defaults_to_env_db_path(monkeypatch, tmp_path):
         conn.execute("CREATE TABLE x (a)")
         conn.commit()
     assert target.exists()
+
+
+def test_build_db_preserves_destination_file(tmp_path, monkeypatch):
+    from muscat_db.database import build_db
+    target = tmp_path / "muscat.db"
+    monkeypatch.setenv("MUSCAT_DB_PATH", str(target))
+    
+    # Initialize empty target DB with valid schema
+    with get_conn(str(target)) as conn:
+        conn.execute("CREATE TABLE db_meta (key TEXT PRIMARY KEY, value TEXT)")
+        conn.commit()
+    
+    # Pre-create a sidecar file
+    sidecar = tmp_path / "muscat.db-wal"
+    sidecar.write_text("dummy")
+
+    assert target.exists()
+    assert sidecar.exists()
+
+    build_db(str(target))
+
+    assert target.exists()
+    assert not sidecar.exists()
+
+
+def test_build_db_never_removes_destination_file_itself(tmp_path, monkeypatch):
+    """The pre-swap sidecar cleanup must only ever touch -wal/-shm, never the
+    destination path itself.
+
+    ``os.replace`` is what makes the swap atomic -- a reader always sees the
+    old inode or the new one, never neither. Removing the destination file
+    ahead of the replace (as ``_remove_sqlite_tmp``'s ``("", "-wal", "-shm",
+    "-journal")`` suffix list would, since "" is the bare path) throws that
+    guarantee away and opens a window where the database doesn't exist at
+    all. A before/after existence check can't catch that window because the
+    file exists again by the time the assertion runs; asserting the bare
+    path is never passed to ``os.remove`` can.
+    """
+    from muscat_db.database import build_db
+
+    target = tmp_path / "muscat.db"
+    monkeypatch.setenv("MUSCAT_DB_PATH", str(target))
+
+    with get_conn(str(target)) as conn:
+        conn.execute("CREATE TABLE db_meta (key TEXT PRIMARY KEY, value TEXT)")
+        conn.commit()
+
+    removed_paths = []
+    real_remove = os.remove
+
+    def tracking_remove(path, *args, **kwargs):
+        removed_paths.append(str(path))
+        return real_remove(path, *args, **kwargs)
+
+    monkeypatch.setattr("muscat_db.database.os.remove", tracking_remove)
+
+    build_db(str(target))
+
+    assert str(target) not in removed_paths
+
+
+
+def test_build_db_clears_sidecars_held_by_a_live_connection(tmp_path, monkeypatch):
+    """A stale ``-wal`` at the destination silently masks the rebuilt database.
+
+    The other two build_db tests here pass whether or not the sidecar removal in
+    ``build_db`` exists, because the preserve-step connection checkpoints and
+    deletes the WAL when it closes, so a sidecar with no live owner disappears on
+    its own. Production is the case where another connection still holds the
+    destination open: the WAL then survives into ``os.replace``, SQLite replays
+    it over the freshly built file, and every reader keeps seeing pre-rebuild
+    data with ``PRAGMA integrity_check`` still reporting ``ok``.
+    """
+    import sqlite3
+    from muscat_db.database import build_db
+
+    target = tmp_path / "muscat.db"
+    monkeypatch.setenv("MUSCAT_DB_PATH", str(target))
+
+    live = sqlite3.connect(str(target))
+    live.execute("PRAGMA journal_mode=WAL;")
+    live.execute("PRAGMA wal_autocheckpoint=0;")
+    live.execute("CREATE TABLE db_meta (key TEXT PRIMARY KEY, value TEXT)")
+    live.executemany(
+        "INSERT INTO db_meta (key, value) VALUES (?, ?)",
+        [(f"k{i}", "stale") for i in range(200)],
+    )
+    live.commit()
+    try:
+        assert (tmp_path / "muscat.db-wal").exists(), "setup: the WAL must be live"
+        build_db(str(target))
+        assert not (tmp_path / "muscat.db-wal").exists()
+        assert not (tmp_path / "muscat.db-shm").exists()
+    finally:
+        live.close()
