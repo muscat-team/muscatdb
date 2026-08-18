@@ -1373,58 +1373,69 @@ def export_targets_csv():
     )
 
 
-_LCO_TELESCOPE_FILENAME_RE = re.compile(r"^[a-z]{3}1m0(\d{2})-")
+def _lco_telescope_filename_re(inst: str) -> re.Pattern:
+    """Filename-prefix regex for an instrument's TELESCOP-style unit token,
+    e.g. ``cpt1m010-`` for sinistro (``1m0``) or ``ogg0m406-`` for sbig/qhy600
+    (``0m4``)."""
+    prefix = re.escape(phot._TELESCOPE_PREFIX.get(inst, "1m0"))
+    return re.compile(rf"^[a-z]{{3}}{prefix}(\d{{2}})-")
 
 
 def _sinistro_obslog_choices(
     db: str, inst: str, date: str, target: str, site: str = ""
 ) -> tuple[list[str], list[str], list[str]]:
-    """``(sites, telescopes, modes)`` present in the obslog for a sinistro
-    target+date, optionally scoping the telescope list to one ``site``.
+    """``(sites, telescopes, modes)`` present in the obslog for a multi-site
+    instrument's (sinistro/sbig/qhy600) target+date, optionally scoping the
+    telescope list to one ``site``.
 
     The LCO site is the 3-char filename prefix (e.g. ``cpt1m010-...``); the
-    physical telescope is the 2-digit unit number right after ``1m0`` in that
-    same prefix (e.g. ``cpt1m010-`` -> unit ``10``, reconstructed as the
-    canonical TELESCOP-style value ``'1m0-10'``); the mode is ``read_mode``
-    (CONFMODE). Site/mode are intersected with the known valid sets so a stray
-    prefix or non-canonical read_mode (MUSCAT_FAST/SLOW) can't leak in;
-    telescope is open-ended (LCO's 1m fleet changes over time) so only the
-    filename shape is validated. Empty lists for non-sinistro or on error.
+    physical telescope is the 2-digit unit number right after the telescope
+    class token in that same prefix (e.g. ``cpt1m010-`` -> unit ``10``,
+    reconstructed as the canonical TELESCOP-style value ``'1m0-10'``); the
+    mode is ``read_mode`` (CONFMODE). Site/mode are intersected with the
+    instrument's known valid sets so a stray prefix or non-canonical
+    read_mode (MUSCAT_FAST/SLOW) can't leak in; telescope is open-ended
+    (LCO's fleet changes over time) so only the filename shape is validated.
+    Empty lists for non-multi-site instruments or on error.
     """
-    if inst != "sinistro" or not (date and target):
+    if inst not in phot.MULTISITE_INSTRUMENTS or not (date and target):
         return [], [], []
     try:
+        tel_prefix = phot._TELESCOPE_PREFIX.get(inst, "1m0")
+        tel_re = _lco_telescope_filename_re(inst)
+        inst_sites = phot.MULTISITE_SITES.get(inst, ())
+        inst_modes = phot.MULTISITE_MODES.get(inst, ())
         with get_conn(db) as conn:
             cur = conn.execute(
                 "SELECT DISTINCT filename FROM frames WHERE instrument = ? AND obsdate = ? AND object = ? AND filename IS NOT NULL AND filename != ''",
                 (inst, date, target),
             )
             filenames = [row[0].lower() for row in cur.fetchall() if row[0]]
-            sites = sorted({fn[:3] for fn in filenames} & set(phot.SINISTRO_SITES))
+            sites = sorted({fn[:3] for fn in filenames} & set(inst_sites))
             scoped = [fn for fn in filenames if not site or fn.startswith(site)]
             telescopes = sorted({
-                f"1m0-{m.group(1)}"
+                f"{tel_prefix}-{m.group(1)}"
                 for fn in scoped
-                if (m := _LCO_TELESCOPE_FILENAME_RE.match(fn))
+                if (m := tel_re.match(fn))
             })
             cur = conn.execute(
                 "SELECT DISTINCT read_mode FROM frames WHERE instrument = ? AND obsdate = ? AND object = ? AND read_mode IS NOT NULL AND read_mode != ''",
                 (inst, date, target),
             )
-            modes = sorted({row[0].lower() for row in cur.fetchall() if row[0]} & set(phot.SINISTRO_MODES))
+            modes = sorted({row[0].lower() for row in cur.fetchall() if row[0]} & set(inst_modes))
         return sites, telescopes, modes
     except Exception:
         return [], [], []
 
 
 def _site_required_error(db: str, inst: str, date: str, target: str, options: dict) -> str | None:
-    """Block a sinistro run that would silently merge multiple sites.
+    """Block a multi-site instrument run that would silently merge multiple sites.
 
     When the obslog holds more than one site for this target+date and no site is
     chosen, prose would combine frames from different telescopes into one
     mislabeled reduction (prose2 now aborts on this too). Require a choice.
     """
-    if inst != "sinistro":
+    if inst not in phot.MULTISITE_INSTRUMENTS:
         return None
     if (options.get("site") or "").strip():
         return None
@@ -1435,14 +1446,15 @@ def _site_required_error(db: str, inst: str, date: str, target: str, options: di
 
 
 def _telescope_required_error(db: str, inst: str, date: str, target: str, options: dict) -> str | None:
-    """Block a sinistro run that would silently merge multiple physical telescopes.
+    """Block a multi-site instrument run that would silently merge multiple
+    physical telescopes.
 
     Mirrors :func:`_site_required_error`: when the obslog (scoped to the chosen
-    site, if any) holds more than one physical 1m telescope for this
+    site, if any) holds more than one physical telescope for this
     target+date and none is chosen, prose would combine frames from different
     telescopes into one mislabeled reduction (prose2 aborts on this too).
     """
-    if inst != "sinistro":
+    if inst not in phot.MULTISITE_INSTRUMENTS:
         return None
     if (options.get("telescope") or "").strip():
         return None
@@ -1484,20 +1496,20 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
     inst = inst if inst in INSTRUMENTS else ""
     date = date if phot.valid_date(date) else ""
     target = (target or "").strip()
-    # Site/telescope/mode are sinistro-only view filters (which LCO
-    # site/physical telescope/readout mode's products to show). Site/mode are
-    # validated against the known sets here; telescope is open-ended (no fixed
-    # whitelist, LCO's 1m fleet changes over time) so only its shape is
-    # checked. Whether any of them are actually present is decided by
-    # list_outputs from the filenames.
+    # Site/telescope/mode are multi-site-instrument-only view filters (which
+    # LCO site/physical telescope/readout mode's products to show). Site/mode
+    # are validated against the instrument's known sets here; telescope is
+    # open-ended (no fixed whitelist, LCO's fleet changes over time) so only
+    # its shape is checked. Whether any of them are actually present is
+    # decided by list_outputs from the filenames.
     site = site.strip().lower()
-    if inst != "sinistro" or site not in phot.SINISTRO_SITES:
+    if inst not in phot.MULTISITE_INSTRUMENTS or site not in phot.MULTISITE_SITES.get(inst, ()):
         site = ""
     telescope = telescope.strip().lower()
-    if inst != "sinistro" or not phot.TELESCOPE_RE.match(telescope):
+    if inst not in phot.MULTISITE_INSTRUMENTS or not phot.TELESCOPE_RE.match(telescope):
         telescope = ""
     mode = mode.strip().lower()
-    if inst != "sinistro" or mode not in phot.SINISTRO_MODES:
+    if inst not in phot.MULTISITE_MODES or mode not in phot.MULTISITE_MODES.get(inst, ()):
         mode = ""
 
     route_target = target.replace(" ", "")
@@ -1527,9 +1539,12 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
 
     dates: list[str] = []
     targets: list[str] = []
-    available_sites: list[str] = ["lsc", "cpt", "coj", "tfn", "elp"]
+    # Instrument-specific fallback shown only until the real obslog query
+    # (below) narrows it; must not leak sinistro's site/mode codes into an
+    # sbig/qhy600 page (or vice versa) when that query comes back empty.
+    available_sites: list[str] = list(phot.MULTISITE_SITES.get(inst, ()))
     available_telescopes: list[str] = []
-    available_modes: list[str] = ["central_2k_2x2", "full_frame"]
+    available_modes: list[str] = list(phot.MULTISITE_MODES.get(inst, ()))
     outputs = None
     runs: list = []
     sel_run: str | None = None
@@ -1555,7 +1570,7 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
     available_bands: list[str] = []
     if inst and date and target:
         runs, run_outputs = phot.list_photometry_runs(inst, date, target)
-        if inst == "sinistro":
+        if inst in phot.MULTISITE_INSTRUMENTS:
             if site:
                 runs = [r for r in runs if r.is_legacy or r.site == site or not r.site]
             if telescope:
@@ -1690,17 +1705,17 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
     inst = inst if inst in INSTRUMENTS else ""
     date = date if phot.valid_date(date) else ""
     target = (target or "").strip()
-    # Sinistro-only view filters (which site / physical telescope / readout
-    # mode's lightcurves to list). Telescope is open-ended (no fixed whitelist)
-    # so only its shape is checked.
+    # Multi-site-instrument-only view filters (which site / physical
+    # telescope / readout mode's lightcurves to list). Telescope is
+    # open-ended (no fixed whitelist) so only its shape is checked.
     site = site.strip().lower()
-    if inst != "sinistro" or site not in phot.SINISTRO_SITES:
+    if inst not in phot.MULTISITE_INSTRUMENTS or site not in phot.MULTISITE_SITES.get(inst, ()):
         site = ""
     telescope = telescope.strip().lower()
-    if inst != "sinistro" or not phot.TELESCOPE_RE.match(telescope):
+    if inst not in phot.MULTISITE_INSTRUMENTS or not phot.TELESCOPE_RE.match(telescope):
         telescope = ""
     mode = mode.strip().lower()
-    if inst != "sinistro" or mode not in phot.SINISTRO_MODES:
+    if inst not in phot.MULTISITE_MODES or mode not in phot.MULTISITE_MODES.get(inst, ()):
         mode = ""
 
     run = (run or "").strip()
@@ -1757,20 +1772,20 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
                 created_at = datetime.datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M:%S')
             except Exception:
                 mtime, created_at = 0.0, "Unknown"
-            csite, ctelescope, cmode = fit.csv_site_mode(c.name) if inst == "sinistro" else (None, None, None)
+            csite, ctelescope, cmode = fit.csv_site_mode(c.name, inst) if inst in phot.MULTISITE_INSTRUMENTS else (None, None, None)
             crun = c.parent.name if "_runs" in c.parts else ""
             rows.append({"path": str(c), "name": c.name, "created_at": created_at,
                          "_mtime": mtime, "_site": csite, "_telescope": ctelescope, "_mode": cmode, "run_id": crun})
 
-        if inst == "sinistro":
-            # A sinistro date+target can hold multiple sites / physical
-            # telescopes / readout modes with identical bands. The picker
-            # defaults to showing ALL lightcurves (so the user can fit one
-            # site/telescope or deliberately combine several); the
+        if inst in phot.MULTISITE_INSTRUMENTS:
+            # A multi-site instrument's date+target can hold multiple sites /
+            # physical telescopes / readout modes with identical bands. The
+            # picker defaults to showing ALL lightcurves (so the user can fit
+            # one site/telescope or deliberately combine several); the
             # Site/Telescope/Mode chips optionally narrow the list. The run's
             # identity is derived from whatever is actually selected at launch.
             csv_sites = sorted({r["_site"] for r in rows if r["_site"]})
-            sel_site = site  # validated against SINISTRO_SITES above; "" == all
+            sel_site = site  # validated against MULTISITE_SITES[inst] above; "" == all
             csv_telescopes = sorted({
                 r["_telescope"] for r in rows
                 if r["_telescope"] and (not sel_site or r["_site"] == sel_site)
@@ -1794,7 +1809,7 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
         # ``run`` unspecified -> newest; ``__legacy__`` -> the legacy single-dir
         # run (run_id ""); an explicit run_id -> that run.
         runs = fit.list_fit_runs(inst, date, target)
-        if inst == "sinistro":
+        if inst in phot.MULTISITE_INSTRUMENTS:
             if sel_site:
                 runs = [r for r in runs if r.is_legacy or r.site == sel_site or not r.site]
             if sel_telescope:
@@ -1818,6 +1833,8 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
             outputs = fit.get_fit_outputs(inst, date, target, run_id=sel_run or None)
         else:
             outputs = None
+
+    if target:
         target_params = fit.get_target_parameters(target)
 
     # Collect all runs for this target across all instruments/dates,
@@ -1889,6 +1906,31 @@ async def transit_fit_query_archive(target: str, source: str = "nasa", inst: str
     def clean_archive_name(value: str) -> str:
         return re.sub(r"[^0-9a-zA-Z]", "", value or "").lower()
 
+    def split_toi(value: str) -> tuple[int | None, int | None]:
+        """Split a TOI designation into ``(host number, candidate index)``.
+
+        ``TOI-1404.02`` -> ``(1404, 2)`` and ``toi01404`` -> ``(1404, None)``.
+        The candidate index is the only thing distinguishing two planets around
+        one star, so it must survive the comparison; int() normalizes the zero
+        padding on both halves.
+        """
+        match = re.search(r'(\d+)(?:\.(\d+))?', value or "")
+        if not match:
+            return None, None
+        sub = match.group(2)
+        return int(match.group(1)), (int(sub) if sub is not None else None)
+
+    # The candidate a query resolves to when it names a star, not a planet, and
+    # the rank given to a row whose designation carries no candidate index.
+    DEFAULT_CANDIDATE = 1
+    _UNRANKED_CANDIDATE = 10**6
+
+    def candidate_letter(sub: int | None) -> str:
+        """Map a TOI candidate index to a planet letter: ``.01`` -> ``b``."""
+        if sub is None or not 1 <= sub <= 25:
+            return "b"
+        return chr(ord("b") + sub - 1)
+
     def is_planet_of_lookup_name(clean_planet_name: str) -> bool:
         """Match ``HOST b`` while rejecting arbitrary prefix continuations."""
         return any(
@@ -1927,8 +1969,24 @@ async def transit_fit_query_archive(target: str, source: str = "nasa", inst: str
             return int(match.group(0)) if match else None
 
         target_lower = target.lower()
-        target_num = extract_number(target_lower)
+        target_clean = re.sub(r"[^0-9a-zA-Z]", "", target_lower)
+        target_num, target_sub = split_toi(target_lower)
         best_row = None
+        best_sub = None
+
+        def prefer(row: dict, sub: int | None) -> bool:
+            """Track the best star-level match; True once it is settled.
+
+            A query naming a star rather than a planet (a bare host number or a
+            TIC ID) resolves to the ``.01`` candidate, never to whichever row the
+            file lists first -- TOI-1726 and TOI-1772 store ``.02`` ahead of
+            ``.01``. Every host in the catalog has a ``.01``, so the lowest-index
+            fallback only guards against a future one that does not.
+            """
+            nonlocal best_row, best_sub
+            if best_row is None or (sub is not None and (best_sub is None or sub < best_sub)):
+                best_row, best_sub = row, sub
+            return best_sub == DEFAULT_CANDIDATE
 
         with open(csv_path, mode='r', encoding='utf-8') as f:
             reader = csv.DictReader(f)
@@ -1940,37 +1998,46 @@ async def transit_fit_query_archive(target: str, source: str = "nasa", inst: str
 
                 # Match TOI by numeric value (handles leading zeros like toi02688 vs TOI-688)
                 if toi:
-                    toi_num = extract_number(toi)
-                    if target_num and toi_num and target_num == toi_num:
-                        best_row = row
-                        break
+                    toi_num, toi_sub = split_toi(toi)
+                    if target_num is not None and toi_num is not None and target_num == toi_num:
+                        if target_sub is None:
+                            # Bare host number: resolve to the .01 candidate.
+                            if prefer(row, toi_sub):
+                                break
+                        elif target_sub == toi_sub:
+                            # An explicit ".NN" must match exactly; a sibling
+                            # candidate is a different planet, not a near miss.
+                            best_row, best_sub = row, toi_sub
+                            break
+                        continue
                     # Also try exact prefix match for formats like toi688 or toi-688
-                    target_clean = re.sub(r"[^0-9a-zA-Z]", "", target_lower)
                     toi_clean = re.sub(r"[^0-9a-zA-Z]", "", toi.lower())
                     if target_clean == toi_clean or (toi_num and target_clean == f"toi{toi_num}"):
-                        best_row = row
+                        best_row, best_sub = row, toi_sub
                         break
 
                 # Match planet name (exact or prefix)
                 if planet_name:
-                    target_clean = re.sub(r"[^0-9a-zA-Z]", "", target_lower)
                     planet_clean = re.sub(r"[^0-9a-zA-Z]", "", planet_name.lower())
                     if target_clean == planet_clean:
                         best_row = row
                         break
 
-                # Match TIC ID by numeric value
+                # Match TIC ID by numeric value.  A TIC query names a star, not a
+                # planet, so it inherits the lowest-candidate rule above.
                 if tic_id:
                     tic_num = extract_number(tic_id)
-                    if target_num and tic_num and target_num == tic_num:
-                        best_row = row
-                        break
-                    target_clean = re.sub(r"[^0-9a-zA-Z]", "", target_lower)
                     tic_clean = re.sub(r"[^0-9a-zA-Z]", "", tic_id.lower())
-                    if target_clean == tic_clean or (tic_num and target_clean == f"tic{tic_num}"):
-                        best_row = row
-                        break
-                    
+                    matches_tic = (
+                        (target_num is not None and tic_num is not None and target_num == tic_num)
+                        or target_clean == tic_clean
+                        or (tic_num and target_clean == f"tic{tic_num}")
+                    )
+                    if matches_tic:
+                        if prefer(row, split_toi(toi)[1]):
+                            break
+                        continue
+
         if not best_row:
             return None
 
@@ -1989,7 +2056,7 @@ async def transit_fit_query_archive(target: str, source: str = "nasa", inst: str
         dur_err = _float_or_none(best_row.get("duration (hours) err"))
         
         params = {
-            "planets": "b",
+            "planets": candidate_letter(split_toi(toi_val)[1]),
             "teff": teff,
             "teff_unc": teff_err,
             "logg": logg,
@@ -2243,8 +2310,21 @@ async def transit_fit_query_archive(target: str, source: str = "nasa", inst: str
         target_lit = _adql_literal(clean_target)
         target_like = _adql_literal(f"%{target}%")
         clean_like = _adql_literal(f"%{clean_target}%")
-        
-        q = f"SELECT {col_str} FROM toi WHERE toi = {target_lit} OR toidisplay LIKE {target_like} OR toi LIKE {clean_like}"
+
+        # ``clean_target`` deliberately drops the ".NN" so the host number can
+        # drive the LIKE fallbacks, but a query naming one candidate must not be
+        # answerable by a sibling planet of the same star.  Rebuild the canonical
+        # designation and both narrow the query and harden the scoring with it.
+        toi_host, toi_sub = split_toi(target)
+        exact_toi = f"{toi_host}.{toi_sub:02d}" if toi_host is not None and toi_sub is not None else ""
+
+        if exact_toi:
+            q = (
+                f"SELECT {col_str} FROM toi WHERE toi = {_adql_literal(exact_toi)}"
+                f" OR toidisplay LIKE {_adql_literal(f'%{exact_toi}%')}"
+            )
+        else:
+            q = f"SELECT {col_str} FROM toi WHERE toi = {target_lit} OR toidisplay LIKE {target_like} OR toi LIKE {clean_like}"
         data = []
         url = 'https://exoplanetarchive.ipac.caltech.edu/TAP/sync?' + urllib.parse.urlencode({'query': q, 'format': 'json'})
         try:
@@ -2253,22 +2333,34 @@ async def transit_fit_query_archive(target: str, source: str = "nasa", inst: str
             if res:
                 # Sort to prioritize: toi = clean_target (3), toidisplay LIKE target (2), toi LIKE clean_target (1)
                 best_row = None
-                best_score = -1
+                best_key = None
                 for row in res:
                     r_toi = str(row.get("toi", "")).strip()
                     r_toidisplay = str(row.get("toidisplay", "")).strip()
 
                     score = -1
-                    if r_toi == clean_target:
+                    if exact_toi:
+                        # Only the named candidate qualifies; a LIKE hit on a
+                        # sibling stays unscored and is discarded below.
+                        if split_toi(r_toi) == (toi_host, toi_sub):
+                            score = 3
+                    elif r_toi == clean_target:
                         score = 3
                     elif target.lower() in r_toidisplay.lower():
                         score = 2
                     elif clean_target in r_toi:
                         score = 1
 
-                    if score > best_score:
-                        best_score = score
-                        best_row = row
+                    if score < 0:
+                        continue
+
+                    # A star-level LIKE scores every candidate of the host alike,
+                    # so break the tie on the candidate index rather than on the
+                    # order the archive happened to return the rows in.
+                    r_sub = split_toi(r_toi)[1]
+                    key = (score, -(r_sub if r_sub is not None else _UNRANKED_CANDIDATE))
+                    if best_key is None or key > best_key:
+                        best_key, best_row = key, row
                 if best_row:
                     data = [best_row]
         except Exception:
@@ -2282,7 +2374,7 @@ async def transit_fit_query_archive(target: str, source: str = "nasa", inst: str
         pl_name = toi_display or target
 
         params = {
-            "planets": "b",
+            "planets": candidate_letter(split_toi(str(row.get("toi", "")))[1]),
             "teff": row.get("st_teff"),
             "teff_unc": get_unc(row.get("st_tefferr1"), row.get("st_tefferr2")),
             "logg": row.get("st_logg"),
@@ -2708,7 +2800,8 @@ def exposure_calculate(payload: dict = Body(...)):
     mode = payload.get("mode", "exptime")
     exptime = payload.get("exptime")
     target_adu = payload.get("target_adu")
-    confmode = payload.get("confmode", "central_2k_2x2") if inst == "sinistro" else None
+    _inst_modes = phot.MULTISITE_MODES.get(inst)
+    confmode = payload.get("confmode", _inst_modes[0]) if _inst_modes else None
     if exptime is not None:
         exptime = float(exptime)
     if target_adu is not None:
@@ -3016,12 +3109,15 @@ def fov_page(inst: str = "", target: str = ""):
     readout_modes: dict[str, list[dict[str, str]]] = {}
     fov_sizes = {}
     for name in _FOV_INSTRUMENTS:
-        if name == "sinistro":
-            # Show the default (central_2k_2x2) size; full_frame is a selectable option
-            size_arcmin = fov_opt.SINISTRO_MODES["central_2k_2x2"] * 2.0 / 60.0
+        inst_modes = fov_opt.MULTISITE_MODE_HALFSIZES.get(name)
+        if inst_modes:
+            # Show the default (first-listed) mode's size; the rest are
+            # selectable options.
+            default_half = next(iter(inst_modes.values()))
+            size_arcmin = default_half * 2.0 / 60.0
             readout_modes[name] = [
                 {"value": mode, "label": f"{mode} ({round(half_arcsec * 2.0 / 60.0, 1)}′)"}
-                for mode, half_arcsec in fov_opt.SINISTRO_MODES.items()
+                for mode, half_arcsec in inst_modes.items()
             ]
         else:
             size_arcmin = fov_opt.load_fov_halfsize_arcsec(name) * 2.0 / 60.0

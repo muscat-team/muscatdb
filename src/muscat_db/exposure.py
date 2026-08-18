@@ -168,6 +168,18 @@ INSTRUMENT_PARAMS = {
         "bands": "Broadband optical filters",
         "url": "https://lco.global/observatory/instruments/sinistro/",
     },
+    # Verified on real /data/SBIGSTL6303 BANZAI e91 headers: SATURATE=102400
+    # e- at GAIN=1.0, PIXSCALE=0.58. Aperture is the LCO 0.4m network's
+    # historical 400mm optical tube. No site/fov/bands/url yet: unlike the
+    # instruments above, no prose2 .telescope file exists for this camera to
+    # verify field of view or filter set against.
+    "sbig": {"full_well": 102400, "gain": 1.0, "pixel_scale": 0.58, "aperture_m": 0.4},
+    # Verified on a real archived QHY600CMOS header
+    # (coj0m416-sq36-20260804-0098-e91, central30x30 mode): SATURATE=MAXLIN=
+    # 47400 e- at GAIN=1.0, PIXSCALE=0.74. Aperture is the DeltaRho 350's
+    # published 350mm optical tube. No site/fov/bands/url yet, same reason as
+    # sbig above.
+    "qhy600": {"full_well": 47400, "gain": 1.0, "pixel_scale": 0.74, "aperture_m": 0.35},
 }
 
 # Empirical coefficients for MuSCAT3 from peak_count_estimator.
@@ -230,7 +242,7 @@ def _full_well_gain(instrument: str, band: str) -> tuple[float, float]:
 # native->electron conversion. The physical gain in INSTRUMENT_PARAMS (1.8 for
 # muscat3/muscat4) is retained only for cross-instrument coef scaling
 # (_scale_coef), not for this conversion.
-_ELECTRON_NATIVE_INSTRUMENTS = frozenset({"muscat3", "muscat4", "sinistro"})
+_ELECTRON_NATIVE_INSTRUMENTS = frozenset({"muscat3", "muscat4", "sinistro", "sbig", "qhy600"})
 
 
 def _electron_gain(instrument: str) -> float:

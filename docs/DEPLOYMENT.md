@@ -134,13 +134,31 @@ pointing somewhere else is not obvious from the directory name alone:
 | timer | `github.com/john-livingston/timer` |
 | harmonic | `github.com/john-livingston/harmonic` |
 
+The conda environments supply each engine's dependencies; the code itself comes from
+these checkouts through editable installs, so the ref a checkout sits on is the
+version of the engine that runs. `timer` and `harmonic` record `editable: true` in
+their `direct_url.json` pointing back here, and `prose` imports from
+`ext_tools/prose2/prose/__init__.py`. See #79 for what is missing about the
+environments themselves.
+
+A remote alone does not identify what runs, because every engine is checked out on
+a branch rather than at a release, and none of those branch names exists on the
+remote it tracks. Record the ref and commit alongside the remote, and re-record them
+whenever an engine is updated on the host. A branch name is not enough on its own:
+it does not let anyone else reproduce a run, and a commit that was never pushed
+cannot be recovered at all if this host is lost.
+
+The state observed at any given time is tracked in the issue that covers it rather
+than here, so this section does not go stale: see #77.
+
 Verify before trusting a pipeline result, since a fork can be behind upstream or
 carry a patch that exists in no release:
 
 ```bash
 for e in prose2 timer harmonic; do
   d="$HOME/github/research/project/ext_tools/$e"
-  printf '%-9s %s @ %s\n' "$e" "$(git -C "$d" remote get-url origin)" "$(git -C "$d" rev-parse --short HEAD)"
+  printf '%-9s %s @ %s %s\n' "$e" "$(git -C "$d" remote get-url origin)" \
+    "$(git -C "$d" rev-parse --abbrev-ref HEAD)" "$(git -C "$d" rev-parse --short HEAD)"
   git -C "$d" status --short | head -3
 done
 ```

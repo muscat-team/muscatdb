@@ -192,12 +192,6 @@ def scan_date(
     Returns {"total": int, "per_ccd": {ccd: count}} — falsy if no files found.
     """
     inst = INSTRUMENTS[inst_name]
-    logdir = f"{OBSLOG_BASE}/{inst_name}/{obsdate}"
-    try:
-        os.makedirs(logdir, exist_ok=True)
-    except (PermissionError, OSError) as e:
-        print(f"[warn] cannot create {logdir}: {e}")
-        return {}
 
     file_ccd_pairs: list[tuple[str, int]] = []
     for ccd in range(inst.nccd):
@@ -205,6 +199,19 @@ def scan_date(
             file_ccd_pairs.append((fp, ccd))
 
     if not file_ccd_pairs:
+        return {}
+
+    # Created only once there is something to write. scan_missing_dates()
+    # treats this directory's existence as "already scanned" regardless of
+    # whether it holds a CSV, so creating it unconditionally (the previous
+    # behaviour) permanently hid any date whose archive delivery lagged past
+    # the scan attempt: the marker directory outlives the empty result, and
+    # nothing ever retries a date that already "exists".
+    logdir = f"{OBSLOG_BASE}/{inst_name}/{obsdate}"
+    try:
+        os.makedirs(logdir, exist_ok=True)
+    except (PermissionError, OSError) as e:
+        print(f"[warn] cannot create {logdir}: {e}")
         return {}
 
     total = len(file_ccd_pairs)

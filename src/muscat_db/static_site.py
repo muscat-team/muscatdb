@@ -334,7 +334,7 @@ def _install_scrub(web) -> None:
     def jobs_scrubbed():
         selected: list[dict] = []
         counts: dict[str, int] = {}
-        for job in orig["_jobs_with_lco_archive_rows"]():
+        for job in reversed(orig["_jobs_with_lco_archive_rows"]()):
             job_type = job.get("type", "photometry")
             if counts.get(job_type, 0) >= _STATIC_JOB_EXAMPLES_PER_TYPE:
                 continue
@@ -397,7 +397,7 @@ def _drilldown_urls(database, instruments) -> list[str]:
         if not dates:
             continue
         urls.append(f"/{inst}")
-        date = dates[0]["obsdate"]
+        date = dates[-1]["obsdate"]
         urls.append(f"/{inst}/{date}")
         summaries = database.get_summaries(db, inst, date)
         ccds = sorted({s["ccd"] for s in summaries})
@@ -441,7 +441,7 @@ def _transit_fit_examples(instruments, limit: int) -> list[tuple[str, str, str]]
         inst_dir = base / inst
         if not inst_dir.is_dir():
             continue
-        for date_dir in sorted(inst_dir.iterdir(), reverse=True):
+        for date_dir in sorted(inst_dir.iterdir()):
             if not date_dir.is_dir() or not _DATE_RE.match(date_dir.name):
                 continue
             for target_dir in sorted(date_dir.iterdir()):
@@ -575,7 +575,7 @@ def _rewrite_link(
     if path.startswith("/static/"):
         return prefix + path.lstrip("/")
 
-    # Query-bearing detail links must retain their identity.  The queryless
+    # Query-bearing detail links must retain their identity. The queryless
     # navbar parent intentionally points at the first populated example, but a
     # link for a different target/dataset should resolve to its own static-tree
     # location (which may be outside the representative snapshot and 404) rather

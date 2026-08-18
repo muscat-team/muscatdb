@@ -41,7 +41,13 @@ SITES_FOR_KIND: dict[str, list[str]] = {
     "muscat": ["ogg", "coj"],                       # 2M0-SCICAM-MUSCAT (MuSCAT3/4)
     "muscat3": ["ogg"],
     "muscat4": ["coj"],
-    "sinistro": ["lsc", "cpt", "coj", "tfn", "elp"],  # 1m network
+    "sinistro": ["lsc", "cpt", "coj", "tfn", "elp"],  # 1m network, no unit at ogg
+    # LCO 0.4m network, all 6 sites. sbig is archival-only (no live LCO API
+    # instrument_type code -- retired); qhy600 is the current live camera
+    # (0M4-SCICAM-QHY600). Both still need observability across every site
+    # the network has ever/currently covers frames from.
+    "sbig": ["ogg", "coj", "lsc", "cpt", "tfn", "elp"],
+    "qhy600": ["ogg", "coj", "lsc", "cpt", "tfn", "elp"],
 }
 
 # Named twilight options -> sun altitude limit (deg). A sample counts as "night"

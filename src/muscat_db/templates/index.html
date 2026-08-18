@@ -82,7 +82,7 @@
   </thead>
   <tbody>
   {% for t in rows %}
-    {% set display_dates %}{% for d in t.dates %}{% set inst = t.date_to_inst.get(d, t.instruments[0] if t.instruments else '') %}{{ d }}{% if inst == 'muscat' %}(M1){% elif inst == 'muscat2' %}(M2){% elif inst == 'muscat3' %}(M3){% elif inst == 'muscat4' %}(M4){% elif inst == 'sinistro' %}(S){% endif %}{% if not loop.last %},{% endif %}{% endfor %}{% endset %}
+    {% set display_dates %}{% for d in t.dates %}{% set inst = t.date_to_inst.get(d, t.instruments[0] if t.instruments else '') %}{{ d }}{% if inst == 'muscat' %}(M1){% elif inst == 'muscat2' %}(M2){% elif inst == 'muscat3' %}(M3){% elif inst == 'muscat4' %}(M4){% elif inst == 'sinistro' %}(S){% elif inst == 'sbig' %}(SB){% elif inst == 'qhy600' %}(Q){% endif %}{% if not loop.last %},{% endif %}{% endfor %}{% endset %}
     <tr data-name="{{ t.object }}"
         data-norm-name="{{ t.norm_name }}"
         data-ra="{{ t.ra }}"
@@ -105,7 +105,7 @@
         {% for d in t.dates %}
           {% set inst = t.date_to_inst.get(d, t.instruments[0] if t.instruments else '') %}
           <div style="margin-bottom:2px;">
-            <a href="/{{ inst }}/{{ d }}">{{ d }}{% if inst == 'muscat' %}(M1){% elif inst == 'muscat2' %}(M2){% elif inst == 'muscat3' %}(M3){% elif inst == 'muscat4' %}(M4){% elif inst == 'sinistro' %}(S){% endif %}</a>
+            <a href="/{{ inst }}/{{ d }}">{{ d }}{% if inst == 'muscat' %}(M1){% elif inst == 'muscat2' %}(M2){% elif inst == 'muscat3' %}(M3){% elif inst == 'muscat4' %}(M4){% elif inst == 'sinistro' %}(S){% elif inst == 'sbig' %}(SB){% elif inst == 'qhy600' %}(Q){% endif %}</a>
           </div>
         {% endfor %}
       </td>

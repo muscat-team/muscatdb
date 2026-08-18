@@ -69,26 +69,69 @@ SINISTRO_MODES: dict[str, float] = {
 }
 _FALLBACK_HALF_ARCSEC["sinistro"] = SINISTRO_MODES["central_2k_2x2"]  # default
 
+# LCO 0.4m network readout modes (half-width in arcsec). qhy600's codes/specs
+# sbig's is a real BANZAI-trimmed SCI dim; qhy600's central30x30 is verified
+# on a real archived header (coj0m416-sq36-20260804-0098-e91: NAXIS 2400x2400
+# @ PIXSCALE=0.74"/pix); full_frame remains inferred from the nominal
+# (untrimmed) sensor size -- not yet confirmed against a real frame taken in
+# that mode. sbig has a single CONFMODE="default" on real archive headers
+# (no multi-mode split needed). Shorter chip axis used for both
+# (square-footprint approximation, so the assumed square field never
+# overstates true rectangular coverage):
+#   sbig:    2042 px (real BANZAI-trimmed SCI dim) @ 0.58 "/pix = 9.9' half
+#   qhy600 central30x30: 2400 px (real) @ 0.74 "/pix           = 14.8' half
+#   qhy600 full_frame:   6388 px (nominal, untrimmed) @ 0.74 "/pix = 39.4' half
+_FALLBACK_HALF_ARCSEC["sbig"] = 0.58 * 2042 / 2.0
+QHY600_MODES: dict[str, float] = {
+    "central30x30": 0.74 * 2400 / 2.0,
+    "full_frame": 0.74 * 6388 / 2.0,
+}
+_FALLBACK_HALF_ARCSEC["qhy600"] = QHY600_MODES["central30x30"]  # default
+
+# Per-instrument readout-mode -> half-width lookup, for optimize_fov's
+# mode-aware field-size selection.
+MULTISITE_MODE_HALFSIZES: dict[str, dict[str, float]] = {
+    "sinistro": SINISTRO_MODES,
+    "qhy600": QHY600_MODES,
+}
+
 # Observatory locations (latitude in degrees), taken from prose2/data/*.telescope latlong fields.
 OBSERVATORY_LOCATIONS: dict[str, float] = {
     "muscat": 34.58,         # OAO, Okayama, Japan
     "muscat2": 28.30,        # TCS, Teide, Tenerife (28.3005°N)
     "muscat3": 20.72,        # FTN, Haleakala, Maui (20.71552°N)
     "muscat4": -31.27,       # FTS, Siding Spring, Australia (-31.273333°)
-    # Sinistro has multiple sites — see SINISTRO_SITE_LATITUDES below.
+    # Multi-site instruments have several sites — see MULTISITE_SITE_LATITUDES below.
 }
 
-# Sinistro is deployed across the full LCO 1m network.  Observability is
-# satisfied if the target is reachable from ANY of these sites.
+# Instruments deployed across multiple LCO sites. Observability is satisfied
+# if the target is reachable from ANY of the instrument's sites.
 # Latitudes from astropy's EarthLocation registry (matching transit_obs.py).
-SINISTRO_SITE_LATITUDES: list[float] = [
-    30.67167,    # elp – McDonald Observatory, Texas (+30.67°N)
-    28.30000,    # tfn – Teide, Tenerife (+28.30°N)
-    20.71552,    # ogg – Haleakala, Maui (+20.72°N)  [also hosts MuSCAT3]
-    -30.16528,   # lsc – Cerro Tololo, Chile
-    -31.27336,   # coj – Siding Spring, Australia    [also hosts MuSCAT4]
-    -32.37582,   # cpt – Sutherland, South Africa
-]
+# sinistro: LCO 1m network -- confirmed no unit at ogg (Haleakala hosts a 2m0
+# MuSCAT3 and 0.4m units, but no 1m0/Sinistro).
+# sbig/qhy600: LCO 0.4m network, deployed at all 6 LCO sites including ogg.
+MULTISITE_SITE_LATITUDES: dict[str, list[float]] = {
+    "sinistro": [
+        30.67167,    # elp – McDonald Observatory, Texas (+30.67°N)
+        28.30000,    # tfn – Teide, Tenerife (+28.30°N)
+        -30.16528,   # lsc – Cerro Tololo, Chile
+        -31.27336,   # coj – Siding Spring, Australia    [also hosts MuSCAT4]
+        -32.37582,   # cpt – Sutherland, South Africa
+    ],
+    "sbig": [
+        30.67167,    # elp – McDonald Observatory, Texas (+30.67°N)
+        28.30000,    # tfn – Teide, Tenerife (+28.30°N)
+        20.71552,    # ogg – Haleakala, Maui (+20.72°N)  [also hosts MuSCAT3]
+        -30.16528,   # lsc – Cerro Tololo, Chile
+        -31.27336,   # coj – Siding Spring, Australia    [also hosts MuSCAT4]
+        -32.37582,   # cpt – Sutherland, South Africa
+    ],
+    "qhy600": [
+        30.67167, 28.30000, 20.71552, -30.16528, -31.27336, -32.37582,
+    ],
+}
+# Backwards-compatible alias (still imported/used by earlier tests).
+SINISTRO_SITE_LATITUDES: list[float] = MULTISITE_SITE_LATITUDES["sinistro"]
 
 # Minimum altitude (degrees above horizon) for observable targets.
 MIN_ALTITUDE_DEG = 20.0
@@ -113,10 +156,13 @@ def is_observable(dec: float, instrument: str, min_altitude: float = MIN_ALTITUD
     → |obs_lat − dec| ≤ 90° − min_altitude
     → obs_lat − (90° − min_altitude) ≤ dec ≤ obs_lat + (90° − min_altitude)
     """
-    if instrument == "sinistro":
+    if instrument in MULTISITE_SITE_LATITUDES:
         return any(
             lo <= dec <= hi
-            for lo, hi in (_dec_range_for_lat(lat, min_altitude) for lat in SINISTRO_SITE_LATITUDES)
+            for lo, hi in (
+                _dec_range_for_lat(lat, min_altitude)
+                for lat in MULTISITE_SITE_LATITUDES[instrument]
+            )
         )
     obs_lat = OBSERVATORY_LOCATIONS.get(instrument)
     if obs_lat is None:
@@ -130,8 +176,11 @@ def get_observable_range(instrument: str, min_altitude: float = MIN_ALTITUDE_DEG
 
     For Sinistro this is the union across all LCO 1m sites.
     """
-    if instrument == "sinistro":
-        ranges = [_dec_range_for_lat(lat, min_altitude) for lat in SINISTRO_SITE_LATITUDES]
+    if instrument in MULTISITE_SITE_LATITUDES:
+        ranges = [
+            _dec_range_for_lat(lat, min_altitude)
+            for lat in MULTISITE_SITE_LATITUDES[instrument]
+        ]
         return (min(lo for lo, _ in ranges), max(hi for _, hi in ranges))
     obs_lat = OBSERVATORY_LOCATIONS.get(instrument, 0.0)
     return _dec_range_for_lat(obs_lat, min_altitude)
@@ -777,7 +826,10 @@ def optimize(
     If ``comp_margin_arcsec`` is None, defaults to ``margin_arcsec``.
 
     For Sinistro, ``sinistro_mode`` selects "full_frame" (26'x26') or
-    "central_2k_2x2" (13'x13', default).
+    "central_2k_2x2" (13'x13', default). The same parameter also carries
+    qhy600's readout mode ("full_frame" / "central30x30", the latter
+    default) -- named after its original sinistro-only use, but generalized
+    to any mode-capable multi-site instrument (see MULTISITE_MODE_HALFSIZES).
 
     If ``avoid_mag`` is given, any pointing whose footprint contains a star
     brighter than ``avoid_mag`` (Gmag) is rejected; the science target itself is
@@ -796,8 +848,9 @@ def optimize(
 
     # --- field size ---
     try:
-        if instrument == "sinistro" and sinistro_mode in SINISTRO_MODES:
-            half = SINISTRO_MODES[sinistro_mode]
+        inst_modes = MULTISITE_MODE_HALFSIZES.get(instrument)
+        if inst_modes and sinistro_mode in inst_modes:
+            half = inst_modes[sinistro_mode]
         else:
             half = load_fov_halfsize_arcsec(instrument)
     except ValueError as exc:
