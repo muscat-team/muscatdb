@@ -39,6 +39,7 @@ jobs:
           ISSUE_TITLE: ${{ github.event.issue.title }}
           ISSUE_URL: ${{ github.event.issue.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HAS_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL != '' }}
         run: |
           set -euo pipefail
           skip=false
@@ -82,6 +83,12 @@ jobs:
               fi
               ;;
           esac
+          # A fork PR carries no repository secrets. Skip quietly instead of
+          # letting the notify step fail and post a red X on the first
+          # outside contribution, per #64.
+          if [ "$HAS_WEBHOOK" != "true" ]; then
+            skip=true
+          fi
           echo "skip=${skip}" >> "$GITHUB_OUTPUT"
           echo "color=${color}" >> "$GITHUB_OUTPUT"
           echo "url=${url}" >> "$GITHUB_OUTPUT"
