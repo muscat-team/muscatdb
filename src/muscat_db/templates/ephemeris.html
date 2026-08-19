@@ -2913,10 +2913,18 @@
         };
       }
 
+      // Reserve a total 0.15 domain fraction for inter-row gaps, split evenly
+      // across the (rows - 1) gaps between rows -- but only when there is a
+      // second row to gap against. A single row has nothing to separate, so
+      // it gets the full [0, 1] domain instead of leaving a phantom 15% of
+      // blank space at the bottom (the common case after planets with no
+      // fitted transits are filtered out of the plot).
+      const totalGapFraction = rows > 1 ? 0.15 : 0;
+      const heightFraction = (1 - totalGapFraction) / rows;
+      const gap = rows > 1 ? totalGapFraction / (rows - 1) : 0;
+
       planets.forEach((pl, i) => {
         const yaxisKey = i === 0 ? 'y' : 'y' + (i + 1);
-        const heightFraction = 0.85 / rows;
-        const gap = 0.15 / (rows - 1 || 1);
         const start = 1 - (i + 1) * heightFraction - i * gap;
         const end = start + heightFraction;
         
@@ -3146,15 +3154,26 @@
       grid: isDark ? '#2e3348' : '#d8dce6'
     };
 
+    // Export at the live view's own aspect ratio, scaled up for resolution --
+    // margins and legend position are tuned in pixels for OC_PLOT_BASE_HEIGHT,
+    // so exporting at an unrelated fixed height (previously 600 vs the live
+    // 450 baseline) stretched the domain-fraction subplot rows to fill extra
+    // vertical space the live view never had, showing up as unused white
+    // space only in the downloaded PNG.
+    const exportWidth = 1200;
+    const liveWidth = plotDiv.clientWidth || 1;
+    const liveHeight = plotDiv.clientHeight || (OC_PLOT_BASE_HEIGHT + (showTwin
+      ? OC_PLOT_UTC_AXIS_EXTRA_HEIGHT
+      : (showEpochTwin ? OC_PLOT_EPOCH_AXIS_EXTRA_HEIGHT : 0)));
+    const exportHeight = Math.round(exportWidth * (liveHeight / liveWidth));
+
     // Always apply a solid white background for image export, then restore
     // the live theme's colors afterward.
     Plotly.relayout(plotDiv, plotAxisColorLayout(planets, showTwin, showEpochTwin, exportPalette)).then(() => {
       Plotly.downloadImage(plotDiv, {
         format: 'png',
-        width: 1200,
-        height: 600 + (showTwin
-          ? OC_PLOT_UTC_AXIS_EXTRA_HEIGHT
-          : (showEpochTwin ? OC_PLOT_EPOCH_AXIS_EXTRA_HEIGHT : 0)),
+        width: exportWidth,
+        height: exportHeight,
         filename: filename,
         background: '#ffffff'
       }).then(() => {
