@@ -36,8 +36,11 @@ flowchart TD
 
 ## Pipeline engines
 
-muscat-db orchestrates three external packages, each in its own conda environment.
-It stores their inputs, launches them as background jobs, and renders their outputs;
+muscat-db orchestrates three external packages. Each package's code lives in its
+own `ext_tools/` checkout and is installed editable into a dedicated conda
+environment, which supplies its dependencies rather than the code itself — so the
+checkout's git ref, not the environment, determines what actually runs. muscat-db
+stores their inputs, launches them as background jobs, and renders their outputs;
 the science lives in the packages themselves.
 
 | Stage | Engine | Sampler | Outputs |

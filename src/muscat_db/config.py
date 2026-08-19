@@ -66,6 +66,7 @@ ENV_VARS: tuple[EnvVar, ...] = (
         "<repo>/../ext_tools/timer",
         "timer repository path (transit-fit source; read by the @bot chat assistant for grounding)",
     ),
+    EnvVar("MUSCAT_TIMER_CONDA_ENV", "timer", "Conda env supplying timer's dependencies"),
     EnvVar(
         "MUSCAT_TTV_DIR",
         str(Path.home() / "ql" / "harmonic"),
@@ -76,6 +77,7 @@ ENV_VARS: tuple[EnvVar, ...] = (
         "<repo>/../ext_tools/harmonic",
         "harmonic repository path (TTV-fit source; read by the @bot chat assistant for grounding)",
     ),
+    EnvVar("MUSCAT_HARMONIC_CONDA_ENV", "harmonic", "Conda env supplying harmonic's dependencies"),
     EnvVar(
         "MUSCAT_QUICKLOOK_URL",
         "http://127.0.0.1:5000",
