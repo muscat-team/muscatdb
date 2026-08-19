@@ -188,6 +188,8 @@
   </div>
     <div id="plot-planet-settings" style="margin-top: 0.75rem; border-top: 1px solid var(--border); padding-top: 0.75rem; display: none; flex-direction: column; gap: 0.5rem;">
     </div>
+    <div id="plot-instrument-settings" style="margin-top: 0.75rem; border-top: 1px solid var(--border); padding-top: 0.75rem; display: none; flex-direction: column; gap: 0.5rem;">
+    </div>
   </div>
 </details>
 
@@ -559,18 +561,52 @@
     return date.toISOString().slice(2, 10).replace(/-/g, '');
   }
 
-  // Instrument to Plotly Marker Symbol mapper
-  function getSymbolForInstrument(inst) {
+  // Instrument to Plotly Marker Symbol mapper, used when a planet's marker
+  // setting is "Instrument-dependent". Bucketed by category rather than raw
+  // instrument string since e.g. "muscat2_g"/"muscat2_r" (band-suffixed
+  // instrument names) should share one symbol. Order matters: muscat2/3/4
+  // must be checked before the plain "muscat" substring match.
+  const INSTRUMENT_SYMBOL_CATEGORIES = [
+    { key: 'manual', label: 'Manual / imported', match: n => n.includes('manual'), defaultSymbol: 'star' },
+    { key: 'muscat4', label: 'MuSCAT4', match: n => n.includes('muscat4'), defaultSymbol: 'diamond' },
+    { key: 'muscat3', label: 'MuSCAT3', match: n => n.includes('muscat3'), defaultSymbol: 'triangle-up' },
+    { key: 'muscat2', label: 'MuSCAT2', match: n => n.includes('muscat2'), defaultSymbol: 'square' },
+    { key: 'muscat', label: 'MuSCAT', match: n => n.includes('muscat'), defaultSymbol: 'circle' },
+    { key: 'sinistro', label: 'Sinistro', match: n => n.includes('sinistro'), defaultSymbol: 'triangle-down' },
+    { key: 'qhy600', label: 'QHY600', match: n => n.includes('qhy600'), defaultSymbol: 'star' },
+    { key: 'sbig', label: 'SBIG', match: n => n.includes('sbig'), defaultSymbol: 'pentagon' }
+  ];
+  const OTHER_INSTRUMENT_SYMBOL = { key: 'other', label: 'Other', defaultSymbol: 'hexagon' };
+  const INSTRUMENT_SYMBOL_OPTIONS = ['circle', 'square', 'triangle-up', 'triangle-down', 'diamond', 'cross', 'x', 'star', 'pentagon', 'hexagon', 'asterisk'];
+
+  function instrumentSymbolCategory(inst) {
     const name = (inst || '').toLowerCase();
-    if (name.includes('manual')) return 'star';
-    if (name.includes('muscat4')) return 'diamond';
-    if (name.includes('muscat3')) return 'triangle-up';
-    if (name.includes('muscat2')) return 'square';
-    if (name.includes('muscat')) return 'circle';
-    if (name.includes('sinistro')) return 'triangle-down';
-    if (name.includes('qhy600')) return 'star';
-    if (name.includes('sbig')) return 'pentagon';
-    return 'hexagon';
+    return INSTRUMENT_SYMBOL_CATEGORIES.find(c => c.match(name)) || OTHER_INSTRUMENT_SYMBOL;
+  }
+
+  // User overrides of the default instrument->symbol mapping above, keyed by
+  // category key (e.g. "muscat2"). A global preference (not scoped to the
+  // loaded target set), since it represents "MuSCAT3 is always a triangle"
+  // rather than anything target-specific -- same treatment as the other
+  // global display toggles (show-excluded, show-twin, ...).
+  const instrumentSymbolSettings = {};
+
+  function loadInstrumentSymbolSettings() {
+    let parsed = {};
+    try {
+      parsed = JSON.parse(localStorage.getItem(STORAGE_OPTS_PREFIX + 'instrument-symbol-settings') || '{}') || {};
+    } catch (e) {}
+    Object.keys(instrumentSymbolSettings).forEach(k => delete instrumentSymbolSettings[k]);
+    Object.assign(instrumentSymbolSettings, parsed);
+  }
+
+  function saveInstrumentSymbolSettings() {
+    localStorage.setItem(STORAGE_OPTS_PREFIX + 'instrument-symbol-settings', JSON.stringify(instrumentSymbolSettings));
+  }
+
+  function getSymbolForInstrument(inst) {
+    const category = instrumentSymbolCategory(inst);
+    return instrumentSymbolSettings[category.key] || category.defaultSymbol;
   }
 
   const STORAGE_TARGET_KEY = 'muscat-ephem-selected-target';
@@ -730,6 +766,13 @@
       );
       Object.keys(planetPlotSettings).forEach(k => delete planetPlotSettings[k]);
     }
+    if (state.instrument_symbol_settings && typeof state.instrument_symbol_settings === 'object') {
+      localStorage.setItem(
+        STORAGE_OPTS_PREFIX + 'instrument-symbol-settings',
+        JSON.stringify(state.instrument_symbol_settings)
+      );
+      Object.keys(instrumentSymbolSettings).forEach(k => delete instrumentSymbolSettings[k]);
+    }
 
     if (state.ttv_opts && typeof state.ttv_opts === 'object') {
       const opts = state.ttv_opts;
@@ -805,6 +848,7 @@
       fit_method: fitMethod,
       planet_options: planetOptions,
       planet_plot_settings: currentPlanetPlotSettings,
+      instrument_symbol_settings: instrumentSymbolSettings,
       show_excluded: Boolean(document.getElementById('show-excluded-checkbox')?.checked),
       hide_deselected: Boolean(document.getElementById('hide-deselected-checkbox')?.checked),
       show_utc: Boolean(document.getElementById('show-twin-checkbox')?.checked),
@@ -1813,7 +1857,87 @@
       `;
       container.appendChild(row);
     });
+
+    renderInstrumentSymbolSettings();
   }
+
+  // Instrument categories with data actually loaded for the current
+  // target(s) -- database datasets plus any manually entered points, which
+  // carry their own free-text instrument field. Showing all known
+  // categories regardless of whether the target has that instrument would
+  // just be clutter (e.g. a target with only muscat2 data has no use for
+  // a Sinistro or SBIG row).
+  function usedInstrumentCategories() {
+    const seen = new Set();
+    combinedDatasets.forEach(d => seen.add(instrumentSymbolCategory(d.instrument).key));
+    manualPoints.forEach(mp => seen.add(instrumentSymbolCategory(mp.instrument || 'manual').key));
+    return [...INSTRUMENT_SYMBOL_CATEGORIES, OTHER_INSTRUMENT_SYMBOL].filter(c => seen.has(c.key));
+  }
+
+  // Only meaningful once at least one planet's marker is "Instrument-dependent"
+  // (getSymbolForInstrument is otherwise unused) -- shown below the per-planet
+  // rows so the user can see and override which symbol represents which
+  // instrument, instead of that mapping being an invisible hardcoded default.
+  function renderInstrumentSymbolSettings() {
+    const container = document.getElementById('plot-instrument-settings');
+    if (!container) return;
+    container.innerHTML = '';
+
+    const usesInstrumentSymbol = Object.values(planetPlotSettings).some(s => s && s.symbol === 'instrument');
+    const categories = usesInstrumentSymbol ? usedInstrumentCategories() : [];
+    if (categories.length === 0) {
+      container.style.display = 'none';
+      return;
+    }
+    container.style.display = 'flex';
+
+    loadInstrumentSymbolSettings();
+
+    const heading = document.createElement('div');
+    heading.style.fontSize = '0.85rem';
+    heading.style.color = 'var(--text-dim)';
+    heading.style.fontWeight = '500';
+    heading.textContent = 'Instrument-dependent marker shapes:';
+    container.appendChild(heading);
+
+    const row = document.createElement('div');
+    row.style.display = 'flex';
+    row.style.alignItems = 'center';
+    row.style.gap = '1rem';
+    row.style.flexWrap = 'wrap';
+    row.style.background = 'var(--surface2)';
+    row.style.border = '1px solid var(--border)';
+    row.style.borderRadius = '6px';
+    row.style.padding = '0.5rem 0.75rem';
+
+    const symbolOptionsHtml = (selected) => INSTRUMENT_SYMBOL_OPTIONS.map(sym =>
+      `<option value="${sym}"${sym === selected ? ' selected' : ''}>${sym}</option>`
+    ).join('');
+
+    categories.forEach(category => {
+      const selected = instrumentSymbolSettings[category.key] || category.defaultSymbol;
+      const item = document.createElement('div');
+      item.style.display = 'flex';
+      item.style.alignItems = 'center';
+      item.style.gap = '0.4rem';
+      item.innerHTML = `
+        <span style="font-size: 0.85rem; color: var(--text-dim); white-space: nowrap;">${escapeAttr(category.label)}:</span>
+        <select class="instrument-symbol-select select-sm" data-category="${category.key}" style="font-size: 0.85rem; padding: 0.25rem 0.5rem; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 4px; outline: none; cursor: pointer;" onchange="updateInstrumentSymbolSetting('${category.key}', this.value)">
+          ${symbolOptionsHtml(selected)}
+        </select>
+      `;
+      row.appendChild(item);
+    });
+
+    container.appendChild(row);
+  }
+
+  window.updateInstrumentSymbolSetting = function(categoryKey, symbol) {
+    instrumentSymbolSettings[categoryKey] = symbol;
+    saveInstrumentSymbolSettings();
+    if (fitResults) drawPlot();
+    scheduleSaveView();
+  };
 
   window.updatePlanetPlotSetting = function(planet, key, value) {
     if (!planetPlotSettings[planet]) planetPlotSettings[planet] = {};

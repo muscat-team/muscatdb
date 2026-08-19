@@ -699,6 +699,50 @@ def test_ephemeris_manual_planet_card_is_added_inline_and_persisted():
     assert "saveManualPlanets()" in remove_planet
 
 
+def test_ephemeris_instrument_symbol_mapping_is_editable_and_persisted():
+    """When a planet's marker is "Instrument-dependent", the mapping from
+    instrument to marker shape (previously a hardcoded, invisible default in
+    getSymbolForInstrument) must be visible and overridable, and the override
+    must persist and feed the actual per-point symbol lookup."""
+    html = _read_template("ephemeris.html")
+
+    assert 'id="plot-instrument-settings"' in html
+
+    get_symbol = _function_body(html, "getSymbolForInstrument")
+    assert "instrumentSymbolCategory(inst)" in get_symbol
+    assert "instrumentSymbolSettings[category.key] || category.defaultSymbol" in get_symbol
+
+    render_instrument_settings = _function_body(html, "renderInstrumentSymbolSettings")
+    assert "planetPlotSettings" in render_instrument_settings
+    assert "s.symbol === 'instrument'" in render_instrument_settings
+    assert "loadInstrumentSymbolSettings()" in render_instrument_settings
+    assert "onchange=\"updateInstrumentSymbolSetting(" in render_instrument_settings
+
+    # Only categories with actual data for the loaded target(s) are listed --
+    # not all known instruments unconditionally, which would just be clutter
+    # for a target that e.g. only has muscat2 data.
+    assert "usesInstrumentSymbol ? usedInstrumentCategories() : []" in render_instrument_settings
+    assert "categories.length === 0" in render_instrument_settings
+    assert "categories.forEach(category =>" in render_instrument_settings
+
+    used_categories = _function_body(html, "usedInstrumentCategories")
+    assert "combinedDatasets.forEach(d => seen.add(instrumentSymbolCategory(d.instrument).key))" in used_categories
+    assert "manualPoints.forEach(mp => seen.add(instrumentSymbolCategory(mp.instrument || 'manual').key))" in used_categories
+
+    render_planet_settings = _function_body(html, "renderPlanetPlotSettings")
+    assert "renderInstrumentSymbolSettings()" in render_planet_settings
+
+    update_setting = html.split("window.updateInstrumentSymbolSetting = function(categoryKey, symbol) {", 1)[1].split("\n  };", 1)[0]
+    assert "saveInstrumentSymbolSettings()" in update_setting
+    assert "if (fitResults) drawPlot()" in update_setting
+    assert "scheduleSaveView()" in update_setting
+
+    collect_state = _function_body(html, "collectEphemerisViewState")
+    assert "instrument_symbol_settings: instrumentSymbolSettings" in collect_state
+    apply_state = _function_body(html, "applyViewStateToStorage")
+    assert "state.instrument_symbol_settings" in apply_state
+
+
 def test_ephemeris_ttv_run_selection_is_preserved_in_shareable_url():
     html = _read_template("ephemeris.html")
 
