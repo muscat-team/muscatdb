@@ -1975,6 +1975,12 @@ async def transit_fit_query_archive(target: str, source: str = "nasa", inst: str
         target_lower = target.lower()
         target_clean = re.sub(r"[^0-9a-zA-Z]", "", target_lower)
         target_num, target_sub = split_toi(target_lower)
+        # split_toi pulls the same digits out of "TIC 2876" and "TOI 2876"; a
+        # numeric-only comparison can't tell the catalogs apart, and a TIC ID
+        # can equal an unrelated star's TOI host number (or vice versa). A
+        # query naming its catalog explicitly must stay in that catalog rather
+        # than resolving to whichever row the file happens to list first.
+        is_tic_query = target_lower.strip().startswith("tic")
         best_row = None
         best_sub = None
 
@@ -2003,7 +2009,7 @@ async def transit_fit_query_archive(target: str, source: str = "nasa", inst: str
                 # Match TOI by numeric value (handles leading zeros like toi02688 vs TOI-688)
                 if toi:
                     toi_num, toi_sub = split_toi(toi)
-                    if target_num is not None and toi_num is not None and target_num == toi_num:
+                    if not is_tic_query and target_num is not None and toi_num is not None and target_num == toi_num:
                         if target_sub is None:
                             # Bare host number: resolve to the .01 candidate.
                             if prefer(row, toi_sub):
@@ -2035,7 +2041,7 @@ async def transit_fit_query_archive(target: str, source: str = "nasa", inst: str
                     tic_num = extract_number(tic_id)
                     tic_clean = re.sub(r"[^0-9a-zA-Z]", "", tic_id.lower())
                     matches_tic = (
-                        (target_num is not None and tic_num is not None and target_num == tic_num)
+                        (is_tic_query and target_num is not None and tic_num is not None and target_num == tic_num)
                         or target_clean == tic_clean
                         or (tic_num and target_clean == f"tic{tic_num}")
                     )
