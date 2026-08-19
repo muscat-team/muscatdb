@@ -123,6 +123,33 @@ The **linchpin assumption** for multi-host workers: `/ut2` and everything under 
 - Repo: `$HOME/github/research/project/muscat-db/`
 - Database: `$HOME/github/research/project/muscat-db/muscat.db` (**3,066,445,824 bytes** — same size on ut2, ut3, ut4, ut6)
 
+`$HOME` above always means the single deployment account's home (currently
+jerome's), which the §12 design already requires to resolve identically across
+every host via this same NFS export — that invariant holds today and these
+four paths are safe to keep `$HOME`-relative for that reason.
+
+### Shared-input paths must be pinned, not left `$HOME`-relative
+
+`MUSCAT_OBSLOG_DIR` (and `MUSCAT_DATA_DIR`) are a different category from the
+four paths above: they name data populated by *whatever writes the obslog CSVs
+/ raw FITS*, not by the muscat-db deployment account. On ut2 that's a separate,
+long-standing `muscat` account running its own `auto_mkobslog.pl`, unrelated to
+muscat-db. `instruments.py`'s in-code default for `MUSCAT_OBSLOG_DIR` still
+falls back to `Path.home()/muscat/obslog` when unset, so any command run as an
+account other than `muscat` (i.e. every manual/GUI invocation here, since the
+deployment runs as jerome) silently resolved a different, near-empty tree with
+no error — see #71. The daily cron already worked around this by exporting
+`MUSCAT_OBSLOG_DIR=/ut2/muscat/obslog` itself (see the [Cron
+section](../README.md#cron-daily) of the README), but that override never
+covered manual CLI runs or the `muscatdbgui` session, which only read `.env`.
+
+**Rule:** pin `MUSCAT_OBSLOG_DIR` (and `MUSCAT_DATA_DIR` if it ever moves off
+`/data`) explicitly in `.env`, on a single host or many — never rely on their
+`$HOME`-relative in-code default in production. The startup log
+(`[startup] env config:`) now prints the resolved value whenever a variable is
+using its in-code default, so an unpinned shared-input path is visible instead
+of silent.
+
 ### Engine checkouts
 
 Each pipeline engine must track its owner's repository. Forks exist, so a checkout
