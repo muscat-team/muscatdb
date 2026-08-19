@@ -153,6 +153,10 @@
         <input type="checkbox" id="show-epoch-checkbox">
         <span>Show epoch numbers</span>
       </label>
+      <label class="opt-check-item" title="Mark each planet's centered fit epoch (E_center) with a vertical guide and label -- the anchor the fitted T0/period are quoted relative to.">
+        <input type="checkbox" id="show-reference-epoch-checkbox" checked>
+        <span>Show reference epoch</span>
+      </label>
       <div id="ttv-model-controls" style="display: none; align-items: center; gap: 0.75rem; flex-wrap: wrap;">
         <label class="opt-check-item" title="Show the minimum-χ² posterior model from the selected TTV run.">
           <input type="checkbox" id="show-ttv-model-checkbox">
@@ -661,6 +665,11 @@
         localStorage.setItem(STORAGE_OPTS_PREFIX + 'show-twin', 'false');
       }
     }
+    if (typeof state.show_reference_epoch === 'boolean') {
+      localStorage.setItem(STORAGE_OPTS_PREFIX + 'show-reference-epoch', String(state.show_reference_epoch));
+      const cb = document.getElementById('show-reference-epoch-checkbox');
+      if (cb) cb.checked = state.show_reference_epoch;
+    }
     if (typeof state.show_ttv_model === 'boolean') {
       localStorage.setItem(STORAGE_OPTS_PREFIX + 'show-ttv-model', String(state.show_ttv_model));
       const cb = document.getElementById('show-ttv-model-checkbox');
@@ -791,6 +800,7 @@
       hide_deselected: Boolean(document.getElementById('hide-deselected-checkbox')?.checked),
       show_utc: Boolean(document.getElementById('show-twin-checkbox')?.checked),
       show_epoch: Boolean(document.getElementById('show-epoch-checkbox')?.checked),
+      show_reference_epoch: Boolean(document.getElementById('show-reference-epoch-checkbox')?.checked),
       show_ttv_model: Boolean(document.getElementById('show-ttv-model-checkbox')?.checked),
       ttv_model_end_date: document.getElementById('ttv-model-end-date')?.value || '',
       center_epoch: Boolean(document.getElementById('center-epoch-checkbox')?.checked),
@@ -992,6 +1002,19 @@
         showTwinCheckbox.checked = false;
         localStorage.setItem(STORAGE_OPTS_PREFIX + 'show-twin', 'false');
       }
+      if (fitResults) drawPlot();
+      scheduleSaveView();
+    });
+
+    // Restore show-reference-epoch checkbox preference (default on: it was
+    // always drawn before this toggle existed).
+    const savedShowReferenceEpoch = localStorage.getItem(STORAGE_OPTS_PREFIX + 'show-reference-epoch');
+    const showReferenceEpochCheckbox = document.getElementById('show-reference-epoch-checkbox');
+    if (savedShowReferenceEpoch !== null) {
+      showReferenceEpochCheckbox.checked = savedShowReferenceEpoch === 'true';
+    }
+    showReferenceEpochCheckbox.addEventListener('change', function() {
+      localStorage.setItem(STORAGE_OPTS_PREFIX + 'show-reference-epoch', String(this.checked));
       if (fitResults) drawPlot();
       scheduleSaveView();
     });
@@ -1675,6 +1698,25 @@
     scheduleSaveView();
   }
 
+  // Default per-planet plot colors. Systems with more than four planets fall
+  // through to a golden-angle hue rotation so a 5th+ planet gets a distinct
+  // color instead of wrapping back onto planet b's.
+  const DEFAULT_PLANET_COLORS = ['#6c8cff', '#0f9d8b', '#f87171', '#fcd34d'];
+
+  function hslToHex(h, s, l) {
+    s /= 100; l /= 100;
+    const k = n => (n + h / 30) % 12;
+    const a = s * Math.min(l, 1 - l);
+    const f = n => l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
+    const toHex = x => Math.round(255 * x).toString(16).padStart(2, '0');
+    return `#${toHex(f(0))}${toHex(f(8))}${toHex(f(4))}`;
+  }
+
+  function defaultPlanetColor(index) {
+    if (index < DEFAULT_PLANET_COLORS.length) return DEFAULT_PLANET_COLORS[index];
+    return hslToHex((index * 137.508) % 360, 70, 65);
+  }
+
   // Render planet customizer settings (color & marker type) at the bottom of the plot card
   const planetPlotSettings = {};
   
@@ -1696,8 +1738,7 @@
     } catch(e) {}
 
     combinedPlanets.forEach((pl, i) => {
-      const defaultColors = ['#6c8cff', '#0f9d8b', '#f87171', '#fcd34d'];
-      const defaultColor = defaultColors[i % defaultColors.length];
+      const defaultColor = defaultPlanetColor(i);
       
       if (!planetPlotSettings[pl]) {
         planetPlotSettings[pl] = {
@@ -2605,6 +2646,20 @@
     };
   }
 
+  // Planets to actually draw: a planet can be configured (T0/period from the
+  // catalog or a manual entry) with zero fitted transit centers when only a
+  // sibling planet has been observed so far -- e.g. a NASA archive listing
+  // for both b and c while only c has completed transit fits. fitResults
+  // still carries an entry for it (empty points array) so its card and the
+  // dataset table stay usable; the O-C plot itself has nothing to draw for
+  // it, so it is left out here rather than rendered as an empty subplot row.
+  function plottedPlanets() {
+    if (!fitResults) return [];
+    return Object.keys(fitResults)
+      .filter(pl => (fitResults[pl].points || []).length > 0)
+      .sort();
+  }
+
   // Draw plot using Plotly
   function drawPlot() {
     if (!fitResults) return;
@@ -2621,6 +2676,7 @@
       && !showTwin;
     const showTTVModel = document.getElementById('show-ttv-model-checkbox').checked
       && ttvModelData && ttvModelRun === selectedTTVRun;
+    const showReferenceEpoch = document.getElementById('show-reference-epoch-checkbox').checked;
     const suptitle = document.getElementById('plot-suptitle-input').value.trim();
     const secondaryAxisExtraHeight = showTwin
       ? OC_PLOT_UTC_AXIS_EXTRA_HEIGHT
@@ -2629,13 +2685,19 @@
 
     plotDiv.style.height = plotHeight + 'px';
     plotCard.style.minHeight = (plotHeight + 70) + 'px';
-    
-    const planets = Object.keys(fitResults).sort();
+
+    const planets = plottedPlanets();
     if (planets.length === 0) {
       plotDiv.innerHTML = '<div style="text-align: center; color: var(--text-dim); padding-top: 5rem;">No data points available to plot.</div>';
       return;
     }
-    const colors = ['#6c8cff', '#0f9d8b', '#f87171', '#fcd34d'];
+    // planetPlotSettings is keyed off combinedPlanets (every catalog-listed
+    // planet, including ones with no plotted points), so its color assignment
+    // is the source of truth the legend/customizer panel already shows the
+    // user. Falling back to index-into-planets here would drift out of sync
+    // whenever a lower-lettered planet has no data and gets filtered out of
+    // `planets` (e.g. only c is plotted: c would wrongly get b's color).
+    const planetColor = (pl, i) => (planetPlotSettings[pl] && planetPlotSettings[pl].color) || defaultPlanetColor(i);
     const traces = [];
     const referenceBjdOffset = plotBjdOffset(planets, showExcluded);
     const foundBjdOffset = Number.isFinite(referenceBjdOffset);
@@ -2717,7 +2779,8 @@
         font: { size: 10 }
       },
       hovermode: 'closest',
-      shapes: []
+      shapes: [],
+      annotations: []
     };
 
     if (planets.length === 2) {
@@ -2775,8 +2838,8 @@
       planets.forEach((pl, i) => {
         const res = fitResults[pl];
         const yaxisKey = i === 0 ? 'y' : 'y2';
-        const color = colors[i % colors.length];
-        
+        const color = planetColor(pl, i);
+
         // Build traces
         const plTraces = getPlotlyTracesForPlanet(res, pl, color, yaxisKey, isDark, showExcluded, bjdOffset);
         plTraces.forEach(t => traces.push(t));
@@ -2785,8 +2848,9 @@
           if (modelTrace) traces.push(modelTrace);
         }
         addZeroLineShape(layout, yaxisKey, color);
+        if (showReferenceEpoch) addCenteredEpochMarker(layout, yaxisKey, res, bjdOffset, isDark);
       });
-      
+
     } else {
       const rows = planets.length;
       layout.xaxis = {
@@ -2840,7 +2904,7 @@
         };
 
         const res = fitResults[pl];
-        const color = colors[i % colors.length];
+        const color = planetColor(pl, i);
         const plTraces = getPlotlyTracesForPlanet(res, pl, color, yaxisKey, isDark, showExcluded, bjdOffset);
         plTraces.forEach(t => traces.push(t));
         if (showTTVModel) {
@@ -2848,6 +2912,7 @@
           if (modelTrace) traces.push(modelTrace);
         }
         addZeroLineShape(layout, yaxisKey, color);
+        if (showReferenceEpoch) addCenteredEpochMarker(layout, yaxisKey, res, bjdOffset, isDark);
       });
     }
 
@@ -2920,19 +2985,19 @@
       });
     }
 
-    // Add legend guide for instruments if any planet uses instrument shapes
+    // Add legend guide for instruments if any displayed planet uses instrument shapes
     let hasInstrumentSymbol = false;
-    for (const pl in fitResults) {
+    for (const pl of planets) {
       const settings = planetPlotSettings[pl];
       if (!settings || settings.symbol === 'instrument') {
         hasInstrumentSymbol = true;
         break;
       }
     }
-    
+
     if (hasInstrumentSymbol) {
       const activeInstruments = new Set();
-      for (const pl in fitResults) {
+      for (const pl of planets) {
         fitResults[pl].points.forEach(p => {
           if (p.checked || showExcluded) {
             activeInstruments.add(p.instrument);
@@ -3002,45 +3067,63 @@
     }, 5000);
   }
 
+  // Layout patch that recolors every axis (shared x-axis, each planet's
+  // y-axis, and the UTC/epoch twin x-axes when shown) to one flat palette.
+  // downloadPlotPNG uses this once to force a white background for the PNG
+  // export and once more to restore the live theme, instead of maintaining
+  // two hand-written copies of the same per-axis loop.
+  function plotAxisColorLayout(planets, showTwin, showEpochTwin, palette) {
+    const layout = {
+      'paper_bgcolor': palette.paper,
+      'plot_bgcolor': palette.plot,
+      'font.color': palette.font,
+      'title.font.color': palette.font,
+      'xaxis.gridcolor': palette.grid,
+      'xaxis.zerolinecolor': palette.grid,
+      'xaxis.linecolor': palette.grid,
+    };
+    if (showTwin) {
+      layout['xaxis2.linecolor'] = palette.grid;
+    } else if (showEpochTwin) {
+      planets.forEach((pl, i) => {
+        layout[`xaxis${i + 2}.linecolor`] = palette.grid;
+      });
+    }
+    planets.forEach((pl, i) => {
+      const key = 'yaxis' + (i === 0 ? '' : i + 1);
+      layout[key + '.gridcolor'] = palette.grid;
+      layout[key + '.zerolinecolor'] = palette.grid;
+      layout[key + '.linecolor'] = palette.grid;
+    });
+    return layout;
+  }
+
   function downloadPlotPNG(event) {
     if (event) event.preventDefault();
     const plotDiv = document.getElementById('oc-plot');
     if (!plotDiv || !fitResults) return;
     const filename = 'oc_plot_' + (getCombinedStorageKey() || 'export');
-    
+
     const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
     const showTwin = document.getElementById('show-twin-checkbox').checked;
     const showEpochTwin = document.getElementById('show-epoch-checkbox').checked && !showTwin;
-    const suptitle = document.getElementById('plot-suptitle-input').value.trim();
-    
-    // Always apply solid white background layout overrides for image export
-    const tempLayout = {
-      'paper_bgcolor': '#ffffff',
-      'plot_bgcolor': 'rgba(238, 240, 246, 0.4)',
-      'font.color': '#1a1d27',
-      'title.font.color': '#1a1d27',
-      'xaxis.gridcolor': '#d8dce6',
-      'xaxis.zerolinecolor': '#d8dce6',
-      'xaxis.linecolor': '#d8dce6',
-    };
-    
-    if (showTwin) {
-      tempLayout['xaxis2.linecolor'] = '#d8dce6';
-    } else if (showEpochTwin) {
-      Object.keys(fitResults).sort().forEach((pl, i) => {
-        tempLayout[`xaxis${i + 2}.linecolor`] = '#d8dce6';
-      });
-    }
-    
-    const planets = Object.keys(fitResults).sort();
-    planets.forEach((pl, i) => {
-      const key = 'yaxis' + (i === 0 ? '' : i + 1);
-      tempLayout[key + '.gridcolor'] = '#d8dce6';
-      tempLayout[key + '.zerolinecolor'] = '#d8dce6';
-      tempLayout[key + '.linecolor'] = '#d8dce6';
-    });
 
-    Plotly.relayout(plotDiv, tempLayout).then(() => {
+    // Must mirror the same planet set drawPlot() actually rendered -- these
+    // axis keys (yaxis, yaxis2, ... / xaxis2, xaxis3, ...) only exist on the
+    // live figure for planets with plotted points.
+    const planets = plottedPlanets();
+
+    const exportPalette = { paper: '#ffffff', plot: 'rgba(238, 240, 246, 0.4)', font: '#1a1d27', grid: '#d8dce6' };
+    const themePalette = {
+      paper: 'transparent',
+      plot: isDark ? 'rgba(36, 40, 56, 0.4)' : 'rgba(238, 240, 246, 0.4)',
+      font: isDark ? '#e1e4ed' : '#1a1d27',
+      grid: isDark ? '#2e3348' : '#d8dce6'
+    };
+
+    // Always apply a solid white background for image export, then restore
+    // the live theme's colors afterward.
+    Plotly.relayout(plotDiv, plotAxisColorLayout(planets, showTwin, showEpochTwin, exportPalette)).then(() => {
       Plotly.downloadImage(plotDiv, {
         format: 'png',
         width: 1200,
@@ -3050,30 +3133,7 @@
         filename: filename,
         background: '#ffffff'
       }).then(() => {
-        // Restore layout properties back to original state based on theme
-        const restoreLayout = {
-          'paper_bgcolor': 'transparent',
-          'plot_bgcolor': isDark ? 'rgba(36, 40, 56, 0.4)' : 'rgba(238, 240, 246, 0.4)',
-          'font.color': isDark ? '#e1e4ed' : '#1a1d27',
-          'title.font.color': isDark ? '#e1e4ed' : '#1a1d27',
-          'xaxis.gridcolor': isDark ? '#2e3348' : '#d8dce6',
-          'xaxis.zerolinecolor': isDark ? '#2e3348' : '#d8dce6',
-          'xaxis.linecolor': isDark ? '#2e3348' : '#d8dce6',
-        };
-        if (showTwin) {
-          restoreLayout['xaxis2.linecolor'] = isDark ? '#2e3348' : '#d8dce6';
-        } else if (showEpochTwin) {
-          Object.keys(fitResults).sort().forEach((pl, i) => {
-            restoreLayout[`xaxis${i + 2}.linecolor`] = isDark ? '#2e3348' : '#d8dce6';
-          });
-        }
-        planets.forEach((pl, i) => {
-          const key = 'yaxis' + (i === 0 ? '' : i + 1);
-          restoreLayout[key + '.gridcolor'] = isDark ? '#2e3348' : '#d8dce6';
-          restoreLayout[key + '.zerolinecolor'] = isDark ? '#2e3348' : '#d8dce6';
-          restoreLayout[key + '.linecolor'] = isDark ? '#2e3348' : '#d8dce6';
-        });
-        Plotly.relayout(plotDiv, restoreLayout);
+        Plotly.relayout(plotDiv, plotAxisColorLayout(planets, showTwin, showEpochTwin, themePalette));
       });
     });
   }
@@ -3155,12 +3215,57 @@
     });
   }
 
+  // Mark the epoch the linear ephemeris was centered on (E_center, at BJD
+  // t0_fit_centered) with a vertical guide spanning the row plus a small
+  // "E=n" label at the top -- the anchor the fitted T0/period are quoted
+  // relative to, otherwise invisible on the plot itself. The `... domain`
+  // yref keeps the line within this row's own y-domain regardless of its
+  // data range (Plotly.js 2.x, supported since 1.42).
+  function addCenteredEpochMarker(layout, yaxisKey, res, bjdOffset, isDark) {
+    if (!res.was_fit || !Number.isFinite(res.t0_fit_centered) || !Number.isFinite(res.E_center)) return;
+    const x = res.t0_fit_centered - bjdOffset;
+    const guideColor = isDark ? 'rgba(225, 228, 237, 0.35)' : 'rgba(26, 29, 39, 0.35)';
+    layout.shapes.push({
+      type: 'line',
+      xref: 'x',
+      yref: `${yaxisKey} domain`,
+      x0: x,
+      x1: x,
+      y0: 0,
+      y1: 1,
+      line: {
+        color: guideColor,
+        width: 1,
+        dash: 'dot'
+      }
+    });
+    layout.annotations.push({
+      x: x,
+      y: 1,
+      xref: 'x',
+      yref: `${yaxisKey} domain`,
+      text: `E=${res.E_center}`,
+      showarrow: false,
+      yanchor: 'bottom',
+      font: { size: 9, color: guideColor }
+    });
+  }
+
+  // Outline applied to a manual point the backend flagged as >5sigma from
+  // the fitted linear ephemeris, in place of the normal thin white/dark
+  // marker outline -- distinguishes a likely data-entry error at a glance
+  // instead of relying solely on the hover tooltip.
+  const FLAGGED_OUTLINE_COLOR = '#f87171';
+  const FLAGGED_OUTLINE_WIDTH = 2.5;
+
   function getPlotlyTracesForPlanet(res, planet, color, yaxisKey, isDark, showExcluded, bjdOffset) {
     const settings = planetPlotSettings[planet] || { color: color, symbol: 'instrument' };
     const pColor = settings.color;
+    const normalOutline = isDark ? '#1a1d27' : '#ffffff';
+    const excludedOutline = isDark ? 'rgba(79, 88, 124, 0.7)' : 'rgba(162, 169, 189, 0.7)';
 
-    const fitX = [], fitY = [], fitErr = [], fitCustom = [], fitText = [], fitSymbols = [];
-    const unX = [], unY = [], unErr = [], unCustom = [], unText = [], unSymbols = [];
+    const fitX = [], fitY = [], fitErr = [], fitCustom = [], fitText = [], fitSymbols = [], fitOutlineColors = [], fitOutlineWidths = [];
+    const unX = [], unY = [], unErr = [], unCustom = [], unText = [], unSymbols = [], unOutlineColors = [], unOutlineWidths = [];
 
     res.points.forEach(p => {
       const x = p.bjd - bjdOffset;
@@ -3207,6 +3312,8 @@
         fitCustom.push(cd);
         fitText.push(label);
         fitSymbols.push(symbol);
+        fitOutlineColors.push(p.flagged ? FLAGGED_OUTLINE_COLOR : normalOutline);
+        fitOutlineWidths.push(p.flagged ? FLAGGED_OUTLINE_WIDTH : 1.5);
       } else {
         unX.push(x);
         unY.push(y);
@@ -3214,6 +3321,8 @@
         unCustom.push(cd);
         unText.push(label);
         unSymbols.push(symbol);
+        unOutlineColors.push(p.flagged ? FLAGGED_OUTLINE_COLOR : excludedOutline);
+        unOutlineWidths.push(p.flagged ? FLAGGED_OUTLINE_WIDTH : 2);
       }
     });
 
@@ -3239,7 +3348,7 @@
           color: pColor,
           size: 9,
           symbol: fitSymbols,
-          line: { color: isDark ? '#1a1d27' : '#ffffff', width: 1.5 }
+          line: { color: fitOutlineColors, width: fitOutlineWidths }
         },
         customdata: fitCustom,
         hoverinfo: 'text',
@@ -3269,7 +3378,7 @@
           color: 'rgba(0, 0, 0, 0)',
           size: 8,
           symbol: unSymbols,
-          line: { color: isDark ? 'rgba(79, 88, 124, 0.7)' : 'rgba(162, 169, 189, 0.7)', width: 2 }
+          line: { color: unOutlineColors, width: unOutlineWidths }
         },
         customdata: unCustom,
         hoverinfo: 'text',
