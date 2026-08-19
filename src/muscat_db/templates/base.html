@@ -173,7 +173,9 @@
   (function () {
     const root = document.documentElement;
     const btn = document.getElementById('theme-toggle');
+    {% if not is_static_site() %}
     if (window.MuscatRouteState) window.MuscatRouteState.applyNavbar();
+    {% endif %}
     const stored = localStorage.getItem('muscat-theme');
     apply(stored || 'light');
     btn.addEventListener('click', function () {
