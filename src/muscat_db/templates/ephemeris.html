@@ -157,6 +157,10 @@
         <input type="checkbox" id="show-reference-epoch-checkbox" checked>
         <span>Show reference epoch</span>
       </label>
+      <label class="opt-check-item" style="display: inline-flex; align-items: center; gap: 0.35rem;" title="Marker size for plotted transit-center points.">
+        <span>Marker size</span>
+        <input type="range" id="oc-marker-size-input" min="4" max="16" step="1" value="9">
+      </label>
       <div id="ttv-model-controls" style="display: none; align-items: center; gap: 0.75rem; flex-wrap: wrap;">
         <label class="opt-check-item" title="Show the minimum-χ² posterior model from the selected TTV run.">
           <input type="checkbox" id="show-ttv-model-checkbox">
@@ -670,6 +674,11 @@
       const cb = document.getElementById('show-reference-epoch-checkbox');
       if (cb) cb.checked = state.show_reference_epoch;
     }
+    if (typeof state.oc_marker_size === 'string' && state.oc_marker_size) {
+      localStorage.setItem(STORAGE_OPTS_PREFIX + 'oc-marker-size', state.oc_marker_size);
+      const input = document.getElementById('oc-marker-size-input');
+      if (input) input.value = state.oc_marker_size;
+    }
     if (typeof state.show_ttv_model === 'boolean') {
       localStorage.setItem(STORAGE_OPTS_PREFIX + 'show-ttv-model', String(state.show_ttv_model));
       const cb = document.getElementById('show-ttv-model-checkbox');
@@ -801,6 +810,7 @@
       show_utc: Boolean(document.getElementById('show-twin-checkbox')?.checked),
       show_epoch: Boolean(document.getElementById('show-epoch-checkbox')?.checked),
       show_reference_epoch: Boolean(document.getElementById('show-reference-epoch-checkbox')?.checked),
+      oc_marker_size: document.getElementById('oc-marker-size-input')?.value || '',
       show_ttv_model: Boolean(document.getElementById('show-ttv-model-checkbox')?.checked),
       ttv_model_end_date: document.getElementById('ttv-model-end-date')?.value || '',
       center_epoch: Boolean(document.getElementById('center-epoch-checkbox')?.checked),
@@ -1016,6 +1026,20 @@
     showReferenceEpochCheckbox.addEventListener('change', function() {
       localStorage.setItem(STORAGE_OPTS_PREFIX + 'show-reference-epoch', String(this.checked));
       if (fitResults) drawPlot();
+      scheduleSaveView();
+    });
+
+    // Restore marker-size slider preference.
+    const savedOcMarkerSize = localStorage.getItem(STORAGE_OPTS_PREFIX + 'oc-marker-size');
+    const ocMarkerSizeInput = document.getElementById('oc-marker-size-input');
+    if (savedOcMarkerSize !== null) {
+      ocMarkerSizeInput.value = savedOcMarkerSize;
+    }
+    ocMarkerSizeInput.addEventListener('input', function() {
+      localStorage.setItem(STORAGE_OPTS_PREFIX + 'oc-marker-size', this.value);
+      if (fitResults) drawPlot();
+    });
+    ocMarkerSizeInput.addEventListener('change', function() {
       scheduleSaveView();
     });
 
@@ -2677,6 +2701,7 @@
     const showTTVModel = document.getElementById('show-ttv-model-checkbox').checked
       && ttvModelData && ttvModelRun === selectedTTVRun;
     const showReferenceEpoch = document.getElementById('show-reference-epoch-checkbox').checked;
+    const markerSize = Number(document.getElementById('oc-marker-size-input').value) || 9;
     const suptitle = document.getElementById('plot-suptitle-input').value.trim();
     const secondaryAxisExtraHeight = showTwin
       ? OC_PLOT_UTC_AXIS_EXTRA_HEIGHT
@@ -2841,7 +2866,7 @@
         const color = planetColor(pl, i);
 
         // Build traces
-        const plTraces = getPlotlyTracesForPlanet(res, pl, color, yaxisKey, isDark, showExcluded, bjdOffset);
+        const plTraces = getPlotlyTracesForPlanet(res, pl, color, yaxisKey, isDark, showExcluded, bjdOffset, markerSize);
         plTraces.forEach(t => traces.push(t));
         if (showTTVModel) {
           const modelTrace = getTTVModelTrace(res, pl, color, yaxisKey, bjdOffset, requestedModelEndBjd);
@@ -2905,7 +2930,7 @@
 
         const res = fitResults[pl];
         const color = planetColor(pl, i);
-        const plTraces = getPlotlyTracesForPlanet(res, pl, color, yaxisKey, isDark, showExcluded, bjdOffset);
+        const plTraces = getPlotlyTracesForPlanet(res, pl, color, yaxisKey, isDark, showExcluded, bjdOffset, markerSize);
         plTraces.forEach(t => traces.push(t));
         if (showTTVModel) {
           const modelTrace = getTTVModelTrace(res, pl, color, yaxisKey, bjdOffset, requestedModelEndBjd);
@@ -3258,7 +3283,7 @@
   const FLAGGED_OUTLINE_COLOR = '#f87171';
   const FLAGGED_OUTLINE_WIDTH = 2.5;
 
-  function getPlotlyTracesForPlanet(res, planet, color, yaxisKey, isDark, showExcluded, bjdOffset) {
+  function getPlotlyTracesForPlanet(res, planet, color, yaxisKey, isDark, showExcluded, bjdOffset, markerSize = 9) {
     const settings = planetPlotSettings[planet] || { color: color, symbol: 'instrument' };
     const pColor = settings.color;
     const normalOutline = isDark ? '#1a1d27' : '#ffffff';
@@ -3346,7 +3371,7 @@
         name: `planet ${planet.toLowerCase()}`,
         marker: {
           color: pColor,
-          size: 9,
+          size: markerSize,
           symbol: fitSymbols,
           line: { color: fitOutlineColors, width: fitOutlineWidths }
         },
@@ -3376,7 +3401,7 @@
         name: `planet ${planet.toLowerCase()} (unused)`,
         marker: {
           color: 'rgba(0, 0, 0, 0)',
-          size: 8,
+          size: Math.max(3, markerSize - 1),
           symbol: unSymbols,
           line: { color: unOutlineColors, width: unOutlineWidths }
         },
