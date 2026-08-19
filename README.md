@@ -123,7 +123,8 @@ cp .env.example .env   # then edit
 Core variables inherited by the app and its pipeline jobs include
 `MUSCAT_DB_PATH`, `MUSCAT_DATA_DIR`, `MUSCAT_OBSLOG_DIR`, `MUSCAT_PROSE_DIR`,
 `MUSCAT_PROSE_PROJECT`, `MUSCAT_PROSE_PYTHON`, `MUSCAT_PROSE_CONDA_ENV`,
-`MUSCAT_TIMER_DIR`, `MUSCAT_TTV_DIR`, the `MUSCAT_PHOT_*` job-lifecycle
+`MUSCAT_TIMER_DIR`, `MUSCAT_TIMER_CONDA_ENV`, `MUSCAT_TTV_DIR`,
+`MUSCAT_HARMONIC_CONDA_ENV`, the `MUSCAT_PHOT_*` job-lifecycle
 timeouts, `MUSCAT_TMPDIR`, `ASTROMETRY_NET_API_KEY`, `LCO_API_TOKEN`,
 `MUSCAT_LCO_DIR`, `MUSCAT_LCO_ALLOW_SUBMIT`, `MUSCAT_DB_SECRET` (per-user LCO
 token encryption), the `MUSCAT_LCO_MONITOR_*` request-monitor settings,
