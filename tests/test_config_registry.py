@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from muscat_db.config import ENV_VARS
+from muscat_db.config import ENV_VARS, EnvVar, config_status, resolved_value
 
 SRC = Path(__file__).resolve().parent.parent / "src" / "muscat_db"
 
@@ -78,3 +78,36 @@ def test_secrets_are_flagged_as_secret():
             continue
         if re.search(r"TOKEN|SECRET|_KEY$|PASSWORD", var.name):
             assert var.secret, f"{var.name} looks like a credential but secret=False"
+
+
+def test_resolved_value_prefers_env_override(monkeypatch):
+    var = EnvVar("MUSCAT_TEST_PATH", "/default/path", "test var")
+    monkeypatch.setenv("MUSCAT_TEST_PATH", "/pinned/path")
+    assert resolved_value(var) == "/pinned/path"
+
+
+def test_resolved_value_falls_back_to_default_when_unset(monkeypatch):
+    var = EnvVar("MUSCAT_TEST_PATH", "/default/path", "test var")
+    monkeypatch.delenv("MUSCAT_TEST_PATH", raising=False)
+    assert resolved_value(var) == "/default/path"
+
+
+def test_config_status_shows_the_silent_default_a_shared_path_falls_back_to(monkeypatch):
+    """A shared-input path (e.g. MUSCAT_OBSLOG_DIR) that falls back to its
+    $HOME-derived default must be visible in the startup report -- this is the
+    exact failure mode from issue #71, where two accounts silently resolved
+    different obslog trees with no error and nothing in the output to say
+    which one was chosen."""
+    monkeypatch.delenv("MUSCAT_OBSLOG_DIR", raising=False)
+    status = {name: (state, value) for name, state, value in config_status()}
+    state, value = status["MUSCAT_OBSLOG_DIR"]
+    assert state == "default"
+    assert value is not None
+
+
+def test_config_status_redacts_secret_values(monkeypatch):
+    monkeypatch.setenv("LCO_API_TOKEN", "super-secret-token")
+    status = {name: (state, value) for name, state, value in config_status()}
+    state, value = status["LCO_API_TOKEN"]
+    assert state == "set"
+    assert value is None

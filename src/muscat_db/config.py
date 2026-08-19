@@ -265,9 +265,20 @@ def status_of(var: EnvVar) -> str:
     return "default" if var.default is not None else "unset"
 
 
-def config_status() -> list[tuple[str, str]]:
-    """Return ``(name, status)`` for each known variable, registry order."""
-    return [(v.name, status_of(v)) for v in ENV_VARS]
+def resolved_value(var: EnvVar) -> str | None:
+    """The value actually in effect: the env override, else the in-code default."""
+    raw = os.environ.get(var.name)
+    return raw if raw not in (None, "") else var.default
+
+
+def config_status() -> list[tuple[str, str, str | None]]:
+    """Return ``(name, status, display_value)`` for each known variable, registry
+    order. ``display_value`` is redacted to None for secrets so a wrong path
+    default (e.g. an unpinned $HOME-derived shared-input dir) is still visible
+    in the startup log without ever printing a credential."""
+    return [
+        (v.name, status_of(v), None if v.secret else resolved_value(v)) for v in ENV_VARS
+    ]
 
 
 def missing_required_secret() -> EnvVar | None:
