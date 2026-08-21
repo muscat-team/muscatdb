@@ -1105,6 +1105,29 @@ def test_manual_transit_centers_are_fitted_and_placed_on_epoch_grid(
     assert all(p["flagged"] is False for p in points)
 
 
+def test_ephemeris_calculate_exposes_dof_for_two_point_fit(
+    mock_db, _isolate_ephemeris_jobs
+):
+    """Exactly 2 checked points is a degenerate fit (2 free params, 2 data
+    points, 0 residual degrees of freedom): the API must surface n_fit/dof
+    so the frontend can flag the reported uncertainties as unverified
+    instead of presenting the unweighted-mode hard 0.0 at face value."""
+    planets_ephem = {"b": {"t0": 2458000.0, "period": 2.5}}
+    manual_points = [
+        {"id": "m0", "planet": "b", "tc": 2458000.0, "tc_unc": 0.001, "checked": True},
+        {"id": "m1", "planet": "b", "tc": 2458010.0, "tc_unc": 0.001, "checked": True},
+    ]
+
+    body = _post_manual_calculate(planets_ephem, manual_points).json()
+    result = body["results"]["b"]
+
+    assert result["was_fit"] is True
+    assert result["n_fit"] == 2
+    assert result["dof"] == 0
+    assert result["t0_fit_unc"] == 0.0
+    assert result["period_fit_unc"] == 0.0
+
+
 def test_imported_source_epoch_is_preserved_but_page_epoch_drives_fit(
     mock_db, _isolate_ephemeris_jobs
 ):
