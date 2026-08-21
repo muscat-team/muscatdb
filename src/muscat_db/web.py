@@ -194,8 +194,9 @@ async def _lifespan(app: FastAPI):
     from muscat_db.config import config_status, missing_required_secret
 
     print("[startup] env config:")
-    for name, state in config_status():
-        print(f"  {name}={state}")
+    for name, state, value in config_status():
+        suffix = f" -> {value}" if state == "default" and value is not None else ""
+        print(f"  {name}={state}{suffix}")
     missing = missing_required_secret()
     if missing is not None:
         print(
