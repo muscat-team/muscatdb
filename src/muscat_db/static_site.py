@@ -9,13 +9,12 @@ backend, database, or conda stack.
 
 Design notes
 ------------
-* **The guide is the site root.** This tree is published as the project's
-  documentation, so a visitor lands on the written pipeline guide, not on the
-  application's own home page. The app's home page keeps its own directory
-  (``home/``); the targets table has its own (``targets/``). The masthead
-  resolves to the site root rather than following the route map there. The UI
-  capture below is then what it has always been: a tour reached from the
-  documentation.
+* **Home is the site root.** The published tree mirrors the live app's own
+  routing: ``/`` is the home page (globe, instrument cards, quick links), and
+  the written pipeline guide lives at ``/guide`` — same as the running
+  server. The targets table keeps its own directory (``targets/``) so it
+  never collides with either. The masthead's ``href="/"`` and every other
+  bare-root link resolve to that same site root without special-casing.
 * **Representative subset, not a full mirror.** All navigation pages plus a few
   example detail / drill-down pages (chosen from what actually has data and
   figures on disk). This keeps the published site small while still documenting
@@ -55,12 +54,10 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 # still illustrating every table's structure and column layout.
 _TABLE_ROW_LIMIT = 10
 
-# The published tree is documentation first, so the guide is served at the site
-# root and the application's own home page (``/``) moves into its own directory,
-# distinct from the targets table's (``/targets``) so the two routes never
-# collide on one output directory.
-_LANDING_ROUTE = "/guide"
-_APP_HOME_SITEDIR = "home"
+# Sitedir for the written pipeline guide. Named so the banner-skip logic below
+# can refer to it without a magic string; the guide documents the pipeline
+# rather than showing live data, so the snapshot banner does not apply there.
+_GUIDE_SITEDIR = "guide"
 
 # Pages captured with no query parameters. Order controls nothing here; the
 # navbar defines the visible order. The three parametric parents
@@ -177,12 +174,12 @@ def _banner_html(dismissible: bool = True) -> str:
 def _inject_banner(html: str, sitedir: str) -> str:
     """Insert the banner immediately after the opening ``<body>`` tag.
 
-    The landing page is skipped. It is the written guide, which documents the
-    pipeline rather than displaying live data, so warning that live data is
-    disabled there is answering a question the page never raises. Every UI page
-    reached from it still carries the banner, which is where the caveat lands.
+    The guide is skipped. It is the written pipeline guide, which documents
+    the pipeline rather than displaying live data, so warning that live data
+    is disabled there is answering a question the page never raises. Every
+    other page, including the home landing page, still carries the banner.
     """
-    if not sitedir or _BANNER_MARKER in html:
+    if sitedir == _GUIDE_SITEDIR or _BANNER_MARKER in html:
         return html
     m = re.search(r"<body[^>]*>", html, re.I)
     if not m:
@@ -236,23 +233,21 @@ def _inject_no_live_data(html: str, sitedir: str) -> str:
 def _url_to_sitedir(path: str, query: str = "") -> str:
     """Map a captured URL to its output directory (relative, no leading slash).
 
-    ``/guide`` → ``""`` (site root), ``/`` → ``home``, ``/targets`` → ``targets``,
+    ``/`` → ``""`` (site root), ``/guide`` → ``guide``, ``/targets`` → ``targets``,
     ``/logs`` → ``logs``, ``/muscat/231201/ccd0`` → ``muscat/231201/ccd0``,
     ``/target?name=X`` → ``target/<slug>``,
     ``/photometry?inst=&date=&target=`` → ``photometry/<inst>/<date>/<slug>``.
 
-    The guide, not the application's own home page, is the site root: this
-    tree is published as the project's documentation, so a visitor should arrive
-    at the written guide rather than at the app's own landing page. The app's
-    home page keeps its own directory, distinct from the targets table's, so the
-    two never collide on one output directory. Every internal link is rewritten
-    through ``route_map`` and every page's ``../`` prefix is derived from its
-    output directory, so both moves propagate on their own.
+    The app's own home page, not the guide, is the site root: the published
+    tree mirrors the live app's routing, so ``/`` and ``/guide`` map exactly
+    like they do on the running server. The guide keeps its own directory,
+    distinct from the targets table's, so the two never collide on one output
+    directory. Every internal link is rewritten through ``route_map`` and
+    every page's ``../`` prefix is derived from its output directory, so both
+    moves propagate on their own.
     """
     p = path.strip("/")
     if not p:
-        return _APP_HOME_SITEDIR
-    if p == _LANDING_ROUTE.strip("/"):
         return ""
     qs = parse_qs(query)
     if p == "target":
@@ -589,10 +584,10 @@ def _rewrite_link(
         if target != path.strip("/"):
             return prefix + target.rstrip("/") + "/"
 
-    # The bare root "/" always resolves to the site root (the guide landing
+    # The bare root "/" always resolves to the site root (the home landing
     # page), regardless of which route_map entry claims it.  In the published
-    # tree the guide lives at the root and the app's own home page is in
-    # home/; a brand link or "Back" link must not silently redirect there.
+    # tree the app's own home page lives at the root and the written guide is
+    # in guide/; a brand link or "Back" link must not silently redirect there.
     if path == "/":
         return prefix or "./"
 

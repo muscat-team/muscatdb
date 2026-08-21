@@ -164,29 +164,32 @@ def test_static_cache_buster_stripped_and_depth_relative(tiny_db, tmp_path):
     assert "../static/styles.css" in logs_html
 
 
-def test_snapshot_banner_on_ui_pages_but_not_the_landing_guide(tiny_db, tmp_path):
+def test_snapshot_banner_on_ui_pages_but_not_the_guide(tiny_db, tmp_path):
     out = tmp_path / "site"
     build_site(out, db_path=tiny_db, n_examples=1, include_figures=False, log=lambda _m: None)
-    # Every captured UI page still warns that it is a frozen snapshot ...
+    # Every captured UI page still warns that it is a frozen snapshot,
+    # including the home landing page ...
+    assert "snapshot-banner" in _read(out / "index.html")
     assert "snapshot-banner" in _read(out / "logs" / "index.html")
     assert "snapshot-banner" in _read(out / "targets" / "index.html")
-    # ... but the landing page is the written guide, which documents the
+    # ... but the guide is the written pipeline guide, which documents the
     # pipeline rather than showing live data, so the caveat does not apply.
-    assert "snapshot-banner" not in _read(out / "index.html")
+    assert "snapshot-banner" not in _read(out / "guide" / "index.html")
 
 
-def test_guide_is_the_site_root_and_app_home_moves(tiny_db, tmp_path):
-    """The published tree is documentation, so ``/guide`` is served at the root
-    and the app's own landing page keeps its own directory."""
+def test_home_is_the_site_root_and_guide_moves(tiny_db, tmp_path):
+    """The published tree mirrors the live app's routing: ``/`` is the home
+    page and the written guide keeps its own directory, same as the running
+    server."""
     out = tmp_path / "site"
     build_site(out, db_path=tiny_db, n_examples=1, include_figures=False, log=lambda _m: None)
 
     root = _read(out / "index.html")
-    assert "<title>Pipeline Guide" in root
-    # The app landing page is still published, one click away.
-    assert "<title>Targets" in _read(out / "targets" / "index.html")
-    # ``guide/`` must not also exist, or the two would drift apart.
-    assert not (out / "guide" / "index.html").exists()
+    assert "<title>Home" in root
+    # The guide is still published, one click away.
+    assert "<title>Pipeline Guide" in _read(out / "guide" / "index.html")
+    # ``home/`` must not also exist, or the two would drift apart.
+    assert not (out / "home" / "index.html").exists()
 
 
 def test_navbar_links_resolve_after_the_root_swap(tiny_db, tmp_path):
@@ -248,8 +251,8 @@ def test_home_page_is_published_without_overwriting_targets(tiny_db, tmp_path):
     out = tmp_path / "site"
     build_site(out, db_path=tiny_db, n_examples=1, include_figures=False, log=lambda _m: None)
 
-    assert (out / "home" / "index.html").is_file(), "home page should be published"
-    assert "<title>Home" in _read(out / "home" / "index.html")
+    assert (out / "index.html").is_file(), "home page should be published"
+    assert "<title>Home" in _read(out / "index.html")
     assert "<title>Targets" in _read(out / "targets" / "index.html")
 
 
@@ -263,7 +266,7 @@ def test_home_page_static_build_does_not_call_the_live_weather_api(tiny_db, tmp_
     out = tmp_path / "site"
     build_site(out, db_path=tiny_db, n_examples=1, include_figures=False, log=lambda _m: None)
 
-    home = _read(out / "home" / "index.html")
+    home = _read(out / "index.html")
     assert "const STATIC_SITE = true;" in home
     assert "if (!STATIC_SITE) loadWeather();" in home
     assert "Connecting to LCO Weather API" not in home

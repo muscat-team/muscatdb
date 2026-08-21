@@ -645,7 +645,9 @@
   }
   if (inst && date && target && window.MuscatRouteState) {
     window.MuscatRouteState.rememberPhotometry({ inst: inst, date: date, target: routeTarget, run: runId || '' });
+    {% if not is_static_site() %}
     window.MuscatRouteState.applyNavbar();
+    {% endif %}
   }
 
   // ----- persistent job: resume or show banner across page navigations -----
