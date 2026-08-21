@@ -255,6 +255,16 @@ def prose_conda_env() -> str:
     return os.environ.get("MUSCAT_PROSE_CONDA_ENV", _CONDA_ENV_DEFAULT)
 
 
+def timer_conda_env() -> str:
+    """Name of the conda env that supplies timer's dependencies."""
+    return os.environ.get("MUSCAT_TIMER_CONDA_ENV", "timer")
+
+
+def harmonic_conda_env() -> str:
+    """Name of the conda env that supplies harmonic's dependencies."""
+    return os.environ.get("MUSCAT_HARMONIC_CONDA_ENV", "harmonic")
+
+
 def _conda_env_python(env: str) -> str | None:
     """Resolve ``envs/<env>/bin/python`` from the active conda install or the
     usual install locations. Returns the interpreter path, or ``None``."""
