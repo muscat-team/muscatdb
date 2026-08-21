@@ -2597,6 +2597,26 @@ class TestRoutes:
         assert data["pl_name"] == "TOI-1404.01"
         assert data["params"]["planets"] == "b"
 
+    def test_transit_fit_query_archive_toi_tic_lookup_honors_candidate_index(
+        self, client, multiplanet_toi_csv,
+    ):
+        """An explicit ``.NN`` on a TIC query must not be dropped (#73).
+
+        The TIC branch called ``prefer`` unconditionally, discarding any
+        candidate index the query carried, so ``TIC 352239069.02`` still
+        resolved to ``.01``. The TOI branch a few lines above already honors
+        ``target_sub``; this makes the TIC branch match it.
+        """
+        r = client.get(
+            "/api/transit-fit/query-archive",
+            params={"target": "TIC 352239069.02", "source": "toi"},
+        )
+        data = r.json()
+        assert data["ok"] is True
+        assert data["pl_name"] == "TOI-1404.02"
+        assert data["params"]["period"] == 14.431887
+        assert data["params"]["planets"] == "c"
+
     def test_jobs_page(self, client, monkeypatch):
         mock_jobs = [
             {
