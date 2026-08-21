@@ -3335,6 +3335,71 @@ def test_ttv_fit_model_endpoint_uses_selected_run_and_end_date(monkeypatch):
     assert json.loads(response.body)["points"]["b"][0]["epoch"] == 2
 
 
+def _fake_ttv_model_at(tc_bjd):
+    def fake_model(target, run_name, end_date):
+        return {
+            "ok": True,
+            "run_name": run_name or "default",
+            "points": {"b": [{"epoch": 5, "tc": tc_bjd}]},
+        }
+    return fake_model
+
+
+def test_ttv_windows_corrects_bjd_tdb_to_utc_when_coords_given(monkeypatch):
+    # Same defect as lco.generate_windows (#76): mid_bjd is BJD_TDB and must
+    # not be treated as JD_UTC directly once target coordinates are known.
+    import datetime
+
+    monkeypatch.setattr("muscat_db.web.ttv.get_ttv_model", _fake_ttv_model_at(2461223.0))
+    from muscat_db.web import _ttv_windows
+
+    ra_deg = (15 + 13 / 60 + 47 / 3600) * 15
+    dec_deg = -(45 + 0 / 60 + 42 / 3600)
+    payload = {
+        "target": "TOI-1404", "ttv_run": "default", "planet": "b",
+        "range_start": "2026-06-30", "range_end": "2026-07-02",
+        "pad_before_min": 0, "pad_after_min": 0,
+        "ra": ra_deg, "dec": dec_deg,
+    }
+
+    result = _ttv_windows(payload, duration_h=1.0)
+
+    assert result["ok"] is True
+    assert len(result["windows"]) == 1
+    w = result["windows"][0]
+    assert w["mid_bjd"] == 2461223.0  # unchanged: still the raw BJD_TDB
+
+    mid = datetime.datetime.fromisoformat(w["mid"].replace("Z", "+00:00"))
+    naive = datetime.datetime(2026, 7, 1, 12, 0, 0, tzinfo=datetime.timezone.utc)
+    offset_min = (naive - mid).total_seconds() / 60.0
+    assert 6.5 < offset_min < 7.5  # matches lco.generate_windows for the same target/time
+
+    start = datetime.datetime.fromisoformat(w["start"].replace("Z", "+00:00"))
+    end = datetime.datetime.fromisoformat(w["end"].replace("Z", "+00:00"))
+    assert abs((mid - start).total_seconds() - 1800) < 1  # half of 1h duration
+    assert abs((end - mid).total_seconds() - 1800) < 1
+
+
+def test_ttv_windows_without_coords_keeps_bjd_treated_as_utc(monkeypatch):
+    import datetime
+
+    monkeypatch.setattr("muscat_db.web.ttv.get_ttv_model", _fake_ttv_model_at(2461223.0))
+    from muscat_db.web import _ttv_windows
+
+    payload = {
+        "target": "TOI-1404", "ttv_run": "default", "planet": "b",
+        "range_start": "2026-06-30", "range_end": "2026-07-02",
+        "pad_before_min": 0, "pad_after_min": 0,
+    }
+
+    result = _ttv_windows(payload, duration_h=1.0)
+
+    assert result["ok"] is True
+    mid = datetime.datetime.fromisoformat(result["windows"][0]["mid"].replace("Z", "+00:00"))
+    expected = datetime.datetime(2026, 7, 1, 12, 0, 0, tzinfo=datetime.timezone.utc)
+    assert abs((mid - expected).total_seconds()) < 0.001
+
+
 def test_ttv_model_rejects_invalid_date_before_starting_harmonic(tmp_path, monkeypatch):
     from muscat_db import ttv_fit as ttv
 

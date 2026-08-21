@@ -125,6 +125,36 @@ def _earth_location(site: str):
     return EarthLocation(lat=lat * u.deg, lon=lon * u.deg, height=height * u.m)
 
 
+def bjd_tdb_to_jd_utc(bjd_tdb, ra_deg: float, dec_deg: float):
+    """Convert BJD_TDB (barycentric dynamical time) to JD_UTC at geocenter.
+
+    Corrects the Romer (light-travel-time) delay to the solar-system
+    barycenter plus the ~69 s TDB-UTC offset. The topocentric part of this
+    correction is at most ~20 ms across the LCO network, so a single
+    geocentric correction is used regardless of site (matches
+    ``generate_windows``'s existing site-agnostic contract).
+
+    ``light_travel_time`` is evaluated at the input BJD_TDB, but the answer is
+    wanted at the shifted UTC time, and the two differ enough (~tens of ms for
+    a several-minute correction) to matter once compounded across a whole
+    ephemeris. So it is evaluated a second time at the first-pass estimate,
+    which brings a forward/backward round trip to sub-millisecond agreement
+    without iterating to full convergence.
+
+    Accepts a scalar or array-like ``bjd_tdb`` and returns the same shape.
+    """
+    from astropy.time import Time
+    from astropy.coordinates import SkyCoord, EarthLocation
+    import astropy.units as u
+
+    geocenter = EarthLocation.from_geocentric(0 * u.m, 0 * u.m, 0 * u.m)
+    coord = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg)
+    t_tdb = Time(bjd_tdb, format="jd", scale="tdb", location=geocenter)
+    first_pass = t_tdb - t_tdb.light_travel_time(coord, kind="barycentric")
+    corrected = t_tdb - first_pass.light_travel_time(coord, kind="barycentric")
+    return corrected.utc.jd
+
+
 def _parse_iso_utc(value: str):
     """Parse an ISO-8601 UTC string to an astropy Time (UTC scale)."""
     from astropy.time import Time

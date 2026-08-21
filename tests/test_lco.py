@@ -685,6 +685,102 @@ class LcoTest(unittest.TestCase):
         self.assertLess(abs((start - expected_start).total_seconds()), 0.001)
         self.assertLess(abs((end - expected_end).total_seconds()), 0.001)
 
+    def test_generate_windows_without_coords_keeps_bjd_treated_as_utc(self):
+        # No ra_deg/dec_deg: unchanged legacy behavior, BJD used as JD_UTC
+        # directly. t0 = 2026-07-01T12:00:00 UTC nominal.
+        t0 = 2461223.0
+        windows = lco.generate_windows(
+            t0=t0, period=10.0, duration_h=1.0,
+            start_dt="2026-07-01", end_dt="2026-07-01",
+            pad_before_min=0, pad_after_min=0,
+        )
+        self.assertEqual(len(windows), 1)
+        mid = datetime.datetime.fromisoformat(windows[0]["mid"].replace("Z", "+00:00"))
+        expected = datetime.datetime(2026, 7, 1, 12, 0, 0, tzinfo=datetime.timezone.utc)
+        self.assertLess(abs((mid - expected).total_seconds()), 0.001)
+
+    def test_generate_windows_corrects_bjd_tdb_to_utc_when_coords_given(self):
+        # TOI-1404 coordinates (RA 15:13:47, Dec -45:00:42) and a t0 whose
+        # naive (BJD-as-UTC) reading is 2026-07-01T12:00:00 UTC. The real
+        # BJD_TDB -> JD_UTC correction here is about -6.95 minutes (verified
+        # against a direct astropy round-trip), so the corrected mid time
+        # must land noticeably earlier than the naive one, not right on it.
+        ra_deg = (15 + 13 / 60 + 47 / 3600) * 15
+        dec_deg = -(45 + 0 / 60 + 42 / 3600)
+        t0 = 2461223.0
+
+        windows = lco.generate_windows(
+            t0=t0, period=10.0, duration_h=1.0,
+            start_dt="2026-07-01", end_dt="2026-07-01",
+            pad_before_min=0, pad_after_min=0,
+            ra_deg=ra_deg, dec_deg=dec_deg,
+        )
+        self.assertEqual(len(windows), 1)
+        mid = datetime.datetime.fromisoformat(windows[0]["mid"].replace("Z", "+00:00"))
+        naive = datetime.datetime(2026, 7, 1, 12, 0, 0, tzinfo=datetime.timezone.utc)
+        offset_min = (naive - mid).total_seconds() / 60.0
+        self.assertGreater(offset_min, 6.5)
+        self.assertLess(offset_min, 7.5)
+        # mid_bjd stays the uncorrected BJD_TDB value; only the calendar
+        # fields (mid/start/end) get the UTC correction.
+        self.assertEqual(windows[0]["mid_bjd"], t0)
+
+    def test_generate_windows_coord_correction_does_not_drop_boundary_transit(self):
+        # Same target/t0 as above, but the requested range ends exactly at
+        # the naive (uncorrected) transit time. The real, corrected transit
+        # falls ~7 minutes earlier, i.e. still inside the range -- a scan that
+        # doesn't pad before correcting would miss it entirely.
+        ra_deg = (15 + 13 / 60 + 47 / 3600) * 15
+        dec_deg = -(45 + 0 / 60 + 42 / 3600)
+        t0 = 2461223.0
+
+        windows = lco.generate_windows(
+            t0=t0, period=10.0, duration_h=1.0,
+            start_dt="2026-06-30", end_dt="2026-07-01",
+            pad_before_min=0, pad_after_min=0,
+            ra_deg=ra_deg, dec_deg=dec_deg,
+        )
+        self.assertEqual(len(windows), 1)
+
+
+class BjdTdbToJdUtcTest(unittest.TestCase):
+    """transit_obs.bjd_tdb_to_jd_utc: the conversion lco.generate_windows uses."""
+
+    def test_round_trips_against_a_forward_conversion(self):
+        from astropy.time import Time
+        from astropy.coordinates import SkyCoord, EarthLocation
+        import astropy.units as u
+        from muscat_db import transit_obs
+
+        ra_deg = (15 + 13 / 60 + 47 / 3600) * 15
+        dec_deg = -(45 + 0 / 60 + 42 / 3600)
+        bjd_tdb = 2461223.0
+
+        jd_utc = transit_obs.bjd_tdb_to_jd_utc(bjd_tdb, ra_deg, dec_deg)
+
+        geocenter = EarthLocation.from_geocentric(0 * u.m, 0 * u.m, 0 * u.m)
+        coord = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg)
+        t_utc = Time(jd_utc, format="jd", scale="utc", location=geocenter)
+        roundtrip_tdb = (t_utc + t_utc.light_travel_time(coord, kind="barycentric")).tdb.jd
+
+        self.assertLess(abs(roundtrip_tdb - bjd_tdb) * 86400.0, 0.005)  # within 5 ms
+
+    def test_accepts_array_input(self):
+        from muscat_db import transit_obs
+
+        ra_deg = (15 + 13 / 60 + 47 / 3600) * 15
+        dec_deg = -(45 + 0 / 60 + 42 / 3600)
+        values = [2461223.0, 2461233.0, 2461243.0]
+
+        result = transit_obs.bjd_tdb_to_jd_utc(values, ra_deg, dec_deg)
+
+        self.assertEqual(len(result), 3)
+        for scalar, batched in zip(
+            (transit_obs.bjd_tdb_to_jd_utc(v, ra_deg, dec_deg) for v in values), result
+        ):
+            self.assertLess(abs(float(scalar) - float(batched)) * 86400.0, 0.005)
+
+
 class FrameDestinationDayobsTest(unittest.TestCase):
     """The download directory must come from the filename's DAY-OBS token.
 

@@ -1502,7 +1502,18 @@ def archive_download_jobs() -> list[dict]:
     return jobs
 
 
-def generate_windows(t0: float, period: float, duration_h: float, start_dt: str, end_dt: str, pad_before_min: float, pad_after_min: float) -> list[dict]:
+# BJD_TDB - JD_UTC is at most ~9 min (light-travel-time Romer delay to the
+# barycenter, plus the ~69 s TDB-UTC constant). The scan below is padded by
+# more than that so a transit near either boundary is never dropped once the
+# real correction is applied.
+_BJD_UTC_BOUNDARY_PAD = datetime.timedelta(minutes=15)
+
+
+def generate_windows(
+    t0: float, period: float, duration_h: float, start_dt: str, end_dt: str,
+    pad_before_min: float, pad_after_min: float,
+    ra_deg: float | None = None, dec_deg: float | None = None,
+) -> list[dict]:
     """Generate transit windows within a date range.
 
     Epochs are normalized to the first transit within the date range for clarity
@@ -1511,6 +1522,12 @@ def generate_windows(t0: float, period: float, duration_h: float, start_dt: str,
     Window boundaries retain the precise calculated transit times. LCO checks
     visibility against the actual astronomical window, so rounding boundaries
     can make a request claim slightly more observable time than exists.
+
+    ``t0``/the derived mid-transit times are BJD_TDB. When ``ra_deg``/``dec_deg``
+    are given, they are converted to true JD_UTC (see
+    ``transit_obs.bjd_tdb_to_jd_utc``) before being used as calendar times;
+    omitting either coordinate falls back to treating BJD as JD_UTC directly,
+    which is off by up to ~9 minutes.
     """
     if not all([start_dt, end_dt]):
         raise LcoError("Date range is required", status=400)
@@ -1518,44 +1535,73 @@ def generate_windows(t0: float, period: float, duration_h: float, start_dt: str,
     start = datetime.datetime.fromisoformat(start_dt + "T00:00:00").replace(tzinfo=datetime.timezone.utc)
     end = datetime.datetime.fromisoformat(end_dt + "T23:59:59").replace(tzinfo=datetime.timezone.utc)
 
-    # JD for Unix epoch is 2440587.5. BJD is close enough for this purpose.
+    has_coord = ra_deg is not None and dec_deg is not None
+    scan_start = start - _BJD_UTC_BOUNDARY_PAD if has_coord else start
+    scan_end = end + _BJD_UTC_BOUNDARY_PAD if has_coord else end
+
+    # JD for Unix epoch is 2440587.5. This uncorrected arithmetic only bounds
+    # the epoch scan below; the real BJD_TDB -> JD_UTC correction (if
+    # requested) is applied in a single batched pass afterward, since doing it
+    # per-epoch with astropy would be too slow for the epoch count this loop
+    # can reach.
     t0_dt = datetime.datetime.fromtimestamp((t0 - 2440587.5) * 86400, tz=datetime.timezone.utc)
 
-    epoch_at_start = math.floor((start - t0_dt).total_seconds() / (period * 86400.0))
+    epoch_at_start = math.floor((scan_start - t0_dt).total_seconds() / (period * 86400.0))
 
-    windows = []
+    candidates: list[tuple[int, float]] = []  # (epoch, mid_bjd)
     current_epoch = epoch_at_start
-    relative_epoch = 0  # Reset to 0 for the first window in range
-    first_in_range = True
 
     while True:
         mid_bjd = t0 + current_epoch * period
         # Recalculate mid_dt from BJD each time to avoid float drift
         mid_dt = datetime.datetime.fromtimestamp((mid_bjd - 2440587.5) * 86400, tz=datetime.timezone.utc)
 
-        if mid_dt > end:
+        if mid_dt > scan_end:
             break
-
-        if mid_dt >= start:
-            if first_in_range:
-                relative_epoch = current_epoch  # Store absolute epoch for first transit
-                first_in_range = False
-
-            start_obs = mid_dt - datetime.timedelta(hours=duration_h / 2.0, minutes=pad_before_min)
-            end_obs = mid_dt + datetime.timedelta(hours=duration_h / 2.0, minutes=pad_after_min)
-
-            windows.append({
-                "epoch": int(current_epoch - relative_epoch),  # Display relative epoch (0-indexed)
-                "epoch_abs": int(current_epoch),  # Store absolute epoch for reference
-                "mid_bjd": mid_bjd,
-                "mid": mid_dt.isoformat().replace("+00:00", "Z"),
-                "start": start_obs.isoformat().replace("+00:00", "Z"),
-                "end": end_obs.isoformat().replace("+00:00", "Z"),
-            })
+        if mid_dt >= scan_start:
+            candidates.append((current_epoch, mid_bjd))
 
         current_epoch += 1
-        if len(windows) > 1000: # safety break
+        if len(candidates) > 1000: # safety break
              break
+
+    if not candidates:
+        return []
+
+    if has_coord:
+        from muscat_db import transit_obs
+        mid_jds_utc = transit_obs.bjd_tdb_to_jd_utc(
+            [c[1] for c in candidates], ra_deg, dec_deg,
+        )
+    else:
+        mid_jds_utc = [c[1] for c in candidates]
+
+    windows = []
+    relative_epoch = 0  # Reset to 0 for the first window in range
+    first_in_range = True
+
+    for (epoch, mid_bjd), mid_jd_utc in zip(candidates, mid_jds_utc):
+        mid_dt = datetime.datetime.fromtimestamp((float(mid_jd_utc) - 2440587.5) * 86400, tz=datetime.timezone.utc)
+        # The scan above was padded to not miss a boundary transit; re-filter
+        # against the true (unpadded) range now that times are corrected.
+        if mid_dt < start or mid_dt > end:
+            continue
+
+        if first_in_range:
+            relative_epoch = epoch  # Store absolute epoch for first transit
+            first_in_range = False
+
+        start_obs = mid_dt - datetime.timedelta(hours=duration_h / 2.0, minutes=pad_before_min)
+        end_obs = mid_dt + datetime.timedelta(hours=duration_h / 2.0, minutes=pad_after_min)
+
+        windows.append({
+            "epoch": int(epoch - relative_epoch),  # Display relative epoch (0-indexed)
+            "epoch_abs": int(epoch),  # Store absolute epoch for reference
+            "mid_bjd": mid_bjd,
+            "mid": mid_dt.isoformat().replace("+00:00", "Z"),
+            "start": start_obs.isoformat().replace("+00:00", "Z"),
+            "end": end_obs.isoformat().replace("+00:00", "Z"),
+        })
 
     return windows
 
