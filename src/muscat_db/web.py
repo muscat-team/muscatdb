@@ -5326,6 +5326,8 @@ def api_ephemeris_calculate(payload: dict = Body(...)):
             "t0_fit_centered": round(t0_centered, 6) if was_fit else round(T0, 6),
             "t0_fit_centered_unc": round(t0_centered_unc, 6) if was_fit else 0.0,
             "E_center": E_center,
+            "n_fit": fit_result["n_fit"],
+            "dof": fit_result["dof"],
             "points": points_data
         }
         

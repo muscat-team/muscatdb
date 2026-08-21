@@ -2706,6 +2706,21 @@
       let fitSummaryHtml = '';
       if (res.was_fit) {
         const methodLabel = res.fit_method === 'weighted' ? 'Weighted' : 'Unweighted';
+        // dof = n_fit - 2 (the line has 2 free parameters: T0, period).
+        // dof <= 0 means the fit has no residual left to check the linear
+        // model against -- with exactly 2 points it interpolates them
+        // exactly, so unweighted mode's residual-variance uncertainties
+        // collapse to a hard 0.0 (see ephemeris_math.fit_linear_ephemeris).
+        // Flag it instead of presenting the fit as a verified measurement.
+        const isDegenerate = Number.isFinite(res.dof) && res.dof <= 0;
+        const convergenceHtml = isDegenerate
+          ? `<p style="margin-bottom: 0rem; font-size: 0.75rem; color: var(--red); font-weight: 500;"
+                title="A straight line has 2 free parameters (T0, period); with only ${res.n_fit} point(s) in the fit there are 0 degrees of freedom left over, so nothing independently checks that a linear ephemeris is the right model here.">
+               ⚠ Exact fit (${res.n_fit} point${res.n_fit === 1 ? '' : 's'}, 0 degrees of freedom)${res.fit_method === 'weighted' ? ' -- unverified, no residual to check the model' : ' -- reported uncertainties above are not a real precision estimate'}
+             </p>`
+          : `<p style="margin-bottom: 0rem; font-size: 0.75rem; color: var(--green); font-weight: 500;">
+               ✓ ${methodLabel} linear fit converged successfully
+             </p>`;
         fitSummaryHtml = `
           <div style="margin-top: 0.5rem; font-size: 0.85rem;">
             <p style="margin-bottom: 0.35rem;" title="Epoch centered to minimize parameter covariance, matching allesfitter2.">
@@ -2717,9 +2732,7 @@
             <p style="margin-bottom: 0.35rem;">
               <strong>Fitted Period:</strong> <span class="text-highlight">${MuscatFormat.pair(res.period_fit, res.period_fit_unc, 1, 8).text} days</span>
             </p>
-            <p style="margin-bottom: 0rem; font-size: 0.75rem; color: var(--green); font-weight: 500;">
-              ✓ ${methodLabel} linear fit converged successfully
-            </p>
+            ${convergenceHtml}
           </div>
         `;
       } else {
@@ -3170,7 +3183,7 @@
           type: 'scatter',
           name: inst.toUpperCase(),
           marker: {
-            color: '#888888',
+            color: '#000000',
             size: 8,
             symbol: getSymbolForInstrument(inst)
           },
@@ -3512,6 +3525,10 @@
         mode: 'markers',
         type: 'scatter',
         name: `planet ${planet.toLowerCase()}`,
+        // The legend shows one black entry per instrument (marker shape)
+        // instead -- the row/axis title already identifies the planet, so a
+        // per-planet color swatch here would be redundant.
+        showlegend: false,
         marker: {
           color: pColor,
           size: markerSize,
@@ -3542,6 +3559,7 @@
         mode: 'markers',
         type: 'scatter',
         name: `planet ${planet.toLowerCase()} (unused)`,
+        showlegend: false,
         marker: {
           color: 'rgba(0, 0, 0, 0)',
           size: Math.max(3, markerSize - 1),
@@ -3585,6 +3603,7 @@
       mode: 'lines',
       type: 'scatter',
       name: `planet ${planet.toLowerCase()} TTV best fit (${ttvModelRun})`,
+      showlegend: false,
       line: {color: color, width: 2, dash: 'dash'},
       hovertemplate: 'BJD %{customdata:.6f}<br>O-C %{y:.3f} min<extra></extra>',
       customdata: modelPoints.map(p => Number(p.tc)),
