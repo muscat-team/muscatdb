@@ -2042,7 +2042,7 @@ async def transit_fit_query_archive(target: str, source: str = "nasa", inst: str
                     tic_clean = re.sub(r"[^0-9a-zA-Z]", "", tic_id.lower())
                     matches_tic = (
                         (is_tic_query and target_num is not None and tic_num is not None and target_num == tic_num)
-                        or target_clean == tic_clean
+                        or (is_tic_query and target_clean == tic_clean)
                         or (tic_num and target_clean == f"tic{tic_num}")
                     )
                     if matches_tic:

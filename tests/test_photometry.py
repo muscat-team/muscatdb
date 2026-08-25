@@ -2427,6 +2427,40 @@ class TestRoutes:
         monkeypatch.setattr(web, "HERE", tmp_path / "src" / "muscat_db")
         return data_dir
 
+    @pytest.fixture
+    def colliding_tic_toi_csv_tic_row_first(self, monkeypatch, tmp_path):
+        """The TOI-2876/TIC-2876 collision from ``colliding_tic_toi_csv``, but
+        with the TIC-owning row listed *first*.
+
+        In ``colliding_tic_toi_csv`` the TOI-2876.01 row happens to come
+        before the colliding TIC-2876 row, so the bare-number query resolves
+        (and the scan loop ``break``s) via the correctly-gated TOI-numeric
+        branch before ever reaching the TIC row -- it never actually
+        exercises ``matches_tic``'s clean-string equality clause. Swapping
+        the order forces a bare ``"2876"`` query to reach that clause first,
+        so this fixture catches it leaking into the TIC catalog even though
+        the query said nothing about TIC.
+        """
+        from muscat_db import web
+
+        data_dir = tmp_path / "data"
+        data_dir.mkdir(exist_ok=True)
+        (data_dir / "TOIs.csv").write_text(
+            "TOI,Planet Name,TIC ID,Stellar Eff Temp (K),"
+            "Stellar Eff Temp (K) err,Stellar Log(g) (cm/s^2),"
+            "Stellar Log(g) (cm/s^2) err,Period (days),Period (days) err,"
+            "Epoch (BJD),Epoch (BJD) err,Duration (hours),"
+            "Duration (hours) err\n"
+            # TIC-2876's TIC ID equals TOI-2876's host number (different
+            # star), listed first this time.
+            "5555.01,TOI-5555.01,2876,5100,50,4.4,0.1,"
+            "4.0,0.001,2459100.0,0.001,2.1,0.1\n"
+            "2876.01,TOI-2876.01,88880001,5000,50,4.5,0.1,"
+            "3.0,0.001,2459000.0,0.001,2.0,0.1\n",
+        )
+        monkeypatch.setattr(web, "HERE", tmp_path / "src" / "muscat_db")
+        return data_dir
+
     def test_transit_fit_query_archive_tic_query_does_not_match_a_colliding_toi_host_number(
         self, client, colliding_tic_toi_csv,
     ):
@@ -2458,10 +2492,12 @@ class TestRoutes:
         assert data["params"]["period"] == 6.0
 
     def test_transit_fit_query_archive_bare_number_still_prefers_toi(
-        self, client, colliding_tic_toi_csv,
+        self, client, colliding_tic_toi_csv_tic_row_first,
     ):
-        """A bare number with no ``tic``/``toi`` text keeps meaning TOI, same
-        as every other bare-number query in this test class.
+        """A bare number with no ``tic``/``toi`` text keeps meaning TOI, even
+        when the colliding TIC row is listed before the TOI row it should
+        resolve to -- this must not depend on file order any more than the
+        ``tic``/``toi``-prefixed queries above do.
         """
         r = client.get(
             "/api/transit-fit/query-archive",
