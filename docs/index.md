@@ -1,0 +1,3 @@
+# muscat-db
+
+Stub.

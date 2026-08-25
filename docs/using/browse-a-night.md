@@ -1,0 +1,3 @@
+# Browse a night
+
+Stub.
