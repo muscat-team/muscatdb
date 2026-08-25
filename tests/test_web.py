@@ -3400,6 +3400,34 @@ def test_ttv_windows_without_coords_keeps_bjd_treated_as_utc(monkeypatch):
     assert abs((mid - expected).total_seconds()) < 0.001
 
 
+def test_ttv_windows_coord_correction_does_not_drop_boundary_transit(monkeypatch):
+    # Same shape as lco.generate_windows's boundary case (#99): a transit
+    # whose raw BJD_TDB value reads a few minutes past the range's end
+    # boundary, but whose true (BJD_TDB -> JD_UTC corrected) time falls back
+    # inside it. Filtering on the raw BJD_TDB value before correcting --
+    # as `_ttv_windows` did -- drops it.
+    from muscat_db.web import _iso_date_to_jd, _ttv_windows
+
+    ra_deg = (15 + 13 / 60 + 47 / 3600) * 15
+    dec_deg = -(45 + 0 / 60 + 42 / 3600)
+    end_jd = _iso_date_to_jd("2026-07-01", end_of_day=True)
+    mid_bjd = end_jd + 3.0 / 1440.0  # 3 minutes past the boundary, read raw
+
+    monkeypatch.setattr("muscat_db.web.ttv.get_ttv_model", _fake_ttv_model_at(mid_bjd))
+
+    payload = {
+        "target": "TOI-1404", "ttv_run": "default", "planet": "b",
+        "range_start": "2026-06-30", "range_end": "2026-07-01",
+        "pad_before_min": 0, "pad_after_min": 0,
+        "ra": ra_deg, "dec": dec_deg,
+    }
+
+    result = _ttv_windows(payload, duration_h=1.0)
+
+    assert result["ok"] is True
+    assert len(result["windows"]) == 1
+
+
 def test_ttv_model_rejects_invalid_date_before_starting_harmonic(tmp_path, monkeypatch):
     from muscat_db import ttv_fit as ttv
 

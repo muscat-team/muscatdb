@@ -3743,6 +3743,16 @@ def _ttv_windows(payload: dict, duration_h: float) -> dict:
     ra_deg = float(req_ra) if has_coord else None
     dec_deg = float(req_dec) if has_coord else None
 
+    # start_jd/end_jd are calendar JD_UTC; mid_bjd is BJD_TDB, which can be up
+    # to ~9 minutes off UTC (see lco._BJD_UTC_BOUNDARY_PAD). Membership can't
+    # be decided on the raw BJD_TDB value alone once coordinates make the
+    # correction available, so the initial scan is padded (same margin as
+    # lco.generate_windows) and re-filtered below once each mid time has been
+    # corrected to true JD_UTC.
+    pad_days = lco._BJD_UTC_BOUNDARY_PAD.total_seconds() / 86400.0
+    scan_start_jd = start_jd - pad_days if has_coord else start_jd
+    scan_end_jd = end_jd + pad_days if has_coord else end_jd
+
     raw_windows = []  # (epoch_abs, mid_bjd, start_jd_win, end_jd_win)
     for point in points:
         try:
@@ -3750,7 +3760,7 @@ def _ttv_windows(payload: dict, duration_h: float) -> dict:
             epoch_abs = int(point["epoch"])
         except (KeyError, TypeError, ValueError):
             continue
-        if not (start_jd <= mid_bjd <= end_jd):
+        if not (scan_start_jd <= mid_bjd <= scan_end_jd):
             continue
         start_jd_win = mid_bjd - (half / 24.0) - (pad_before / 1440.0)
         end_jd_win = mid_bjd + (half / 24.0) + (pad_after / 1440.0)
@@ -3773,6 +3783,10 @@ def _ttv_windows(payload: dict, duration_h: float) -> dict:
     windows = []
     for (epoch_abs, mid_bjd, start_jd_win, end_jd_win), mid_jd_utc in zip(raw_windows, mid_jds_utc):
         mid_jd_utc = float(mid_jd_utc)
+        # The scan above was padded to not miss a boundary transit; re-filter
+        # against the true (unpadded) range now that times are corrected.
+        if not (start_jd <= mid_jd_utc <= end_jd):
+            continue
         correction = mid_jd_utc - mid_bjd
         windows.append({
             "epoch": 0,  # replaced below, once the first in-range epoch is known
