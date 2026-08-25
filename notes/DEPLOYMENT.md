@@ -123,11 +123,6 @@ The **linchpin assumption** for multi-host workers: `/ut2` and everything under 
 - Repo: `$HOME/github/research/project/muscat-db/`
 - Database: `$HOME/github/research/project/muscat-db/muscat.db` (**3,066,445,824 bytes** — same size on ut2, ut3, ut4, ut6)
 
-`$HOME` above always means the single deployment account's home (currently
-jerome's), which the §12 design already requires to resolve identically across
-every host via this same NFS export — that invariant holds today and these
-four paths are safe to keep `$HOME`-relative for that reason.
-
 ### Shared-input paths must be pinned, not left `$HOME`-relative
 
 `MUSCAT_OBSLOG_DIR` (and `MUSCAT_DATA_DIR`) are a different category from the
@@ -143,12 +138,13 @@ no error — see #71. The daily cron already worked around this by exporting
 section](../README.md#cron-daily) of the README), but that override never
 covered manual CLI runs or the `muscatdbgui` session, which only read `.env`.
 
-**Rule:** pin `MUSCAT_OBSLOG_DIR` (and `MUSCAT_DATA_DIR` if it ever moves off
-`/data`) explicitly in `.env`, on a single host or many — never rely on their
-`$HOME`-relative in-code default in production. The startup log
-(`[startup] env config:`) now prints the resolved value whenever a variable is
-using its in-code default, so an unpinned shared-input path is visible instead
-of silent.
+**Rule:** pin `MUSCAT_OBSLOG_DIR` explicitly in `.env`, on a single host or
+many — never rely on its `$HOME`-relative in-code default in production.
+`MUSCAT_DATA_DIR`'s in-code default (`/data`) is not `$HOME`-relative and
+needs no pin as-is; pin it too only if it's ever pointed somewhere else. The
+startup log (`[startup] env config:`) now prints the resolved value whenever
+a variable is using its in-code default, so an unpinned shared-input path is
+visible instead of silent.
 
 ### Engine checkouts
 
