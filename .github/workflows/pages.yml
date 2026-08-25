@@ -1,8 +1,8 @@
 name: Pages
 
-# Builds and deploys the static documentation snapshot directly in GitHub Actions.
-# Whenever main or test is updated, this workflow builds a snapshot using a
-# synthetic test database and publishes it to GitHub Pages.
+# Builds and deploys the GitHub Pages site in GitHub Actions.
+# Pages root is the MkDocs site; the UI snapshot is nested at site/home.
+# On push to main, MkDocs builds site/, then build-static-site writes site/home/.
 
 on:
   push:
@@ -45,10 +45,11 @@ jobs:
       - name: Download catalog CSVs
         run: bash scripts/download_catalogs.sh
 
-      - name: Build static site with tiny mock DB
+      - name: Build MkDocs then nest the UI snapshot at site/home
         run: |
+          uv run mkdocs build --site-dir site
           uv run python -c "from tests.test_static_site import _build_tiny_db; _build_tiny_db('mock_muscat.db')"
-          uv run muscat-db build-static-site --out site --db mock_muscat.db --no-figures
+          uv run muscat-db build-static-site --out site/home --db mock_muscat.db --no-figures
 
       - name: Configure Pages
         uses: actions/configure-pages@v5

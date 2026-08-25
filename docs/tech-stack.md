@@ -1,6 +1,4 @@
-# Tech Stack — muscat-db
-
-Date: 2026-07-08
+# Tech stack
 
 ## Overview
 

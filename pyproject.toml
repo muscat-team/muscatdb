@@ -37,6 +37,8 @@ dev = [
     "ruff>=0.8",
     "pandas>=2.2", # Used in notebooks for data manipulation
     "pre-commit>=4.6.0",
+    "mkdocs>=1.6.1",
+    "mkdocs-material>=9.7.7",
 ]
 
 [tool.pytest.ini_options]
