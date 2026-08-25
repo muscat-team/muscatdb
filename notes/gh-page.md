@@ -1,6 +1,6 @@
 # Static GitHub Pages documentation snapshot
 
-**Status:** implemented · **Backlog item:** `docs/TODO.md` — "add a static but
+**Status:** implemented · **Backlog item:** `notes/TODO.md` — "add a static but
 navigable github-pages version as visual muscat-db documentation"
 
 The project's documentation, published as a GitHub Page: the pipeline guide as
