@@ -681,4 +681,4 @@ auto-deploy system keeps running on the old package.
 job_store.py, catalog.py, exposure.py, fov.py, lco.py, lco_monitor.py, transit_obs.py,
 ephemeris_math.py, scanner.py, summarizer.py, auth.py, proxy.py, http_client.py, cache.py,
 coord.py, config.py, instruments.py, cli.py}` · `pyproject.toml` · `deploy/nginx.conf` ·
-`.env.example` · `docs/architecture_audit.md` · `docs/DEPLOYMENT.md`.
+`.env.example` · `notes/architecture_audit.md` · `notes/DEPLOYMENT.md`.

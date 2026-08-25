@@ -424,7 +424,7 @@ cd site && python -m http.server 8080
 
 The snapshot is **not** committed to `main`/`test` (it is gitignored) so that
 regenerated binary figures never accumulate in the repository history. See
-[docs/gh-page.md](docs/gh-page.md) for the design, privacy notes, and options.
+[notes/gh-page.md](notes/gh-page.md) for the design, privacy notes, and options.
 
 ## Web Frontend
 
@@ -531,7 +531,7 @@ Interactive API references are auto-generated from the OpenAPI schema of the Fas
 - **Swagger UI**: Available at `/docs` (e.g., [http://localhost:8000/docs](http://localhost:8000/docs)) to interactively test endpoints.
 - **ReDoc**: Available at `/redoc` (e.g., [http://localhost:8000/redoc](http://localhost:8000/redoc)) for a clean, documentation-focused layout.
 
-For an alternative modern documentation interface with client code snippet generators, you can also serve a custom wrapper using **Scalar** via CDN integration referencing `/openapi.json` (see [docs/audit_api.md](docs/audit_api.md) for details).
+For an alternative modern documentation interface with client code snippet generators, you can also serve a custom wrapper using **Scalar** via CDN integration referencing `/openapi.json` (see [notes/audit_api.md](notes/audit_api.md) for details).
 
 ## Cron (daily)
 

@@ -2,7 +2,7 @@
 
 Locks in correctness for the weighted/unweighted linear ephemeris fit that
 used to live inline in web.py's api_ephemeris_calculate route handler (see
-docs/architecture_audit.md, finding H2).
+notes/architecture_audit.md, finding H2).
 """
 
 from __future__ import annotations

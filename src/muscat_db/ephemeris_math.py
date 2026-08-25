@@ -1,7 +1,7 @@
 """Linear ephemeris (transit-timing O-C) least-squares fitting.
 
 Extracted from the ``api_ephemeris_calculate`` route handler in ``web.py``
-(see docs/architecture_audit.md, finding H2) so the weighted/unweighted
+(see notes/architecture_audit.md, finding H2) so the weighted/unweighted
 least-squares fit, its variance propagation, and the epoch-centering trick
 are independently unit-testable instead of living inline in a FastAPI route.
 

@@ -1,5 +1,5 @@
 WIP
-* implement docs/MUSCATDB-LITE.md — greenfield redesign: capability-gated modular
+* implement notes/MUSCATDB-LITE.md — greenfield redesign: capability-gated modular
   install (extras: obs, toi, nexsci, fov, expcalc, cluster), thin per-feature web
   routers, and a durable pull-based work queue for crash-safe multi-host execution
   (supersedes the old celery+redis migration plan; see MUSCATDB-LITE §12)
@@ -16,7 +16,7 @@ TODO
   dual-read env vars during the window, or stored per-user LCO/ADS tokens can no longer
   be decrypted
 * [done] add a static but navigable github-pages version as visual muscat-db
-  documentation — see docs/gh-page.md (`muscat-db build-static-site`,
+  documentation — see notes/gh-page.md (`muscat-db build-static-site`,
   .github/workflows/pages.yml)
 * improve test coverage
 * setting user permissions (admin vs regular; is_admin column already exists)
