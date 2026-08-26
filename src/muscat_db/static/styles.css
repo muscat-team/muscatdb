@@ -323,6 +323,28 @@ tr.filter-row th input::placeholder { color: var(--text-dim); font-style: italic
 }
 .note-cell .note-actions button.save { border-color: var(--accent2); color: var(--accent2); }
 .note-cell .note-actions button.del  { border-color: var(--red);     color: var(--red); margin-left: auto; }
+
+/* ---------- Rendered Markdown (project descriptions) ---------- */
+.markdown-body { line-height: 1.55; }
+.markdown-body > *:first-child { margin-top: 0; }
+.markdown-body > *:last-child { margin-bottom: 0; }
+.markdown-body p { margin: 0 0 0.6rem 0; }
+.markdown-body ul, .markdown-body ol { margin: 0 0 0.6rem 0; padding-left: 1.4rem; }
+.markdown-body li { margin: 0.15rem 0; }
+.markdown-body a { color: var(--accent2); }
+.markdown-body code {
+  background: var(--input-bg); border: 1px solid var(--border);
+  border-radius: 3px; padding: 0.05rem 0.3rem; font-size: 0.9em;
+}
+.markdown-body pre {
+  background: var(--input-bg); border: 1px solid var(--border);
+  border-radius: 6px; padding: 0.6rem 0.8rem; overflow-x: auto;
+}
+.markdown-body pre code { background: none; border: none; padding: 0; }
+.markdown-body blockquote {
+  margin: 0 0 0.6rem 0; padding-left: 0.8rem;
+  border-left: 3px solid var(--border); color: var(--text-dim);
+}
 .note-cell .note-actions button:hover { filter: brightness(1.2); }
 
 /* ---------- Editable norm-name cells ---------- */
@@ -1011,6 +1033,13 @@ th.drag-over-right {
 }
 #message-modal[data-kind="notice"] .modal-box {
   border-color: var(--blue);
+}
+/* The create-project overlay carries a name + description textarea, not a
+   one-line confirmation, so it gets a much wider box than the shared 400px
+   message/confirm modals -- its container (#create-project-overlay) already
+   spans the full viewport, so only the .modal-box max-width was constraining it. */
+#create-project-overlay .modal-box {
+  max-width: 1200px; /* matches .container, so it reads as page-width, not a small dialog */
 }
 .modal-title {
   margin-bottom: 0.75rem;

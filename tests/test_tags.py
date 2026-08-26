@@ -23,7 +23,7 @@ from muscat_db.database import (
     set_norm_name_override,
     set_tag_description,
 )
-from muscat_db.web import app, _project_target_rows
+from muscat_db.web import app, _project_target_rows, _render_markdown
 
 
 # ── DB layer ─────────────────────────────────────────────────────────────────
@@ -355,6 +355,37 @@ def test_tag_page_renders_attached_targets(mock_db, monkeypatch):
     assert "TESTOBJ" in html
     assert "desc here" in html
     assert 'from=project&amp;project=FollowUp' in html or 'from=project&project=FollowUp' in html
+
+
+# ── Markdown description rendering ───────────────────────────────────────────
+
+
+def test_render_markdown_renders_links_and_bullets():
+    html = _render_markdown("[link](https://example.com)\n\n- one\n- two")
+
+    assert '<a href="https://example.com"' in html
+    assert "<li>one</li>" in html
+    assert "<li>two</li>" in html
+
+
+def test_render_markdown_strips_script_and_javascript_urls():
+    html = _render_markdown("<script>alert(1)</script>[bad](javascript:alert(1)) safe")
+
+    assert "<script>" not in html
+    assert "alert(1)" not in html
+    assert "javascript:" not in html
+    assert "safe" in html
+
+
+def test_tag_page_renders_description_as_sanitized_html(mock_db):
+    create_tag(mock_db, "FollowUp", "[link](https://example.com) and\n\n- a bullet")
+
+    html = TestClient(app).get("/tag?name=FollowUp").text
+
+    assert '<a href="https://example.com"' in html
+    assert "<li>a bullet</li>" in html
+    # The raw markdown source survives (for re-editing), not just its render.
+    assert 'data-raw="[link](https://example.com) and' in html
 
 
 def test_tag_page_unknown_project_renders_friendly_not_found(mock_db):

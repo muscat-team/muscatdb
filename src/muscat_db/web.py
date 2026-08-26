@@ -26,6 +26,8 @@ from contextlib import asynccontextmanager
 from urllib.parse import quote, urlencode
 
 import httpx
+import markdown
+import nh3
 from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
@@ -646,6 +648,30 @@ def _project_target_rows(db: str, tag: str) -> list[dict]:
     return rows
 
 
+# Project descriptions are stored as raw Markdown source and rendered to HTML
+# at request time. markdown.markdown() passes through any raw HTML in the
+# input unchanged, so the output is sanitized with nh3 (an allowlist-based
+# HTML cleaner) rather than trusted: this is what stops a description of
+# "<script>...</script>" or a "[link](javascript:...)" from doing anything
+# other than rendering as inert text/a blocked link.
+_MARKDOWN_ALLOWED_TAGS = {
+    "p", "br", "strong", "em", "a", "ul", "ol", "li",
+    "code", "pre", "blockquote", "h1", "h2", "h3", "h4", "hr",
+}
+_MARKDOWN_ALLOWED_ATTRS = {"a": {"href", "title"}}
+
+
+def _render_markdown(text: str) -> str:
+    html = markdown.markdown(text or "", extensions=["nl2br", "sane_lists"])
+    return nh3.clean(
+        html,
+        tags=_MARKDOWN_ALLOWED_TAGS,
+        clean_content_tags={"script", "style"},
+        attributes=_MARKDOWN_ALLOWED_ATTRS,
+        url_schemes={"http", "https", "mailto"},
+    )
+
+
 @app.get("/projects", response_class=HTMLResponse)
 def projects_page():
     return _render("projects.html", projects=_list_project_tags(_db_path()))
@@ -665,8 +691,14 @@ def tag_page(name: str = ""):
     description = _get_tag_description(db, tag)
     exists = description is not None
     rows = _project_target_rows(db, tag) if exists else []
+    description = description or ""
     return _render(
-        "tag.html", tag=tag, description=description or "", targets=rows, exists=exists
+        "tag.html",
+        tag=tag,
+        description=description,
+        description_html=_render_markdown(description),
+        targets=rows,
+        exists=exists,
     )
 
 

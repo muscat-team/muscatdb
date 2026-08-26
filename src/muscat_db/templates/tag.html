@@ -15,10 +15,10 @@
   </p>
   <h1>{{ tag }}</h1>
 
-  <div class="note-cell" id="project-desc-cell" data-tag="{{ tag }}"
-       style="max-width:640px; margin-bottom:1.5rem; padding:0.6rem 0.8rem; border:1px solid var(--border); border-radius:8px;">
-    <span class="note-text">{{ description }}</span>
-    <span class="note-placeholder"{% if description %} style="display:none;"{% endif %}>+ add description</span>
+  <div class="note-cell" id="project-desc-cell" data-tag="{{ tag }}" data-raw="{{ description }}"
+       style="margin-bottom:1.5rem; padding:0.6rem 0.8rem; border:1px solid var(--border); border-radius:8px;">
+    <div class="note-text markdown-body">{{ description_html | safe }}</div>
+    <span class="note-placeholder"{% if description %} style="display:none;"{% endif %}>+ add description (Markdown supported)</span>
   </div>
 
   <div class="search-bar">
@@ -95,13 +95,23 @@
     });
 
     function openDescEditor() {
-      const current = descCell.querySelector('.note-text').textContent;
+      // Descriptions render as sanitized HTML server-side, so editing works
+      // from the raw Markdown source (data-raw) rather than the rendered
+      // .note-text's textContent, which would lose formatting like link URLs.
+      const current = descCell.dataset.raw || '';
+      // Kept (not re-derived) so Cancel restores the exact rendered markup
+      // without a second server round trip.
+      const originalNodes = Array.from(descCell.childNodes);
       descCell.classList.add('editing');
       descCell.innerHTML = '';
       const ta = document.createElement('textarea');
       ta.value = current;
-      ta.rows = 3;
+      ta.rows = 6;
       ta.placeholder = 'Describe this project…';
+      const hint = document.createElement('div');
+      hint.className = 'hint';
+      hint.style.marginTop = '0.35rem';
+      hint.textContent = 'Markdown supported: **bold**, *italic*, [text](url), - bullet points';
       const actions = document.createElement('div');
       actions.className = 'note-actions';
       const save = document.createElement('button');
@@ -109,15 +119,13 @@
       const cancel = document.createElement('button');
       cancel.textContent = 'Cancel';
       actions.append(save, cancel);
-      descCell.append(ta, actions);
+      descCell.append(ta, hint, actions);
       ta.focus(); ta.select();
 
-      function close(desc) {
+      function restore() {
         descCell.classList.remove('editing');
-        const escapeHtml = MuscatDom.escapeHtml;
-        descCell.innerHTML =
-          '<span class="note-text">' + escapeHtml(desc) + '</span>' +
-          '<span class="note-placeholder"' + (desc ? ' style="display:none;"' : '') + '>+ add description</span>';
+        descCell.innerHTML = '';
+        descCell.append(...originalNodes);
       }
 
       async function commit() {
@@ -129,17 +137,20 @@
             body: JSON.stringify({description: value}),
           });
           if (!res.ok) throw new Error('HTTP ' + res.status);
-          close(value);
+          // Reload rather than patch the DOM in place: the display is
+          // server-rendered (Markdown -> sanitized HTML), so the freshly
+          // rendered markup has to come from the server either way.
+          location.reload();
         } catch (err) {
           showMessageModal('Error', 'Save failed: ' + err.message);
         }
       }
 
       save.addEventListener('click', commit);
-      cancel.addEventListener('click', () => close(current));
+      cancel.addEventListener('click', restore);
       ta.addEventListener('keydown', e => {
         if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); commit(); }
-        else if (e.key === 'Escape') { e.preventDefault(); close(current); }
+        else if (e.key === 'Escape') { e.preventDefault(); restore(); }
       });
     }
 
