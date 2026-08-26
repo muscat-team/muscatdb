@@ -191,18 +191,20 @@ def test_project_target_rows_includes_per_date_frame_counts(mock_db, monkeypatch
     )
     with sqlite3.connect(mock_db) as conn:
         conn.execute(
-            "INSERT INTO summaries (instrument, obsdate, ccd, object, nframes) VALUES (?,?,?,?,?)",
-            ("muscat3", "260101", 0, "obj-a", 40),
+            "INSERT INTO summaries (instrument, obsdate, ccd, object, nframes, filter) VALUES (?,?,?,?,?,?)",
+            ("muscat3", "260101", 0, "obj-a", 40, "g"),
         )
         conn.execute(
-            "INSERT INTO summaries (instrument, obsdate, ccd, object, nframes) VALUES (?,?,?,?,?)",
-            ("muscat3", "260102", 0, "obj-a", 110),
+            "INSERT INTO summaries (instrument, obsdate, ccd, object, nframes, filter) VALUES (?,?,?,?,?,?)",
+            ("muscat3", "260102", 0, "obj-a", 110, "r"),
         )
         conn.commit()
 
     rows = _project_target_rows(mock_db, "Grouped")
 
     assert rows[0]["date_frames"] == {"260101": 40, "260102": 110}
+    assert [c["label"] for c in rows[0]["date_filter_chips"]["260101"]] == ["g"]
+    assert [c["label"] for c in rows[0]["date_filter_chips"]["260102"]] == ["r"]
 
 
 # ── Homepage: Tags column present, RA/Dec/Airmass/Move gone ──────────────────
@@ -517,6 +519,10 @@ def test_tag_page_renders_nframe_filter_and_per_date_frames(mock_db, monkeypatch
     assert 'id="nframe-filter"' in html
     assert 'value="100"' in html
     assert 'data-frames="0"' in html  # no summaries rows seeded -> defaults to 0
+    assert 'ndataset-cell' in html
+    assert 'class="filters-cell"' in html
+    assert 'class="frames-cell"' in html
+    assert 'class="date-filter-chips"' in html
 
 
 # ── Markdown description rendering ───────────────────────────────────────────

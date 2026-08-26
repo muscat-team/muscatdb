@@ -57,12 +57,20 @@
         <td class="mono dates-cell" style="white-space:nowrap; vertical-align:top;">
           {% for d in t.dates %}
             {% set inst = t.date_to_inst.get(d, t.instruments[0] if t.instruments else '') %}
-            <div class="date-entry" data-frames="{{ t.date_frames.get(d, 0) }}" style="margin-bottom:2px;"><a href="/{{ inst }}/{{ d }}">{{ d }}{% if inst == 'muscat' %}(M1){% elif inst == 'muscat2' %}(M2){% elif inst == 'muscat3' %}(M3){% elif inst == 'muscat4' %}(M4){% elif inst == 'sinistro' %}(S){% elif inst == 'sbig' %}(SB){% elif inst == 'qhy600' %}(Q){% endif %}</a> <span class="hint">({{ t.date_frames.get(d, 0) }})</span></div>
+            <div class="date-entry" data-frames="{{ t.date_frames.get(d, 0) }}" style="margin-bottom:2px;">
+              <a href="/{{ inst }}/{{ d }}">{{ d }}{% if inst == 'muscat' %}(M1){% elif inst == 'muscat2' %}(M2){% elif inst == 'muscat3' %}(M3){% elif inst == 'muscat4' %}(M4){% elif inst == 'sinistro' %}(S){% elif inst == 'sbig' %}(SB){% elif inst == 'qhy600' %}(Q){% endif %}</a>
+              <span class="hint">({{ t.date_frames.get(d, 0) }})</span>
+              <span class="date-filter-chips" style="display:none;">
+                {% for c in t.date_filter_chips.get(d, []) %}
+                  <span class="badge badge-filter-{{ c.color }}{% if c.narrow %} narrow filter-narrow-line{% endif %}">{{ c.label }}</span>
+                {% endfor %}
+              </span>
+            </div>
           {% endfor %}
           <div class="date-entry-empty hint" style="display:none;">no dates above threshold</div>
         </td>
-        <td class="mono">{{ t.n_dates }}</td>
-        <td>
+        <td class="mono ndataset-cell">{{ t.n_dates }}</td>
+        <td class="filters-cell">
           {% for c in t.filter_chips if not c.narrow %}
             <span class="badge badge-filter-{{ c.color }}">{{ c.label }}</span>
           {% endfor %}
@@ -70,7 +78,7 @@
             <span class="badge badge-filter-{{ c.color }} narrow filter-narrow-line">{{ c.label }}</span>
           {% endfor %}
         </td>
-        <td>{{ t.n_frames }}</td>
+        <td class="frames-cell">{{ t.n_frames }}</td>
         <td style="text-align:center;">
           <button class="btn sm danger detach-btn" data-norm-name="{{ t.norm_name }}" title="Detach from project">Detach</button>
         </td>
@@ -224,22 +232,42 @@
       });
     }
 
-    // ── #Frames filter: hide dates at/below the threshold, per target row ──
+    // ── #Frames filter: hides dates at/below the threshold, per target row,
+    //    and recomputes that row's Ndataset/Filters/#Frames from whichever
+    //    dates currently pass (rather than leaving those columns showing the
+    //    unfiltered totals while the Dates column shows a filtered subset).
     const nframeFilter = document.getElementById('nframe-filter');
     function applyNframeFilter() {
       const threshold = parseFloat(nframeFilter.value);
       const min = isNaN(threshold) ? -Infinity : threshold;
-      document.querySelectorAll('.dates-cell').forEach(cell => {
+      document.querySelectorAll('#project-targets-table tbody tr').forEach(row => {
+        const cell = row.querySelector('.dates-cell');
+        if (!cell) return;
         const entries = cell.querySelectorAll('.date-entry');
         let visibleCount = 0;
+        let totalFrames = 0;
+        const chipsByKey = new Map();
         entries.forEach(entry => {
           const frames = parseFloat(entry.dataset.frames) || 0;
           const visible = frames > min;
           entry.style.display = visible ? '' : 'none';
-          if (visible) visibleCount++;
+          if (!visible) return;
+          visibleCount++;
+          totalFrames += frames;
+          entry.querySelectorAll('.date-filter-chips .badge').forEach(chip => {
+            const key = chip.className + '|' + chip.textContent;
+            if (!chipsByKey.has(key)) chipsByKey.set(key, chip.cloneNode(true));
+          });
         });
         const empty = cell.querySelector('.date-entry-empty');
         if (empty) empty.style.display = (entries.length && !visibleCount) ? '' : 'none';
+
+        const ndatasetCell = row.querySelector('.ndataset-cell');
+        if (ndatasetCell) ndatasetCell.textContent = visibleCount;
+        const framesCell = row.querySelector('.frames-cell');
+        if (framesCell) framesCell.textContent = totalFrames;
+        const filtersCell = row.querySelector('.filters-cell');
+        if (filtersCell) filtersCell.replaceChildren(...chipsByKey.values());
       });
     }
     if (nframeFilter) {
