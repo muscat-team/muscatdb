@@ -229,6 +229,20 @@ def test_targets_page_is_published_and_linked(tiny_db, tmp_path):
     assert len(linking) > 0, "targets/ should be linked in navigation"
 
 
+def test_projects_page_is_published_and_linked(tiny_db, tmp_path):
+    """/projects is published and linked from navbar, mirroring /targets above."""
+    out = tmp_path / "site"
+    build_site(out, db_path=tiny_db, n_examples=1, include_figures=False, log=lambda _m: None)
+
+    assert (out / "projects" / "index.html").is_file(), "projects page should be published"
+    linking = [
+        page.relative_to(out).as_posix()
+        for page in out.rglob("index.html")
+        if 'href="projects/"' in _read(page) or 'href="../projects/"' in _read(page)
+    ]
+    assert len(linking) > 0, "projects/ should be linked in navigation"
+
+
 def test_nav_pages_do_not_collide_on_output_directory():
     """Regression (#62): every top-level nav route must get its own output
     directory. ``_APP_HOME_SITEDIR`` used to still be ``"targets"`` from when

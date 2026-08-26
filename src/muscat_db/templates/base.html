@@ -63,6 +63,7 @@
   <a class="brand" href="/" data-nav-section="home">MuSCAT-db</a>
   <a href="/targets" data-nav-section="targets">Targets</a>
   <a href="/logs" data-nav-section="obslog">ObsLog</a>
+  <a href="/projects" data-nav-section="projects">Projects</a>
   <a id="photometry-nav-link" href="/photometry" data-nav-section="photometry">Photometry</a>
   <a id="transit-fit-nav-link" href="/transit-fit" data-nav-section="transit-fit">Transit Fit</a>
   <a id="ephemeris-nav-link" href="/ephemeris" data-nav-section="ephemeris">Ephemeris</a>
@@ -103,6 +104,11 @@
       // under Targets, so it highlights that link instead.
       '/target': 'targets',
       '/logs': 'obslog',
+      '/projects': 'projects',
+      '/tags': 'projects',
+      // A project detail page has no nav item of its own -- it lives under
+      // Projects, so it highlights that link instead (mirrors /target above).
+      '/tag': 'projects',
       '/photometry': 'photometry',
       '/transit-fit': 'transit-fit',
       '/ephemeris': 'ephemeris',

@@ -310,6 +310,26 @@ CREATE TABLE IF NOT EXISTS chat_reactions (
     created_at  REAL NOT NULL,
     PRIMARY KEY (message_id, user_name, emoji)
 );
+
+CREATE TABLE IF NOT EXISTS tag_descriptions (
+    tag         TEXT PRIMARY KEY COLLATE NOCASE,
+    description TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Keyed on the *normalized* target identity (see _normalize_target_name in
+-- catalog.py), not the raw obslog OBJECT string, so every raw-object spelling
+-- variant of one physical target shares one set of project tags -- consistent
+-- with how /target already aggregates raw-object rows by norm_name.
+CREATE TABLE IF NOT EXISTS target_tags (
+    norm_name  TEXT NOT NULL,
+    tag        TEXT NOT NULL COLLATE NOCASE,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (norm_name, tag)
+);
+CREATE INDEX IF NOT EXISTS idx_target_tags_tag       ON target_tags(tag);
+CREATE INDEX IF NOT EXISTS idx_target_tags_norm_name ON target_tags(norm_name);
 """
 
 # Idempotent schema migrations for columns added after initial deployment.
@@ -727,6 +747,8 @@ _APP_OWNED_TABLES = (
     "lco_observation_frames",
     "chat_messages",
     "chat_reactions",
+    "target_tags",
+    "tag_descriptions",
 )
 
 
@@ -1316,6 +1338,155 @@ def get_norm_name_overrides(db_path: str) -> dict[str, str]:
             "SELECT object, norm_name FROM target_overrides WHERE norm_name IS NOT NULL"
         )
         return {row[0]: row[1] for row in cur.fetchall()}
+
+
+def create_tag(db_path: str, tag: str, description: str = "") -> bool:
+    """Create a new project. Returns False if `tag` already exists
+    (case-insensitively, per tag_descriptions.tag's COLLATE NOCASE)."""
+    tag = (tag or "").strip()
+    with get_conn(db_path) as conn:
+        _apply_schema(conn)
+        try:
+            conn.execute(
+                "INSERT INTO tag_descriptions(tag, description, updated_at) "
+                "VALUES (?, ?, CURRENT_TIMESTAMP)",
+                (tag, (description or "").strip()),
+            )
+        except sqlite3.IntegrityError:
+            return False
+        conn.commit()
+    clear_all_caches()
+    return True
+
+
+def delete_tag(db_path: str, tag: str) -> None:
+    """Delete a project entirely: its description row and every target_tags
+    row referencing it. There is no FK between the two tables, so the cascade
+    is done explicitly, in one connection/transaction. Idempotent on a tag
+    that doesn't exist."""
+    tag = (tag or "").strip()
+    with get_conn(db_path) as conn:
+        _apply_schema(conn)
+        conn.execute("DELETE FROM tag_descriptions WHERE tag = ?", (tag,))
+        conn.execute("DELETE FROM target_tags WHERE tag = ?", (tag,))
+        conn.commit()
+    clear_all_caches()
+
+
+def get_tag_description(db_path: str, tag: str) -> str | None:
+    """None if the tag does not exist at all; '' if it exists with a blank
+    description. Callers use the None/'' distinction to 404/empty-state vs.
+    render an existing project with nothing written yet."""
+    with get_conn(db_path) as conn:
+        _apply_schema(conn)
+        row = conn.execute(
+            "SELECT description FROM tag_descriptions WHERE tag = ?", ((tag or "").strip(),)
+        ).fetchone()
+    return None if row is None else (row[0] or "")
+
+
+def set_tag_description(db_path: str, tag: str, description: str) -> bool:
+    """Returns False if the tag doesn't exist (caller should treat as 404)."""
+    with get_conn(db_path) as conn:
+        _apply_schema(conn)
+        cur = conn.execute(
+            "UPDATE tag_descriptions SET description = ?, updated_at = CURRENT_TIMESTAMP "
+            "WHERE tag = ?",
+            ((description or "").strip(), (tag or "").strip()),
+        )
+        conn.commit()
+        updated = cur.rowcount > 0
+    clear_all_caches()
+    return updated
+
+
+def list_project_tags(db_path: str) -> list[dict]:
+    """One row per known project: {"tag", "description", "target_count"}.
+    A tag "exists" if it has a tag_descriptions row (even with zero targets,
+    e.g. freshly created) OR appears in target_tags. Two simple queries +
+    Python-side fan-out/union, mirroring the _reactions_by_message batching
+    template rather than an outer join (avoids depending on SQLite's
+    FULL OUTER JOIN, which needs 3.39+)."""
+    with get_conn(db_path) as conn:
+        _apply_schema(conn)
+        desc_rows = conn.execute("SELECT tag, description FROM tag_descriptions").fetchall()
+        count_rows = conn.execute(
+            "SELECT tag, COUNT(DISTINCT norm_name) FROM target_tags GROUP BY tag"
+        ).fetchall()
+    descriptions = {r[0]: r[1] or "" for r in desc_rows}
+    counts = {r[0]: r[1] for r in count_rows}
+    all_tags = sorted(set(descriptions) | set(counts), key=str.casefold)
+    return [
+        {"tag": t, "description": descriptions.get(t, ""), "target_count": counts.get(t, 0)}
+        for t in all_tags
+    ]
+
+
+def add_target_tag(db_path: str, norm_name: str, tag: str) -> bool:
+    """Attach `tag` to `norm_name`. Returns False if `tag` is not an existing
+    project (projects must be created via create_tag first); True on success,
+    idempotently (re-tagging an already-tagged target is not an error)."""
+    norm_name = (norm_name or "").strip()
+    tag = (tag or "").strip()
+    if not norm_name or not tag:
+        return False
+    with get_conn(db_path) as conn:
+        _apply_schema(conn)
+        if not conn.execute("SELECT 1 FROM tag_descriptions WHERE tag = ?", (tag,)).fetchone():
+            return False
+        conn.execute(
+            "INSERT OR IGNORE INTO target_tags(norm_name, tag, created_at) "
+            "VALUES (?, ?, CURRENT_TIMESTAMP)",
+            (norm_name, tag),
+        )
+        conn.commit()
+    clear_all_caches()
+    return True
+
+
+def remove_target_tag(db_path: str, norm_name: str, tag: str) -> None:
+    """Detach `tag` from `norm_name`. Idempotent if it wasn't attached."""
+    with get_conn(db_path) as conn:
+        _apply_schema(conn)
+        conn.execute(
+            "DELETE FROM target_tags WHERE norm_name = ? AND tag = ?",
+            ((norm_name or "").strip(), (tag or "").strip()),
+        )
+        conn.commit()
+    clear_all_caches()
+
+
+def get_targets_for_tag(db_path: str, tag: str) -> list[str]:
+    """Sorted list of norm_names currently attached to `tag`."""
+    with get_conn(db_path) as conn:
+        _apply_schema(conn)
+        cur = conn.execute(
+            "SELECT norm_name FROM target_tags WHERE tag = ? ORDER BY norm_name",
+            ((tag or "").strip(),),
+        )
+        return [r[0] for r in cur.fetchall()]
+
+
+def get_tags_for_targets(db_path: str, norm_names: list[str]) -> dict[str, list[str]]:
+    """Batched {norm_name: [tag, ...]} for every norm_name that has >=1 tag.
+    Mirrors _reactions_by_message's one-query/fan-out-in-Python template so a
+    caller iterating many targets (e.g. the homepage) issues one query, not
+    one per row."""
+    names = [n for n in dict.fromkeys(norm_names) if n]
+    if not names:
+        return {}
+    placeholders = ",".join("?" for _ in names)
+    with get_conn(db_path) as conn:
+        _apply_schema(conn)
+        cur = conn.execute(
+            f"SELECT norm_name, tag FROM target_tags WHERE norm_name IN ({placeholders}) "
+            "ORDER BY tag COLLATE NOCASE",
+            names,
+        )
+        out: dict[str, list[str]] = {}
+        for norm_name, tag in cur.fetchall():
+            out.setdefault(norm_name, []).append(tag)
+    return out
 
 
 def get_frames(db_path: str, instrument: str, obsdate: str, ccd: int) -> list[dict]:

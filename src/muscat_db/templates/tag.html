@@ -1,0 +1,225 @@
+{% extends "base.html" %}
+{% block title %}{{ tag }} — MuSCAT-db{% endblock %}
+{% block content %}
+
+{% if not exists %}
+  <div class="empty-state">
+    <div class="empty-icon">🔍</div>
+    <h2>Project not found</h2>
+    <p>No project named &ldquo;{{ tag }}&rdquo; exists yet.</p>
+    <a href="/projects" class="btn solid">Back to Projects</a>
+  </div>
+{% else %}
+  <p style="color: var(--text-dim); margin-bottom: 1rem;">
+    <a href="/projects">← Back to Projects</a>
+  </p>
+  <h1>{{ tag }}</h1>
+
+  <div class="note-cell" id="project-desc-cell" data-tag="{{ tag }}"
+       style="max-width:640px; margin-bottom:1.5rem; padding:0.6rem 0.8rem; border:1px solid var(--border); border-radius:8px;">
+    <span class="note-text">{{ description }}</span>
+    <span class="note-placeholder"{% if description %} style="display:none;"{% endif %}>+ add description</span>
+  </div>
+
+  <div class="search-bar">
+    <input id="attach-target-input" type="text" list="attach-target-options" placeholder="Add a target by normalized name…" autocomplete="off">
+    <datalist id="attach-target-options"></datalist>
+    <button id="attach-target-btn" class="btn" type="button">Add to Project</button>
+    <a href="/api/tags/{{ tag | urlencode }}/export.csv" class="csv-btn" download>CSV</a>
+    <button id="delete-project-btn" class="btn danger" type="button" style="margin-left:auto;">Delete Project</button>
+  </div>
+
+  {% if targets %}
+  <div class="csv-wrap">
+  <table id="project-targets-table">
+    <thead>
+      <tr>
+        <th data-sort-attr="normName">Target</th>
+        <th data-sort-attr="dates">Dates</th>
+        <th data-sort-attr="nDates" data-sort-type="number">Ndataset</th>
+        <th data-sort-attr="filters">Filters</th>
+        <th data-sort-attr="frames" data-sort-type="number"># Frames</th>
+        <th style="width:1px;">Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for t in targets %}
+      <tr data-norm-name="{{ t.norm_name }}">
+        <td>
+          <a href="/target?name={{ t.norm_name | urlencode }}&amp;from=project&amp;project={{ tag | urlencode }}" style="text-decoration:none;">
+            <strong>{{ t.norm_name }}</strong>
+          </a>
+        </td>
+        <td class="mono" style="white-space:nowrap; vertical-align:top;">
+          {% for d in t.dates %}
+            {% set inst = t.date_to_inst.get(d, t.instruments[0] if t.instruments else '') %}
+            <div style="margin-bottom:2px;"><a href="/{{ inst }}/{{ d }}">{{ d }}</a></div>
+          {% endfor %}
+        </td>
+        <td class="mono">{{ t.n_dates }}</td>
+        <td>
+          {% for c in t.filter_chips if not c.narrow %}
+            <span class="badge badge-filter-{{ c.color }}">{{ c.label }}</span>
+          {% endfor %}
+          {% for c in t.filter_chips if c.narrow %}
+            <span class="badge badge-filter-{{ c.color }} narrow filter-narrow-line">{{ c.label }}</span>
+          {% endfor %}
+        </td>
+        <td>{{ t.n_frames }}</td>
+        <td style="text-align:center;">
+          <button class="btn sm danger detach-btn" data-norm-name="{{ t.norm_name }}" title="Detach from project">Detach</button>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+    <div class="empty-state">
+      <div class="empty-icon">🎯</div>
+      <h2>No targets attached yet</h2>
+      <p>Use the box above to attach a target to this project.</p>
+    </div>
+  {% endif %}
+
+  <script>
+  (function () {
+    const tag = {{ tag | tojson }};
+
+    // ── editable description (mirrors base.html's note-cell editor) ────────
+    const descCell = document.getElementById('project-desc-cell');
+    descCell.addEventListener('click', function (e) {
+      if (descCell.classList.contains('editing')) return;
+      if (e.target.closest('a, button')) return;
+      openDescEditor();
+    });
+
+    function openDescEditor() {
+      const current = descCell.querySelector('.note-text').textContent;
+      descCell.classList.add('editing');
+      descCell.innerHTML = '';
+      const ta = document.createElement('textarea');
+      ta.value = current;
+      ta.rows = 3;
+      ta.placeholder = 'Describe this project…';
+      const actions = document.createElement('div');
+      actions.className = 'note-actions';
+      const save = document.createElement('button');
+      save.className = 'save'; save.textContent = 'Save';
+      const cancel = document.createElement('button');
+      cancel.textContent = 'Cancel';
+      actions.append(save, cancel);
+      descCell.append(ta, actions);
+      ta.focus(); ta.select();
+
+      function close(desc) {
+        descCell.classList.remove('editing');
+        const escapeHtml = MuscatDom.escapeHtml;
+        descCell.innerHTML =
+          '<span class="note-text">' + escapeHtml(desc) + '</span>' +
+          '<span class="note-placeholder"' + (desc ? ' style="display:none;"' : '') + '>+ add description</span>';
+      }
+
+      async function commit() {
+        const value = ta.value.trim();
+        try {
+          const res = await fetch('/api/tags/' + encodeURIComponent(tag), {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({description: value}),
+          });
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          close(value);
+        } catch (err) {
+          showMessageModal('Error', 'Save failed: ' + err.message);
+        }
+      }
+
+      save.addEventListener('click', commit);
+      cancel.addEventListener('click', () => close(current));
+      ta.addEventListener('keydown', e => {
+        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); commit(); }
+        else if (e.key === 'Escape') { e.preventDefault(); close(current); }
+      });
+    }
+
+    // ── attach-target box ────────────────────────────────────────────────
+    const attachInput = document.getElementById('attach-target-input');
+    const attachBtn = document.getElementById('attach-target-btn');
+    const attachOptions = document.getElementById('attach-target-options');
+
+    fetch('/api/targets/norm-names')
+      .then(r => r.json())
+      .then(data => {
+        attachOptions.replaceChildren(...(data.norm_names || []).map(n => {
+          const opt = document.createElement('option');
+          opt.value = n;
+          return opt;
+        }));
+      })
+      .catch(() => {});
+
+    async function attachTarget() {
+      const norm_name = attachInput.value.trim();
+      if (!norm_name) { attachInput.focus(); return; }
+      try {
+        const res = await fetch('/api/targets/' + encodeURIComponent(norm_name) + '/tags', {
+          method: 'PUT',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({tag}),
+        });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        location.reload();
+      } catch (err) {
+        showMessageModal('Error', 'Could not attach target: ' + err.message);
+      }
+    }
+    attachBtn.addEventListener('click', attachTarget);
+    attachInput.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); attachTarget(); }
+    });
+
+    // ── detach ────────────────────────────────────────────────────────────
+    document.querySelectorAll('.detach-btn').forEach(btn => {
+      btn.addEventListener('click', async function () {
+        const normName = btn.dataset.normName;
+        const ok = await showConfirmModal(
+          'Remove target?',
+          'Remove "' + normName + '" from this project?',
+          {confirmLabel: 'Remove', confirmClass: 'btn danger'}
+        );
+        if (!ok) return;
+        try {
+          const res = await fetch('/api/targets/' + encodeURIComponent(normName) + '/tags', {
+            method: 'DELETE',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({tag}),
+          });
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          location.reload();
+        } catch (err) {
+          showMessageModal('Error', 'Could not remove target: ' + err.message);
+        }
+      });
+    });
+
+    // ── delete project ───────────────────────────────────────────────────
+    document.getElementById('delete-project-btn').addEventListener('click', async function () {
+      const ok = await showConfirmModal(
+        'Delete project?',
+        'Delete project "' + tag + '"? This cannot be undone.',
+        {confirmLabel: 'Delete', confirmClass: 'btn danger'}
+      );
+      if (!ok) return;
+      try {
+        const res = await fetch('/api/tags/' + encodeURIComponent(tag), {method: 'DELETE'});
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        window.location.href = '/projects';
+      } catch (err) {
+        showMessageModal('Error', 'Could not delete project: ' + err.message);
+      }
+    });
+  })();
+  </script>
+{% endif %}
+{% endblock %}

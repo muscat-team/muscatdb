@@ -131,6 +131,15 @@ from muscat_db.database import (
     set_user_lco_token,
     set_user_ephem_sheet,
     _normalize_filters,
+    create_tag as _create_tag,
+    delete_tag as _delete_tag,
+    get_tag_description as _get_tag_description,
+    set_tag_description as _set_tag_description,
+    list_project_tags as _list_project_tags,
+    add_target_tag as _add_target_tag,
+    remove_target_tag as _remove_target_tag,
+    get_targets_for_tag as _get_targets_for_tag,
+    get_tags_for_targets,
 )
 from muscat_db.job_store import get_job_store
 from muscat_db.cache import LRUCache
@@ -246,6 +255,7 @@ ttv_fit_router = APIRouter(prefix="/api/ttv-fit", tags=["ttv-fit"])
 exposure_router = APIRouter(prefix="/api/exposure", tags=["exposure"])
 jobs_router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 target_router = APIRouter(prefix="/api/targets", tags=["targets"])
+tags_router = APIRouter(prefix="/api/tags", tags=["tags"])
 ephemeris_router = APIRouter(prefix="/api/ephemeris", tags=["ephemeris"])
 fov_router = APIRouter(prefix="/api/fov", tags=["fov"])
 lco_router = APIRouter(prefix="/api/lco", tags=["lco"])
@@ -481,6 +491,10 @@ def index():
     for t in targets:
         t["norm_n_dates"] = norm_date_totals[t["norm_name"]]
 
+    tags_by_norm = get_tags_for_targets(db, [t["norm_name"] for t in targets])
+    for t in targets:
+        t["tags"] = tags_by_norm.get(t["norm_name"], [])
+
     last_updated = get_last_build_date(db)
 
     html = jinja.get_template("index.html").render(
@@ -588,6 +602,72 @@ def _get_datasets_for_normalized_target(db: str, normalized_name: str) -> tuple[
     datasets.sort(key=lambda d: d["date"], reverse=True)
     last_updated = get_last_build_date(db)
     return datasets, last_updated
+
+
+def _project_target_rows(db: str, tag: str) -> list[dict]:
+    """One aggregated row per norm_name attached to `tag`, for the Project
+    Detail table. Deliberately does not call _get_datasets_for_normalized_target
+    per target (N+1 queries, and that helper returns one row per
+    (instrument, obsdate), not one row per target). Instead reuses the
+    already-loaded per-raw-object rows from _get_targets (which already carry
+    n_dates/n_frames/dates/filters aggregated at raw-object level) and unions/
+    sums them across every raw-object spelling that shares a norm_name.
+    """
+    wanted = set(_get_targets_for_tag(db, tag))
+    if not wanted:
+        return []
+
+    norm_overrides = _get_norm_name_overrides(db)
+    groups: dict[str, list[dict]] = {}
+    for t in _get_targets(db):
+        norm = _normalize_target_name(t["object"], norm_overrides)
+        if norm in wanted:
+            groups.setdefault(norm, []).append(t)
+
+    rows = []
+    for norm, members in groups.items():
+        dates = sorted(set().union(*(m["dates"] for m in members)))
+        date_to_inst: dict[str, str] = {}
+        for m in sorted(members, key=lambda x: x["object"]):
+            date_to_inst.update(m["date_to_inst"])
+        filters = sorted(set().union(*(m["filters"] for m in members)))
+        rows.append({
+            "norm_name": norm,
+            "objects": sorted(m["object"] for m in members),
+            "dates": dates,
+            "date_to_inst": date_to_inst,
+            "n_dates": len(dates),
+            "filters": filters,
+            "filter_chips": _normalize_filters(filters),
+            "n_frames": sum(m["n_frames"] for m in members),
+            "instruments": sorted(set().union(*(m["instruments"] for m in members))),
+        })
+    rows.sort(key=lambda r: r["norm_name"].casefold())
+    return rows
+
+
+@app.get("/projects", response_class=HTMLResponse)
+def projects_page():
+    return _render("projects.html", projects=_list_project_tags(_db_path()))
+
+
+@app.get("/tags", response_class=RedirectResponse)
+def tags_alias_redirect():
+    return RedirectResponse(url="/projects", status_code=301)
+
+
+@app.get("/tag", response_class=HTMLResponse)
+def tag_page(name: str = ""):
+    tag = name.strip()
+    if not tag:
+        return RedirectResponse("/projects", status_code=303)
+    db = _db_path()
+    description = _get_tag_description(db, tag)
+    exists = description is not None
+    rows = _project_target_rows(db, tag) if exists else []
+    return _render(
+        "tag.html", tag=tag, description=description or "", targets=rows, exists=exists
+    )
 
 
 @app.get("/target", response_class=HTMLResponse)
@@ -1347,12 +1427,16 @@ def nexsci_page():
 def export_targets_csv():
     db = _db_path()
     targets = _get_targets(db)
+    norm_overrides = _get_norm_name_overrides(db)
+    for t in targets:
+        t["norm_name"] = _normalize_target_name(t["object"], norm_overrides)
+    tags_by_norm = get_tags_for_targets(db, [t["norm_name"] for t in targets])
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow([
         "object", "ra", "dec", "filters", "airmass_min", "airmass_max",
         "n_dates", "n_frames", "instruments", "dates",
-        "total_exptime_hr", "note", "is_identified",
+        "total_exptime_hr", "note", "is_identified", "tags",
     ])
     for t in targets:
         filters = ", ".join(c["label"] for c in t["filter_chips"])
@@ -1370,6 +1454,7 @@ def export_targets_csv():
             t["total_exptime_hr"],
             t["note"],
             "yes" if t["is_identified"] else "no",
+            ", ".join(tags_by_norm.get(t["norm_name"], [])),
         ])
     return Response(
         content=buf.getvalue(),
@@ -6062,23 +6147,102 @@ def api_set_norm_name(obj: str, payload: dict = Body(...)):
     return JSONResponse({"ok": True, "object": obj, "norm_name": norm_name})
 
 
-@app.get("/{instrument}", response_class=HTMLResponse)
-def instrument_page(instrument: str):
-    dates = _get_dates(_db_path(), instrument)
-    return _render("instrument.html", instrument=instrument, dates=dates)
+@target_router.get("/norm-names", response_class=JSONResponse)
+def api_target_norm_names():
+    """Full sorted, deduped list of every norm_name in the DB. Backs the
+    Project Detail page's attach-target search box: ship the (small) full
+    list and filter client-side, matching the homepage's own
+    ship-everything/filter-in-JS pattern rather than a bespoke server search."""
+    db = _db_path()
+    norm_overrides = _get_norm_name_overrides(db)
+    names = sorted({_normalize_target_name(t["object"], norm_overrides) for t in _get_targets(db)})
+    return JSONResponse({"ok": True, "norm_names": names})
 
 
-@app.get("/{instrument}/{obsdate}", response_class=HTMLResponse)
-def date_page(instrument: str, obsdate: str):
-    summaries = _get_summaries(_db_path(), instrument, obsdate)
-    ccds = sorted(set(s["ccd"] for s in summaries))
-    return _render("date.html", instrument=instrument, obsdate=obsdate, summaries=summaries, ccds=ccds)
+@target_router.get("/{obj}/tags", response_class=JSONResponse)
+def api_get_target_tags(obj: str):
+    db = _db_path()
+    norm_name = _normalize_target_name(obj, _get_norm_name_overrides(db))
+    tags = get_tags_for_targets(db, [norm_name]).get(norm_name, [])
+    return JSONResponse({"ok": True, "object": obj, "norm_name": norm_name, "tags": tags})
 
 
-@app.get("/{instrument}/{obsdate}/ccd{ccd}", response_class=HTMLResponse)
-def ccd_page(instrument: str, obsdate: str, ccd: int):
-    frames = _get_frames(_db_path(), instrument, obsdate, ccd)
-    return _render("ccd.html", instrument=instrument, obsdate=obsdate, ccd=ccd, frames=frames)
+@target_router.put("/{obj}/tags")
+def api_add_target_tag(obj: str, payload: dict = Body(...)):
+    tag = (payload.get("tag") or "").strip()
+    if not tag:
+        raise HTTPException(400, "tag is required")
+    db = _db_path()
+    norm_name = _normalize_target_name(obj, _get_norm_name_overrides(db))
+    if not _add_target_tag(db, norm_name, tag):
+        raise HTTPException(404, f"project {tag!r} not found")
+    return JSONResponse({"ok": True, "object": obj, "norm_name": norm_name, "tag": tag})
+
+
+@target_router.delete("/{obj}/tags")
+def api_remove_target_tag(obj: str, payload: dict = Body(...)):
+    # DELETE-with-body (mirrors api_delete_note above), not a
+    # /{obj}/tags/{tag} path segment: a tag name may contain characters that
+    # are fine in JSON but awkward as a raw path segment.
+    tag = (payload.get("tag") or "").strip()
+    db = _db_path()
+    norm_name = _normalize_target_name(obj, _get_norm_name_overrides(db))
+    _remove_target_tag(db, norm_name, tag)
+    return JSONResponse({"ok": True, "object": obj, "norm_name": norm_name, "tag": tag})
+
+
+@tags_router.get("")
+def api_list_tags():
+    return JSONResponse({"ok": True, "tags": _list_project_tags(_db_path())})
+
+
+@tags_router.post("")
+def api_create_tag(payload: dict = Body(...)):
+    tag = (payload.get("tag") or "").strip()
+    description = (payload.get("description") or "").strip()
+    if not tag or len(tag) > 100:
+        raise HTTPException(400, "tag is required (max 100 chars)")
+    if "/" in tag:
+        raise HTTPException(400, "tag must not contain '/'")
+    if not _create_tag(_db_path(), tag, description):
+        raise HTTPException(409, f"project {tag!r} already exists")
+    return JSONResponse({"ok": True, "tag": tag})
+
+
+@tags_router.put("/{tag}")
+def api_update_tag_description(tag: str, payload: dict = Body(...)):
+    description = payload.get("description") or ""
+    if len(description) > 4000:
+        raise HTTPException(400, "description too long (max 4000 chars)")
+    if not _set_tag_description(_db_path(), tag, description):
+        raise HTTPException(404, f"project {tag!r} not found")
+    return JSONResponse({"ok": True, "tag": tag, "description": description.strip()})
+
+
+@tags_router.delete("/{tag}")
+def api_delete_tag(tag: str):
+    _delete_tag(_db_path(), tag)
+    return JSONResponse({"ok": True, "tag": tag})
+
+
+@tags_router.get("/{tag}/export.csv")
+def api_export_tag_csv(tag: str):
+    db = _db_path()
+    if _get_tag_description(db, tag) is None:
+        raise HTTPException(404, f"project {tag!r} not found")
+    rows = _project_target_rows(db, tag)
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["norm_name", "dates", "n_dates", "filters", "n_frames"])
+    for r in rows:
+        w.writerow([
+            r["norm_name"], ", ".join(r["dates"]), r["n_dates"],
+            ", ".join(c["label"] for c in r["filter_chips"]), r["n_frames"],
+        ])
+    return Response(
+        content=buf.getvalue(), media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={tag}.csv"},
+    )
 
 
 # ── TTV Fit API ──────────────────────────────────────────────────────────────
@@ -6234,9 +6398,38 @@ app.include_router(transit_fit_router)
 app.include_router(exposure_router)
 app.include_router(jobs_router)
 app.include_router(target_router)
+app.include_router(tags_router)
 app.include_router(ephemeris_router)
 app.include_router(ttv_fit_router)
 app.include_router(fov_router)
 app.include_router(lco_router)
 app.include_router(settings_router)
 app.include_router(ads_router)
+
+
+# These catch-all single/double dynamic-segment routes must be registered
+# last: app.include_router() only appends a router's routes to app.routes at
+# the point it is called (here, above), which is after every directly
+# `@app.get`-decorated route earlier in this file has already been added.
+# Starlette matches routes in app.routes order, so if these were registered
+# earlier in the file (as they used to be), they would shadow any later
+# router-based route whose full path happens to also be exactly one or two
+# segments (e.g. GET /api/tags was being matched here as
+# instrument="api", obsdate="tags" instead of reaching tags_router).
+@app.get("/{instrument}", response_class=HTMLResponse)
+def instrument_page(instrument: str):
+    dates = _get_dates(_db_path(), instrument)
+    return _render("instrument.html", instrument=instrument, dates=dates)
+
+
+@app.get("/{instrument}/{obsdate}", response_class=HTMLResponse)
+def date_page(instrument: str, obsdate: str):
+    summaries = _get_summaries(_db_path(), instrument, obsdate)
+    ccds = sorted(set(s["ccd"] for s in summaries))
+    return _render("date.html", instrument=instrument, obsdate=obsdate, summaries=summaries, ccds=ccds)
+
+
+@app.get("/{instrument}/{obsdate}/ccd{ccd}", response_class=HTMLResponse)
+def ccd_page(instrument: str, obsdate: str, ccd: int):
+    frames = _get_frames(_db_path(), instrument, obsdate, ccd)
+    return _render("ccd.html", instrument=instrument, obsdate=obsdate, ccd=ccd, frames=frames)

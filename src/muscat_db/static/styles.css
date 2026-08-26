@@ -302,23 +302,6 @@ tr.filter-row th input::placeholder { color: var(--text-dim); font-style: italic
   border-color: var(--accent);
 }
 
-/* ---------- Move-target button ---------- */
-.btn-move {
-  background: none;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 0.15rem 0.35rem;
-  font-size: 0.7rem;
-  cursor: pointer;
-  color: var(--text-dim);
-  white-space: nowrap;
-  transition: border-color 0.15s, color 0.15s;
-}
-.btn-move:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-}
-
 /* ---------- Editable note cells ---------- */
 .note-cell { cursor: text; min-width: 140px; position: relative; }
 .note-cell .note-text { color: var(--text); word-break: break-word; }
@@ -362,6 +345,33 @@ tr.filter-row th input::placeholder { color: var(--text-dim); font-style: italic
 }
 .norm-name-cell .note-actions button.save { border-color: var(--accent2); color: var(--accent2); }
 .norm-name-cell .note-actions button:hover { filter: brightness(1.2); }
+
+/* ---------- Project tag chips + quick adder ---------- */
+.badge-tag { background: var(--surface2); color: var(--accent2); border: 1px solid var(--border); margin: 0 0.2rem 0.2rem 0; }
+.badge-tag:hover { border-color: var(--accent2); }
+.tags-cell { position: relative; }
+.tags-chip-list { display: inline; }
+.tag-add-hint {
+  opacity: 0.5; font-size: 0.7rem; cursor: pointer; margin-left: 0.2rem;
+  transition: opacity 0.15s;
+}
+.tags-cell:hover .tag-add-hint { opacity: 0.85; }
+.tag-add-hint:hover { opacity: 1; }
+.tags-cell.editing { padding: 0.25rem; overflow: visible; white-space: normal; }
+.tags-cell .tag-add-input {
+  width: 100%; min-height: 1.8rem;
+  background: var(--input-bg); color: var(--text);
+  border: 1px solid var(--accent); border-radius: 4px;
+  padding: 0.25rem 0.4rem; font: inherit;
+}
+.tags-cell .note-actions { margin-top: 0.25rem; display: flex; gap: 0.35rem; }
+.tags-cell .note-actions button {
+  background: var(--surface2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 4px;
+  padding: 0.2rem 0.55rem; font-size: 0.75rem; cursor: pointer;
+}
+.tags-cell .note-actions button.save { border-color: var(--accent2); color: var(--accent2); }
+.tags-cell .note-actions button:hover { filter: brightness(1.2); }
 
 /* ---------- Theme toggle ---------- */
 .theme-toggle {
@@ -965,8 +975,8 @@ th.drag-over-right {
 
 #message-modal,
 #hide-confirm-overlay,
-#move-confirm-overlay,
-#delete-confirm-overlay {
+#delete-confirm-overlay,
+#create-project-overlay {
   display: none;
   position: fixed;
   inset: 0;
@@ -977,8 +987,8 @@ th.drag-over-right {
 }
 #message-modal.visible,
 #hide-confirm-overlay.visible,
-#move-confirm-overlay.visible,
-#delete-confirm-overlay.visible {
+#delete-confirm-overlay.visible,
+#create-project-overlay.visible {
   display: flex;
 }
 #message-modal[data-mode="message"] #message-modal-cancel {
