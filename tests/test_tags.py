@@ -1,9 +1,8 @@
 """Tests for the target tagging / project management feature (issue #88).
 
 target_tags keys on the normalized target identity (norm_name), not the raw
-obslog OBJECT string -- see the "Key design decision" note in
-notes/target_tagging_plan.md. The core regression test below pins that down:
-two raw objects that normalize to the same target must share one project's
+obslog OBJECT string. The core regression test below pins that down: two raw
+objects that normalize to the same target must share one project's
 membership.
 """
 
