@@ -526,7 +526,10 @@ def test_index_exposes_normalized_target_direct_link(mock_db, monkeypatch):
     assert "V1298Tau_b V1298TAU" in html
 
 
-def test_target_detail_stores_last_viewed_target(mock_db, monkeypatch):
+def test_target_detail_has_no_standalone_target_nav_item(mock_db, monkeypatch):
+    """An individual target page lives under the Targets nav item rather than
+    getting its own -- no separate "Target" link or per-target remember-me
+    plumbing, just the shared photometry/transit-fit/ephemeris ones."""
     monkeypatch.setattr(
         "muscat_db.web._get_datasets_for_normalized_target",
         lambda _db, norm_name: ([], "2026-07-01"),
@@ -536,11 +539,12 @@ def test_target_detail_stores_last_viewed_target(mock_db, monkeypatch):
 
     assert response.status_code == 200
     html = response.text
-    assert 'id="target-nav-link" href="/target"' in html
+    assert 'id="target-nav-link"' not in html
+    assert "rememberTarget" not in html
+    assert 'href="/targets" data-nav-section="targets"' in html
     assert 'id="photometry-nav-link" href="/photometry"' in html
     assert 'id="transit-fit-nav-link" href="/transit-fit"' in html
     assert 'id="ephemeris-nav-link" href="/ephemeris"' in html
-    assert "MuscatRouteState.rememberTarget(\"V1298TAU\")" in html
 
 
 def test_target_detail_has_lco_schedule_and_archive_buttons(mock_db, monkeypatch):
@@ -860,6 +864,88 @@ def test_ephemeris_target_info_lists_only_full_transit_fit_runs(
     assert "run_type" not in datasets[0]
 
 
+def _write_timer_run(rdir, tc_line, ref_time=2460114, summary=None):
+    """A minimal timer run directory: fit.yaml, timer-fit.log and out/tc.txt."""
+    out = rdir / "out"
+    out.mkdir(parents=True, exist_ok=True)
+    (rdir / "fit.yaml").write_text("planets: b\n")
+    (rdir / "timer-fit.log").write_text(
+        "2026-08-04 13:45:02 - INFO - loading data: lc_gp.csv\n"
+        f"2026-08-04 13:45:02 - INFO - ref. time: {ref_time}\n"
+    )
+    if tc_line is not None:
+        (out / "tc.txt").write_text(tc_line + "\n")
+    if summary is not None:
+        (out / "summary.csv").write_text(summary)
+    return rdir
+
+
+@pytest.mark.parametrize(
+    ("tc_line", "expected_tc"),
+    [
+        # Post-de8180f timer writes the light curve's own system (BJD_TDB).
+        ("b 2460114.529475892 0.001763186", 2460114.529475892),
+        # Pre-de8180f timer subtracted the Kepler zero point.
+        ("b 5281.529475892 0.001763186", 2460114.529475892),
+    ],
+    ids=["native_bjd", "legacy_bkjd"],
+)
+def test_run_fitted_params_normalises_tc_txt_time_system(
+    tmp_path, monkeypatch, tc_line, expected_tc
+):
+    """Both timer conventions for tc.txt must resolve to the same BJD.
+
+    timer dropped its hardcoded -2454833 offset in de8180f, so runs written
+    either side of the engine update coexist on disk and cannot be offset
+    unconditionally.
+    """
+    from muscat_db import web
+
+    rdir = _write_timer_run(tmp_path / "run", tc_line)
+    monkeypatch.setattr(web.fit, "fit_output_dir", lambda *args: rdir)
+
+    fitted = web._get_run_fitted_params("muscat2", "230618", "TOI01404.01", "default")
+
+    assert fitted["b"]["tc"] == pytest.approx(expected_tc, abs=1e-6)
+    assert fitted["b"]["unc"] == pytest.approx(0.001763186)
+
+
+def test_run_fitted_params_tc_txt_falls_back_to_magnitude_without_ref_time(
+    tmp_path, monkeypatch
+):
+    """Without timer-fit.log the reading is still separable by magnitude alone."""
+    from muscat_db import web
+
+    rdir = _write_timer_run(tmp_path / "run", "b 5281.529475892 0.001763186")
+    (rdir / "timer-fit.log").unlink()
+    monkeypatch.setattr(web.fit, "fit_output_dir", lambda *args: rdir)
+
+    fitted = web._get_run_fitted_params("muscat2", "230618", "TOI01404.01", "default")
+
+    assert fitted["b"]["tc"] == pytest.approx(2460114.529475892, abs=1e-6)
+
+
+def test_run_fitted_params_summary_t0_is_relative_to_ref_time(tmp_path, monkeypatch):
+    """summary.csv t0 is always relative, so it takes ref_time and no offset."""
+    from muscat_db import web
+
+    rdir = _write_timer_run(
+        tmp_path / "run",
+        tc_line=None,
+        summary=(
+            ",mean,sd\n"
+            "t0[0],0.529475892,0.001763186\n"
+            "dur[0],0.125,0.002\n"
+        ),
+    )
+    monkeypatch.setattr(web.fit, "fit_output_dir", lambda *args: rdir)
+
+    fitted = web._get_run_fitted_params("muscat2", "230618", "TOI01404.01", "default")
+
+    assert fitted["b"]["tc"] == pytest.approx(2460114.529475892, abs=1e-6)
+    assert fitted["b"]["dur"] == pytest.approx(3.0)
+
+
 @pytest.mark.parametrize(
     ("start", "end", "expected"),
     [
@@ -1017,6 +1103,29 @@ def test_manual_transit_centers_are_fitted_and_placed_on_epoch_grid(
     # A perfectly linear series is fitted with no 5-sigma flags.
     assert body["results"]["b"]["was_fit"] is True
     assert all(p["flagged"] is False for p in points)
+
+
+def test_ephemeris_calculate_exposes_dof_for_two_point_fit(
+    mock_db, _isolate_ephemeris_jobs
+):
+    """Exactly 2 checked points is a degenerate fit (2 free params, 2 data
+    points, 0 residual degrees of freedom): the API must surface n_fit/dof
+    so the frontend can flag the reported uncertainties as unverified
+    instead of presenting the unweighted-mode hard 0.0 at face value."""
+    planets_ephem = {"b": {"t0": 2458000.0, "period": 2.5}}
+    manual_points = [
+        {"id": "m0", "planet": "b", "tc": 2458000.0, "tc_unc": 0.001, "checked": True},
+        {"id": "m1", "planet": "b", "tc": 2458010.0, "tc_unc": 0.001, "checked": True},
+    ]
+
+    body = _post_manual_calculate(planets_ephem, manual_points).json()
+    result = body["results"]["b"]
+
+    assert result["was_fit"] is True
+    assert result["n_fit"] == 2
+    assert result["dof"] == 0
+    assert result["t0_fit_unc"] == 0.0
+    assert result["period_fit_unc"] == 0.0
 
 
 def test_imported_source_epoch_is_preserved_but_page_epoch_drives_fit(
@@ -3224,6 +3333,99 @@ def test_ttv_fit_model_endpoint_uses_selected_run_and_end_date(monkeypatch):
         "end_date": "2030-01-02",
     }
     assert json.loads(response.body)["points"]["b"][0]["epoch"] == 2
+
+
+def _fake_ttv_model_at(tc_bjd):
+    def fake_model(target, run_name, end_date):
+        return {
+            "ok": True,
+            "run_name": run_name or "default",
+            "points": {"b": [{"epoch": 5, "tc": tc_bjd}]},
+        }
+    return fake_model
+
+
+def test_ttv_windows_corrects_bjd_tdb_to_utc_when_coords_given(monkeypatch):
+    # Same defect as lco.generate_windows (#76): mid_bjd is BJD_TDB and must
+    # not be treated as JD_UTC directly once target coordinates are known.
+    import datetime
+
+    monkeypatch.setattr("muscat_db.web.ttv.get_ttv_model", _fake_ttv_model_at(2461223.0))
+    from muscat_db.web import _ttv_windows
+
+    ra_deg = (15 + 13 / 60 + 47 / 3600) * 15
+    dec_deg = -(45 + 0 / 60 + 42 / 3600)
+    payload = {
+        "target": "TOI-1404", "ttv_run": "default", "planet": "b",
+        "range_start": "2026-06-30", "range_end": "2026-07-02",
+        "pad_before_min": 0, "pad_after_min": 0,
+        "ra": ra_deg, "dec": dec_deg,
+    }
+
+    result = _ttv_windows(payload, duration_h=1.0)
+
+    assert result["ok"] is True
+    assert len(result["windows"]) == 1
+    w = result["windows"][0]
+    assert w["mid_bjd"] == 2461223.0  # unchanged: still the raw BJD_TDB
+
+    mid = datetime.datetime.fromisoformat(w["mid"].replace("Z", "+00:00"))
+    naive = datetime.datetime(2026, 7, 1, 12, 0, 0, tzinfo=datetime.timezone.utc)
+    offset_min = (naive - mid).total_seconds() / 60.0
+    assert 6.5 < offset_min < 7.5  # matches lco.generate_windows for the same target/time
+
+    start = datetime.datetime.fromisoformat(w["start"].replace("Z", "+00:00"))
+    end = datetime.datetime.fromisoformat(w["end"].replace("Z", "+00:00"))
+    assert abs((mid - start).total_seconds() - 1800) < 1  # half of 1h duration
+    assert abs((end - mid).total_seconds() - 1800) < 1
+
+
+def test_ttv_windows_without_coords_keeps_bjd_treated_as_utc(monkeypatch):
+    import datetime
+
+    monkeypatch.setattr("muscat_db.web.ttv.get_ttv_model", _fake_ttv_model_at(2461223.0))
+    from muscat_db.web import _ttv_windows
+
+    payload = {
+        "target": "TOI-1404", "ttv_run": "default", "planet": "b",
+        "range_start": "2026-06-30", "range_end": "2026-07-02",
+        "pad_before_min": 0, "pad_after_min": 0,
+    }
+
+    result = _ttv_windows(payload, duration_h=1.0)
+
+    assert result["ok"] is True
+    mid = datetime.datetime.fromisoformat(result["windows"][0]["mid"].replace("Z", "+00:00"))
+    expected = datetime.datetime(2026, 7, 1, 12, 0, 0, tzinfo=datetime.timezone.utc)
+    assert abs((mid - expected).total_seconds()) < 0.001
+
+
+def test_ttv_windows_coord_correction_does_not_drop_boundary_transit(monkeypatch):
+    # Same shape as lco.generate_windows's boundary case (#99): a transit
+    # whose raw BJD_TDB value reads a few minutes past the range's end
+    # boundary, but whose true (BJD_TDB -> JD_UTC corrected) time falls back
+    # inside it. Filtering on the raw BJD_TDB value before correcting --
+    # as `_ttv_windows` did -- drops it.
+    from muscat_db.web import _iso_date_to_jd, _ttv_windows
+
+    ra_deg = (15 + 13 / 60 + 47 / 3600) * 15
+    dec_deg = -(45 + 0 / 60 + 42 / 3600)
+    end_jd = _iso_date_to_jd("2026-07-01", end_of_day=True)
+    mid_bjd = end_jd + 3.0 / 1440.0  # 3 minutes past the boundary, read raw
+
+    monkeypatch.setattr("muscat_db.web.ttv.get_ttv_model", _fake_ttv_model_at(mid_bjd))
+
+    payload = {
+        "target": "TOI-1404", "ttv_run": "default", "planet": "b",
+        "range_start": "2026-06-30", "range_end": "2026-07-01",
+        "pad_before_min": 0, "pad_after_min": 0,
+        "ra": ra_deg, "dec": dec_deg,
+    }
+
+    result = _ttv_windows(payload, duration_h=1.0)
+
+    assert result["ok"] is True
+    assert len(result["windows"]) == 1
 
 
 def test_ttv_model_rejects_invalid_date_before_starting_harmonic(tmp_path, monkeypatch):

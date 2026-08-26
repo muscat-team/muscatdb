@@ -63,7 +63,6 @@
   <a class="brand" href="/" data-nav-section="home">MuSCAT-db</a>
   <a href="/targets" data-nav-section="targets">Targets</a>
   <a href="/logs" data-nav-section="obslog">ObsLog</a>
-  <a id="target-nav-link" href="/target" data-nav-section="target">Target</a>
   <a id="photometry-nav-link" href="/photometry" data-nav-section="photometry">Photometry</a>
   <a id="transit-fit-nav-link" href="/transit-fit" data-nav-section="transit-fit">Transit Fit</a>
   <a id="ephemeris-nav-link" href="/ephemeris" data-nav-section="ephemeris">Ephemeris</a>
@@ -99,8 +98,11 @@
     var path = window.location.pathname.replace(/\/+$/, '') || '/';
     var section = {
       '/': 'home',
+      '/targets': 'targets',
+      // An individual target page has no nav item of its own -- it lives
+      // under Targets, so it highlights that link instead.
+      '/target': 'targets',
       '/logs': 'obslog',
-      '/target': 'target',
       '/photometry': 'photometry',
       '/transit-fit': 'transit-fit',
       '/ephemeris': 'ephemeris',
@@ -171,7 +173,9 @@
   (function () {
     const root = document.documentElement;
     const btn = document.getElementById('theme-toggle');
+    {% if not is_static_site() %}
     if (window.MuscatRouteState) window.MuscatRouteState.applyNavbar();
+    {% endif %}
     const stored = localStorage.getItem('muscat-theme');
     apply(stored || 'light');
     btn.addEventListener('click', function () {

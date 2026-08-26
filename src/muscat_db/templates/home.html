@@ -91,6 +91,11 @@
     <div id="globe-container" style="position: relative; width: 100%; max-width: 350px; margin: 0 auto; cursor: grab; user-select: none;">
       <!-- SVG dynamic globe rendered via D3 -->
     </div>
+    <!-- Not a real link: the static-site HTML rewriter only rewrites href/src/action
+         attributes, so the world-topology path is parked here (instead of as a JS
+         string literal) to get the same relative-path rewrite as the D3 script tags
+         above. The globe script below reads its resolved .href. -->
+    <a id="world-topo-src" href="/static/js/world-110m.v1.json" style="display:none" aria-hidden="true"></a>
 
     <!-- Preset Navigation Buttons for Observatory Sites -->
     <div style="display: flex; gap: 0.35rem; justify-content: center; margin-top: 1rem; flex-wrap: wrap;" id="site-selector-btns">
@@ -579,8 +584,11 @@
           .on("end", () => { isDragging = false; })
       );
 
-      // Fetch World Topology
-      d3.json("/static/js/world-110m.v1.json")
+      // Fetch World Topology. The path comes from the #world-topo-src link's
+      // resolved .href (not a literal string here) so the static-site build's
+      // relative-path rewrite of that href applies to this fetch too.
+      const worldTopoUrl = document.getElementById('world-topo-src').href;
+      d3.json(worldTopoUrl)
         .then(world => {
           if (!world) return;
           const land = topojson.feature(world, world.objects.land);

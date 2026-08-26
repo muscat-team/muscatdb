@@ -7,7 +7,7 @@ composite-catalog parsing, JWST/spectra target membership, and per-target
 ephemeris/coordinate resolution (local CSV first, then the online TAP/ADQL
 archive, then SIMBAD via muscat_db.exposure).
 
-Extracted from muscat_db.web (see docs/architecture_audit.md, findings H1/H2)
+Extracted from muscat_db.web (see notes/architecture_audit.md, findings H1/H2)
 so this logic has one home instead of being interleaved with route handlers;
 web.py's route handlers import these names back and call them unchanged.
 """

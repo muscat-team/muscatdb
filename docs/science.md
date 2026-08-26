@@ -1,6 +1,4 @@
-# Science Stack — muscat-db
-
-Date: 2026-07-10
+# Science
 
 ## Overview
 

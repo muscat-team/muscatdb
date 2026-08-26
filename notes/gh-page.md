@@ -1,22 +1,20 @@
 # Static GitHub Pages documentation snapshot
 
-**Status:** implemented · **Backlog item:** `docs/TODO.md` — "add a static but
-navigable github-pages version as visual muscat-db documentation"
+**Status:** historical builder notes. The public GitHub Pages root is the
+MkDocs site. This snapshot is nested at `/home/` on that site. The in-app
+`/guide` route is unchanged.
 
-The project's documentation, published as a GitHub Page: the pipeline guide as
-the landing page, plus a browsable static snapshot of the muscat-db web UI, so
-anyone can read how the pipeline works and see what the tool looks like without
-running the FastAPI server, the 3 GB `muscat.db`, or the conda photometry/transit
-stack. The UI pages document *what the UI looks like*, not a live instance.
+The snapshot is a browsable static capture of the muscat-db web UI, so
+anyone can see what the tool looks like without running the FastAPI server,
+the 3 GB `muscat.db`, or the conda photometry/transit stack. The UI pages
+document *what the UI looks like*, not a live instance.
 
 ## Design decisions
 
-- **The guide is the landing page.** `/guide` is written to the site root and the
-  app's own landing page moves to `targets/`. A visitor
-  arriving at the Pages URL is reading documentation, not looking at a table of
-  observation targets they cannot query. Every internal link is rewritten through
-  the route map and every page's `../` prefix is derived from its output
-  directory, so both moves propagate without any hand-maintained paths.
+- **Nested under `/home/`.** After MkDocs writes `site/`, `build-static-site
+  --out site/home` writes the app snapshot there. Snapshot root is the live
+  app home (globe). `/guide` in the snapshot is `guide/`, same as the running
+  server. Do not put a `docs/home.md` in MkDocs: that path is reserved.
 - **Real host snapshot.** The build runs where `muscat.db`, the `data/` CSVs, and
   the `~/ql/*` figure trees live (CI runners have none of these), so pages carry
   real data and real figures.
@@ -27,8 +25,8 @@ stack. The UI pages document *what the UI looks like*, not a live instance.
   PNGs/GIFs are copied so those pages show real plots; live-API pages (ephemeris,
   fov, exposure, lco) render as static shells. Every UI page carries a banner:
   *"Static documentation snapshot — live data & actions are disabled."* The
-  landing guide does not, since it documents the pipeline rather than showing
-  live data, so the caveat answers a question that page never raises.
+  in-app Guide capture (`guide/`) does not, since it documents the pipeline
+  rather than showing live data.
 
 ## How it works
 
@@ -69,7 +67,8 @@ settings page shows token *status* only, never secrets.
 ## Rebuilding the snapshot (on the host)
 
 ```bash
-uv run muscat-db build-static-site --out site
+uv run mkdocs build --site-dir site
+uv run muscat-db build-static-site --out site/home
 #   --db PATH            SQLite database (default muscat.db)
 #   --scrub-notes/--keep-notes   blank private notes/usernames (default: scrub)
 #   --base-path PREFIX   force root-absolute links (default: depth-relative)
@@ -85,7 +84,7 @@ cd site && python -m http.server 8080   # browse http://localhost:8080/
 
 ## Deployment
 
-The static documentation site is built and deployed automatically in GitHub Actions on pushes to `main` and `test` via `.github/workflows/pages.yml`.
+The site is built and deployed automatically in GitHub Actions on pushes to `main` via `.github/workflows/pages.yml`. A push to `test` does not publish.
 
 In CI, the build runs using a synthetic mock database to generate a lightweight, self-contained documentation snapshot and deploys directly to GitHub Pages via `actions/upload-pages-artifact` and `actions/deploy-pages`.
 
@@ -103,5 +102,5 @@ In CI, the build runs using a synthetic mock database to generate a lightweight,
 
 - `src/muscat_db/static_site.py` — the builder.
 - `src/muscat_db/cli.py` — `build-static-site` command.
-- `.github/workflows/pages.yml` — the GitHub Pages deploy workflow (runs on `main`/`test`).
+- `.github/workflows/pages.yml` — the GitHub Pages deploy workflow (runs on `main`).
 - `tests/test_static_site.py` — build test suite and synthetic database helper.

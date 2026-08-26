@@ -194,8 +194,9 @@ async def _lifespan(app: FastAPI):
     from muscat_db.config import config_status, missing_required_secret
 
     print("[startup] env config:")
-    for name, state in config_status():
-        print(f"  {name}={state}")
+    for name, state, value in config_status():
+        suffix = f" -> {value}" if state == "default" and value is not None else ""
+        print(f"  {name}={state}{suffix}")
     missing = missing_required_secret()
     if missing is not None:
         print(
@@ -1975,6 +1976,12 @@ async def transit_fit_query_archive(target: str, source: str = "nasa", inst: str
         target_lower = target.lower()
         target_clean = re.sub(r"[^0-9a-zA-Z]", "", target_lower)
         target_num, target_sub = split_toi(target_lower)
+        # split_toi pulls the same digits out of "TIC 2876" and "TOI 2876"; a
+        # numeric-only comparison can't tell the catalogs apart, and a TIC ID
+        # can equal an unrelated star's TOI host number (or vice versa). A
+        # query naming its catalog explicitly must stay in that catalog rather
+        # than resolving to whichever row the file happens to list first.
+        is_tic_query = target_lower.strip().startswith("tic")
         best_row = None
         best_sub = None
 
@@ -2003,7 +2010,7 @@ async def transit_fit_query_archive(target: str, source: str = "nasa", inst: str
                 # Match TOI by numeric value (handles leading zeros like toi02688 vs TOI-688)
                 if toi:
                     toi_num, toi_sub = split_toi(toi)
-                    if target_num is not None and toi_num is not None and target_num == toi_num:
+                    if not is_tic_query and target_num is not None and toi_num is not None and target_num == toi_num:
                         if target_sub is None:
                             # Bare host number: resolve to the .01 candidate.
                             if prefer(row, toi_sub):
@@ -2027,18 +2034,25 @@ async def transit_fit_query_archive(target: str, source: str = "nasa", inst: str
                         best_row = row
                         break
 
-                # Match TIC ID by numeric value.  A TIC query names a star, not a
-                # planet, so it inherits the lowest-candidate rule above.
+                # Match TIC ID by numeric value. A bare TIC query names a star,
+                # not a planet, so it inherits the lowest-candidate rule above --
+                # but an explicit ".NN" on the query (e.g. "TIC 12345.02") must
+                # still be honored exactly, same as the TOI branch above.
                 if tic_id:
                     tic_num = extract_number(tic_id)
                     tic_clean = re.sub(r"[^0-9a-zA-Z]", "", tic_id.lower())
                     matches_tic = (
-                        (target_num is not None and tic_num is not None and target_num == tic_num)
-                        or target_clean == tic_clean
+                        (is_tic_query and target_num is not None and tic_num is not None and target_num == tic_num)
+                        or (is_tic_query and target_clean == tic_clean)
                         or (tic_num and target_clean == f"tic{tic_num}")
                     )
                     if matches_tic:
-                        if prefer(row, split_toi(toi)[1]):
+                        toi_sub = split_toi(toi)[1]
+                        if target_sub is None:
+                            if prefer(row, toi_sub):
+                                break
+                        elif target_sub == toi_sub:
+                            best_row, best_sub = row, toi_sub
                             break
                         continue
 
@@ -3723,27 +3737,65 @@ def _ttv_windows(payload: dict, duration_h: float) -> dict:
     start_jd = _iso_date_to_jd(str(start_dt), end_of_day=False)
     end_jd = _iso_date_to_jd(str(end_dt), end_of_day=True)
 
-    windows = []
+    req_ra = payload.get("ra")
+    req_dec = payload.get("dec")
+    has_coord = req_ra not in (None, "") and req_dec not in (None, "")
+    ra_deg = float(req_ra) if has_coord else None
+    dec_deg = float(req_dec) if has_coord else None
+
+    # start_jd/end_jd are calendar JD_UTC; mid_bjd is BJD_TDB, which can be up
+    # to ~9 minutes off UTC (see lco._BJD_UTC_BOUNDARY_PAD). Membership can't
+    # be decided on the raw BJD_TDB value alone once coordinates make the
+    # correction available, so the initial scan is padded (same margin as
+    # lco.generate_windows) and re-filtered below once each mid time has been
+    # corrected to true JD_UTC.
+    pad_days = lco._BJD_UTC_BOUNDARY_PAD.total_seconds() / 86400.0
+    scan_start_jd = start_jd - pad_days if has_coord else start_jd
+    scan_end_jd = end_jd + pad_days if has_coord else end_jd
+
+    raw_windows = []  # (epoch_abs, mid_bjd, start_jd_win, end_jd_win)
     for point in points:
         try:
             mid_bjd = float(point["tc"]) + t_offset
             epoch_abs = int(point["epoch"])
         except (KeyError, TypeError, ValueError):
             continue
-        if not (start_jd <= mid_bjd <= end_jd):
+        if not (scan_start_jd <= mid_bjd <= scan_end_jd):
             continue
         start_jd_win = mid_bjd - (half / 24.0) - (pad_before / 1440.0)
         end_jd_win = mid_bjd + (half / 24.0) + (pad_after / 1440.0)
+        raw_windows.append((epoch_abs, mid_bjd, start_jd_win, end_jd_win))
+        if len(raw_windows) > 1000:
+            break
+
+    # mid_bjd is BJD_TDB; convert to true JD_UTC when target coordinates are
+    # known, same correction as lco.generate_windows. The offset drifts by
+    # about a minute per week, negligible over one transit's padded span, so
+    # the per-transit correction computed from mid_bjd is reused for that
+    # transit's start/end rather than converting all three separately.
+    if has_coord and raw_windows:
+        mid_jds_utc = transit_obs.bjd_tdb_to_jd_utc(
+            [w[1] for w in raw_windows], ra_deg, dec_deg,
+        )
+    else:
+        mid_jds_utc = [w[1] for w in raw_windows]
+
+    windows = []
+    for (epoch_abs, mid_bjd, start_jd_win, end_jd_win), mid_jd_utc in zip(raw_windows, mid_jds_utc):
+        mid_jd_utc = float(mid_jd_utc)
+        # The scan above was padded to not miss a boundary transit; re-filter
+        # against the true (unpadded) range now that times are corrected.
+        if not (start_jd <= mid_jd_utc <= end_jd):
+            continue
+        correction = mid_jd_utc - mid_bjd
         windows.append({
             "epoch": 0,  # replaced below, once the first in-range epoch is known
             "epoch_abs": epoch_abs,
             "mid_bjd": mid_bjd,
-            "mid": transit_obs._jd_to_iso_z(mid_bjd),
-            "start": transit_obs._jd_to_iso_z(start_jd_win),
-            "end": transit_obs._jd_to_iso_z(end_jd_win),
+            "mid": transit_obs._jd_to_iso_z(mid_jd_utc),
+            "start": transit_obs._jd_to_iso_z(start_jd_win + correction),
+            "end": transit_obs._jd_to_iso_z(end_jd_win + correction),
         })
-        if len(windows) > 1000:
-            break
 
     # Match generate_windows: displayed epoch is relative to the first in range.
     if windows:
@@ -3919,6 +3971,8 @@ def api_lco_windows(request: Request, payload: dict = Body(...)):
                 status_code=400,
             )
 
+        req_ra = payload.get("ra")
+        req_dec = payload.get("dec")
         windows = lco.generate_windows(
             float(t0),
             float(period),
@@ -3927,6 +3981,8 @@ def api_lco_windows(request: Request, payload: dict = Body(...)):
             payload.get("range_end"),
             float(payload.get("pad_before_min") or 0),
             float(payload.get("pad_after_min") or 0),
+            ra_deg=float(req_ra) if req_ra not in (None, "") else None,
+            dec_deg=float(req_dec) if req_dec not in (None, "") else None,
         )
         result = {
             "ok": True,
@@ -4460,16 +4516,71 @@ def _bjd_to_yymmdd(bjd: float) -> str:
         return ""
 
 
+# Kepler's BKJD zero point. timer wrote ``tc.txt`` as ``t0 + ref_time - 2454833``
+# until john-livingston/timer@de8180f ("tc.txt: report transit times in data
+# native time system, drop hardcoded kepler offset"), after which the file
+# carries the light curve's own time system -- BJD_TDB, since muscat-db never
+# sets timer's ``timeoffset``. Both conventions are on disk: every run predating
+# the engine update on this host holds BKJD, every run after it holds BJD, so
+# tc.txt has to be normalised per run rather than offset unconditionally.
+_BKJD_TO_BJD = 2454833.0
+
+# Any BKJD transit center is < 10^5; any BJD one is > 2.4 x 10^6. Used only when
+# a run's reference time is unavailable.
+_BJD_FLOOR = 2_400_000.0
+
+
+def _timer_ref_time(rdir: pathlib.Path) -> float | None:
+    """The ``ref. time`` timer subtracted from a run's light curves, or None.
+
+    timer logs one line per input dataset; the log is truncated per run, so the
+    first line belongs to the run being read. Datasets of one run share a night,
+    hence a single line is enough to anchor the time system.
+    """
+    log_file = rdir / "timer-fit.log"
+    if not log_file.is_file():
+        return None
+    try:
+        with open(log_file) as lf:
+            for line in lf:
+                if "ref. time:" in line:
+                    try:
+                        return float(line.split("ref. time:")[-1].strip())
+                    except ValueError:
+                        return None
+    except OSError:
+        logger.debug("failed to read ref. time from %s", log_file, exc_info=True)
+    return None
+
+
+def _tc_txt_to_bjd(value: float, ref_time: float | None) -> float:
+    """Normalise a ``tc.txt`` transit center to BJD, whichever timer wrote it.
+
+    The two candidate readings sit 2454833 days apart while a transit center
+    stays near the night it was observed, so picking the candidate nearest
+    ``ref_time`` identifies the convention unambiguously -- with a margin no
+    plausible fit can close, not a tuned tolerance.
+    """
+    if ref_time is None:
+        return value if value > _BJD_FLOOR else value + _BKJD_TO_BJD
+    return min(
+        (value, value + _BKJD_TO_BJD),
+        key=lambda candidate: abs(candidate - ref_time),
+    )
+
+
 def _get_run_fitted_params(inst: str, date: str, target: str, run_id: str | None) -> dict:
     """Per-planet fitted ephemeris from a run's outputs (the Fitted Parameters
     Summary), not the input ``sys.yaml`` priors.
 
     Returns ``{planet: {"tc", "unc", "dur", "dur_unc"}}`` with whatever is
     available. The transit center (``tc``, BJD) comes from ``out/tc.txt`` when
-    present, otherwise from ``out/summary.csv`` (``t0[idx]`` + the run's
-    reference time). The transit duration (``dur``, hours) comes from
-    ``summary.csv`` (``dur[idx]``, stored in days). ``period`` is deliberately
-    not read here: it is held fixed in the fit and never appears in the summary.
+    present -- normalised by :func:`_tc_txt_to_bjd`, since the file's time
+    system depends on the timer version that wrote it -- otherwise from
+    ``out/summary.csv`` (``t0[idx]`` + the run's reference time). The transit
+    duration (``dur``, hours) comes from ``summary.csv`` (``dur[idx]``, stored
+    in days). ``period`` is deliberately not read here: it is held fixed in the
+    fit and never appears in the summary.
     """
     import csv
     import yaml
@@ -4486,6 +4597,10 @@ def _get_run_fitted_params(inst: str, date: str, target: str, run_id: str | None
                 cfg = yaml.safe_load(f) or {}
                 planets_fitted = str(cfg.get("planets", "b"))
 
+        # Anchors both readers below: tc.txt is written in the light curves'
+        # own time system, summary.csv relative to this value.
+        ref_time = _timer_ref_time(rdir)
+
         # Transit centers from tc.txt take precedence for t0 when present.
         tc_txt = out_dir / "tc.txt"
         if tc_txt.is_file():
@@ -4495,23 +4610,12 @@ def _get_run_fitted_params(inst: str, date: str, target: str, run_id: str | None
                     if len(parts) >= 3:
                         pl = parts[0]
                         entry = fitted.setdefault(pl, {})
-                        entry["tc"] = float(parts[1]) + 2454833.0  # Kepler -> BJD
+                        entry["tc"] = _tc_txt_to_bjd(float(parts[1]), ref_time)
                         entry["unc"] = float(parts[2])
 
         # Fitted Parameters Summary: t0[idx] (if not already from tc.txt) and dur[idx].
         summary_csv = out_dir / "summary.csv"
         if summary_csv.is_file():
-            ref_time = None
-            log_file = rdir / "timer-fit.log"
-            if log_file.is_file():
-                with open(log_file) as lf:
-                    for line in lf:
-                        if "ref. time:" in line:
-                            try:
-                                ref_time = int(line.split("ref. time:")[-1].strip())
-                            except ValueError:
-                                ref_time = None
-                            break
             with open(summary_csv) as f:
                 reader = csv.reader(f)
                 headers = next(reader)
@@ -5278,6 +5382,8 @@ def api_ephemeris_calculate(payload: dict = Body(...)):
             "t0_fit_centered": round(t0_centered, 6) if was_fit else round(T0, 6),
             "t0_fit_centered_unc": round(t0_centered_unc, 6) if was_fit else 0.0,
             "E_center": E_center,
+            "n_fit": fit_result["n_fit"],
+            "dof": fit_result["dof"],
             "points": points_data
         }
         
