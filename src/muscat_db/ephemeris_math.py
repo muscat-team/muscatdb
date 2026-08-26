@@ -1,7 +1,7 @@
 """Linear ephemeris (transit-timing O-C) least-squares fitting.
 
 Extracted from the ``api_ephemeris_calculate`` route handler in ``web.py``
-(see docs/architecture_audit.md, finding H2) so the weighted/unweighted
+(see notes/architecture_audit.md, finding H2) so the weighted/unweighted
 least-squares fit, its variance propagation, and the epoch-centering trick
 are independently unit-testable instead of living inline in a FastAPI route.
 
@@ -26,6 +26,16 @@ class EphemerisFit(TypedDict):
     point on the line, useful for display). When ``was_fit`` is False, all
     "_fit" fields equal the reference ``t0_ref``/``period_ref`` passed in and
     the uncertainties are 0.0.
+
+    ``n_fit`` is the number of points passed in (``len(epochs)``); ``dof`` is
+    ``n_fit - 2`` (the model has 2 free parameters, T0 and period). ``dof <=
+    0`` means the fit has no residual degrees of freedom -- with exactly 2
+    points (``fit_method="unweighted"``) the line interpolates them exactly,
+    so ``residuals_sum_sq`` is 0 and the reported T0/period uncertainties are
+    a hard 0.0, not a real precision estimate. Callers should treat a
+    ``dof <= 0`` fit as unverified (no independent check that a straight
+    line is the right model) and flag it rather than presenting the
+    uncertainties at face value.
     """
 
     was_fit: bool
@@ -37,6 +47,8 @@ class EphemerisFit(TypedDict):
     t0_fit_centered: float
     t0_fit_centered_unc: float
     E_center: int
+    n_fit: int
+    dof: int
 
 
 def assign_epoch(tc: float, t0: float, period: float) -> int:
@@ -111,6 +123,7 @@ def fit_linear_ephemeris(
     ``round()`` calls when building the JSON response, unchanged.
     """
     n = len(epochs)
+    dof = n - 2
     result: EphemerisFit = {
         "was_fit": False,
         "fit_method": "none",
@@ -121,6 +134,8 @@ def fit_linear_ephemeris(
         "t0_fit_centered": t0_ref,
         "t0_fit_centered_unc": 0.0,
         "E_center": 0,
+        "n_fit": n,
+        "dof": dof,
     }
     if n < 2:
         return result
@@ -157,7 +172,6 @@ def fit_linear_ephemeris(
             (tc - (t0_centered + (epoch - e_center) * period_fit)) ** 2
             for epoch, tc in zip(epochs, tcs)
         )
-        dof = n - 2
         sigma_sq = residuals_sum_sq / dof if dof > 0 else 0.0
         t0_centered_unc = (sigma_sq * swxx / delta) ** 0.5
         period_fit_unc = (sigma_sq * sw / delta) ** 0.5
@@ -181,4 +195,6 @@ def fit_linear_ephemeris(
         "t0_fit_centered": t0_centered,
         "t0_fit_centered_unc": t0_centered_unc,
         "E_center": e_center,
+        "n_fit": n,
+        "dof": dof,
     }

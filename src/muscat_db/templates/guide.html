@@ -2127,21 +2127,40 @@ erDiagram
     threshold: 0
   };
 
+  // Document order, top to bottom, so "topmost" below is a simple array scan
+  // rather than a DOM-position comparison.
+  const tocCards = Array.from(document.querySelectorAll('.workflow-card, #faq-card'));
+  const tocCardIds = tocCards.map(card => card.id);
+  const intersectingIds = new Set();
+
+  function setActiveTocLink(id) {
+    const link = id && document.querySelector(`.toc-link[href="#${id}"]`);
+    document.querySelectorAll('.toc-link').forEach(l => l.classList.remove('active'));
+    if (link) link.classList.add('active');
+  }
+
+  // Collapsed cards are short, so several headers can intersect at once
+  // (all above the fold on load, or several during a fast scroll). Highlight
+  // whichever of those is topmost in document order rather than whichever the
+  // observer callback happens to report last.
   const spyObserver = new IntersectionObserver((entries) => {
     entries.forEach(entry => {
       const id = entry.target.getAttribute('id');
-      const link = document.querySelector(`.toc-link[href="#${id}"]`);
-      if (!link) return;
-      if (entry.isIntersecting) {
-        document.querySelectorAll('.toc-link').forEach(l => l.classList.remove('active'));
-        link.classList.add('active');
-      }
+      if (entry.isIntersecting) intersectingIds.add(id);
+      else intersectingIds.delete(id);
     });
+    const topmost = tocCardIds.find(id => intersectingIds.has(id));
+    if (topmost) setActiveTocLink(topmost);
   }, observerOptions);
 
-  document.querySelectorAll('.workflow-card, #faq-card').forEach(card => {
-    spyObserver.observe(card);
-  });
+  tocCards.forEach(card => spyObserver.observe(card));
+
+  // The observer's first callback lands asynchronously after this script
+  // runs, so with no hash to focus, default to the first section immediately
+  // rather than leaving the TOC unhighlighted (or briefly wrong) until then.
+  if (!window.location.hash) {
+    setActiveTocLink(tocCardIds[0]);
+  }
 </script>
 <script>
   document.addEventListener('DOMContentLoaded', function() {

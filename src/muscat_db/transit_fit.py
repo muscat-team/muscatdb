@@ -29,7 +29,7 @@ from muscat_db.instruments import INSTRUMENTS
 from muscat_db.photometry import (
     output_base, valid_date, _conda_env_python, _tail, _to_float, _get_error_desc,
     SINISTRO_SITES, MULTISITE_INSTRUMENTS, MULTISITE_SITES,
-    MULTISITE_MODES, _TELESCOPE_PREFIX,
+    MULTISITE_MODES, _TELESCOPE_PREFIX, timer_conda_env,
 )
 from muscat_db.cache import register_cache
 
@@ -48,7 +48,7 @@ def _timer_version() -> str:
     with _TIMER_VERSION_LOCK:
         if _TIMER_VERSION is not None:
             return _TIMER_VERSION
-        timer_py = _conda_env_python("timer")
+        timer_py = _conda_env_python(timer_conda_env())
         if timer_py is None:
             _TIMER_VERSION = "unknown"
         else:
@@ -261,7 +261,7 @@ def validate_no_duplicate_datasets(inst: str, date: str, csvs: list[pathlib.Path
 
 def _timer_prefix() -> list[str]:
     """Resolve how to invoke the timer-fit tool, using the timer conda env."""
-    env = "timer"
+    env = timer_conda_env()
     conda_py = _conda_env_python(env)
     if conda_py:
         timer_fit_path = pathlib.Path(conda_py).parent / "timer-fit"
@@ -1243,7 +1243,7 @@ def compute_logp(inst: str, date: str, target: str, options: dict, selected_csvs
     if err:
         return {"ok": False, "error": err}
 
-    timer_py = _conda_env_python("timer")
+    timer_py = _conda_env_python(timer_conda_env())
     if not timer_py:
         return {"ok": False, "error": "timer conda environment not found"}
     if not _LOGP_HELPER.is_file():

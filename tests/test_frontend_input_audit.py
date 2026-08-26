@@ -568,6 +568,26 @@ def test_ephemeris_ttv_fit_log_has_dedicated_new_tab_link():
     assert "f !== 'harmonic.log'" in html
 
 
+def test_ephemeris_oc_plot_single_row_uses_full_vertical_domain():
+    """A lone plotted planet must fill the whole [0, 1] subplot domain.
+
+    The row-domain formula reserves a 0.15 fraction of vertical space for
+    gaps between rows, split across (rows - 1) gaps -- correct for 2+ rows,
+    but with only one row there is nothing to gap against. The old formula
+    fell back to treating a single row as if it had one gap anyway (via
+    ``rows - 1 || 1``), leaving a 15% blank band at the bottom of both the
+    live view and the downloaded PNG. This is now the common case: a target
+    whose catalog lists more planets than have fitted transits (e.g. TIC
+    434398831, where only planet c has data) plots just the one row.
+    """
+    html = _read_template("ephemeris.html")
+
+    draw_plot = _function_body(html, "drawPlot")
+    assert "const totalGapFraction = rows > 1 ? 0.15 : 0" in draw_plot
+    assert "const heightFraction = (1 - totalGapFraction) / rows" in draw_plot
+    assert "const gap = rows > 1 ? totalGapFraction / (rows - 1) : 0" in draw_plot
+
+
 def test_ephemeris_utc_axis_preserves_plot_area_height():
     html = _read_template("ephemeris.html")
 
@@ -577,7 +597,21 @@ def test_ephemeris_utc_axis_preserves_plot_area_height():
     assert "const plotHeight = OC_PLOT_BASE_HEIGHT + secondaryAxisExtraHeight" in html
     assert "plotDiv.style.height = plotHeight + 'px'" in html
     assert "height: plotHeight" in html
-    assert "height: 600 + (showTwin" in html
+
+    # PNG export must scale from the live view's own rendered aspect ratio
+    # (falling back to the same OC_PLOT_BASE_HEIGHT + secondary-axis-extra
+    # formula only when the live div has no measurable size yet) rather than
+    # an unrelated fixed height -- an independent height baseline previously
+    # stretched the domain-fraction subplot rows to fill extra vertical space
+    # the live view never had, showing up as unused white space only in the
+    # downloaded PNG.
+    download_plot = _function_body(html, "downloadPlotPNG")
+    assert "const exportWidth = 1200" in download_plot
+    assert "const liveWidth = plotDiv.clientWidth || 1" in download_plot
+    assert "const liveHeight = plotDiv.clientHeight || (OC_PLOT_BASE_HEIGHT + (showTwin" in download_plot
+    assert "const exportHeight = Math.round(exportWidth * (liveHeight / liveWidth))" in download_plot
+    assert "width: exportWidth" in download_plot
+    assert "height: exportHeight" in download_plot
 
 
 def test_ephemeris_epoch_twin_axes_attach_to_each_planet_and_exclude_utc_axis():
@@ -663,6 +697,50 @@ def test_ephemeris_manual_planet_card_is_added_inline_and_persisted():
     assert "updateCombinedUI({skipFit: true})" in add_planet
     assert "manualPoints.some" in remove_planet
     assert "saveManualPlanets()" in remove_planet
+
+
+def test_ephemeris_instrument_symbol_mapping_is_editable_and_persisted():
+    """When a planet's marker is "Instrument-dependent", the mapping from
+    instrument to marker shape (previously a hardcoded, invisible default in
+    getSymbolForInstrument) must be visible and overridable, and the override
+    must persist and feed the actual per-point symbol lookup."""
+    html = _read_template("ephemeris.html")
+
+    assert 'id="plot-instrument-settings"' in html
+
+    get_symbol = _function_body(html, "getSymbolForInstrument")
+    assert "instrumentSymbolCategory(inst)" in get_symbol
+    assert "instrumentSymbolSettings[category.key] || category.defaultSymbol" in get_symbol
+
+    render_instrument_settings = _function_body(html, "renderInstrumentSymbolSettings")
+    assert "planetPlotSettings" in render_instrument_settings
+    assert "s.symbol === 'instrument'" in render_instrument_settings
+    assert "loadInstrumentSymbolSettings()" in render_instrument_settings
+    assert "onchange=\"updateInstrumentSymbolSetting(" in render_instrument_settings
+
+    # Only categories with actual data for the loaded target(s) are listed --
+    # not all known instruments unconditionally, which would just be clutter
+    # for a target that e.g. only has muscat2 data.
+    assert "usesInstrumentSymbol ? usedInstrumentCategories() : []" in render_instrument_settings
+    assert "categories.length === 0" in render_instrument_settings
+    assert "categories.forEach(category =>" in render_instrument_settings
+
+    used_categories = _function_body(html, "usedInstrumentCategories")
+    assert "combinedDatasets.forEach(d => seen.add(instrumentSymbolCategory(d.instrument).key))" in used_categories
+    assert "manualPoints.forEach(mp => seen.add(instrumentSymbolCategory(mp.instrument || 'manual').key))" in used_categories
+
+    render_planet_settings = _function_body(html, "renderPlanetPlotSettings")
+    assert "renderInstrumentSymbolSettings()" in render_planet_settings
+
+    update_setting = html.split("window.updateInstrumentSymbolSetting = function(categoryKey, symbol) {", 1)[1].split("\n  };", 1)[0]
+    assert "saveInstrumentSymbolSettings()" in update_setting
+    assert "if (fitResults) drawPlot()" in update_setting
+    assert "scheduleSaveView()" in update_setting
+
+    collect_state = _function_body(html, "collectEphemerisViewState")
+    assert "instrument_symbol_settings: instrumentSymbolSettings" in collect_state
+    apply_state = _function_body(html, "applyViewStateToStorage")
+    assert "state.instrument_symbol_settings" in apply_state
 
 
 def test_ephemeris_ttv_run_selection_is_preserved_in_shareable_url():

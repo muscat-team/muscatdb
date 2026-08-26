@@ -2,7 +2,7 @@
 
 Locks in correctness for the weighted/unweighted linear ephemeris fit that
 used to live inline in web.py's api_ephemeris_calculate route handler (see
-docs/architecture_audit.md, finding H2).
+notes/architecture_audit.md, finding H2).
 """
 
 from __future__ import annotations
@@ -34,6 +34,8 @@ def test_fit_recovers_known_period_and_t0_unweighted():
     assert result["t0_fit_unc"] == pytest.approx(0.0, abs=1e-9)
     assert result["period_fit_unc"] == pytest.approx(0.0, abs=1e-9)
     assert result["E_center"] == 0  # symmetric epoch range centers on 0
+    assert result["n_fit"] == 11
+    assert result["dof"] == 9
 
 
 def test_fit_recovers_known_period_and_t0_weighted():
@@ -52,6 +54,8 @@ def test_fit_recovers_known_period_and_t0_weighted():
     assert result["period_fit"] == pytest.approx(period_true)
     assert result["t0_fit_unc"] > 0.0
     assert result["period_fit_unc"] > 0.0
+    assert result["n_fit"] == 5
+    assert result["dof"] == 3
 
 
 def test_fit_falls_back_to_reference_with_fewer_than_two_points():
@@ -71,11 +75,15 @@ def test_fit_falls_back_to_reference_with_fewer_than_two_points():
     assert empty["t0_fit_centered"] == t0_ref
     assert empty["t0_fit_centered_unc"] == 0.0
     assert empty["E_center"] == 0
+    assert empty["n_fit"] == 0
+    assert empty["dof"] == -2
 
     single = fit_linear_ephemeris([3], [2451500.0], [0.01], t0_ref, period_ref)
     assert single["was_fit"] is False
     assert single["t0_fit"] == t0_ref
     assert single["period_fit"] == period_ref
+    assert single["n_fit"] == 1
+    assert single["dof"] == -1
 
 
 def test_fit_two_points_is_the_minimum_that_succeeds():
@@ -97,6 +105,35 @@ def test_fit_two_points_is_the_minimum_that_succeeds():
     # (dof <= 0 guard) and the reported uncertainties are exactly zero.
     assert result["t0_fit_unc"] == 0.0
     assert result["period_fit_unc"] == 0.0
+    # dof = n_fit - 2 = 0: no residual left to check the linear model against,
+    # which is why the uncertainties above collapse to a hard zero. Callers
+    # (the ephemeris page) key off this to flag the fit as unverified rather
+    # than presenting 0.0 as a genuine precision.
+    assert result["n_fit"] == 2
+    assert result["dof"] == 0
+
+
+def test_fit_two_points_weighted_has_zero_dof_but_nonzero_uncertainty():
+    """Weighted mode derives uncertainty from the input Tc errors, not from
+    residual scatter, so a 2-point weighted fit does NOT collapse to zero
+    uncertainty the way unweighted does. It still has dof=0 -- no residual
+    exists to check the straight-line model is actually appropriate -- so
+    callers must flag it the same way regardless of the nonzero numbers."""
+    t0_ref = 2450000.0
+    period_ref = 1.0
+    epochs = [0, 7]
+    tcs = [2458000.0, 2458000.0 + 7 * 2.5]
+    uncs = [0.005, 0.01]
+
+    result = fit_linear_ephemeris(epochs, tcs, uncs, t0_ref, period_ref, fit_method="weighted")
+
+    assert result["was_fit"] is True
+    assert result["period_fit"] == pytest.approx(2.5)
+    assert result["t0_fit"] == pytest.approx(2458000.0)
+    assert result["t0_fit_unc"] > 0.0
+    assert result["period_fit_unc"] > 0.0
+    assert result["n_fit"] == 2
+    assert result["dof"] == 0
 
 
 def test_fit_unweighted_accepts_zero_uncertainty_inputs():

@@ -27,6 +27,7 @@ from muscat_db.photometry import (
     _RUNS_DIR_NAME,
     _tail,
     _get_error_desc,
+    harmonic_conda_env,
 )
 from muscat_db.cache import register_cache
 
@@ -44,7 +45,7 @@ def _harmonic_version() -> str:
     with _HARMONIC_VERSION_LOCK:
         if _HARMONIC_VERSION is not None:
             return _HARMONIC_VERSION
-        harmonic_py = _conda_env_python("harmonic")
+        harmonic_py = _conda_env_python(harmonic_conda_env())
         if harmonic_py is None:
             _HARMONIC_VERSION = "unknown"
         else:
@@ -257,7 +258,7 @@ def ttv_job_key(target: str, run_name: str = "") -> str:
 
 
 def _harmonic_prefix() -> list[str]:
-    env = "harmonic"
+    env = harmonic_conda_env()
     conda_py = _conda_env_python(env)
     if conda_py:
         harmonic_cli = pathlib.Path(conda_py).parent / "harmonic"
@@ -971,7 +972,7 @@ def _get_ttv_model_cached(
     _version: int,
 ) -> dict:
     rdir = ttv_output_dir(target, run_name)
-    harmonic_python = _conda_env_python("harmonic")
+    harmonic_python = _conda_env_python(harmonic_conda_env())
     if not harmonic_python:
         return {"ok": False, "error": "harmonic conda environment is unavailable"}
     helper = pathlib.Path(__file__).with_name("_ttv_model_helper.py")
@@ -1043,7 +1044,7 @@ def compute_delta_bic(target: str, run_name: str = "") -> dict:
 @_ttv_model_cache
 def _compute_delta_bic_cached(target: str, run_name: str, _version: int) -> dict:
     rdir = ttv_output_dir(target, run_name)
-    harmonic_python = _conda_env_python("harmonic")
+    harmonic_python = _conda_env_python(harmonic_conda_env())
     if not harmonic_python:
         return {"ok": False, "error": "harmonic conda environment is unavailable"}
     helper = pathlib.Path(__file__).with_name("_ttv_dbic_helper.py")
@@ -1119,7 +1120,7 @@ def _get_ttv_ranking_cached(
     target: str, run_name: str, start: str, end: str, rank_by: str, _version: int
 ) -> dict:
     rdir = ttv_output_dir(target, run_name)
-    harmonic_python = _conda_env_python("harmonic")
+    harmonic_python = _conda_env_python(harmonic_conda_env())
     if not harmonic_python:
         return {"ok": False, "error": "harmonic conda environment is unavailable"}
     helper = pathlib.Path(__file__).with_name("_ttv_rank_helper.py")

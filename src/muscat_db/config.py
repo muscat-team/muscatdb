@@ -66,6 +66,7 @@ ENV_VARS: tuple[EnvVar, ...] = (
         "<repo>/../ext_tools/timer",
         "timer repository path (transit-fit source; read by the @bot chat assistant for grounding)",
     ),
+    EnvVar("MUSCAT_TIMER_CONDA_ENV", "timer", "Conda env supplying timer's dependencies"),
     EnvVar(
         "MUSCAT_TTV_DIR",
         str(Path.home() / "ql" / "harmonic"),
@@ -76,6 +77,7 @@ ENV_VARS: tuple[EnvVar, ...] = (
         "<repo>/../ext_tools/harmonic",
         "harmonic repository path (TTV-fit source; read by the @bot chat assistant for grounding)",
     ),
+    EnvVar("MUSCAT_HARMONIC_CONDA_ENV", "harmonic", "Conda env supplying harmonic's dependencies"),
     EnvVar(
         "MUSCAT_QUICKLOOK_URL",
         "http://127.0.0.1:5000",
@@ -265,9 +267,20 @@ def status_of(var: EnvVar) -> str:
     return "default" if var.default is not None else "unset"
 
 
-def config_status() -> list[tuple[str, str]]:
-    """Return ``(name, status)`` for each known variable, registry order."""
-    return [(v.name, status_of(v)) for v in ENV_VARS]
+def resolved_value(var: EnvVar) -> str | None:
+    """The value actually in effect: the env override, else the in-code default."""
+    raw = os.environ.get(var.name)
+    return raw if raw not in (None, "") else var.default
+
+
+def config_status() -> list[tuple[str, str, str | None]]:
+    """Return ``(name, status, display_value)`` for each known variable, registry
+    order. ``display_value`` is redacted to None for secrets so a wrong path
+    default (e.g. an unpinned $HOME-derived shared-input dir) is still visible
+    in the startup log without ever printing a credential."""
+    return [
+        (v.name, status_of(v), None if v.secret else resolved_value(v)) for v in ENV_VARS
+    ]
 
 
 def missing_required_secret() -> EnvVar | None:

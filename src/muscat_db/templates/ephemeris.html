@@ -153,6 +153,14 @@
         <input type="checkbox" id="show-epoch-checkbox">
         <span>Show epoch numbers</span>
       </label>
+      <label class="opt-check-item" title="Mark each planet's centered fit epoch (E_center) with a vertical guide and label -- the anchor the fitted T0/period are quoted relative to.">
+        <input type="checkbox" id="show-reference-epoch-checkbox" checked>
+        <span>Show reference epoch</span>
+      </label>
+      <label class="opt-check-item" style="display: inline-flex; align-items: center; gap: 0.35rem;" title="Marker size for plotted transit-center points.">
+        <span>Marker size</span>
+        <input type="range" id="oc-marker-size-input" min="4" max="16" step="1" value="9">
+      </label>
       <div id="ttv-model-controls" style="display: none; align-items: center; gap: 0.75rem; flex-wrap: wrap;">
         <label class="opt-check-item" title="Show the minimum-χ² posterior model from the selected TTV run.">
           <input type="checkbox" id="show-ttv-model-checkbox">
@@ -179,6 +187,8 @@
     </div>
   </div>
     <div id="plot-planet-settings" style="margin-top: 0.75rem; border-top: 1px solid var(--border); padding-top: 0.75rem; display: none; flex-direction: column; gap: 0.5rem;">
+    </div>
+    <div id="plot-instrument-settings" style="margin-top: 0.75rem; border-top: 1px solid var(--border); padding-top: 0.75rem; display: none; flex-direction: column; gap: 0.5rem;">
     </div>
   </div>
 </details>
@@ -551,18 +561,52 @@
     return date.toISOString().slice(2, 10).replace(/-/g, '');
   }
 
-  // Instrument to Plotly Marker Symbol mapper
-  function getSymbolForInstrument(inst) {
+  // Instrument to Plotly Marker Symbol mapper, used when a planet's marker
+  // setting is "Instrument-dependent". Bucketed by category rather than raw
+  // instrument string since e.g. "muscat2_g"/"muscat2_r" (band-suffixed
+  // instrument names) should share one symbol. Order matters: muscat2/3/4
+  // must be checked before the plain "muscat" substring match.
+  const INSTRUMENT_SYMBOL_CATEGORIES = [
+    { key: 'manual', label: 'Manual / imported', match: n => n.includes('manual'), defaultSymbol: 'star' },
+    { key: 'muscat4', label: 'MuSCAT4', match: n => n.includes('muscat4'), defaultSymbol: 'diamond' },
+    { key: 'muscat3', label: 'MuSCAT3', match: n => n.includes('muscat3'), defaultSymbol: 'triangle-up' },
+    { key: 'muscat2', label: 'MuSCAT2', match: n => n.includes('muscat2'), defaultSymbol: 'square' },
+    { key: 'muscat', label: 'MuSCAT', match: n => n.includes('muscat'), defaultSymbol: 'circle' },
+    { key: 'sinistro', label: 'Sinistro', match: n => n.includes('sinistro'), defaultSymbol: 'triangle-down' },
+    { key: 'qhy600', label: 'QHY600', match: n => n.includes('qhy600'), defaultSymbol: 'star' },
+    { key: 'sbig', label: 'SBIG', match: n => n.includes('sbig'), defaultSymbol: 'pentagon' }
+  ];
+  const OTHER_INSTRUMENT_SYMBOL = { key: 'other', label: 'Other', defaultSymbol: 'hexagon' };
+  const INSTRUMENT_SYMBOL_OPTIONS = ['circle', 'square', 'triangle-up', 'triangle-down', 'diamond', 'cross', 'x', 'star', 'pentagon', 'hexagon', 'asterisk'];
+
+  function instrumentSymbolCategory(inst) {
     const name = (inst || '').toLowerCase();
-    if (name.includes('manual')) return 'star';
-    if (name.includes('muscat4')) return 'diamond';
-    if (name.includes('muscat3')) return 'triangle-up';
-    if (name.includes('muscat2')) return 'square';
-    if (name.includes('muscat')) return 'circle';
-    if (name.includes('sinistro')) return 'triangle-down';
-    if (name.includes('qhy600')) return 'star';
-    if (name.includes('sbig')) return 'pentagon';
-    return 'hexagon';
+    return INSTRUMENT_SYMBOL_CATEGORIES.find(c => c.match(name)) || OTHER_INSTRUMENT_SYMBOL;
+  }
+
+  // User overrides of the default instrument->symbol mapping above, keyed by
+  // category key (e.g. "muscat2"). A global preference (not scoped to the
+  // loaded target set), since it represents "MuSCAT3 is always a triangle"
+  // rather than anything target-specific -- same treatment as the other
+  // global display toggles (show-excluded, show-twin, ...).
+  const instrumentSymbolSettings = {};
+
+  function loadInstrumentSymbolSettings() {
+    let parsed = {};
+    try {
+      parsed = JSON.parse(localStorage.getItem(STORAGE_OPTS_PREFIX + 'instrument-symbol-settings') || '{}') || {};
+    } catch (e) {}
+    Object.keys(instrumentSymbolSettings).forEach(k => delete instrumentSymbolSettings[k]);
+    Object.assign(instrumentSymbolSettings, parsed);
+  }
+
+  function saveInstrumentSymbolSettings() {
+    localStorage.setItem(STORAGE_OPTS_PREFIX + 'instrument-symbol-settings', JSON.stringify(instrumentSymbolSettings));
+  }
+
+  function getSymbolForInstrument(inst) {
+    const category = instrumentSymbolCategory(inst);
+    return instrumentSymbolSettings[category.key] || category.defaultSymbol;
   }
 
   const STORAGE_TARGET_KEY = 'muscat-ephem-selected-target';
@@ -661,6 +705,16 @@
         localStorage.setItem(STORAGE_OPTS_PREFIX + 'show-twin', 'false');
       }
     }
+    if (typeof state.show_reference_epoch === 'boolean') {
+      localStorage.setItem(STORAGE_OPTS_PREFIX + 'show-reference-epoch', String(state.show_reference_epoch));
+      const cb = document.getElementById('show-reference-epoch-checkbox');
+      if (cb) cb.checked = state.show_reference_epoch;
+    }
+    if (typeof state.oc_marker_size === 'string' && state.oc_marker_size) {
+      localStorage.setItem(STORAGE_OPTS_PREFIX + 'oc-marker-size', state.oc_marker_size);
+      const input = document.getElementById('oc-marker-size-input');
+      if (input) input.value = state.oc_marker_size;
+    }
     if (typeof state.show_ttv_model === 'boolean') {
       localStorage.setItem(STORAGE_OPTS_PREFIX + 'show-ttv-model', String(state.show_ttv_model));
       const cb = document.getElementById('show-ttv-model-checkbox');
@@ -711,6 +765,13 @@
         JSON.stringify(state.planet_plot_settings)
       );
       Object.keys(planetPlotSettings).forEach(k => delete planetPlotSettings[k]);
+    }
+    if (state.instrument_symbol_settings && typeof state.instrument_symbol_settings === 'object') {
+      localStorage.setItem(
+        STORAGE_OPTS_PREFIX + 'instrument-symbol-settings',
+        JSON.stringify(state.instrument_symbol_settings)
+      );
+      Object.keys(instrumentSymbolSettings).forEach(k => delete instrumentSymbolSettings[k]);
     }
 
     if (state.ttv_opts && typeof state.ttv_opts === 'object') {
@@ -787,10 +848,13 @@
       fit_method: fitMethod,
       planet_options: planetOptions,
       planet_plot_settings: currentPlanetPlotSettings,
+      instrument_symbol_settings: instrumentSymbolSettings,
       show_excluded: Boolean(document.getElementById('show-excluded-checkbox')?.checked),
       hide_deselected: Boolean(document.getElementById('hide-deselected-checkbox')?.checked),
       show_utc: Boolean(document.getElementById('show-twin-checkbox')?.checked),
       show_epoch: Boolean(document.getElementById('show-epoch-checkbox')?.checked),
+      show_reference_epoch: Boolean(document.getElementById('show-reference-epoch-checkbox')?.checked),
+      oc_marker_size: document.getElementById('oc-marker-size-input')?.value || '',
       show_ttv_model: Boolean(document.getElementById('show-ttv-model-checkbox')?.checked),
       ttv_model_end_date: document.getElementById('ttv-model-end-date')?.value || '',
       center_epoch: Boolean(document.getElementById('center-epoch-checkbox')?.checked),
@@ -993,6 +1057,33 @@
         localStorage.setItem(STORAGE_OPTS_PREFIX + 'show-twin', 'false');
       }
       if (fitResults) drawPlot();
+      scheduleSaveView();
+    });
+
+    // Restore show-reference-epoch checkbox preference (default on: it was
+    // always drawn before this toggle existed).
+    const savedShowReferenceEpoch = localStorage.getItem(STORAGE_OPTS_PREFIX + 'show-reference-epoch');
+    const showReferenceEpochCheckbox = document.getElementById('show-reference-epoch-checkbox');
+    if (savedShowReferenceEpoch !== null) {
+      showReferenceEpochCheckbox.checked = savedShowReferenceEpoch === 'true';
+    }
+    showReferenceEpochCheckbox.addEventListener('change', function() {
+      localStorage.setItem(STORAGE_OPTS_PREFIX + 'show-reference-epoch', String(this.checked));
+      if (fitResults) drawPlot();
+      scheduleSaveView();
+    });
+
+    // Restore marker-size slider preference.
+    const savedOcMarkerSize = localStorage.getItem(STORAGE_OPTS_PREFIX + 'oc-marker-size');
+    const ocMarkerSizeInput = document.getElementById('oc-marker-size-input');
+    if (savedOcMarkerSize !== null) {
+      ocMarkerSizeInput.value = savedOcMarkerSize;
+    }
+    ocMarkerSizeInput.addEventListener('input', function() {
+      localStorage.setItem(STORAGE_OPTS_PREFIX + 'oc-marker-size', this.value);
+      if (fitResults) drawPlot();
+    });
+    ocMarkerSizeInput.addEventListener('change', function() {
       scheduleSaveView();
     });
 
@@ -1675,6 +1766,25 @@
     scheduleSaveView();
   }
 
+  // Default per-planet plot colors. Systems with more than four planets fall
+  // through to a golden-angle hue rotation so a 5th+ planet gets a distinct
+  // color instead of wrapping back onto planet b's.
+  const DEFAULT_PLANET_COLORS = ['#6c8cff', '#0f9d8b', '#f87171', '#fcd34d'];
+
+  function hslToHex(h, s, l) {
+    s /= 100; l /= 100;
+    const k = n => (n + h / 30) % 12;
+    const a = s * Math.min(l, 1 - l);
+    const f = n => l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
+    const toHex = x => Math.round(255 * x).toString(16).padStart(2, '0');
+    return `#${toHex(f(0))}${toHex(f(8))}${toHex(f(4))}`;
+  }
+
+  function defaultPlanetColor(index) {
+    if (index < DEFAULT_PLANET_COLORS.length) return DEFAULT_PLANET_COLORS[index];
+    return hslToHex((index * 137.508) % 360, 70, 65);
+  }
+
   // Render planet customizer settings (color & marker type) at the bottom of the plot card
   const planetPlotSettings = {};
   
@@ -1696,8 +1806,7 @@
     } catch(e) {}
 
     combinedPlanets.forEach((pl, i) => {
-      const defaultColors = ['#6c8cff', '#0f9d8b', '#f87171', '#fcd34d'];
-      const defaultColor = defaultColors[i % defaultColors.length];
+      const defaultColor = defaultPlanetColor(i);
       
       if (!planetPlotSettings[pl]) {
         planetPlotSettings[pl] = {
@@ -1748,7 +1857,87 @@
       `;
       container.appendChild(row);
     });
+
+    renderInstrumentSymbolSettings();
   }
+
+  // Instrument categories with data actually loaded for the current
+  // target(s) -- database datasets plus any manually entered points, which
+  // carry their own free-text instrument field. Showing all known
+  // categories regardless of whether the target has that instrument would
+  // just be clutter (e.g. a target with only muscat2 data has no use for
+  // a Sinistro or SBIG row).
+  function usedInstrumentCategories() {
+    const seen = new Set();
+    combinedDatasets.forEach(d => seen.add(instrumentSymbolCategory(d.instrument).key));
+    manualPoints.forEach(mp => seen.add(instrumentSymbolCategory(mp.instrument || 'manual').key));
+    return [...INSTRUMENT_SYMBOL_CATEGORIES, OTHER_INSTRUMENT_SYMBOL].filter(c => seen.has(c.key));
+  }
+
+  // Only meaningful once at least one planet's marker is "Instrument-dependent"
+  // (getSymbolForInstrument is otherwise unused) -- shown below the per-planet
+  // rows so the user can see and override which symbol represents which
+  // instrument, instead of that mapping being an invisible hardcoded default.
+  function renderInstrumentSymbolSettings() {
+    const container = document.getElementById('plot-instrument-settings');
+    if (!container) return;
+    container.innerHTML = '';
+
+    const usesInstrumentSymbol = Object.values(planetPlotSettings).some(s => s && s.symbol === 'instrument');
+    const categories = usesInstrumentSymbol ? usedInstrumentCategories() : [];
+    if (categories.length === 0) {
+      container.style.display = 'none';
+      return;
+    }
+    container.style.display = 'flex';
+
+    loadInstrumentSymbolSettings();
+
+    const heading = document.createElement('div');
+    heading.style.fontSize = '0.85rem';
+    heading.style.color = 'var(--text-dim)';
+    heading.style.fontWeight = '500';
+    heading.textContent = 'Instrument-dependent marker shapes:';
+    container.appendChild(heading);
+
+    const row = document.createElement('div');
+    row.style.display = 'flex';
+    row.style.alignItems = 'center';
+    row.style.gap = '1rem';
+    row.style.flexWrap = 'wrap';
+    row.style.background = 'var(--surface2)';
+    row.style.border = '1px solid var(--border)';
+    row.style.borderRadius = '6px';
+    row.style.padding = '0.5rem 0.75rem';
+
+    const symbolOptionsHtml = (selected) => INSTRUMENT_SYMBOL_OPTIONS.map(sym =>
+      `<option value="${sym}"${sym === selected ? ' selected' : ''}>${sym}</option>`
+    ).join('');
+
+    categories.forEach(category => {
+      const selected = instrumentSymbolSettings[category.key] || category.defaultSymbol;
+      const item = document.createElement('div');
+      item.style.display = 'flex';
+      item.style.alignItems = 'center';
+      item.style.gap = '0.4rem';
+      item.innerHTML = `
+        <span style="font-size: 0.85rem; color: var(--text-dim); white-space: nowrap;">${escapeAttr(category.label)}:</span>
+        <select class="instrument-symbol-select select-sm" data-category="${category.key}" style="font-size: 0.85rem; padding: 0.25rem 0.5rem; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 4px; outline: none; cursor: pointer;" onchange="updateInstrumentSymbolSetting('${category.key}', this.value)">
+          ${symbolOptionsHtml(selected)}
+        </select>
+      `;
+      row.appendChild(item);
+    });
+
+    container.appendChild(row);
+  }
+
+  window.updateInstrumentSymbolSetting = function(categoryKey, symbol) {
+    instrumentSymbolSettings[categoryKey] = symbol;
+    saveInstrumentSymbolSettings();
+    if (fitResults) drawPlot();
+    scheduleSaveView();
+  };
 
   window.updatePlanetPlotSetting = function(planet, key, value) {
     if (!planetPlotSettings[planet]) planetPlotSettings[planet] = {};
@@ -2517,6 +2706,21 @@
       let fitSummaryHtml = '';
       if (res.was_fit) {
         const methodLabel = res.fit_method === 'weighted' ? 'Weighted' : 'Unweighted';
+        // dof = n_fit - 2 (the line has 2 free parameters: T0, period).
+        // dof <= 0 means the fit has no residual left to check the linear
+        // model against -- with exactly 2 points it interpolates them
+        // exactly, so unweighted mode's residual-variance uncertainties
+        // collapse to a hard 0.0 (see ephemeris_math.fit_linear_ephemeris).
+        // Flag it instead of presenting the fit as a verified measurement.
+        const isDegenerate = Number.isFinite(res.dof) && res.dof <= 0;
+        const convergenceHtml = isDegenerate
+          ? `<p style="margin-bottom: 0rem; font-size: 0.75rem; color: var(--red); font-weight: 500;"
+                title="A straight line has 2 free parameters (T0, period); with only ${res.n_fit} point(s) in the fit there are 0 degrees of freedom left over, so nothing independently checks that a linear ephemeris is the right model here.">
+               ⚠ Exact fit (${res.n_fit} point${res.n_fit === 1 ? '' : 's'}, 0 degrees of freedom)${res.fit_method === 'weighted' ? ' -- unverified, no residual to check the model' : ' -- reported uncertainties above are not a real precision estimate'}
+             </p>`
+          : `<p style="margin-bottom: 0rem; font-size: 0.75rem; color: var(--green); font-weight: 500;">
+               ✓ ${methodLabel} linear fit converged successfully
+             </p>`;
         fitSummaryHtml = `
           <div style="margin-top: 0.5rem; font-size: 0.85rem;">
             <p style="margin-bottom: 0.35rem;" title="Epoch centered to minimize parameter covariance, matching allesfitter2.">
@@ -2528,9 +2732,7 @@
             <p style="margin-bottom: 0.35rem;">
               <strong>Fitted Period:</strong> <span class="text-highlight">${MuscatFormat.pair(res.period_fit, res.period_fit_unc, 1, 8).text} days</span>
             </p>
-            <p style="margin-bottom: 0rem; font-size: 0.75rem; color: var(--green); font-weight: 500;">
-              ✓ ${methodLabel} linear fit converged successfully
-            </p>
+            ${convergenceHtml}
           </div>
         `;
       } else {
@@ -2605,6 +2807,20 @@
     };
   }
 
+  // Planets to actually draw: a planet can be configured (T0/period from the
+  // catalog or a manual entry) with zero fitted transit centers when only a
+  // sibling planet has been observed so far -- e.g. a NASA archive listing
+  // for both b and c while only c has completed transit fits. fitResults
+  // still carries an entry for it (empty points array) so its card and the
+  // dataset table stay usable; the O-C plot itself has nothing to draw for
+  // it, so it is left out here rather than rendered as an empty subplot row.
+  function plottedPlanets() {
+    if (!fitResults) return [];
+    return Object.keys(fitResults)
+      .filter(pl => (fitResults[pl].points || []).length > 0)
+      .sort();
+  }
+
   // Draw plot using Plotly
   function drawPlot() {
     if (!fitResults) return;
@@ -2621,6 +2837,8 @@
       && !showTwin;
     const showTTVModel = document.getElementById('show-ttv-model-checkbox').checked
       && ttvModelData && ttvModelRun === selectedTTVRun;
+    const showReferenceEpoch = document.getElementById('show-reference-epoch-checkbox').checked;
+    const markerSize = Number(document.getElementById('oc-marker-size-input').value) || 9;
     const suptitle = document.getElementById('plot-suptitle-input').value.trim();
     const secondaryAxisExtraHeight = showTwin
       ? OC_PLOT_UTC_AXIS_EXTRA_HEIGHT
@@ -2629,13 +2847,19 @@
 
     plotDiv.style.height = plotHeight + 'px';
     plotCard.style.minHeight = (plotHeight + 70) + 'px';
-    
-    const planets = Object.keys(fitResults).sort();
+
+    const planets = plottedPlanets();
     if (planets.length === 0) {
       plotDiv.innerHTML = '<div style="text-align: center; color: var(--text-dim); padding-top: 5rem;">No data points available to plot.</div>';
       return;
     }
-    const colors = ['#6c8cff', '#0f9d8b', '#f87171', '#fcd34d'];
+    // planetPlotSettings is keyed off combinedPlanets (every catalog-listed
+    // planet, including ones with no plotted points), so its color assignment
+    // is the source of truth the legend/customizer panel already shows the
+    // user. Falling back to index-into-planets here would drift out of sync
+    // whenever a lower-lettered planet has no data and gets filtered out of
+    // `planets` (e.g. only c is plotted: c would wrongly get b's color).
+    const planetColor = (pl, i) => (planetPlotSettings[pl] && planetPlotSettings[pl].color) || defaultPlanetColor(i);
     const traces = [];
     const referenceBjdOffset = plotBjdOffset(planets, showExcluded);
     const foundBjdOffset = Number.isFinite(referenceBjdOffset);
@@ -2717,7 +2941,8 @@
         font: { size: 10 }
       },
       hovermode: 'closest',
-      shapes: []
+      shapes: [],
+      annotations: []
     };
 
     if (planets.length === 2) {
@@ -2775,18 +3000,19 @@
       planets.forEach((pl, i) => {
         const res = fitResults[pl];
         const yaxisKey = i === 0 ? 'y' : 'y2';
-        const color = colors[i % colors.length];
-        
+        const color = planetColor(pl, i);
+
         // Build traces
-        const plTraces = getPlotlyTracesForPlanet(res, pl, color, yaxisKey, isDark, showExcluded, bjdOffset);
+        const plTraces = getPlotlyTracesForPlanet(res, pl, color, yaxisKey, isDark, showExcluded, bjdOffset, markerSize);
         plTraces.forEach(t => traces.push(t));
         if (showTTVModel) {
           const modelTrace = getTTVModelTrace(res, pl, color, yaxisKey, bjdOffset, requestedModelEndBjd);
           if (modelTrace) traces.push(modelTrace);
         }
         addZeroLineShape(layout, yaxisKey, color);
+        if (showReferenceEpoch) addCenteredEpochMarker(layout, yaxisKey, res, bjdOffset, isDark);
       });
-      
+
     } else {
       const rows = planets.length;
       layout.xaxis = {
@@ -2824,10 +3050,18 @@
         };
       }
 
+      // Reserve a total 0.15 domain fraction for inter-row gaps, split evenly
+      // across the (rows - 1) gaps between rows -- but only when there is a
+      // second row to gap against. A single row has nothing to separate, so
+      // it gets the full [0, 1] domain instead of leaving a phantom 15% of
+      // blank space at the bottom (the common case after planets with no
+      // fitted transits are filtered out of the plot).
+      const totalGapFraction = rows > 1 ? 0.15 : 0;
+      const heightFraction = (1 - totalGapFraction) / rows;
+      const gap = rows > 1 ? totalGapFraction / (rows - 1) : 0;
+
       planets.forEach((pl, i) => {
         const yaxisKey = i === 0 ? 'y' : 'y' + (i + 1);
-        const heightFraction = 0.85 / rows;
-        const gap = 0.15 / (rows - 1 || 1);
         const start = 1 - (i + 1) * heightFraction - i * gap;
         const end = start + heightFraction;
         
@@ -2840,14 +3074,15 @@
         };
 
         const res = fitResults[pl];
-        const color = colors[i % colors.length];
-        const plTraces = getPlotlyTracesForPlanet(res, pl, color, yaxisKey, isDark, showExcluded, bjdOffset);
+        const color = planetColor(pl, i);
+        const plTraces = getPlotlyTracesForPlanet(res, pl, color, yaxisKey, isDark, showExcluded, bjdOffset, markerSize);
         plTraces.forEach(t => traces.push(t));
         if (showTTVModel) {
           const modelTrace = getTTVModelTrace(res, pl, color, yaxisKey, bjdOffset, requestedModelEndBjd);
           if (modelTrace) traces.push(modelTrace);
         }
         addZeroLineShape(layout, yaxisKey, color);
+        if (showReferenceEpoch) addCenteredEpochMarker(layout, yaxisKey, res, bjdOffset, isDark);
       });
     }
 
@@ -2920,19 +3155,19 @@
       });
     }
 
-    // Add legend guide for instruments if any planet uses instrument shapes
+    // Add legend guide for instruments if any displayed planet uses instrument shapes
     let hasInstrumentSymbol = false;
-    for (const pl in fitResults) {
+    for (const pl of planets) {
       const settings = planetPlotSettings[pl];
       if (!settings || settings.symbol === 'instrument') {
         hasInstrumentSymbol = true;
         break;
       }
     }
-    
+
     if (hasInstrumentSymbol) {
       const activeInstruments = new Set();
-      for (const pl in fitResults) {
+      for (const pl of planets) {
         fitResults[pl].points.forEach(p => {
           if (p.checked || showExcluded) {
             activeInstruments.add(p.instrument);
@@ -2948,7 +3183,7 @@
           type: 'scatter',
           name: inst.toUpperCase(),
           marker: {
-            color: '#888888',
+            color: '#000000',
             size: 8,
             symbol: getSymbolForInstrument(inst)
           },
@@ -3002,78 +3237,84 @@
     }, 5000);
   }
 
+  // Layout patch that recolors every axis (shared x-axis, each planet's
+  // y-axis, and the UTC/epoch twin x-axes when shown) to one flat palette.
+  // downloadPlotPNG uses this once to force a white background for the PNG
+  // export and once more to restore the live theme, instead of maintaining
+  // two hand-written copies of the same per-axis loop.
+  function plotAxisColorLayout(planets, showTwin, showEpochTwin, palette) {
+    const layout = {
+      'paper_bgcolor': palette.paper,
+      'plot_bgcolor': palette.plot,
+      'font.color': palette.font,
+      'title.font.color': palette.font,
+      'xaxis.gridcolor': palette.grid,
+      'xaxis.zerolinecolor': palette.grid,
+      'xaxis.linecolor': palette.grid,
+    };
+    if (showTwin) {
+      layout['xaxis2.linecolor'] = palette.grid;
+    } else if (showEpochTwin) {
+      planets.forEach((pl, i) => {
+        layout[`xaxis${i + 2}.linecolor`] = palette.grid;
+      });
+    }
+    planets.forEach((pl, i) => {
+      const key = 'yaxis' + (i === 0 ? '' : i + 1);
+      layout[key + '.gridcolor'] = palette.grid;
+      layout[key + '.zerolinecolor'] = palette.grid;
+      layout[key + '.linecolor'] = palette.grid;
+    });
+    return layout;
+  }
+
   function downloadPlotPNG(event) {
     if (event) event.preventDefault();
     const plotDiv = document.getElementById('oc-plot');
     if (!plotDiv || !fitResults) return;
     const filename = 'oc_plot_' + (getCombinedStorageKey() || 'export');
-    
+
     const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
     const showTwin = document.getElementById('show-twin-checkbox').checked;
     const showEpochTwin = document.getElementById('show-epoch-checkbox').checked && !showTwin;
-    const suptitle = document.getElementById('plot-suptitle-input').value.trim();
-    
-    // Always apply solid white background layout overrides for image export
-    const tempLayout = {
-      'paper_bgcolor': '#ffffff',
-      'plot_bgcolor': 'rgba(238, 240, 246, 0.4)',
-      'font.color': '#1a1d27',
-      'title.font.color': '#1a1d27',
-      'xaxis.gridcolor': '#d8dce6',
-      'xaxis.zerolinecolor': '#d8dce6',
-      'xaxis.linecolor': '#d8dce6',
-    };
-    
-    if (showTwin) {
-      tempLayout['xaxis2.linecolor'] = '#d8dce6';
-    } else if (showEpochTwin) {
-      Object.keys(fitResults).sort().forEach((pl, i) => {
-        tempLayout[`xaxis${i + 2}.linecolor`] = '#d8dce6';
-      });
-    }
-    
-    const planets = Object.keys(fitResults).sort();
-    planets.forEach((pl, i) => {
-      const key = 'yaxis' + (i === 0 ? '' : i + 1);
-      tempLayout[key + '.gridcolor'] = '#d8dce6';
-      tempLayout[key + '.zerolinecolor'] = '#d8dce6';
-      tempLayout[key + '.linecolor'] = '#d8dce6';
-    });
 
-    Plotly.relayout(plotDiv, tempLayout).then(() => {
+    // Must mirror the same planet set drawPlot() actually rendered -- these
+    // axis keys (yaxis, yaxis2, ... / xaxis2, xaxis3, ...) only exist on the
+    // live figure for planets with plotted points.
+    const planets = plottedPlanets();
+
+    const exportPalette = { paper: '#ffffff', plot: 'rgba(238, 240, 246, 0.4)', font: '#1a1d27', grid: '#d8dce6' };
+    const themePalette = {
+      paper: 'transparent',
+      plot: isDark ? 'rgba(36, 40, 56, 0.4)' : 'rgba(238, 240, 246, 0.4)',
+      font: isDark ? '#e1e4ed' : '#1a1d27',
+      grid: isDark ? '#2e3348' : '#d8dce6'
+    };
+
+    // Export at the live view's own aspect ratio, scaled up for resolution --
+    // margins and legend position are tuned in pixels for OC_PLOT_BASE_HEIGHT,
+    // so exporting at an unrelated fixed height (previously 600 vs the live
+    // 450 baseline) stretched the domain-fraction subplot rows to fill extra
+    // vertical space the live view never had, showing up as unused white
+    // space only in the downloaded PNG.
+    const exportWidth = 1200;
+    const liveWidth = plotDiv.clientWidth || 1;
+    const liveHeight = plotDiv.clientHeight || (OC_PLOT_BASE_HEIGHT + (showTwin
+      ? OC_PLOT_UTC_AXIS_EXTRA_HEIGHT
+      : (showEpochTwin ? OC_PLOT_EPOCH_AXIS_EXTRA_HEIGHT : 0)));
+    const exportHeight = Math.round(exportWidth * (liveHeight / liveWidth));
+
+    // Always apply a solid white background for image export, then restore
+    // the live theme's colors afterward.
+    Plotly.relayout(plotDiv, plotAxisColorLayout(planets, showTwin, showEpochTwin, exportPalette)).then(() => {
       Plotly.downloadImage(plotDiv, {
         format: 'png',
-        width: 1200,
-        height: 600 + (showTwin
-          ? OC_PLOT_UTC_AXIS_EXTRA_HEIGHT
-          : (showEpochTwin ? OC_PLOT_EPOCH_AXIS_EXTRA_HEIGHT : 0)),
+        width: exportWidth,
+        height: exportHeight,
         filename: filename,
         background: '#ffffff'
       }).then(() => {
-        // Restore layout properties back to original state based on theme
-        const restoreLayout = {
-          'paper_bgcolor': 'transparent',
-          'plot_bgcolor': isDark ? 'rgba(36, 40, 56, 0.4)' : 'rgba(238, 240, 246, 0.4)',
-          'font.color': isDark ? '#e1e4ed' : '#1a1d27',
-          'title.font.color': isDark ? '#e1e4ed' : '#1a1d27',
-          'xaxis.gridcolor': isDark ? '#2e3348' : '#d8dce6',
-          'xaxis.zerolinecolor': isDark ? '#2e3348' : '#d8dce6',
-          'xaxis.linecolor': isDark ? '#2e3348' : '#d8dce6',
-        };
-        if (showTwin) {
-          restoreLayout['xaxis2.linecolor'] = isDark ? '#2e3348' : '#d8dce6';
-        } else if (showEpochTwin) {
-          Object.keys(fitResults).sort().forEach((pl, i) => {
-            restoreLayout[`xaxis${i + 2}.linecolor`] = isDark ? '#2e3348' : '#d8dce6';
-          });
-        }
-        planets.forEach((pl, i) => {
-          const key = 'yaxis' + (i === 0 ? '' : i + 1);
-          restoreLayout[key + '.gridcolor'] = isDark ? '#2e3348' : '#d8dce6';
-          restoreLayout[key + '.zerolinecolor'] = isDark ? '#2e3348' : '#d8dce6';
-          restoreLayout[key + '.linecolor'] = isDark ? '#2e3348' : '#d8dce6';
-        });
-        Plotly.relayout(plotDiv, restoreLayout);
+        Plotly.relayout(plotDiv, plotAxisColorLayout(planets, showTwin, showEpochTwin, themePalette));
       });
     });
   }
@@ -3155,12 +3396,57 @@
     });
   }
 
-  function getPlotlyTracesForPlanet(res, planet, color, yaxisKey, isDark, showExcluded, bjdOffset) {
+  // Mark the epoch the linear ephemeris was centered on (E_center, at BJD
+  // t0_fit_centered) with a vertical guide spanning the row plus a small
+  // "E=n" label at the top -- the anchor the fitted T0/period are quoted
+  // relative to, otherwise invisible on the plot itself. The `... domain`
+  // yref keeps the line within this row's own y-domain regardless of its
+  // data range (Plotly.js 2.x, supported since 1.42).
+  function addCenteredEpochMarker(layout, yaxisKey, res, bjdOffset, isDark) {
+    if (!res.was_fit || !Number.isFinite(res.t0_fit_centered) || !Number.isFinite(res.E_center)) return;
+    const x = res.t0_fit_centered - bjdOffset;
+    const guideColor = isDark ? 'rgba(225, 228, 237, 0.35)' : 'rgba(26, 29, 39, 0.35)';
+    layout.shapes.push({
+      type: 'line',
+      xref: 'x',
+      yref: `${yaxisKey} domain`,
+      x0: x,
+      x1: x,
+      y0: 0,
+      y1: 1,
+      line: {
+        color: guideColor,
+        width: 1,
+        dash: 'dot'
+      }
+    });
+    layout.annotations.push({
+      x: x,
+      y: 1,
+      xref: 'x',
+      yref: `${yaxisKey} domain`,
+      text: `E=${res.E_center}`,
+      showarrow: false,
+      yanchor: 'bottom',
+      font: { size: 9, color: guideColor }
+    });
+  }
+
+  // Outline applied to a manual point the backend flagged as >5sigma from
+  // the fitted linear ephemeris, in place of the normal thin white/dark
+  // marker outline -- distinguishes a likely data-entry error at a glance
+  // instead of relying solely on the hover tooltip.
+  const FLAGGED_OUTLINE_COLOR = '#f87171';
+  const FLAGGED_OUTLINE_WIDTH = 2.5;
+
+  function getPlotlyTracesForPlanet(res, planet, color, yaxisKey, isDark, showExcluded, bjdOffset, markerSize = 9) {
     const settings = planetPlotSettings[planet] || { color: color, symbol: 'instrument' };
     const pColor = settings.color;
+    const normalOutline = isDark ? '#1a1d27' : '#ffffff';
+    const excludedOutline = isDark ? 'rgba(79, 88, 124, 0.7)' : 'rgba(162, 169, 189, 0.7)';
 
-    const fitX = [], fitY = [], fitErr = [], fitCustom = [], fitText = [], fitSymbols = [];
-    const unX = [], unY = [], unErr = [], unCustom = [], unText = [], unSymbols = [];
+    const fitX = [], fitY = [], fitErr = [], fitCustom = [], fitText = [], fitSymbols = [], fitOutlineColors = [], fitOutlineWidths = [];
+    const unX = [], unY = [], unErr = [], unCustom = [], unText = [], unSymbols = [], unOutlineColors = [], unOutlineWidths = [];
 
     res.points.forEach(p => {
       const x = p.bjd - bjdOffset;
@@ -3207,6 +3493,8 @@
         fitCustom.push(cd);
         fitText.push(label);
         fitSymbols.push(symbol);
+        fitOutlineColors.push(p.flagged ? FLAGGED_OUTLINE_COLOR : normalOutline);
+        fitOutlineWidths.push(p.flagged ? FLAGGED_OUTLINE_WIDTH : 1.5);
       } else {
         unX.push(x);
         unY.push(y);
@@ -3214,6 +3502,8 @@
         unCustom.push(cd);
         unText.push(label);
         unSymbols.push(symbol);
+        unOutlineColors.push(p.flagged ? FLAGGED_OUTLINE_COLOR : excludedOutline);
+        unOutlineWidths.push(p.flagged ? FLAGGED_OUTLINE_WIDTH : 2);
       }
     });
 
@@ -3235,11 +3525,15 @@
         mode: 'markers',
         type: 'scatter',
         name: `planet ${planet.toLowerCase()}`,
+        // The legend shows one black entry per instrument (marker shape)
+        // instead -- the row/axis title already identifies the planet, so a
+        // per-planet color swatch here would be redundant.
+        showlegend: false,
         marker: {
           color: pColor,
-          size: 9,
+          size: markerSize,
           symbol: fitSymbols,
-          line: { color: isDark ? '#1a1d27' : '#ffffff', width: 1.5 }
+          line: { color: fitOutlineColors, width: fitOutlineWidths }
         },
         customdata: fitCustom,
         hoverinfo: 'text',
@@ -3265,11 +3559,12 @@
         mode: 'markers',
         type: 'scatter',
         name: `planet ${planet.toLowerCase()} (unused)`,
+        showlegend: false,
         marker: {
           color: 'rgba(0, 0, 0, 0)',
-          size: 8,
+          size: Math.max(3, markerSize - 1),
           symbol: unSymbols,
-          line: { color: isDark ? 'rgba(79, 88, 124, 0.7)' : 'rgba(162, 169, 189, 0.7)', width: 2 }
+          line: { color: unOutlineColors, width: unOutlineWidths }
         },
         customdata: unCustom,
         hoverinfo: 'text',
@@ -3308,6 +3603,7 @@
       mode: 'lines',
       type: 'scatter',
       name: `planet ${planet.toLowerCase()} TTV best fit (${ttvModelRun})`,
+      showlegend: false,
       line: {color: color, width: 2, dash: 'dash'},
       hovertemplate: 'BJD %{customdata:.6f}<br>O-C %{y:.3f} min<extra></extra>',
       customdata: modelPoints.map(p => Number(p.tc)),

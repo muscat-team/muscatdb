@@ -155,7 +155,7 @@
       <a id="lco-vis-link" href="#" target="_blank" rel="noopener">LCO visibility figure</a>.
     </p>
   </div>
-  <p class="lco-note">Windows are coarse scheduling bounds. t0 is usually BJD_TDB; the ≤8&nbsp;min barycentric offset is absorbed by the padding above.</p>
+  <p class="lco-note">Windows are coarse scheduling bounds. t0 is usually BJD_TDB; when the target's coordinates are known, transit centers are corrected to true UTC before scheduling. Without coordinates, the ≤9&nbsp;min BJD_TDB/UTC offset falls back to being absorbed by the padding above.</p>
   <p class="lco-note">Window boundaries are always rounded to 5-minute intervals. When padding is 0 the rounded window may be slightly shorter than the transit visibility (floor for start, ceil for end). Verify for critical observations.</p>
 </details>
 

@@ -1,0 +1,17 @@
+site_name: muscat-db
+site_url: https://muscat-team.github.io/muscatdb/
+repo_url: https://github.com/muscat-team/muscatdb
+repo_name: muscat-team/muscatdb
+theme:
+  name: material
+nav:
+  - Home: index.md
+  - Using muscat-db:
+      - Getting started: using/getting-started.md
+      - Browse a night: using/browse-a-night.md
+  - Science: science.md
+  - Tech stack: tech-stack.md
+  - Running the system: running.md
+validation:
+  links:
+    absolute_links: ignore
