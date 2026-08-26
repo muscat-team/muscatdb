@@ -1560,6 +1560,20 @@ _DECORATED_TOI_OBJECT_RE = re.compile(
 )
 
 
+# Real star names that happen to end in a letter the trailing-planet-letter
+# heuristic below would otherwise strip -- e.g. "AU Mic" (AU Microscopii):
+# "MIC" is the constellation abbreviation, not a planet letter, but stripping
+# rule has no way to tell that apart from "V1298Tauc" (a real planet-letter
+# suffix glued directly onto a name with no separator, which the same rule
+# must keep stripping -- see the V1298Tauc case asserted in
+# tests/test_photometry.py). A per-object target_overrides row only fixes
+# the exact raw spelling it was set on, so a second raw spelling of the same
+# star (e.g. "AUMic" vs "AU Mic") silently mis-normalizes again; listing the
+# canonical (already letter/punctuation-stripped, uppercased) name here fixes
+# every raw spelling at once.
+_LETTER_SUFFIX_EXCEPTIONS = {"AUMIC"}
+
+
 # Helper to normalize target names for comparison
 def _normalize_target_name(t: str, overrides: dict[str, str] | None = None) -> str:
     # Check user override first
@@ -1582,6 +1596,8 @@ def _normalize_target_name(t: str, overrides: dict[str, str] | None = None) -> s
 
     s = t.strip().upper().replace(" ", "").replace("-", "").replace("_", "")
     s = re.sub(r"\.\d+$", "", s)
+    if s in _LETTER_SUFFIX_EXCEPTIONS:
+        return s
     if len(s) > 2 and s[-1] in "BCDEFGH":
         return s[:-1]
     return s
