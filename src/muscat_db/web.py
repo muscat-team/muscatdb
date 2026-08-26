@@ -627,6 +627,23 @@ def _project_target_rows(db: str, tag: str) -> list[dict]:
         if norm in wanted:
             groups.setdefault(norm, []).append(t)
 
+    # Per-date frame counts (for the Dates column's Nframe filter) aren't on
+    # the per-raw-object dicts above -- those only carry an object-wide total
+    # -- so fetch them in one batched query across every backing object,
+    # mirroring get_tags_for_targets' one-query/fan-out-in-Python template.
+    all_objects = sorted({m["object"] for members in groups.values() for m in members})
+    frames_by_object_date: dict[tuple[str, str], int] = {}
+    if all_objects:
+        placeholders = ",".join("?" for _ in all_objects)
+        with get_conn(db) as conn:
+            cur = conn.execute(
+                f"""SELECT object, obsdate, SUM(nframes) FROM summaries
+                    WHERE object IN ({placeholders}) GROUP BY object, obsdate""",
+                all_objects,
+            )
+            for obj, obsdate, n in cur.fetchall():
+                frames_by_object_date[(obj, obsdate)] = n or 0
+
     rows = []
     for norm, members in groups.items():
         dates = sorted(set().union(*(m["dates"] for m in members)))
@@ -634,11 +651,16 @@ def _project_target_rows(db: str, tag: str) -> list[dict]:
         for m in sorted(members, key=lambda x: x["object"]):
             date_to_inst.update(m["date_to_inst"])
         filters = sorted(set().union(*(m["filters"] for m in members)))
+        date_frames: dict[str, int] = {}
+        for m in members:
+            for d in m["dates"]:
+                date_frames[d] = date_frames.get(d, 0) + frames_by_object_date.get((m["object"], d), 0)
         rows.append({
             "norm_name": norm,
             "objects": sorted(m["object"] for m in members),
             "dates": dates,
             "date_to_inst": date_to_inst,
+            "date_frames": date_frames,
             "n_dates": len(dates),
             "filters": filters,
             "filter_chips": _normalize_filters(filters),

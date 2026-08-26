@@ -28,6 +28,7 @@
     <input id="attach-target-input" type="text" list="attach-target-options" placeholder="Add a target by normalized name…" autocomplete="off">
     <datalist id="attach-target-options"></datalist>
     <button id="attach-target-btn" class="btn" type="button">Add to Project</button>
+    <label>#Frames &gt; <input id="nframe-filter" type="number" min="0" step="1" value="100" style="width:5rem;"></label>
     <a href="/api/tags/{{ tag | urlencode }}/export.csv" class="csv-btn" download>CSV</a>
     <button id="delete-project-btn" class="btn danger" type="button" style="margin-left:auto;">Delete Project</button>
   </div>
@@ -53,11 +54,12 @@
             <strong>{{ t.norm_name }}</strong>
           </a>
         </td>
-        <td class="mono" style="white-space:nowrap; vertical-align:top;">
+        <td class="mono dates-cell" style="white-space:nowrap; vertical-align:top;">
           {% for d in t.dates %}
             {% set inst = t.date_to_inst.get(d, t.instruments[0] if t.instruments else '') %}
-            <div style="margin-bottom:2px;"><a href="/{{ inst }}/{{ d }}">{{ d }}{% if inst == 'muscat' %}(M1){% elif inst == 'muscat2' %}(M2){% elif inst == 'muscat3' %}(M3){% elif inst == 'muscat4' %}(M4){% elif inst == 'sinistro' %}(S){% elif inst == 'sbig' %}(SB){% elif inst == 'qhy600' %}(Q){% endif %}</a></div>
+            <div class="date-entry" data-frames="{{ t.date_frames.get(d, 0) }}" style="margin-bottom:2px;"><a href="/{{ inst }}/{{ d }}">{{ d }}{% if inst == 'muscat' %}(M1){% elif inst == 'muscat2' %}(M2){% elif inst == 'muscat3' %}(M3){% elif inst == 'muscat4' %}(M4){% elif inst == 'sinistro' %}(S){% elif inst == 'sbig' %}(SB){% elif inst == 'qhy600' %}(Q){% endif %}</a> <span class="hint">({{ t.date_frames.get(d, 0) }})</span></div>
           {% endfor %}
+          <div class="date-entry-empty hint" style="display:none;">no dates above threshold</div>
         </td>
         <td class="mono">{{ t.n_dates }}</td>
         <td>
@@ -220,6 +222,29 @@
         if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); commit(); }
         else if (e.key === 'Escape') { e.preventDefault(); restore(); }
       });
+    }
+
+    // ── #Frames filter: hide dates at/below the threshold, per target row ──
+    const nframeFilter = document.getElementById('nframe-filter');
+    function applyNframeFilter() {
+      const threshold = parseFloat(nframeFilter.value);
+      const min = isNaN(threshold) ? -Infinity : threshold;
+      document.querySelectorAll('.dates-cell').forEach(cell => {
+        const entries = cell.querySelectorAll('.date-entry');
+        let visibleCount = 0;
+        entries.forEach(entry => {
+          const frames = parseFloat(entry.dataset.frames) || 0;
+          const visible = frames > min;
+          entry.style.display = visible ? '' : 'none';
+          if (visible) visibleCount++;
+        });
+        const empty = cell.querySelector('.date-entry-empty');
+        if (empty) empty.style.display = (entries.length && !visibleCount) ? '' : 'none';
+      });
+    }
+    if (nframeFilter) {
+      nframeFilter.addEventListener('input', applyNframeFilter);
+      applyNframeFilter();
     }
 
     // ── attach-target box ────────────────────────────────────────────────

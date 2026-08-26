@@ -9,6 +9,8 @@ membership.
 
 from __future__ import annotations
 
+import sqlite3
+
 from fastapi.testclient import TestClient
 
 from muscat_db.database import (
@@ -172,6 +174,35 @@ def test_project_target_rows_aggregates_raw_objects_sharing_a_norm_name(mock_db,
     assert row["n_frames"] == 15
     assert row["filters"] == ["g", "r"]
     assert row["instruments"] == ["muscat3", "muscat4"]
+
+
+def test_project_target_rows_includes_per_date_frame_counts(mock_db, monkeypatch):
+    create_tag(mock_db, "Grouped")
+    add_target_tag(mock_db, "GROUPED", "Grouped")
+    set_norm_name_override(mock_db, "obj-a", "GROUPED")
+    monkeypatch.setattr(
+        "muscat_db.web._get_targets",
+        lambda _db: [{
+            "object": "obj-a", "n_dates": 2, "n_frames": 150,
+            "dates": ["260101", "260102"],
+            "date_to_inst": {"260101": "muscat3", "260102": "muscat3"},
+            "filters": ["g"], "instruments": ["muscat3"],
+        }],
+    )
+    with sqlite3.connect(mock_db) as conn:
+        conn.execute(
+            "INSERT INTO summaries (instrument, obsdate, ccd, object, nframes) VALUES (?,?,?,?,?)",
+            ("muscat3", "260101", 0, "obj-a", 40),
+        )
+        conn.execute(
+            "INSERT INTO summaries (instrument, obsdate, ccd, object, nframes) VALUES (?,?,?,?,?)",
+            ("muscat3", "260102", 0, "obj-a", 110),
+        )
+        conn.commit()
+
+    rows = _project_target_rows(mock_db, "Grouped")
+
+    assert rows[0]["date_frames"] == {"260101": 40, "260102": 110}
 
 
 # ── Homepage: Tags column present, RA/Dec/Airmass/Move gone ──────────────────
@@ -467,6 +498,25 @@ def test_tag_page_has_rename_control(mock_db):
     assert 'id="project-name-cell"' in html
     assert 'data-tag="FollowUp"' in html
     assert 'class="project-name-text">FollowUp<' in html
+
+
+def test_tag_page_renders_nframe_filter_and_per_date_frames(mock_db, monkeypatch):
+    create_tag(mock_db, "FollowUp")
+    add_target_tag(mock_db, "TESTOBJ", "FollowUp")
+    monkeypatch.setattr(
+        "muscat_db.web._get_targets",
+        lambda _db: [{
+            "object": "TESTOBJ", "n_dates": 1, "n_frames": 10,
+            "dates": ["260101"], "date_to_inst": {"260101": "muscat3"},
+            "filters": ["g"], "instruments": ["muscat3"],
+        }],
+    )
+
+    html = TestClient(app).get("/tag?name=FollowUp").text
+
+    assert 'id="nframe-filter"' in html
+    assert 'value="100"' in html
+    assert 'data-frames="0"' in html  # no summaries rows seeded -> defaults to 0
 
 
 # ── Markdown description rendering ───────────────────────────────────────────
