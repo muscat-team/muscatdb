@@ -42,7 +42,6 @@
         <th data-sort-attr="dates">Dates</th>
         <th data-sort-attr="nDates" data-sort-type="number">Ndataset</th>
         <th data-sort-attr="filters">Filters</th>
-        <th data-sort-attr="frames" data-sort-type="number"># Frames</th>
         <th style="width:1px;">Actions</th>
       </tr>
     </thead>
@@ -78,7 +77,6 @@
             <span class="badge badge-filter-{{ c.color }} narrow filter-narrow-line">{{ c.label }}</span>
           {% endfor %}
         </td>
-        <td class="frames-cell">{{ t.n_frames }}</td>
         <td style="text-align:center;">
           <button class="btn sm danger detach-btn" data-norm-name="{{ t.norm_name }}" title="Detach from project">Detach</button>
         </td>
@@ -233,8 +231,8 @@
     }
 
     // ── #Frames filter: hides dates at/below the threshold, per target row,
-    //    and recomputes that row's Ndataset/Filters/#Frames from whichever
-    //    dates currently pass (rather than leaving those columns showing the
+    //    and recomputes that row's Ndataset/Filters from whichever dates
+    //    currently pass (rather than leaving those columns showing the
     //    unfiltered totals while the Dates column shows a filtered subset).
     const nframeFilter = document.getElementById('nframe-filter');
     function applyNframeFilter() {
@@ -245,7 +243,6 @@
         if (!cell) return;
         const entries = cell.querySelectorAll('.date-entry');
         let visibleCount = 0;
-        let totalFrames = 0;
         const chipsByKey = new Map();
         entries.forEach(entry => {
           const frames = parseFloat(entry.dataset.frames) || 0;
@@ -253,7 +250,6 @@
           entry.style.display = visible ? '' : 'none';
           if (!visible) return;
           visibleCount++;
-          totalFrames += frames;
           entry.querySelectorAll('.date-filter-chips .badge').forEach(chip => {
             const key = chip.className + '|' + chip.textContent;
             if (!chipsByKey.has(key)) chipsByKey.set(key, chip.cloneNode(true));
@@ -264,8 +260,6 @@
 
         const ndatasetCell = row.querySelector('.ndataset-cell');
         if (ndatasetCell) ndatasetCell.textContent = visibleCount;
-        const framesCell = row.querySelector('.frames-cell');
-        if (framesCell) framesCell.textContent = totalFrames;
         const filtersCell = row.querySelector('.filters-cell');
         if (filtersCell) filtersCell.replaceChildren(...chipsByKey.values());
       });

@@ -233,7 +233,7 @@ def _seed_one_target(monkeypatch):
     )
 
 
-def test_homepage_drops_ra_dec_airmass_move_and_shows_tags(mock_db, monkeypatch):
+def test_homepage_drops_ra_dec_airmass_move_frames_and_shows_tags(mock_db, monkeypatch):
     _seed_one_target(monkeypatch)
     create_tag(mock_db, "FollowUp")
     add_target_tag(mock_db, "TESTOBJ", "FollowUp")
@@ -248,6 +248,7 @@ def test_homepage_drops_ra_dec_airmass_move_and_shows_tags(mock_db, monkeypatch)
     assert ">Airmass<" not in html
     assert ">Move<" not in html
     assert "btn-move" not in html
+    assert "# Frames" not in html
 
 
 def test_homepage_tags_are_not_stale_after_mutation(mock_db, monkeypatch):
@@ -521,8 +522,9 @@ def test_tag_page_renders_nframe_filter_and_per_date_frames(mock_db, monkeypatch
     assert 'data-frames="0"' in html  # no summaries rows seeded -> defaults to 0
     assert 'ndataset-cell' in html
     assert 'class="filters-cell"' in html
-    assert 'class="frames-cell"' in html
     assert 'class="date-filter-chips"' in html
+    assert '# Frames' not in html
+    assert 'frames-cell' not in html
 
 
 # ── Markdown description rendering ───────────────────────────────────────────
