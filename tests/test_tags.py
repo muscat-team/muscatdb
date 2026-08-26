@@ -20,6 +20,7 @@ from muscat_db.database import (
     get_targets_for_tag,
     list_project_tags,
     remove_target_tag,
+    rename_tag,
     set_norm_name_override,
     set_tag_description,
 )
@@ -102,6 +103,37 @@ def test_delete_tag_cascades_to_target_tags(mock_db):
 
     assert get_tag_description(mock_db, "Temp") is None
     assert get_targets_for_tag(mock_db, "Temp") == []
+
+
+def test_rename_tag_moves_description_and_target_tags(mock_db):
+    create_tag(mock_db, "Old", "a description")
+    add_target_tag(mock_db, "TESTOBJ", "Old")
+
+    result = rename_tag(mock_db, "Old", "New")
+
+    assert result == "New"
+    assert get_tag_description(mock_db, "Old") is None
+    assert get_tag_description(mock_db, "New") == "a description"
+    assert get_targets_for_tag(mock_db, "Old") == []
+    assert get_targets_for_tag(mock_db, "New") == ["TESTOBJ"]
+
+
+def test_rename_tag_rejects_unknown_source(mock_db):
+    assert rename_tag(mock_db, "Ghost", "New") is None
+
+
+def test_rename_tag_conflicts_with_existing_different_project(mock_db):
+    create_tag(mock_db, "A")
+    create_tag(mock_db, "B")
+
+    assert rename_tag(mock_db, "A", "B") == "conflict"
+
+
+def test_rename_tag_allows_case_only_change(mock_db):
+    create_tag(mock_db, "FollowUp")
+
+    assert rename_tag(mock_db, "FollowUp", "followup") == "followup"
+    assert get_tag_description(mock_db, "followup") == ""
 
 
 # ── Core design regression: norm_name groups raw-object spelling variants ────
@@ -279,6 +311,42 @@ def test_api_delete_project(mock_db):
     assert client.get("/api/tags").json()["tags"] == []
 
 
+def test_api_rename_tag_success(mock_db):
+    client = TestClient(app)
+    client.post("/api/tags", json={"tag": "Old"})
+
+    resp = client.put("/api/tags/Old/rename", json={"new_tag": "New"})
+
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "tag": "New"}
+    tags = [t["tag"] for t in client.get("/api/tags").json()["tags"]]
+    assert tags == ["New"]
+
+
+def test_api_rename_tag_conflict(mock_db):
+    client = TestClient(app)
+    client.post("/api/tags", json={"tag": "A"})
+    client.post("/api/tags", json={"tag": "B"})
+
+    resp = client.put("/api/tags/A/rename", json={"new_tag": "B"})
+
+    assert resp.status_code == 409
+
+
+def test_api_rename_tag_unknown_source_is_404(mock_db):
+    resp = TestClient(app).put("/api/tags/Ghost/rename", json={"new_tag": "New"})
+
+    assert resp.status_code == 404
+
+
+def test_api_rename_tag_rejects_empty_and_slash(mock_db):
+    client = TestClient(app)
+    client.post("/api/tags", json={"tag": "Old"})
+
+    assert client.put("/api/tags/Old/rename", json={"new_tag": ""}).status_code == 400
+    assert client.put("/api/tags/Old/rename", json={"new_tag": "a/b"}).status_code == 400
+
+
 def test_api_targets_export_csv_has_tags_column(mock_db, monkeypatch):
     _seed_one_target(monkeypatch)
     create_tag(mock_db, "FollowUp")
@@ -355,6 +423,50 @@ def test_tag_page_renders_attached_targets(mock_db, monkeypatch):
     assert "TESTOBJ" in html
     assert "desc here" in html
     assert 'from=project&amp;project=FollowUp' in html or 'from=project&project=FollowUp' in html
+
+
+def test_tag_page_dates_column_shows_instrument_label(mock_db, monkeypatch):
+    create_tag(mock_db, "FollowUp")
+    add_target_tag(mock_db, "TESTOBJ", "FollowUp")
+    monkeypatch.setattr(
+        "muscat_db.web._get_targets",
+        lambda _db: [{
+            "object": "TESTOBJ", "n_dates": 1, "n_frames": 10,
+            "dates": ["260101"], "date_to_inst": {"260101": "muscat3"},
+            "filters": ["g"], "instruments": ["muscat3"],
+        }],
+    )
+
+    html = TestClient(app).get("/tag?name=FollowUp").text
+
+    assert "260101(M3)" in html
+
+
+def test_tag_page_uses_normalized_target_header(mock_db, monkeypatch):
+    create_tag(mock_db, "FollowUp")
+    add_target_tag(mock_db, "TESTOBJ", "FollowUp")
+    monkeypatch.setattr(
+        "muscat_db.web._get_targets",
+        lambda _db: [{
+            "object": "TESTOBJ", "n_dates": 1, "n_frames": 10,
+            "dates": ["260101"], "date_to_inst": {"260101": "muscat3"},
+            "filters": ["g"], "instruments": ["muscat3"],
+        }],
+    )
+
+    html = TestClient(app).get("/tag?name=FollowUp").text
+
+    assert '<th data-sort-attr="normName">Normalized Target</th>' in html
+
+
+def test_tag_page_has_rename_control(mock_db):
+    create_tag(mock_db, "FollowUp")
+
+    html = TestClient(app).get("/tag?name=FollowUp").text
+
+    assert 'id="project-name-cell"' in html
+    assert 'data-tag="FollowUp"' in html
+    assert 'class="project-name-text">FollowUp<' in html
 
 
 # ── Markdown description rendering ───────────────────────────────────────────

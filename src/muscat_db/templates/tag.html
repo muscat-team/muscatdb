@@ -13,7 +13,10 @@
   <p style="color: var(--text-dim); margin-bottom: 1rem;">
     <a href="/projects">← Back to Projects</a>
   </p>
-  <h1>{{ tag }}</h1>
+  <h1 class="norm-name-cell" id="project-name-cell" data-tag="{{ tag }}" style="display:inline-flex; align-items:baseline; gap:0.4rem;">
+    <span class="project-name-text">{{ tag }}</span>
+    <span class="norm-name-edit-hint" title="Click to rename project">&#9998;</span>
+  </h1>
 
   <div class="note-cell" id="project-desc-cell" data-tag="{{ tag }}" data-raw="{{ description }}"
        style="margin-bottom:1.5rem; padding:0.6rem 0.8rem; border:1px solid var(--border); border-radius:8px;">
@@ -34,7 +37,7 @@
   <table id="project-targets-table">
     <thead>
       <tr>
-        <th data-sort-attr="normName">Target</th>
+        <th data-sort-attr="normName">Normalized Target</th>
         <th data-sort-attr="dates">Dates</th>
         <th data-sort-attr="nDates" data-sort-type="number">Ndataset</th>
         <th data-sort-attr="filters">Filters</th>
@@ -53,7 +56,7 @@
         <td class="mono" style="white-space:nowrap; vertical-align:top;">
           {% for d in t.dates %}
             {% set inst = t.date_to_inst.get(d, t.instruments[0] if t.instruments else '') %}
-            <div style="margin-bottom:2px;"><a href="/{{ inst }}/{{ d }}">{{ d }}</a></div>
+            <div style="margin-bottom:2px;"><a href="/{{ inst }}/{{ d }}">{{ d }}{% if inst == 'muscat' %}(M1){% elif inst == 'muscat2' %}(M2){% elif inst == 'muscat3' %}(M3){% elif inst == 'muscat4' %}(M4){% elif inst == 'sinistro' %}(S){% elif inst == 'sbig' %}(SB){% elif inst == 'qhy600' %}(Q){% endif %}</a></div>
           {% endfor %}
         </td>
         <td class="mono">{{ t.n_dates }}</td>
@@ -85,6 +88,71 @@
   <script>
   (function () {
     const tag = {{ tag | tojson }};
+
+    // ── rename project (mirrors index.html's inline norm-name editor) ──────
+    const nameCell = document.getElementById('project-name-cell');
+    nameCell.addEventListener('click', function (e) {
+      if (nameCell.classList.contains('editing')) return;
+      openNameEditor();
+    });
+
+    function openNameEditor() {
+      const current = nameCell.dataset.tag;
+      nameCell.classList.add('editing');
+      nameCell.innerHTML = '';
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.value = current;
+      input.className = 'norm-name-input';
+      const actions = document.createElement('div');
+      actions.className = 'note-actions';
+      const save = document.createElement('button');
+      save.className = 'save'; save.textContent = 'Save';
+      const cancel = document.createElement('button');
+      cancel.textContent = 'Cancel';
+      actions.append(save, cancel);
+      nameCell.append(input, actions);
+      input.focus(); input.select();
+
+      function restore() {
+        nameCell.classList.remove('editing');
+        const nameSpan = document.createElement('span');
+        nameSpan.className = 'project-name-text';
+        nameSpan.textContent = current;
+        const hint = document.createElement('span');
+        hint.className = 'norm-name-edit-hint';
+        hint.title = 'Click to rename project';
+        hint.textContent = '✎';
+        nameCell.replaceChildren(nameSpan, hint);
+      }
+
+      async function commit() {
+        const value = input.value.trim();
+        if (!value || value === current) { restore(); return; }
+        try {
+          const res = await fetch('/api/tags/' + encodeURIComponent(current) + '/rename', {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({new_tag: value}),
+          });
+          if (!res.ok) {
+            const body = await res.json().catch(() => ({}));
+            throw new Error(body.detail || ('HTTP ' + res.status));
+          }
+          window.location.href = '/tag?name=' + encodeURIComponent(value);
+        } catch (err) {
+          showMessageModal('Error', 'Rename failed: ' + err.message);
+          restore();
+        }
+      }
+
+      save.addEventListener('click', commit);
+      cancel.addEventListener('click', restore);
+      input.addEventListener('keydown', e => {
+        if (e.key === 'Enter') { e.preventDefault(); commit(); }
+        else if (e.key === 'Escape') { e.preventDefault(); restore(); }
+      });
+    }
 
     // ── editable description (mirrors base.html's note-cell editor) ────────
     const descCell = document.getElementById('project-desc-cell');

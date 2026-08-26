@@ -135,6 +135,7 @@ from muscat_db.database import (
     _normalize_filters,
     create_tag as _create_tag,
     delete_tag as _delete_tag,
+    rename_tag as _rename_tag,
     get_tag_description as _get_tag_description,
     set_tag_description as _set_tag_description,
     list_project_tags as _list_project_tags,
@@ -6255,6 +6256,21 @@ def api_update_tag_description(tag: str, payload: dict = Body(...)):
 def api_delete_tag(tag: str):
     _delete_tag(_db_path(), tag)
     return JSONResponse({"ok": True, "tag": tag})
+
+
+@tags_router.put("/{tag}/rename")
+def api_rename_tag(tag: str, payload: dict = Body(...)):
+    new_tag = (payload.get("new_tag") or "").strip()
+    if not new_tag or len(new_tag) > 100:
+        raise HTTPException(400, "new_tag is required (max 100 chars)")
+    if "/" in new_tag:
+        raise HTTPException(400, "new_tag must not contain '/'")
+    result = _rename_tag(_db_path(), tag, new_tag)
+    if result is None:
+        raise HTTPException(404, f"project {tag!r} not found")
+    if result == "conflict":
+        raise HTTPException(409, f"project {new_tag!r} already exists")
+    return JSONResponse({"ok": True, "tag": result})
 
 
 @tags_router.get("/{tag}/export.csv")

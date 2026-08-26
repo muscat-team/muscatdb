@@ -33,6 +33,7 @@ BLOCKING_PATHS = {
     "/api/targets/{obj}/tags",
     "/api/tags",
     "/api/tags/{tag}",
+    "/api/tags/{tag}/rename",
     "/api/tags/{tag}/export.csv",
 }
 

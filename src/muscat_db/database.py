@@ -1373,6 +1373,31 @@ def delete_tag(db_path: str, tag: str) -> None:
     clear_all_caches()
 
 
+def rename_tag(db_path: str, tag: str, new_tag: str) -> str | None:
+    """Rename a project, moving its description row and every target_tags
+    row over to the new name (both cascades done explicitly, same as
+    delete_tag, since there is no FK between the two tables).
+
+    Returns None if `tag` doesn't exist, "conflict" if `new_tag` already
+    names a different existing project, else the (stripped) new name.
+    """
+    tag = (tag or "").strip()
+    new_tag = (new_tag or "").strip()
+    with get_conn(db_path) as conn:
+        _apply_schema(conn)
+        if not conn.execute("SELECT 1 FROM tag_descriptions WHERE tag = ?", (tag,)).fetchone():
+            return None
+        if new_tag.casefold() != tag.casefold() and conn.execute(
+            "SELECT 1 FROM tag_descriptions WHERE tag = ?", (new_tag,)
+        ).fetchone():
+            return "conflict"
+        conn.execute("UPDATE tag_descriptions SET tag = ? WHERE tag = ?", (new_tag, tag))
+        conn.execute("UPDATE target_tags SET tag = ? WHERE tag = ?", (new_tag, tag))
+        conn.commit()
+    clear_all_caches()
+    return new_tag
+
+
 def get_tag_description(db_path: str, tag: str) -> str | None:
     """None if the tag does not exist at all; '' if it exists with a blank
     description. Callers use the None/'' distinction to 404/empty-state vs.
