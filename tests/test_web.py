@@ -1354,7 +1354,7 @@ def test_telescope_required_error_blocks_ambiguous_selection(mock_db):
 # --------------------------------------------------------------------------- #
 
 
-def test_lco_pages_render_and_nav_links_it():
+def test_lco_pages_render_and_nav_links_it(mock_db):
     client = TestClient(app)
     page = client.get("/lco")
     assert page.status_code == 200

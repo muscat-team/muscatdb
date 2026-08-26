@@ -2,7 +2,7 @@
 
 target_tags keys on the normalized target identity (norm_name), not the raw
 obslog OBJECT string -- see the "Key design decision" note in
-docs/target_tagging_plan.md. The core regression test below pins that down:
+notes/target_tagging_plan.md. The core regression test below pins that down:
 two raw objects that normalize to the same target must share one project's
 membership.
 """
@@ -233,7 +233,7 @@ def _seed_one_target(monkeypatch):
     )
 
 
-def test_homepage_drops_ra_dec_airmass_move_frames_and_shows_tags(mock_db, monkeypatch):
+def test_homepage_drops_ra_dec_airmass_move_and_shows_tags(mock_db, monkeypatch):
     _seed_one_target(monkeypatch)
     create_tag(mock_db, "FollowUp")
     add_target_tag(mock_db, "TESTOBJ", "FollowUp")
@@ -248,7 +248,6 @@ def test_homepage_drops_ra_dec_airmass_move_frames_and_shows_tags(mock_db, monke
     assert ">Airmass<" not in html
     assert ">Move<" not in html
     assert "btn-move" not in html
-    assert "# Frames" not in html
 
 
 def test_homepage_tags_are_not_stale_after_mutation(mock_db, monkeypatch):
@@ -290,13 +289,14 @@ def test_api_create_tag_rejects_empty_and_slash(mock_db):
     assert client.post("/api/tags", json={"tag": "a/b"}).status_code == 400
 
 
-def test_api_attach_and_detach_target_tag(mock_db):
+def test_api_attach_and_detach_target_tag(mock_db, monkeypatch):
+    _seed_one_target(monkeypatch)
     client = TestClient(app)
     client.post("/api/tags", json={"tag": "FollowUp"})
 
     attached = client.put("/api/targets/TESTOBJ/tags", json={"tag": "FollowUp"})
     assert attached.status_code == 200
-    assert attached.json()["tags"] if "tags" in attached.json() else True
+    assert attached.json()["tag"] == "FollowUp"
 
     listed = client.get("/api/targets/TESTOBJ/tags").json()
     assert listed["tags"] == ["FollowUp"]
@@ -308,12 +308,28 @@ def test_api_attach_and_detach_target_tag(mock_db):
     assert listed_after["tags"] == []
 
 
-def test_api_attach_to_unknown_project_is_404(mock_db):
+def test_api_attach_to_unknown_project_is_404(mock_db, monkeypatch):
+    _seed_one_target(monkeypatch)
     client = TestClient(app)
 
     resp = client.put("/api/targets/TESTOBJ/tags", json={"tag": "NoSuchProject"})
 
     assert resp.status_code == 404
+
+
+def test_api_attach_unknown_target_is_404_and_does_not_change_count(mock_db, monkeypatch):
+    """A typo in the Project Detail page's attach box (a <datalist>, not a
+    hard constraint) must not create a phantom target_tags row: the target
+    must already exist as a real norm_name, not just be accepted as text."""
+    _seed_one_target(monkeypatch)
+    client = TestClient(app)
+    client.post("/api/tags", json={"tag": "FollowUp"})
+
+    resp = client.put("/api/targets/NOTREAL/tags", json={"tag": "FollowUp"})
+
+    assert resp.status_code == 404
+    tags = client.get("/api/tags").json()["tags"]
+    assert tags == [{"tag": "FollowUp", "description": "", "target_count": 0}]
 
 
 def test_api_update_description_unknown_tag_is_404(mock_db):
@@ -518,7 +534,7 @@ def test_tag_page_renders_nframe_filter_and_per_date_frames(mock_db, monkeypatch
     html = TestClient(app).get("/tag?name=FollowUp").text
 
     assert 'id="nframe-filter"' in html
-    assert 'value="100"' in html
+    assert 'value="0"' in html
     assert 'data-frames="0"' in html  # no summaries rows seeded -> defaults to 0
     assert 'ndataset-cell' in html
     assert 'class="filters-cell"' in html

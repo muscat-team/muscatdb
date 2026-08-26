@@ -28,7 +28,7 @@
     <input id="attach-target-input" type="text" list="attach-target-options" placeholder="Add a target by normalized name…" autocomplete="off">
     <datalist id="attach-target-options"></datalist>
     <button id="attach-target-btn" class="btn" type="button">Add to Project</button>
-    <label>#Frames &gt; <input id="nframe-filter" type="number" min="0" step="1" value="100" style="width:5rem;"></label>
+    <label>#Frames &gt; <input id="nframe-filter" type="number" min="0" step="1" value="0" style="width:5rem;"></label>
     <a href="/api/tags/{{ tag | urlencode }}/export.csv" class="csv-btn" download>CSV</a>
     <button id="delete-project-btn" class="btn danger" type="button" style="margin-left:auto;">Delete Project</button>
   </div>

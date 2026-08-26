@@ -6215,15 +6215,23 @@ def api_set_norm_name(obj: str, payload: dict = Body(...)):
     return JSONResponse({"ok": True, "object": obj, "norm_name": norm_name})
 
 
+def _all_norm_names(db: str) -> set[str]:
+    """Every norm_name that actually corresponds to a target in the DB
+    (i.e. some raw obslog OBJECT normalizes to it). Used to reject attaching
+    a project tag to a norm_name that doesn't exist -- e.g. a typo in the
+    Project Detail page's attach box, which is a <datalist> (a suggestion,
+    not a hard constraint on what can be submitted)."""
+    norm_overrides = _get_norm_name_overrides(db)
+    return {_normalize_target_name(t["object"], norm_overrides) for t in _get_targets(db)}
+
+
 @target_router.get("/norm-names", response_class=JSONResponse)
 def api_target_norm_names():
     """Full sorted, deduped list of every norm_name in the DB. Backs the
     Project Detail page's attach-target search box: ship the (small) full
     list and filter client-side, matching the homepage's own
     ship-everything/filter-in-JS pattern rather than a bespoke server search."""
-    db = _db_path()
-    norm_overrides = _get_norm_name_overrides(db)
-    names = sorted({_normalize_target_name(t["object"], norm_overrides) for t in _get_targets(db)})
+    names = sorted(_all_norm_names(_db_path()))
     return JSONResponse({"ok": True, "norm_names": names})
 
 
@@ -6242,6 +6250,8 @@ def api_add_target_tag(obj: str, payload: dict = Body(...)):
         raise HTTPException(400, "tag is required")
     db = _db_path()
     norm_name = _normalize_target_name(obj, _get_norm_name_overrides(db))
+    if norm_name not in _all_norm_names(db):
+        raise HTTPException(404, f"target {norm_name!r} not found")
     if not _add_target_tag(db, norm_name, tag):
         raise HTTPException(404, f"project {tag!r} not found")
     return JSONResponse({"ok": True, "object": obj, "norm_name": norm_name, "tag": tag})
@@ -6322,9 +6332,12 @@ def api_export_tag_csv(tag: str):
             r["norm_name"], ", ".join(r["dates"]), r["n_dates"],
             ", ".join(c["label"] for c in r["filter_chips"]), r["n_frames"],
         ])
+    # Quoted per RFC 6266: an unquoted filename breaks on tag names containing
+    # spaces (e.g. "Empty Project.csv") or other non-token characters.
+    safe_tag = tag.replace("\\", "\\\\").replace('"', '\\"')
     return Response(
         content=buf.getvalue(), media_type="text/csv",
-        headers={"Content-Disposition": f"attachment; filename={tag}.csv"},
+        headers={"Content-Disposition": f'attachment; filename="{safe_tag}.csv"'},
     )
 
 

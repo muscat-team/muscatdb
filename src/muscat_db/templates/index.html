@@ -61,6 +61,7 @@
       <th data-sort-attr="dates">Dates</th>
       <th data-sort-attr="nDates"      data-sort-type="number" title="This row's dataset count (total across the normalized target)">Ndataset</th>
       <th data-sort-attr="filters">Filters</th>
+      <th data-sort-attr="frames"      data-sort-type="number"># Frames</th>
       <th data-sort-attr="tags">Tags</th>
     </tr>
     <tr class="filter-row">
@@ -69,6 +70,7 @@
       <th><input type="text" data-col="date"        placeholder="YYMMDD"></th>
       <th><input type="text" data-col="ndataset"    placeholder="<10  >5"></th>
       <th><input type="text" data-col="filter"      placeholder="g, r, i, z"></th>
+      <th><input type="text" data-col="frames"      placeholder="<100  >500"></th>
       <th><input type="text" data-col="tags"        placeholder="e.g. FollowUp"></th>
     </tr>
   </thead>
@@ -78,6 +80,7 @@
     <tr data-name="{{ t.object }}"
         data-norm-name="{{ t.norm_name }}"
         data-filters="{{ t.filters|join(',') }}"
+        data-frames="{{ t.n_frames }}"
         data-n-dates="{{ t.n_dates }}"
         data-instruments="{{ t.instruments|join(',') }}"
         data-dates="{{ display_dates|trim }}"
@@ -106,6 +109,7 @@
           <span class="badge badge-filter-{{ c.color }} narrow filter-narrow-line">{{ c.label }}</span>
         {% endfor %}
       </td>
+      <td>{{ t.n_frames }}</td>
       <td class="tags-cell" data-object="{{ t.object }}" data-norm-name="{{ t.norm_name }}">
         <span class="tags-chip-list">
         {% for tag in t.tags %}
@@ -329,6 +333,7 @@
       name:       { val: r => r.dataset.name,        build: makeText    },
       norm_name:  { val: r => r.dataset.normName,    build: makeText    },
       filter:     { val: r => r.dataset.filters,     build: makeText    },
+      frames:     { val: r => parseInt(r.dataset.frames, 10),    build: makeNumeric },
       date:       { val: r => r.dataset.dates,       build: makeText    },
       ndataset:   { val: r => parseInt(r.dataset.nDates, 10), build: makeNumeric },
       tags:       { val: r => r.dataset.tags,        build: makeText    },
