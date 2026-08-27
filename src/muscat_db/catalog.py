@@ -33,6 +33,7 @@ from muscat_db.auth import request_user as _request_user
 from muscat_db.cache import LRUCache
 from muscat_db.database import (
     UserSettingsError,
+    get_norm_name_overrides as _get_norm_name_overrides,
     get_targets as _get_targets,
     get_user_ads_token,
 )
@@ -1176,12 +1177,13 @@ def _db_target_identifiers(db: str) -> dict:
     if cached is not None and cached[0] == key:
         return cached[1]
 
+    overrides = _get_norm_name_overrides(db)
     tic_to_norm: dict[int, str] = {}
     toi_to_norm: dict[str, str] = {}
     names: set[str] = set()
     for t in _get_targets(db):
         obj = t.get("object") or ""
-        norm = _normalize_target_name(obj)
+        norm = _normalize_target_name(obj, overrides)
         names.add(norm)
         up = obj.upper()
         for m in re.finditer(r"TIC[\s_-]*0*(\d+)", up):

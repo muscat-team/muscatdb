@@ -1875,10 +1875,15 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
         "mode": mode,
     }
 
+    # "To Target" should land on the same page /targets links to for this
+    # star, not a raw/decorated spelling like "TIC110795273.01(TOI7504.01)"
+    # -- apply the same override-aware normalization used everywhere else.
+    target_norm_name = _normalize_target_name(route_target, _get_norm_name_overrides(db)) if route_target else ""
     resp = _render(
         "photometry.html",
         instruments=list(INSTRUMENTS),
         sel_inst=inst, sel_date=date, sel_target=route_target,
+        target_norm_name=target_norm_name,
         dataset_target=target,
         sel_site=(outputs.get("site") if outputs else "") or "",
         sel_telescope=(outputs.get("telescope") if outputs else "") or "",
@@ -2086,10 +2091,15 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
         all_runs.sort(key=lambda r: r["date"], reverse=True)
 
     runs_json = all_runs
+    # "To Target" should land on the same page /targets links to for this
+    # star, not a raw/decorated spelling like "TIC110795273.01(TOI7504.01)"
+    # -- apply the same override-aware normalization used everywhere else.
+    target_norm_name = _normalize_target_name(target, _get_norm_name_overrides(db)) if target else ""
     return _render(
         "transit_fit.html",
         instruments=list(INSTRUMENTS),
         sel_inst=inst, sel_date=date, sel_target=target,
+        target_norm_name=target_norm_name,
         sel_site=sel_site, sel_telescope=sel_telescope, sel_mode=sel_mode,
         csv_sites=csv_sites, csv_telescopes=csv_telescopes, csv_modes=csv_modes,
         runs=runs, sel_run=sel_run,

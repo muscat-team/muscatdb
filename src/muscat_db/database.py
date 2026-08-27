@@ -1332,12 +1332,30 @@ def set_norm_name_override(db_path: str, obj: str, norm_name: str) -> None:
 
 
 def get_norm_name_overrides(db_path: str) -> dict[str, str]:
+    """{raw object -> norm_name override}, keyed on the raw ``targets.object``
+    spelling the override was set on (e.g. from the targets page).
+
+    Also aliased under the whitespace-stripped form of that same object, since
+    transit-fit/photometry job directories strip spaces from the raw object
+    string for their filesystem-safe target segment (see
+    ``jobs.target_dir_name``) -- so ``job["target"]`` never carries the spaces
+    the override was keyed on. Without this alias, ``_normalize_target_name``
+    silently misses the override for any job whose target has internal spaces
+    (e.g. "TIC 110795273.01 (TOI 7504.01)" -> job target
+    "TIC110795273.01(TOI7504.01)"), and the ephemeris/TTV pages then show no
+    fit results for that target.
+    """
     with get_conn(db_path) as conn:
         _apply_schema(conn)
         cur = conn.execute(
             "SELECT object, norm_name FROM target_overrides WHERE norm_name IS NOT NULL"
         )
-        return {row[0]: row[1] for row in cur.fetchall()}
+        rows = cur.fetchall()
+    overrides: dict[str, str] = {}
+    for obj, norm in rows:
+        overrides[obj] = norm
+        overrides.setdefault(obj.replace(" ", ""), norm)
+    return overrides
 
 
 def create_tag(db_path: str, tag: str, description: str = "") -> bool:
