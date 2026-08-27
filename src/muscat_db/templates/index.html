@@ -13,7 +13,7 @@
   <input id="target-search" type="text" placeholder="Search by object name in fits header…" autocomplete="off">
   <label><input id="regex-toggle" type="checkbox"> Regex</label>
   <label><input id="case-toggle" type="checkbox"> Case-sensitive</label>
-  <label>#Frames &gt; <input id="nframe-filter" type="number" min="0" step="1" value="0" style="width:5rem;"></label>
+  <label>Nframes &gt; <input id="nframe-filter" type="number" min="0" step="1" value="0" style="width:5rem;"></label>
   <span id="search-status" class="hint"></span>
   <a href="/api/targets/export.csv" class="csv-btn" download>CSV</a>
 </div>
@@ -22,7 +22,7 @@
 <div class="instrument-badges">
   <span class="instrument-badges-label">Filter by instrument:</span>
   {% for inst in unique_instruments %}
-    <span class="badge instrument-badge" data-instrument="{{ inst }}">{{ inst }}</span>
+    <span class="badge instrument-badge" data-instrument="{{ inst }}">{{ inst }} ({% if inst == 'muscat' %}M1{% elif inst == 'muscat2' %}M2{% elif inst == 'muscat3' %}M3{% elif inst == 'muscat4' %}M4{% elif inst == 'sinistro' %}S{% elif inst == 'sbig' %}SB{% elif inst == 'qhy600' %}Q{% endif %})</span>
   {% endfor %}
 </div>
 
@@ -59,14 +59,14 @@
     <tr>
       <th data-sort-attr="name">Object</th>
       <th data-sort-attr="normName">Normalized Target</th>
-      <th data-sort-attr="dates">Dates</th>
-      <th data-sort-attr="nDates"      data-sort-type="number" title="This row's dataset count (total across the normalized target)">Ndataset</th>
+      <th data-sort-attr="dates">Dates &middot; Inst &middot; Nframes</th>
+      <th data-sort-attr="nDates"      data-sort-type="number" title="This row's dataset count (total across the normalized target)">Ndataset (total)</th>
       <th data-sort-attr="filters">Filters</th>
       <th data-sort-attr="tags">Tags</th>
     </tr>
     <tr class="filter-row">
       <th><input type="text" data-col="name"        placeholder="raw OBJECT…"></th>
-      <th><input type="text" data-col="norm_name"   placeholder="V1298TAU"></th>
+      <th><input type="text" data-col="norm_name"   placeholder="e.g. V1298Tau"></th>
       <th><input type="text" data-col="date"        placeholder="YYMMDD"></th>
       <th><input type="text" data-col="ndataset"    placeholder="<10  >5"></th>
       <th><input type="text" data-col="filter"      placeholder="g, r, i, z"></th>
@@ -94,8 +94,7 @@
         {% for d in t.dates %}
           {% set inst = t.date_to_inst.get(d, t.instruments[0] if t.instruments else '') %}
           <div class="date-entry" data-frames="{{ t.date_frames.get(d, 0) }}" style="margin-bottom:2px;">
-            <a href="/{{ inst }}/{{ d }}">{{ d }}{% if inst == 'muscat' %}(M1){% elif inst == 'muscat2' %}(M2){% elif inst == 'muscat3' %}(M3){% elif inst == 'muscat4' %}(M4){% elif inst == 'sinistro' %}(S){% elif inst == 'sbig' %}(SB){% elif inst == 'qhy600' %}(Q){% endif %}</a>
-            <span class="hint">({{ t.date_frames.get(d, 0) }})</span>
+            <a href="/{{ inst }}/{{ d }}">{{ d }}</a> &middot; {% if inst == 'muscat' %}M1{% elif inst == 'muscat2' %}M2{% elif inst == 'muscat3' %}M3{% elif inst == 'muscat4' %}M4{% elif inst == 'sinistro' %}S{% elif inst == 'sbig' %}SB{% elif inst == 'qhy600' %}Q{% endif %} &middot; {{ t.date_frames.get(d, 0) }}
             <span class="date-filter-chips" style="display:none;">
               {% for c in t.date_filter_chips.get(d, []) %}
                 <span class="badge badge-filter-{{ c.color }}{% if c.narrow %} narrow filter-narrow-line{% endif %}">{{ c.label }}</span>

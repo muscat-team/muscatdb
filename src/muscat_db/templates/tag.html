@@ -37,16 +37,18 @@
   <table id="project-targets-table">
     <thead>
       <tr>
+        <th style="width:1px; color: var(--text-dim);">#</th>
         <th data-sort-attr="normName">Normalized Target</th>
-        <th data-sort-attr="photDone" data-sort-type="number" title="Datasets with full photometry (see /target)">Phot done</th>
-        <th data-sort-attr="fitDone" data-sort-type="number" title="Datasets with a transit fit (see /target)">Fit done</th>
-        <th>TTV fit</th>
+        <th data-sort-attr="photDone" data-sort-type="number" title="Datasets with full photometry (see /target)">Photometry done</th>
+        <th data-sort-attr="fitDone" data-sort-type="number" title="Datasets with a transit fit (see /target)">Transit fit done</th>
+        <th>TTV</th>
         <th style="width:1px;">Actions</th>
       </tr>
     </thead>
     <tbody>
     {% for t in targets %}
-      <tr data-norm-name="{{ t.norm_name }}" data-phot-done="{{ t.phot_done }}" data-fit-done="{{ t.fit_done }}">
+      <tr data-norm-name="{{ t.norm_name }}" data-phot-done="{{ t.phot_done }}" data-fit-done="{{ t.fit_done }}" data-ttv-done="{{ t.ttv_done }}">
+        <td class="mono" style="text-align:center; color: var(--text-dim);">{{ loop.index }}</td>
         <td>
           <a href="/target?name={{ t.norm_name | urlencode }}&amp;from=project&amp;project={{ tag | urlencode }}" style="text-decoration:none;">
             <strong>{{ t.norm_name }}</strong>
@@ -55,7 +57,12 @@
         <td class="mono" style="text-align:center;">{{ t.phot_done }}</td>
         <td class="mono" style="text-align:center;">{{ t.fit_done }}</td>
         <td style="text-align:center;">
-          <a href="/ephemeris?targets={{ t.norm_name | urlencode }}" title="To ephemeris" style="text-decoration:none;">📈</a>
+          <a href="/ephemeris?targets={{ t.norm_name | urlencode }}" title="To ephemeris" style="text-decoration:none;">⏱️</a>
+          {% if t.ttv_done %}
+            <span style="color: var(--green); font-weight: bold;" title="TTV fit exists">Y</span>
+          {% else %}
+            <span style="color: var(--red);" title="No TTV fit">N</span>
+          {% endif %}
         </td>
         <td style="text-align:center;">
           <button class="btn sm danger detach-btn" data-norm-name="{{ t.norm_name }}" title="Detach from project">Detach</button>

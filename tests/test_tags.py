@@ -240,11 +240,16 @@ def test_project_target_rows_counts_phot_and_fit_done_per_dataset(mock_db, monke
         "muscat_db.web.fit.has_fit_outputs",
         lambda inst, date, obj: date in full_fit_dates,
     )
+    monkeypatch.setattr(
+        "muscat_db.web.ttv.list_ttv_runs",
+        lambda target: [{"run_name": "default", "mtime": 0.0}] if target == "GROUPED" else [],
+    )
 
     rows = _project_target_rows(mock_db, "Grouped")
 
     assert rows[0]["phot_done"] == 2
     assert rows[0]["fit_done"] == 1
+    assert rows[0]["ttv_done"] is True
 
 
 # ── Homepage: Tags column present, RA/Dec/Airmass/Move gone ──────────────────
@@ -308,8 +313,7 @@ def test_homepage_dates_column_shows_per_dataset_frame_count_and_nframe_filter(m
     assert 'value="0"' in html
     assert 'class="mono dates-cell"' in html
     assert 'class="date-entry" data-frames="40"' in html
-    assert "260101(M3)" in html
-    assert "(40)" in html
+    assert "260101</a> &middot; M3 &middot; 40" in html
     assert 'class="ndataset-own"' in html
     assert 'class="filters-cell"' in html
     assert "# Frames" not in html
@@ -590,19 +594,46 @@ def test_tag_page_shows_phot_fit_done_and_ttv_link(mock_db, monkeypatch):
         "muscat_db.web.fit.has_fit_outputs",
         lambda inst, date, obj: False,
     )
+    monkeypatch.setattr(
+        "muscat_db.web.ttv.list_ttv_runs",
+        lambda target: [{"run_name": "default", "mtime": 0.0}],
+    )
 
     html = TestClient(app).get("/tag?name=FollowUp").text
 
-    assert ">Phot done<" in html
-    assert ">Fit done<" in html
-    assert ">TTV fit<" in html
+    assert ">Photometry done<" in html
+    assert ">Transit fit done<" in html
+    assert ">TTV<" in html
     assert 'data-phot-done="1"' in html
     assert 'data-fit-done="0"' in html
+    assert 'data-ttv-done="True"' in html
     assert 'href="/ephemeris?targets=TESTOBJ"' in html
+    assert 'title="TTV fit exists">Y</span>' in html
     assert ">Dates<" not in html
     assert ">Ndataset<" not in html
     assert ">Filters<" not in html
     assert 'id="nframe-filter"' not in html
+
+
+def test_tag_page_shows_ttv_n_when_no_runs_exist(mock_db, monkeypatch):
+    create_tag(mock_db, "FollowUp")
+    add_target_tag(mock_db, "TESTOBJ", "FollowUp")
+    monkeypatch.setattr(
+        "muscat_db.web._get_targets",
+        lambda _db: [{
+            "object": "TESTOBJ", "n_dates": 1, "n_frames": 10,
+            "dates": ["260101"], "date_to_inst": {"260101": "muscat3"},
+            "filters": ["g"], "instruments": ["muscat3"],
+        }],
+    )
+    monkeypatch.setattr("muscat_db.web.phot.get_photometry_status", lambda inst, date, obj: "none")
+    monkeypatch.setattr("muscat_db.web.fit.has_fit_outputs", lambda inst, date, obj: False)
+    monkeypatch.setattr("muscat_db.web.ttv.list_ttv_runs", lambda target: [])
+
+    html = TestClient(app).get("/tag?name=FollowUp").text
+
+    assert 'data-ttv-done="False"' in html
+    assert 'title="No TTV fit">N</span>' in html
 
 
 # ── Markdown description rendering ───────────────────────────────────────────

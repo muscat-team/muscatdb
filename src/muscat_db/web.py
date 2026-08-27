@@ -730,6 +730,7 @@ def _project_target_rows(db: str, tag: str) -> list[dict]:
             "instruments": sorted(set().union(*(m["instruments"] for m in members))),
             "phot_done": phot_done,
             "fit_done": fit_done,
+            "ttv_done": bool(ttv.list_ttv_runs(norm)),
         })
     rows.sort(key=lambda r: r["norm_name"].casefold())
     return rows
