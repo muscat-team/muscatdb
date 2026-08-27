@@ -1,0 +1,299 @@
+{% extends "base.html" %}
+{% block title %}{{ tag }} — MuSCAT-db{% endblock %}
+{% block content %}
+
+{% if not exists %}
+  <div class="empty-state">
+    <div class="empty-icon">🔍</div>
+    <h2>Project not found</h2>
+    <p>No project named &ldquo;{{ tag }}&rdquo; exists yet.</p>
+    <a href="/projects" class="btn solid">Back to Projects</a>
+  </div>
+{% else %}
+  <p style="color: var(--text-dim); margin-bottom: 1rem;">
+    <a href="/projects">← Back to Projects</a>
+  </p>
+  <h1 class="norm-name-cell" id="project-name-cell" data-tag="{{ tag }}" style="display:inline-flex; align-items:baseline; gap:0.4rem;">
+    <span class="project-name-text">{{ tag }}</span>
+    <span class="norm-name-edit-hint" title="Click to rename project">&#9998;</span>
+  </h1>
+
+  <div class="note-cell" id="project-desc-cell" data-tag="{{ tag }}" data-raw="{{ description }}"
+       style="margin-bottom:1.5rem; padding:0.6rem 0.8rem; border:1px solid var(--border); border-radius:8px;">
+    <div class="note-text markdown-body">{{ description_html | safe }}</div>
+    <span class="note-placeholder"{% if description %} style="display:none;"{% endif %}>+ add description (Markdown supported)</span>
+  </div>
+
+  <div class="search-bar">
+    <input id="attach-target-input" type="text" list="attach-target-options" placeholder="Add a target by normalized name…" autocomplete="off">
+    <datalist id="attach-target-options"></datalist>
+    <button id="attach-target-btn" class="btn" type="button">Add to Project</button>
+    <a href="/api/tags/{{ tag | urlencode }}/export.csv" class="csv-btn" download>CSV</a>
+    <button id="delete-project-btn" class="btn danger" type="button" style="margin-left:auto;">Delete Project</button>
+  </div>
+
+  {% if targets %}
+  <div class="csv-wrap">
+  <table id="project-targets-table">
+    <thead>
+      <tr>
+        <th style="width:1px; color: var(--text-dim);">#</th>
+        <th data-sort-attr="normName">Normalized Target</th>
+        <th data-sort-attr="photDone" data-sort-type="number" title="Datasets with full photometry (see /target)">Photometry done</th>
+        <th data-sort-attr="fitDone" data-sort-type="number" title="Datasets with a transit fit (see /target)">Transit fit done</th>
+        <th>TTV</th>
+        <th style="width:1px;">Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for t in targets %}
+      <tr data-norm-name="{{ t.norm_name }}" data-phot-done="{{ t.phot_done }}" data-fit-done="{{ t.fit_done }}" data-ttv-done="{{ t.ttv_done }}">
+        <td class="mono" style="text-align:center; color: var(--text-dim);">{{ loop.index }}</td>
+        <td>
+          <a href="/target?name={{ t.norm_name | urlencode }}&amp;from=project&amp;project={{ tag | urlencode }}" style="text-decoration:none;">
+            <strong>{{ t.norm_name }}</strong>
+          </a>
+        </td>
+        <td class="mono" style="text-align:center;">{{ t.phot_done }}</td>
+        <td class="mono" style="text-align:center;">{{ t.fit_done }}</td>
+        <td style="text-align:center;">
+          <a href="/ephemeris?targets={{ t.norm_name | urlencode }}" title="To ephemeris" style="text-decoration:none;">⏱️</a>
+          {% if t.ttv_done %}
+            <span style="color: var(--green); font-weight: bold;" title="TTV fit exists">Y</span>
+          {% else %}
+            <span style="color: var(--red);" title="No TTV fit">N</span>
+          {% endif %}
+        </td>
+        <td style="text-align:center;">
+          <button class="btn sm danger detach-btn" data-norm-name="{{ t.norm_name }}" title="Detach from project">Detach</button>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+    <div class="empty-state">
+      <div class="empty-icon">🎯</div>
+      <h2>No targets attached yet</h2>
+      <p>Use the box above to attach a target to this project.</p>
+    </div>
+  {% endif %}
+
+  <script>
+  (function () {
+    const tag = {{ tag | tojson }};
+
+    // ── rename project (mirrors index.html's inline norm-name editor) ──────
+    const nameCell = document.getElementById('project-name-cell');
+    nameCell.addEventListener('click', function (e) {
+      if (nameCell.classList.contains('editing')) return;
+      openNameEditor();
+    });
+
+    function openNameEditor() {
+      const current = nameCell.dataset.tag;
+      nameCell.classList.add('editing');
+      nameCell.innerHTML = '';
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.value = current;
+      input.className = 'norm-name-input';
+      const actions = document.createElement('div');
+      actions.className = 'note-actions';
+      const save = document.createElement('button');
+      save.className = 'save'; save.textContent = 'Save';
+      const cancel = document.createElement('button');
+      cancel.textContent = 'Cancel';
+      actions.append(save, cancel);
+      nameCell.append(input, actions);
+      input.focus(); input.select();
+
+      function restore() {
+        nameCell.classList.remove('editing');
+        const nameSpan = document.createElement('span');
+        nameSpan.className = 'project-name-text';
+        nameSpan.textContent = current;
+        const hint = document.createElement('span');
+        hint.className = 'norm-name-edit-hint';
+        hint.title = 'Click to rename project';
+        hint.textContent = '✎';
+        nameCell.replaceChildren(nameSpan, hint);
+      }
+
+      async function commit() {
+        const value = input.value.trim();
+        if (!value || value === current) { restore(); return; }
+        try {
+          const res = await fetch('/api/tags/' + encodeURIComponent(current) + '/rename', {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({new_tag: value}),
+          });
+          if (!res.ok) {
+            const body = await res.json().catch(() => ({}));
+            throw new Error(body.detail || ('HTTP ' + res.status));
+          }
+          window.location.href = '/tag?name=' + encodeURIComponent(value);
+        } catch (err) {
+          showMessageModal('Error', 'Rename failed: ' + err.message);
+          restore();
+        }
+      }
+
+      save.addEventListener('click', commit);
+      cancel.addEventListener('click', restore);
+      input.addEventListener('keydown', e => {
+        if (e.key === 'Enter') { e.preventDefault(); commit(); }
+        else if (e.key === 'Escape') { e.preventDefault(); restore(); }
+      });
+    }
+
+    // ── editable description (mirrors base.html's note-cell editor) ────────
+    const descCell = document.getElementById('project-desc-cell');
+    descCell.addEventListener('click', function (e) {
+      if (descCell.classList.contains('editing')) return;
+      if (e.target.closest('a, button')) return;
+      openDescEditor();
+    });
+
+    function openDescEditor() {
+      // Descriptions render as sanitized HTML server-side, so editing works
+      // from the raw Markdown source (data-raw) rather than the rendered
+      // .note-text's textContent, which would lose formatting like link URLs.
+      const current = descCell.dataset.raw || '';
+      // Kept (not re-derived) so Cancel restores the exact rendered markup
+      // without a second server round trip.
+      const originalNodes = Array.from(descCell.childNodes);
+      descCell.classList.add('editing');
+      descCell.innerHTML = '';
+      const ta = document.createElement('textarea');
+      ta.value = current;
+      ta.rows = 6;
+      ta.placeholder = 'Describe this project…';
+      const hint = document.createElement('div');
+      hint.className = 'hint';
+      hint.style.marginTop = '0.35rem';
+      hint.textContent = 'Markdown supported: **bold**, *italic*, [text](url), - bullet points';
+      const actions = document.createElement('div');
+      actions.className = 'note-actions';
+      const save = document.createElement('button');
+      save.className = 'save'; save.textContent = 'Save';
+      const cancel = document.createElement('button');
+      cancel.textContent = 'Cancel';
+      actions.append(save, cancel);
+      descCell.append(ta, hint, actions);
+      ta.focus(); ta.select();
+
+      function restore() {
+        descCell.classList.remove('editing');
+        descCell.innerHTML = '';
+        descCell.append(...originalNodes);
+      }
+
+      async function commit() {
+        const value = ta.value.trim();
+        try {
+          const res = await fetch('/api/tags/' + encodeURIComponent(tag), {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({description: value}),
+          });
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          // Reload rather than patch the DOM in place: the display is
+          // server-rendered (Markdown -> sanitized HTML), so the freshly
+          // rendered markup has to come from the server either way.
+          location.reload();
+        } catch (err) {
+          showMessageModal('Error', 'Save failed: ' + err.message);
+        }
+      }
+
+      save.addEventListener('click', commit);
+      cancel.addEventListener('click', restore);
+      ta.addEventListener('keydown', e => {
+        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); commit(); }
+        else if (e.key === 'Escape') { e.preventDefault(); restore(); }
+      });
+    }
+
+    // ── attach-target box ────────────────────────────────────────────────
+    const attachInput = document.getElementById('attach-target-input');
+    const attachBtn = document.getElementById('attach-target-btn');
+    const attachOptions = document.getElementById('attach-target-options');
+
+    fetch('/api/targets/norm-names')
+      .then(r => r.json())
+      .then(data => {
+        attachOptions.replaceChildren(...(data.norm_names || []).map(n => {
+          const opt = document.createElement('option');
+          opt.value = n;
+          return opt;
+        }));
+      })
+      .catch(() => {});
+
+    async function attachTarget() {
+      const norm_name = attachInput.value.trim();
+      if (!norm_name) { attachInput.focus(); return; }
+      try {
+        const res = await fetch('/api/targets/' + encodeURIComponent(norm_name) + '/tags', {
+          method: 'PUT',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({tag}),
+        });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        location.reload();
+      } catch (err) {
+        showMessageModal('Error', 'Could not attach target: ' + err.message);
+      }
+    }
+    attachBtn.addEventListener('click', attachTarget);
+    attachInput.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); attachTarget(); }
+    });
+
+    // ── detach ────────────────────────────────────────────────────────────
+    document.querySelectorAll('.detach-btn').forEach(btn => {
+      btn.addEventListener('click', async function () {
+        const normName = btn.dataset.normName;
+        const ok = await showConfirmModal(
+          'Remove target?',
+          'Remove "' + normName + '" from this project?',
+          {confirmLabel: 'Remove', confirmClass: 'btn danger'}
+        );
+        if (!ok) return;
+        try {
+          const res = await fetch('/api/targets/' + encodeURIComponent(normName) + '/tags', {
+            method: 'DELETE',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({tag}),
+          });
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          location.reload();
+        } catch (err) {
+          showMessageModal('Error', 'Could not remove target: ' + err.message);
+        }
+      });
+    });
+
+    // ── delete project ───────────────────────────────────────────────────
+    document.getElementById('delete-project-btn').addEventListener('click', async function () {
+      const ok = await showConfirmModal(
+        'Delete project?',
+        'Delete project "' + tag + '"? This cannot be undone.',
+        {confirmLabel: 'Delete', confirmClass: 'btn danger'}
+      );
+      if (!ok) return;
+      try {
+        const res = await fetch('/api/tags/' + encodeURIComponent(tag), {method: 'DELETE'});
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        window.location.href = '/projects';
+      } catch (err) {
+        showMessageModal('Error', 'Could not delete project: ' + err.message);
+      }
+    });
+  })();
+  </script>
+{% endif %}
+{% endblock %}

@@ -2942,6 +2942,20 @@ class TestRoutes:
         assert _normalize_target_name("TOI_2457") == "TOI2457"
         assert _normalize_target_name("HIP 67522") == "HIP67522"
 
+    def test_target_name_normalization_keeps_au_mic_intact(self):
+        """AU Mic (AU Microscopii) ends in 'C' -- the constellation
+        abbreviation, not a planet letter -- which the trailing-letter-strip
+        heuristic below would otherwise mistake for one (as it correctly does
+        for V1298Tauc above). Every raw spelling must normalize the same way
+        without needing a per-object target_overrides row, or two different
+        raw OBJECT spellings of the same star silently diverge."""
+        from muscat_db.web import _normalize_target_name
+
+        assert _normalize_target_name("AU Mic") == "AUMIC"
+        assert _normalize_target_name("AUMic") == "AUMIC"
+        assert _normalize_target_name("AU-Mic") == "AUMIC"
+        assert _normalize_target_name("au mic") == "AUMIC"
+
     def test_target_name_normalization_does_not_reinterpret_malformed_tois(self):
         from muscat_db.web import _normalize_target_name
 

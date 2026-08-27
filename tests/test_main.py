@@ -620,6 +620,13 @@ class TestDatabase:
                     "(request_id,frame_id,filename,instrument,obsdate,metadata_json,updated_at) "
                     "VALUES (179,'frame-1','frame-1.fits','sinistro','2026-07-14','{}',1.0)"
                 )
+                conn.execute(
+                    "INSERT INTO tag_descriptions (tag, description) "
+                    "VALUES ('young ttv', 'Young TTV follow-up targets')"
+                )
+                conn.execute(
+                    "INSERT INTO target_tags (norm_name, tag) VALUES ('TIC 12345', 'young ttv')"
+                )
                 conn.commit()
 
             # Rebuild from the same obslog CSVs.
@@ -646,6 +653,12 @@ class TestDatabase:
                     "SELECT COUNT(*) FROM lco_observation_frames "
                     "WHERE request_id=179 AND frame_id='frame-1'"
                 ).fetchone()[0]
+                tag_description = conn.execute(
+                    "SELECT description FROM tag_descriptions WHERE tag = 'young ttv'"
+                ).fetchone()
+                target_tag = conn.execute(
+                    "SELECT 1 FROM target_tags WHERE norm_name = 'TIC 12345' AND tag = 'young ttv'"
+                ).fetchone()
             assert note is not None and note[0] == "keep me across rebuilds"
             assert override is not None and override[0] == 0
             assert coeff is not None and coeff[0] == 1.5
@@ -653,6 +666,8 @@ class TestDatabase:
             assert test_observations == 1
             assert lco_requests == 1
             assert lco_frames == 1
+            assert tag_description is not None and tag_description[0] == "Young TTV follow-up targets"
+            assert target_tag is not None
         finally:
             os.unlink(db_path)
 

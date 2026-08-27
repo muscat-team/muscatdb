@@ -2737,7 +2737,7 @@
 <div class="page-nav">
   <a href="#" class="btn solid">Back to Top</a>
   {% if sel_target %}
-    <a href="/target?name={{ sel_target | urlencode }}" class="btn solid">To Target</a>
+    <a href="/target?name={{ (target_norm_name or sel_target) | urlencode }}" class="btn solid">To Target</a>
   {% endif %}
   <a href="/jobs" class="btn solid">To Jobs</a>
   {% if sel_inst and sel_date and sel_target %}
