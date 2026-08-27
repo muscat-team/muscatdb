@@ -498,6 +498,16 @@ def index():
     for t in targets:
         t["tags"] = tags_by_norm.get(t["norm_name"], [])
 
+    # Per-date frame counts and filters for the Dates column's inline "(N)"
+    # frame count and the #Frames filter (mirrors the Project Detail page).
+    frames_by_object_date, filters_by_object_date = _frames_and_filters_by_object_date(db)
+    for t in targets:
+        t["date_frames"] = {d: frames_by_object_date.get((t["object"], d), 0) for d in t["dates"]}
+        t["date_filter_chips"] = {
+            d: _normalize_filters(filters_by_object_date.get((t["object"], d), []))
+            for d in t["dates"]
+        }
+
     last_updated = get_last_build_date(db)
 
     html = jinja.get_template("index.html").render(
@@ -607,6 +617,40 @@ def _get_datasets_for_normalized_target(db: str, normalized_name: str) -> tuple[
     return datasets, last_updated
 
 
+def _frames_and_filters_by_object_date(
+    db: str, objects: list[str] | None = None
+) -> tuple[dict[tuple[str, str], int], dict[tuple[str, str], list[str]]]:
+    """Batched per-(object, obsdate) frame counts and filter lists, for the
+    Dates column's per-dataset frame count and the #Frames filter (which
+    recomputes Ndataset/Filters from whatever dates currently pass) on both
+    the homepage and the Project Detail page.
+
+    Pass `objects` to scope the query to a specific set (e.g. one project's
+    members); omit it to fetch every (object, obsdate) in one query -- cheaper
+    than a large IN-list when nearly every object is wanted anyway, as on the
+    homepage.
+    """
+    frames_by_object_date: dict[tuple[str, str], int] = {}
+    filters_by_object_date: dict[tuple[str, str], list[str]] = {}
+    if objects is not None and not objects:
+        return frames_by_object_date, filters_by_object_date
+    query = "SELECT object, obsdate, SUM(nframes), GROUP_CONCAT(DISTINCT filter) FROM summaries"
+    params: list[str] = []
+    if objects is not None:
+        placeholders = ",".join("?" for _ in objects)
+        query += f" WHERE object IN ({placeholders})"
+        params = objects
+    query += " GROUP BY object, obsdate"
+    with get_conn(db) as conn:
+        cur = conn.execute(query, params)
+        for obj, obsdate, n, filters_csv in cur.fetchall():
+            frames_by_object_date[(obj, obsdate)] = n or 0
+            filters_by_object_date[(obj, obsdate)] = sorted(
+                f for f in (filters_csv or "").split(",") if f
+            )
+    return frames_by_object_date, filters_by_object_date
+
+
 def _project_target_rows(db: str, tag: str) -> list[dict]:
     """One aggregated row per norm_name attached to `tag`, for the Project
     Detail table. Deliberately does not call _get_datasets_for_normalized_target
@@ -634,22 +678,7 @@ def _project_target_rows(db: str, tag: str) -> list[dict]:
     # every backing object, mirroring get_tags_for_targets' one-query/
     # fan-out-in-Python template.
     all_objects = sorted({m["object"] for members in groups.values() for m in members})
-    frames_by_object_date: dict[tuple[str, str], int] = {}
-    filters_by_object_date: dict[tuple[str, str], list[str]] = {}
-    if all_objects:
-        placeholders = ",".join("?" for _ in all_objects)
-        with get_conn(db) as conn:
-            cur = conn.execute(
-                f"""SELECT object, obsdate, SUM(nframes), GROUP_CONCAT(DISTINCT filter)
-                    FROM summaries WHERE object IN ({placeholders})
-                    GROUP BY object, obsdate""",
-                all_objects,
-            )
-            for obj, obsdate, n, filters_csv in cur.fetchall():
-                frames_by_object_date[(obj, obsdate)] = n or 0
-                filters_by_object_date[(obj, obsdate)] = sorted(
-                    f for f in (filters_csv or "").split(",") if f
-                )
+    frames_by_object_date, filters_by_object_date = _frames_and_filters_by_object_date(db, all_objects)
 
     rows = []
     for norm, members in groups.items():
@@ -667,6 +696,26 @@ def _project_target_rows(db: str, tag: str) -> list[dict]:
                 for f in filters_by_object_date.get((m["object"], d), []):
                     if f not in seen:
                         seen.append(f)
+
+        # Phot done / Fit done: count of this norm_name's (object, date)
+        # datasets with full photometry / a transit fit, across every
+        # raw-object spelling -- i.e. the total number of "Y" the /target page
+        # would show in its Phot/Fit columns for this target. Per-(object,
+        # date) rather than per unique date, since two raw-object spellings
+        # sharing a calendar date can carry independent run outputs.
+        phot_done = 0
+        fit_done = 0
+        for m in members:
+            obj_name = m["object"]
+            for d in m["dates"]:
+                inst = m["date_to_inst"].get(d)
+                if not inst:
+                    continue
+                if phot.get_photometry_status(inst, d, obj_name) == "full":
+                    phot_done += 1
+                if fit.has_fit_outputs(inst, d, obj_name):
+                    fit_done += 1
+
         rows.append({
             "norm_name": norm,
             "objects": sorted(m["object"] for m in members),
@@ -679,6 +728,8 @@ def _project_target_rows(db: str, tag: str) -> list[dict]:
             "filter_chips": _normalize_filters(filters),
             "n_frames": sum(m["n_frames"] for m in members),
             "instruments": sorted(set().union(*(m["instruments"] for m in members))),
+            "phot_done": phot_done,
+            "fit_done": fit_done,
         })
     rows.sort(key=lambda r: r["norm_name"].casefold())
     return rows

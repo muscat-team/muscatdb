@@ -13,6 +13,7 @@
   <input id="target-search" type="text" placeholder="Search by object name in fits header…" autocomplete="off">
   <label><input id="regex-toggle" type="checkbox"> Regex</label>
   <label><input id="case-toggle" type="checkbox"> Case-sensitive</label>
+  <label>#Frames &gt; <input id="nframe-filter" type="number" min="0" step="1" value="0" style="width:5rem;"></label>
   <span id="search-status" class="hint"></span>
   <a href="/api/targets/export.csv" class="csv-btn" download>CSV</a>
 </div>
@@ -61,7 +62,6 @@
       <th data-sort-attr="dates">Dates</th>
       <th data-sort-attr="nDates"      data-sort-type="number" title="This row's dataset count (total across the normalized target)">Ndataset</th>
       <th data-sort-attr="filters">Filters</th>
-      <th data-sort-attr="frames"      data-sort-type="number"># Frames</th>
       <th data-sort-attr="tags">Tags</th>
     </tr>
     <tr class="filter-row">
@@ -70,7 +70,6 @@
       <th><input type="text" data-col="date"        placeholder="YYMMDD"></th>
       <th><input type="text" data-col="ndataset"    placeholder="<10  >5"></th>
       <th><input type="text" data-col="filter"      placeholder="g, r, i, z"></th>
-      <th><input type="text" data-col="frames"      placeholder="<100  >500"></th>
       <th><input type="text" data-col="tags"        placeholder="e.g. FollowUp"></th>
     </tr>
   </thead>
@@ -80,7 +79,6 @@
     <tr data-name="{{ t.object }}"
         data-norm-name="{{ t.norm_name }}"
         data-filters="{{ t.filters|join(',') }}"
-        data-frames="{{ t.n_frames }}"
         data-n-dates="{{ t.n_dates }}"
         data-instruments="{{ t.instruments|join(',') }}"
         data-dates="{{ display_dates|trim }}"
@@ -92,16 +90,23 @@
         <a href="/target?name={{ t.norm_name | urlencode }}" style="text-decoration:none;"><strong>{{ t.norm_name }}</strong></a>
         <span class="norm-name-edit-hint" title="Click to edit normalized name">&#9998;</span>
       </td>
-      <td class="mono" style="white-space:nowrap; vertical-align:top;">
+      <td class="mono dates-cell" style="white-space:nowrap; vertical-align:top;">
         {% for d in t.dates %}
           {% set inst = t.date_to_inst.get(d, t.instruments[0] if t.instruments else '') %}
-          <div style="margin-bottom:2px;">
+          <div class="date-entry" data-frames="{{ t.date_frames.get(d, 0) }}" style="margin-bottom:2px;">
             <a href="/{{ inst }}/{{ d }}">{{ d }}{% if inst == 'muscat' %}(M1){% elif inst == 'muscat2' %}(M2){% elif inst == 'muscat3' %}(M3){% elif inst == 'muscat4' %}(M4){% elif inst == 'sinistro' %}(S){% elif inst == 'sbig' %}(SB){% elif inst == 'qhy600' %}(Q){% endif %}</a>
+            <span class="hint">({{ t.date_frames.get(d, 0) }})</span>
+            <span class="date-filter-chips" style="display:none;">
+              {% for c in t.date_filter_chips.get(d, []) %}
+                <span class="badge badge-filter-{{ c.color }}{% if c.narrow %} narrow filter-narrow-line{% endif %}">{{ c.label }}</span>
+              {% endfor %}
+            </span>
           </div>
         {% endfor %}
+        <div class="date-entry-empty hint" style="display:none;">no dates above threshold</div>
       </td>
-      <td class="mono" title="This row's dataset count (total across the normalized target)">{{ t.n_dates }} ({{ t.norm_n_dates }})</td>
-      <td>
+      <td class="mono ndataset-cell" title="This row's dataset count (total across the normalized target)"><span class="ndataset-own">{{ t.n_dates }}</span> ({{ t.norm_n_dates }})</td>
+      <td class="filters-cell">
         {% for c in t.filter_chips if not c.narrow %}
           <span class="badge badge-filter-{{ c.color }}">{{ c.label }}</span>
         {% endfor %}
@@ -109,7 +114,6 @@
           <span class="badge badge-filter-{{ c.color }} narrow filter-narrow-line">{{ c.label }}</span>
         {% endfor %}
       </td>
-      <td>{{ t.n_frames }}</td>
       <td class="tags-cell" data-object="{{ t.object }}" data-norm-name="{{ t.norm_name }}">
         <span class="tags-chip-list">
         {% for tag in t.tags %}
@@ -163,6 +167,7 @@
     const input  = document.getElementById('target-search');
     const regex  = document.getElementById('regex-toggle');
     const caseCB = document.getElementById('case-toggle');
+    const nframeFilter = document.getElementById('nframe-filter');
     const status = document.getElementById('search-status');
     const rows = Array.from(document.querySelectorAll(
       '#targets-table tbody tr, #unidentified-table tbody tr'
@@ -186,6 +191,7 @@
         colInputs.forEach(inp => { colVals[inp.dataset.col] = inp.value; });
         localStorage.setItem('home:cols', JSON.stringify(colVals));
         localStorage.setItem('home:inst', activeInstrument || '');
+        localStorage.setItem('home:nframe', nframeFilter.value);
       } catch (_) {}
     }
     function restoreFilters() {
@@ -210,9 +216,50 @@
             if (b.dataset.instrument === instVal) b.classList.add('active');
           });
         }
+        const nv = localStorage.getItem('home:nframe');
+        if (nv != null) nframeFilter.value = nv;
       } catch (_) {}
     }
     restoreFilters();
+
+    // ── #Frames filter: hides dates at/below the threshold, per target row,
+    //    and recomputes that row's own Ndataset/Filters from whichever dates
+    //    currently pass (rather than leaving those columns showing the
+    //    unfiltered totals while the Dates column shows a filtered subset).
+    //    Mirrors the Project Detail page's (/tag) identical filter.
+    function applyNframeFilter() {
+      const threshold = parseFloat(nframeFilter.value);
+      const min = isNaN(threshold) ? -Infinity : threshold;
+      rows.forEach(row => {
+        const cell = row.querySelector('.dates-cell');
+        if (!cell) return;
+        const entries = cell.querySelectorAll('.date-entry');
+        let visibleCount = 0;
+        const chipsByKey = new Map();
+        entries.forEach(entry => {
+          const frames = parseFloat(entry.dataset.frames) || 0;
+          const visible = frames > min;
+          entry.style.display = visible ? '' : 'none';
+          if (!visible) return;
+          visibleCount++;
+          entry.querySelectorAll('.date-filter-chips .badge').forEach(chip => {
+            const key = chip.className + '|' + chip.textContent;
+            if (!chipsByKey.has(key)) chipsByKey.set(key, chip.cloneNode(true));
+          });
+        });
+        const empty = cell.querySelector('.date-entry-empty');
+        if (empty) empty.style.display = (entries.length && !visibleCount) ? '' : 'none';
+
+        const ndatasetOwn = row.querySelector('.ndataset-cell .ndataset-own');
+        if (ndatasetOwn) ndatasetOwn.textContent = visibleCount;
+        const filtersCell = row.querySelector('.filters-cell');
+        if (filtersCell) filtersCell.replaceChildren(...chipsByKey.values());
+      });
+    }
+    if (nframeFilter) {
+      nframeFilter.addEventListener('input', function () { applyNframeFilter(); saveFilters(); });
+      applyNframeFilter();
+    }
 
     // ── persist sort state ────────────────────────────────────────────────────
     function saveSort(tableId, colIdx, dir) {
@@ -333,7 +380,6 @@
       name:       { val: r => r.dataset.name,        build: makeText    },
       norm_name:  { val: r => r.dataset.normName,    build: makeText    },
       filter:     { val: r => r.dataset.filters,     build: makeText    },
-      frames:     { val: r => parseInt(r.dataset.frames, 10),    build: makeNumeric },
       date:       { val: r => r.dataset.dates,       build: makeText    },
       ndataset:   { val: r => parseInt(r.dataset.nDates, 10), build: makeNumeric },
       tags:       { val: r => r.dataset.tags,        build: makeText    },

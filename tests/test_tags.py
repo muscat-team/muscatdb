@@ -206,6 +206,47 @@ def test_project_target_rows_includes_per_date_frame_counts(mock_db, monkeypatch
     assert [c["label"] for c in rows[0]["date_filter_chips"]["260102"]] == ["r"]
 
 
+def test_project_target_rows_counts_phot_and_fit_done_per_dataset(mock_db, monkeypatch):
+    """Phot done / Fit done count (object, date) datasets with full
+    photometry / a transit fit -- the same "Y" the /target page's Phot/Fit
+    columns show -- summed across every raw-object spelling of the target."""
+    create_tag(mock_db, "Grouped")
+    add_target_tag(mock_db, "GROUPED", "Grouped")
+    set_norm_name_override(mock_db, "obj-a", "GROUPED")
+    set_norm_name_override(mock_db, "obj-b", "GROUPED")
+    monkeypatch.setattr(
+        "muscat_db.web._get_targets",
+        lambda _db: [
+            {
+                "object": "obj-a", "n_dates": 2, "n_frames": 20,
+                "dates": ["260101", "260102"],
+                "date_to_inst": {"260101": "muscat3", "260102": "muscat3"},
+                "filters": ["g"], "instruments": ["muscat3"],
+            },
+            {
+                "object": "obj-b", "n_dates": 1, "n_frames": 10,
+                "dates": ["260103"], "date_to_inst": {"260103": "muscat4"},
+                "filters": ["g"], "instruments": ["muscat4"],
+            },
+        ],
+    )
+    full_phot_dates = {"260101", "260103"}
+    monkeypatch.setattr(
+        "muscat_db.web.phot.get_photometry_status",
+        lambda inst, date, obj: "full" if date in full_phot_dates else "none",
+    )
+    full_fit_dates = {"260102"}
+    monkeypatch.setattr(
+        "muscat_db.web.fit.has_fit_outputs",
+        lambda inst, date, obj: date in full_fit_dates,
+    )
+
+    rows = _project_target_rows(mock_db, "Grouped")
+
+    assert rows[0]["phot_done"] == 2
+    assert rows[0]["fit_done"] == 1
+
+
 # ── Homepage: Tags column present, RA/Dec/Airmass/Move gone ──────────────────
 
 
@@ -247,6 +288,31 @@ def test_homepage_drops_ra_dec_airmass_move_and_shows_tags(mock_db, monkeypatch)
     assert ">Airmass<" not in html
     assert ">Move<" not in html
     assert "btn-move" not in html
+
+
+def test_homepage_dates_column_shows_per_dataset_frame_count_and_nframe_filter(mock_db, monkeypatch):
+    """The Dates column's per-dataset "(N)" frame count and the #Frames
+    filter moved here from the Project Detail page (/tag), which now links
+    out to /target for per-dataset detail instead of duplicating it."""
+    _seed_one_target(monkeypatch)
+    with sqlite3.connect(mock_db) as conn:
+        conn.execute(
+            "INSERT INTO summaries (instrument, obsdate, ccd, object, nframes, filter) VALUES (?,?,?,?,?,?)",
+            ("muscat3", "260101", 0, "TESTOBJ", 40, "g"),
+        )
+        conn.commit()
+
+    html = TestClient(app).get("/targets").text
+
+    assert 'id="nframe-filter"' in html
+    assert 'value="0"' in html
+    assert 'class="mono dates-cell"' in html
+    assert 'class="date-entry" data-frames="40"' in html
+    assert "260101(M3)" in html
+    assert "(40)" in html
+    assert 'class="ndataset-own"' in html
+    assert 'class="filters-cell"' in html
+    assert "# Frames" not in html
 
 
 def test_homepage_tags_are_not_stale_after_mutation(mock_db, monkeypatch):
@@ -474,23 +540,6 @@ def test_tag_page_renders_attached_targets(mock_db, monkeypatch):
     assert 'from=project&amp;project=FollowUp' in html or 'from=project&project=FollowUp' in html
 
 
-def test_tag_page_dates_column_shows_instrument_label(mock_db, monkeypatch):
-    create_tag(mock_db, "FollowUp")
-    add_target_tag(mock_db, "TESTOBJ", "FollowUp")
-    monkeypatch.setattr(
-        "muscat_db.web._get_targets",
-        lambda _db: [{
-            "object": "TESTOBJ", "n_dates": 1, "n_frames": 10,
-            "dates": ["260101"], "date_to_inst": {"260101": "muscat3"},
-            "filters": ["g"], "instruments": ["muscat3"],
-        }],
-    )
-
-    html = TestClient(app).get("/tag?name=FollowUp").text
-
-    assert "260101(M3)" in html
-
-
 def test_tag_page_uses_normalized_target_header(mock_db, monkeypatch):
     create_tag(mock_db, "FollowUp")
     add_target_tag(mock_db, "TESTOBJ", "FollowUp")
@@ -518,28 +567,42 @@ def test_tag_page_has_rename_control(mock_db):
     assert 'class="project-name-text">FollowUp<' in html
 
 
-def test_tag_page_renders_nframe_filter_and_per_date_frames(mock_db, monkeypatch):
+def test_tag_page_shows_phot_fit_done_and_ttv_link(mock_db, monkeypatch):
+    """Dates/Ndataset/Filters moved to the homepage (which already links to
+    /target for the per-dataset breakdown); the Project Detail table instead
+    surfaces phot/fit-done counts and a direct link to the ephemeris page."""
     create_tag(mock_db, "FollowUp")
     add_target_tag(mock_db, "TESTOBJ", "FollowUp")
     monkeypatch.setattr(
         "muscat_db.web._get_targets",
         lambda _db: [{
-            "object": "TESTOBJ", "n_dates": 1, "n_frames": 10,
-            "dates": ["260101"], "date_to_inst": {"260101": "muscat3"},
+            "object": "TESTOBJ", "n_dates": 2, "n_frames": 10,
+            "dates": ["260101", "260102"],
+            "date_to_inst": {"260101": "muscat3", "260102": "muscat3"},
             "filters": ["g"], "instruments": ["muscat3"],
         }],
+    )
+    monkeypatch.setattr(
+        "muscat_db.web.phot.get_photometry_status",
+        lambda inst, date, obj: "full" if date == "260101" else "none",
+    )
+    monkeypatch.setattr(
+        "muscat_db.web.fit.has_fit_outputs",
+        lambda inst, date, obj: False,
     )
 
     html = TestClient(app).get("/tag?name=FollowUp").text
 
-    assert 'id="nframe-filter"' in html
-    assert 'value="0"' in html
-    assert 'data-frames="0"' in html  # no summaries rows seeded -> defaults to 0
-    assert 'ndataset-cell' in html
-    assert 'class="filters-cell"' in html
-    assert 'class="date-filter-chips"' in html
-    assert '# Frames' not in html
-    assert 'frames-cell' not in html
+    assert ">Phot done<" in html
+    assert ">Fit done<" in html
+    assert ">TTV fit<" in html
+    assert 'data-phot-done="1"' in html
+    assert 'data-fit-done="0"' in html
+    assert 'href="/ephemeris?targets=TESTOBJ"' in html
+    assert ">Dates<" not in html
+    assert ">Ndataset<" not in html
+    assert ">Filters<" not in html
+    assert 'id="nframe-filter"' not in html
 
 
 # ── Markdown description rendering ───────────────────────────────────────────
