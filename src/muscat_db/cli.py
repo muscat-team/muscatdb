@@ -142,6 +142,10 @@ def scan(
             per_ccd = result["per_ccd"]
             parts = [f"CCD{c}: {n}" for c, n in sorted(per_ccd.items())]
             console.print(f"[green]{instrument} {obsdate}: {result['total']} frames ({', '.join(parts)})[/]")
+            removed_ccds = result.get("removed_ccds") or []
+            if removed_ccds:
+                ccd_list = ", ".join(f"CCD{c}" for c in removed_ccds)
+                console.print(f"[yellow]Removed stale obslog CSV(s) with no current matches: {ccd_list}[/]")
     except Exception as e:
         console.print(f"[red]Error: {e}[/]")
         raise typer.Exit(1)

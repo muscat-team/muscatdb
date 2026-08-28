@@ -337,11 +337,14 @@ def dedupe_conflicts(plan: Plan, *, dry_run: bool = True) -> DedupeResult:
 def apply_plan(plan: Plan) -> ApplyResult:
     """Perform ``plan``'s moves, then clear the obslog CSVs it invalidated.
 
-    Removing those CSVs is not optional. ``scan_date`` overwrites a CSV only for
-    CCDs that produced rows and never deletes one, returning early when a
-    directory holds no FITS at all. Leave a stale CSV behind and ``build-db``
-    re-ingests the pre-move split — the frames moved, but the database looks
-    untouched.
+    Removing those CSVs is not optional. ``scan_date`` now drops a CCD's stale
+    CSV on its own when a sibling CCD in the same date directory still has
+    matches (#81), but it still returns early, touching nothing, whenever a
+    date's *every* CCD lost all its matches — which is exactly what a move
+    that empties a single-CCD instrument's date directory does, and what a
+    move that empties every CCD of a multi-CCD one does too. Leave a stale CSV
+    behind in either case and ``build-db`` re-ingests the pre-move split — the
+    frames moved, but the database looks untouched.
     """
     moved = 0
     removed_csvs: list[Path] = []

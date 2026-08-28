@@ -264,9 +264,35 @@ def scan_date(
         except (PermissionError, OSError) as e:
             print(f"[warn] cannot write {csv_path}: {e}")
 
+    # A CCD with no rows this scan is not itself ambiguous: every CCD checked
+    # here shares this date's one data directory, and `total > 0` (we're past
+    # the early return above) already proves that directory exists and is
+    # listable, via whichever sibling CCD did find matches. So a CCD landing
+    # outside rows_by_ccd genuinely has nothing on disk right now, not a read
+    # glitch, and any CSV still sitting there is a stale leftover from before
+    # its frames moved elsewhere (#81) — remove it so a rebuild doesn't
+    # re-ingest the pre-move split. This can't fire for a single-CCD
+    # instrument: there, zero matches for its one CCD means total == 0 and we
+    # never reach this point, so a stale single-CCD CSV needs a rescan of
+    # whichever date the query in #81 identifies, not this loop.
+    removed_ccds: list[int] = []
+    for ccd in range(inst.nccd):
+        if ccd in rows_by_ccd:
+            continue
+        csv_path = f"{logdir}/obslog-{inst_name}-{obsdate}-ccd{ccd}.csv"
+        if not os.path.isfile(csv_path):
+            continue
+        try:
+            os.remove(csv_path)
+        except OSError as e:
+            print(f"[warn] cannot remove stale {csv_path}: {e}")
+            continue
+        removed_ccds.append(ccd)
+
     return {
         "total": total,
         "per_ccd": {ccd: len(rows) for ccd, rows in rows_by_ccd.items()},
+        "removed_ccds": removed_ccds,
     }
 
 
