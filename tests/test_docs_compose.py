@@ -33,7 +33,7 @@ def _resolve_tour_href(site: Path, href: str) -> Path:
     return site / "home" / rest / "index.html"
 
 
-def test_mkdocs_plus_snapshot_compose(tmp_path):
+def test_mkdocs_plus_snapshot_compose(tmp_path, mock_target_coord_resolution):
     site = tmp_path / "site"
     db = tmp_path / "mock.db"
     _build_tiny_db(str(db))
