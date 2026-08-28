@@ -1326,11 +1326,11 @@ def sync_jobs() -> None:
                 rdir.mkdir(parents=True, exist_ok=True)
                 csv_content = opts.get("csv_content", "")
                 ini_content = opts.get("ini_content", "")
-                write_ttv_inputs(rdir, csv_content, ini_content, opts)
+                input_dir = write_ttv_inputs(rdir, csv_content, ini_content, opts)
                 cmd = [
                     *_harmonic_prefix(),
-                    "-i", str(rdir / "data.csv"),
-                    "-c", str(rdir / "config.ini"),
+                    "-i", str(input_dir / "data.csv"),
+                    "-c", str(input_dir / "config.ini"),
                     "-o", str(rdir),
                 ]
                 letters = opts.get("planet_letters", "")

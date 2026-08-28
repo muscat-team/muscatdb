@@ -12,6 +12,7 @@ checkout is in use.
 
 from __future__ import annotations
 
+import json
 import pathlib
 import shlex
 
@@ -51,3 +52,83 @@ def test_get_ttv_command_never_collides_input_and_output_dirs(tmp_path, monkeypa
     # -i's parent must not be -o itself, or harmonic's own -o copy step
     # (copying -i onto <outdir>/data.csv) would be a copy onto itself.
     assert pathlib.Path(i_path).parent != pathlib.Path(o_path)
+
+
+def test_sync_jobs_queue_drain_stages_inputs_like_start_ttv_fit(tmp_path, monkeypatch):
+    """A job that misses its concurrency slot in ``start_ttv_fit`` is queued and
+    later launched from ``sync_jobs``'s drain loop instead. That launch path
+    must build ``-i``/``-c`` from the same staged ``_input`` directory
+    ``write_ttv_inputs`` returns -- not from ``rdir`` directly, which is where
+    ``write_ttv_inputs`` no longer writes (#77)."""
+    monkeypatch.setenv("MUSCAT_TTV_DIR", str(tmp_path))
+    monkeypatch.setattr(ttv_fit, "_harmonic_prefix", lambda: ["harmonic"])
+    # _write_log_banner calls this, which otherwise shells out via
+    # subprocess.run -- itself implemented on top of Popen, so it would also
+    # hit the fake Popen below and pollute captured_cmds.
+    monkeypatch.setattr(ttv_fit, "_harmonic_version", lambda: "0.0.0")
+
+    fake_jobs: dict = {}
+    monkeypatch.setattr(ttv_fit, "_TTV_JOBS", fake_jobs)
+
+    captured_cmds = []
+
+    class _Proc:
+        pid = 1234
+
+        def poll(self):
+            return None
+
+    def _fake_popen(cmd, **_kwargs):
+        captured_cmds.append(cmd)
+        return _Proc()
+
+    monkeypatch.setattr(ttv_fit.subprocess, "Popen", _fake_popen)
+
+    entry = {
+        "target": "TOI-123",
+        "run_name": "r1",
+        "started_at": 0.0,
+        "params": json.dumps({"options": {
+            "csv_content": "planet,epoch,tc,tc_unc\n",
+            "ini_content": "[INIT]\n",
+            "run_name": "r1",
+            "planet_letters": "b",
+        }}),
+    }
+
+    class _FakeStore:
+        def all(self):
+            return []
+
+        def reconcile_slots(self, pipeline):
+            return 0
+
+        def count_claimed(self, pipeline):
+            return 0
+
+        def pending(self, pipeline):
+            return [entry]
+
+        def claim_slot(self, pipeline, holder_key, max_slots):
+            return True
+
+        def save(self, **kwargs):
+            pass
+
+    monkeypatch.setattr(ttv_fit, "get_job_store", lambda: _FakeStore())
+
+    try:
+        ttv_fit.sync_jobs()
+
+        assert len(captured_cmds) == 1
+        cmd = captured_cmds[0]
+        i_path = pathlib.Path(cmd[cmd.index("-i") + 1])
+        o_path = pathlib.Path(cmd[cmd.index("-o") + 1])
+        assert i_path.is_file(), (
+            "the file passed as -i must actually exist -- write_ttv_inputs "
+            "stages under _input/, not rdir directly"
+        )
+        assert i_path.parent != o_path
+    finally:
+        for job in fake_jobs.values():
+            job.logf.close()
