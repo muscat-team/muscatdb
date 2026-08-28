@@ -45,6 +45,41 @@ jobs:
       - name: Run fast test suite
         run: uv run pytest --tb=short -q
 
+  test-postgres:
+    name: pytest (postgres control plane)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: muscatdb
+          POSTGRES_PASSWORD: muscatdb
+          POSTGRES_DB: muscatdb_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U muscatdb"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Sync dependencies (with cluster extra)
+        run: uv sync --dev --extra cluster
+      # tests/test_job_store_postgres.py skips cleanly (never fails) when
+      # MUSCAT_POSTGRES_DSN is unset/unreachable -- see that file's docstring.
+      # This job is what actually exercises it; the `test`/`coverage` jobs
+      # above run the same file too, but always hit the skip path since they
+      # don't set MUSCAT_POSTGRES_DSN.
+      - name: Run PostgreSQL-backed job store tests
+        env:
+          MUSCAT_POSTGRES_DSN: postgresql://muscatdb:muscatdb@localhost:5432/muscatdb_test
+        run: uv run pytest tests/test_job_store_postgres.py --tb=short -q
+
   coverage:
     name: coverage
     runs-on: ubuntu-latest
