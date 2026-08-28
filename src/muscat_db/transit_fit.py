@@ -23,7 +23,7 @@ from typing import IO
 import yaml
 
 from muscat_db import jobs, database
-from muscat_db.job_store import get_job_store
+from muscat_db.job_store import current_owner, get_job_store
 from muscat_db import __meta__, __muscatdb_version__, __version__
 from muscat_db.instruments import INSTRUMENTS
 from muscat_db.photometry import (
@@ -1491,6 +1491,7 @@ def start_fit(
             params=params_json,
             run_name=run_name,
             user_name=user_name,
+            owner=current_owner(),
         )
 
     return {"ok": True, "key": key, "run_id": run_id}
@@ -2213,11 +2214,17 @@ def sync_jobs() -> None:
             row = next((j for j in db_jobs if j["key"] == db_key), None)
             if row is None:
                 continue
+            owner = row.get("owner") or ""
+            if owner and owner != current_owner():
+                # Another role's process launched this job; only its own
+                # sync_jobs() pass may judge it lost. See photometry.py's
+                # matching guard for the full rationale.
+                continue
             inst = row["inst"]
             date = row["date"]
             target = row["target"]
             run_id = row.get("run_id", "")
-            
+
             # Check if outputs exist on disk (meaning the process finished successfully in the background)
             completed_ok = False
             rdir = None
@@ -2360,7 +2367,7 @@ def sync_jobs() -> None:
                 run_type = "test" if test_run else "full"
                 _FIT_JOBS[key] = TransitFitJob(key=key, inst=inst, date=date, target=target, cmd=cmd, proc=proc, logf=logf, log_path=log_path, run_type=run_type, run_id=run_id, site=site, telescope=telescope, mode=mode, run_name=run_name)
                 try:
-                    store.save(type_="transit_fit", inst=inst, date=date, target=target, run_id=run_id, state="running", returncode=None, elapsed=0, started_at=_FIT_JOBS[key].started_at, run_type=run_type, params=entry.get("params", ""), run_name=run_name)
+                    store.save(type_="transit_fit", inst=inst, date=date, target=target, run_id=run_id, state="running", returncode=None, elapsed=0, started_at=_FIT_JOBS[key].started_at, run_type=run_type, params=entry.get("params", ""), run_name=run_name, owner=current_owner())
                 except Exception:
                     logger.debug("failed to persist queued transit-fit launch for %s", run_id, exc_info=True)
                     try: proc.terminate()

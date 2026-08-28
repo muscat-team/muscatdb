@@ -135,7 +135,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     params       TEXT NOT NULL DEFAULT '',
     run_id       TEXT NOT NULL DEFAULT '',
     run_name     TEXT NOT NULL DEFAULT '',
-    user_name    TEXT NOT NULL DEFAULT ''
+    user_name    TEXT NOT NULL DEFAULT '',
+    owner        TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_state_started
@@ -1892,6 +1893,7 @@ def _ensure_jobs_schema(conn: sqlite3.Connection) -> None:
         ("run_id", "TEXT NOT NULL DEFAULT ''"),
         ("run_name", "TEXT NOT NULL DEFAULT ''"),
         ("user_name", "TEXT NOT NULL DEFAULT ''"),
+        ("owner", "TEXT NOT NULL DEFAULT ''"),
     ]:
         try:
             conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} {col_type}")
@@ -1964,6 +1966,7 @@ def save_job(
     run_id: str = "",
     run_name: str = "",
     user_name: str | None = None,
+    owner: str = "",
 ) -> None:
     # The "user" is the nginx-authenticated account (X-Forwarded-User), set at
     # job creation from request.state.user. State-transition callers (sync_jobs,
@@ -1982,8 +1985,8 @@ def save_job(
     with get_conn(path) as conn:
         _ensure_jobs_migrated(conn, path)
         conn.execute(
-            """INSERT INTO jobs(key, type, instrument, obsdate, target, state, returncode, elapsed, started_at, error_desc, run_type, params, run_id, run_name, user_name)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """INSERT INTO jobs(key, type, instrument, obsdate, target, state, returncode, elapsed, started_at, error_desc, run_type, params, run_id, run_name, user_name, owner)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(key) DO UPDATE SET
                  state      = excluded.state,
                  returncode = excluded.returncode,
@@ -1994,8 +1997,9 @@ def save_job(
                  params     = CASE WHEN excluded.params != '' THEN excluded.params ELSE params END,
                  run_id     = excluded.run_id,
                  run_name   = CASE WHEN excluded.run_name != '' THEN excluded.run_name ELSE run_name END,
-                 user_name  = CASE WHEN excluded.user_name != '' THEN excluded.user_name ELSE user_name END""",
-            (key, type_, inst, date, target, state, returncode, elapsed, started_at, error_desc, run_type, params, run_id, run_name, user_name)
+                 user_name  = CASE WHEN excluded.user_name != '' THEN excluded.user_name ELSE user_name END,
+                 owner      = CASE WHEN excluded.owner != '' THEN excluded.owner ELSE owner END""",
+            (key, type_, inst, date, target, state, returncode, elapsed, started_at, error_desc, run_type, params, run_id, run_name, user_name, owner)
         )
         conn.commit()
     clear_all_caches()

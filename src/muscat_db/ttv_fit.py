@@ -20,7 +20,7 @@ from typing import IO
 import yaml
 
 from muscat_db import jobs, database
-from muscat_db.job_store import get_job_store
+from muscat_db.job_store import current_owner, get_job_store
 from muscat_db import __meta__, __muscatdb_version__, __version__
 from muscat_db.photometry import (
     _conda_env_python,
@@ -551,6 +551,7 @@ def start_ttv_fit(
             params=json.dumps({"options": options}, separators=(",", ":")),
             run_name=run_name,
             user_name=user_name,
+            owner=current_owner(),
         )
 
     return {"ok": True, "key": key}
@@ -1224,6 +1225,12 @@ def sync_jobs() -> None:
             row = next((j for j in db_jobs if j["key"] == db_key), None)
             if row is None:
                 continue
+            owner = row.get("owner") or ""
+            if owner and owner != current_owner():
+                # Another role's process launched this job; only its own
+                # sync_jobs() pass may judge it lost. See photometry.py's
+                # matching guard for the full rationale.
+                continue
             target = row["target"]
             run_name = row.get("run_name") or ""
             completed_ok = False
@@ -1373,7 +1380,7 @@ def sync_jobs() -> None:
                     continue
                 _TTV_JOBS[key] = TTVFitJob(key=key, inst="_", date="_", target=target, cmd=cmd, proc=proc, logf=logf, log_path=log_path, run_type="full", run_id=run_seg, run_name=run_name)
                 try:
-                    store.save(type_="ttv_fit", inst="_", date="_", target=target, state="running", returncode=None, elapsed=0, started_at=_TTV_JOBS[key].started_at, run_type="full", params=entry.get("params", ""), run_id=run_seg, run_name=run_name)
+                    store.save(type_="ttv_fit", inst="_", date="_", target=target, state="running", returncode=None, elapsed=0, started_at=_TTV_JOBS[key].started_at, run_type="full", params=entry.get("params", ""), run_id=run_seg, run_name=run_name, owner=current_owner())
                 except Exception:
                     logger.debug("failed to persist queued ttv-fit launch for %s", rdir, exc_info=True)
                     try:

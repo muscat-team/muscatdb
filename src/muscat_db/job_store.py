@@ -80,8 +80,15 @@ class JobRepository(Protocol):
         run_id: str = "",
         run_name: str = "",
         user_name: str | None = None,
+        owner: str = "",
     ) -> None:
-        """Upsert one job record (same fields as the legacy ``save_job``)."""
+        """Upsert one job record (same fields as the legacy ``save_job``).
+
+        *owner* identifies which role (``"web"``, ``"worker"``) launched the
+        job -- see :func:`current_owner`. Pass it only at the moment a job
+        transitions to ``state="running"``; every other caller omits it (the
+        row keeps whatever owner it already had, same preserve-on-empty
+        pattern as *run_name*/*user_name*)."""
         ...
 
     def delete(self, key: str) -> None:
@@ -185,6 +192,7 @@ class DatabaseJobStore(JobRepository, JobQueue, JobConcurrency):
         run_id: str = "",
         run_name: str = "",
         user_name: str | None = None,
+        owner: str = "",
     ) -> None:
         database.save_job(
             type_=type_,
@@ -201,6 +209,7 @@ class DatabaseJobStore(JobRepository, JobQueue, JobConcurrency):
             run_id=run_id,
             run_name=run_name,
             user_name=user_name,
+            owner=owner,
         )
 
     def delete(self, key: str) -> None:
@@ -352,7 +361,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     params       TEXT NOT NULL DEFAULT '',
     run_id       TEXT NOT NULL DEFAULT '',
     run_name     TEXT NOT NULL DEFAULT '',
-    user_name    TEXT NOT NULL DEFAULT ''
+    user_name    TEXT NOT NULL DEFAULT '',
+    owner        TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_state_started ON jobs(state, started_at DESC);
 
@@ -463,6 +473,7 @@ class PostgresJobStore(JobRepository, JobQueue, JobConcurrency):
         run_id: str = "",
         run_name: str = "",
         user_name: str | None = None,
+        owner: str = "",
     ) -> None:
         if user_name is None:
             user_name = ""
@@ -474,8 +485,8 @@ class PostgresJobStore(JobRepository, JobQueue, JobConcurrency):
                 """
                 INSERT INTO jobs(key, type, instrument, obsdate, target, state, returncode,
                                   elapsed, started_at, error_desc, run_type, params, run_id,
-                                  run_name, user_name)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                  run_name, user_name, owner)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (key) DO UPDATE SET
                     state      = EXCLUDED.state,
                     returncode = EXCLUDED.returncode,
@@ -486,10 +497,11 @@ class PostgresJobStore(JobRepository, JobQueue, JobConcurrency):
                     params     = CASE WHEN EXCLUDED.params    != '' THEN EXCLUDED.params    ELSE jobs.params    END,
                     run_id     = EXCLUDED.run_id,
                     run_name   = CASE WHEN EXCLUDED.run_name  != '' THEN EXCLUDED.run_name  ELSE jobs.run_name  END,
-                    user_name  = CASE WHEN EXCLUDED.user_name != '' THEN EXCLUDED.user_name ELSE jobs.user_name END
+                    user_name  = CASE WHEN EXCLUDED.user_name != '' THEN EXCLUDED.user_name ELSE jobs.user_name END,
+                    owner      = CASE WHEN EXCLUDED.owner     != '' THEN EXCLUDED.owner     ELSE jobs.owner     END
                 """,
                 (key, type_, inst, date, target, state, returncode, elapsed, started_at,
-                 error_desc, run_type, params, run_id, run_name, user_name),
+                 error_desc, run_type, params, run_id, run_name, user_name, owner),
             )
 
     def delete(self, key: str) -> None:
@@ -634,3 +646,39 @@ def set_job_store(store) -> None:
     """Install a different job store implementation (Postgres backend, test double)."""
     global _STORE
     _STORE = store
+
+
+# Which *role* in this process launches jobs and therefore may reconcile them.
+# Every sync_jobs() (photometry/transit_fit/ttv_fit) treats a DB row in
+# state='running' that its own in-memory job registry no longer recognizes as
+# orphaned -- proof that the process which launched it is gone -- and marks it
+# lost. That inference only holds if this process is the only one that ever
+# launches jobs for the pipeline. Since architecture issue #51 step 1 lets a
+# standalone `muscatdb worker` process run sync_jobs() for the same pipeline
+# the web process's own background loop already does, a row launched by one
+# role must never be reconciled by the other: each launch site tags its row
+# with current_owner(), and sync_jobs() skips any running row whose owner
+# does not match its own -- leaving it for that row's own role to reconcile
+# once *that* role's process comes back and fails to recognize it.
+#
+# A row with no owner (written before this existed, or by a caller that never
+# passed one) is always treated as this process's own -- the pre-existing,
+# single-owner behaviour -- so upgrading a database with old rows in flight
+# never left them stuck. This does not need a lease/heartbeat: it only ever
+# widens who is *exempt* from reconciliation, never who forcibly reclaims a
+# slot, so the existing self-healing-on-restart behaviour for genuinely
+# orphaned rows is unchanged.
+_OWNER = "web"
+
+
+def set_owner(owner: str) -> None:
+    """Set this process's role for job-row ownership tagging (see above).
+    The web process never needs to call this -- "web" is the default: only
+    a standalone `muscatdb worker` process calls ``set_owner("worker")``."""
+    global _OWNER
+    _OWNER = owner
+
+
+def current_owner() -> str:
+    """This process's job-row ownership tag -- see :data:`_OWNER`."""
+    return _OWNER

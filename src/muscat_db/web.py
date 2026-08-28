@@ -144,7 +144,7 @@ from muscat_db.database import (
     get_targets_for_tag as _get_targets_for_tag,
     get_tags_for_targets,
 )
-from muscat_db.job_store import get_job_store
+from muscat_db.job_store import get_job_store, set_owner
 from muscat_db.cache import LRUCache
 from muscat_db.instruments import INSTRUMENTS
 
@@ -223,6 +223,10 @@ async def _lifespan(app: FastAPI):
     # Let the chat's job-finished hook (which runs in the sync job-poll thread)
     # schedule broadcasts back onto this event loop.
     chat.set_event_loop(asyncio.get_running_loop())
+    # "web" is job_store's default owner tag already; set it explicitly so a
+    # future change to that default can't silently make this process's own
+    # launches collide with a standalone `muscatdb worker` process's.
+    set_owner("web")
     reconcile_task = asyncio.create_task(_job_reconciliation_loop())
     observation_monitor = None
     if os.environ.get("MUSCAT_LCO_MONITOR_ENABLED", "1") == "1":

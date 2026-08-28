@@ -13,9 +13,24 @@ claim/lease/finalize machinery in ``job_store.py`` is correct when driven from
 a process other than the one serving HTTP -- the prerequisite for eventually
 running it on a separate host (``notes/MUSCATDB-LITE.md`` §12) -- without yet
 needing PostgreSQL, a second host, or any new infrastructure. ``claim_slot``'s
-atomic INSERT already makes it safe to run this alongside the web process's
-own reconciliation loop for the same pipeline: at most one of them ever wins
-the claim for a given pending job.
+atomic INSERT makes it safe to run this alongside the web process's own
+reconciliation loop *for launching pending jobs*: at most one of them ever
+wins the claim for a given pending job.
+
+That atomicity does not by itself cover *reconciling already-running* jobs.
+Each ``sync_jobs()`` treats any DB row in ``state='running'`` that its own
+in-memory registry no longer recognizes as orphaned -- proof (it assumed)
+that the process which launched it is gone -- and marks it
+``error: "Process lost (server restart)"``, releasing its concurrency slot.
+Run this worker alongside the web process for the same pipeline without
+anything else, and every job the web process is actively tracking gets
+falsely killed within one of its own reconciliation passes (default 2s),
+while the real subprocess keeps running unsupervised. This is closed by
+tagging every launched row with :func:`job_store.current_owner` -- ``"web"``
+for the web process (the default), ``"worker"`` here -- and having
+``sync_jobs()`` skip any running row whose owner does not match its own.
+See ``job_store.py``'s ``_OWNER`` docstring for why this needs no
+lease/heartbeat to be correct.
 
 Known limitation (left for step 3 -- lease/heartbeat -- rather than improvised
 here): each pipeline's in-memory job registry (e.g. ``photometry._JOBS``) is
@@ -24,6 +39,10 @@ the web process's registry, so cancelling it from the web UI does not yet
 work -- the same gap the web process would have for a job launched by another
 web worker under ``--workers N>1``. Jobs still queued (not yet claimed) cancel
 fine either way, since that path only touches the durable ``jobs`` table.
+Likewise, running two ``worker`` processes for the *same* pipeline is not yet
+supported: both tag their rows ``"worker"``, so they can still reconcile each
+other's jobs as lost. That needs per-instance identity, not just per-role,
+and is left for the same lease/heartbeat step.
 """
 
 from __future__ import annotations
@@ -32,6 +51,8 @@ import logging
 import signal
 import time
 from collections.abc import Callable
+
+from muscat_db import job_store
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +129,10 @@ def run(pipeline: str, *, interval: float = 2.0, once: bool = False) -> None:
     else runs, so a typo fails fast instead of silently doing nothing.
     """
     fns = resolve_pipelines(pipeline)
+    # Tag every job this process launches (and gate which running rows its
+    # own sync_jobs() passes may reconcile) as "worker", distinct from the
+    # web process's "web" -- see job_store.py's _OWNER docstring.
+    job_store.set_owner("worker")
     stop = False
 
     def _handle_signal(signum: int, _frame: object) -> None:
