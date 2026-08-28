@@ -2790,12 +2790,16 @@ class TestRoutes:
         assert res["ok"] is True
         assert isinstance(res["targets"], list)
 
-    def test_api_ephemeris_target_info(self, client, catalog):
+    def test_api_ephemeris_target_info(self, client, catalog, monkeypatch):
         r = client.get("/api/ephemeris/target-info")
         assert r.status_code == 422
-        
+
         # Test no-match behavior for a dummy target. Missing ephemerides should
         # stay empty; the scheduler must not silently use placeholder values.
+        # "test_star" isn't a real designation, so the live SIMBAD/Sesame
+        # fallback in resolve_target_coords() would otherwise fire (and fail)
+        # on every run; stub it to fail fast instead of over the network.
+        monkeypatch.setattr("muscat_db.exposure.resolve_target_coords", lambda name: None)
         r2 = client.get("/api/ephemeris/target-info?target=test_star")
         assert r2.status_code == 200
         res = r2.json()

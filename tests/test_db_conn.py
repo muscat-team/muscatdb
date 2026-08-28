@@ -64,7 +64,21 @@ def test_defaults_to_env_db_path(monkeypatch, tmp_path):
     assert target.exists()
 
 
-def test_build_db_preserves_destination_file(tmp_path, monkeypatch):
+@pytest.fixture
+def no_real_obslog_scan(monkeypatch):
+    """Keep build_db() off the real production obslog tree.
+
+    ``MUSCAT_OBSLOG_DIR`` (from .env) points ``database.OBSLOG_BASE`` at the
+    real, shared obslog tree on a configured MuSCAT host. These tests only
+    exercise build_db()'s destination-file/sidecar swap, but without this the
+    unmocked ``_discover_csv_jobs()`` walks and ingests the entire real tree
+    (thousands of CSVs) on every call, which is both slow and irrelevant to
+    what's under test.
+    """
+    monkeypatch.setattr("muscat_db.database._discover_csv_jobs", lambda *a, **k: [])
+
+
+def test_build_db_preserves_destination_file(tmp_path, monkeypatch, no_real_obslog_scan):
     from muscat_db.database import build_db
     target = tmp_path / "muscat.db"
     monkeypatch.setenv("MUSCAT_DB_PATH", str(target))
@@ -87,7 +101,7 @@ def test_build_db_preserves_destination_file(tmp_path, monkeypatch):
     assert not sidecar.exists()
 
 
-def test_build_db_never_removes_destination_file_itself(tmp_path, monkeypatch):
+def test_build_db_never_removes_destination_file_itself(tmp_path, monkeypatch, no_real_obslog_scan):
     """The pre-swap sidecar cleanup must only ever touch -wal/-shm, never the
     destination path itself.
 
@@ -124,7 +138,7 @@ def test_build_db_never_removes_destination_file_itself(tmp_path, monkeypatch):
 
 
 
-def test_build_db_clears_sidecars_held_by_a_live_connection(tmp_path, monkeypatch):
+def test_build_db_clears_sidecars_held_by_a_live_connection(tmp_path, monkeypatch, no_real_obslog_scan):
     """A stale ``-wal`` at the destination silently masks the rebuilt database.
 
     The other two build_db tests here pass whether or not the sidecar removal in

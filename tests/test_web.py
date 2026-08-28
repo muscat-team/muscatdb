@@ -802,7 +802,7 @@ def test_ephemeris_targets_are_normalized_unique_names(mock_db):
 
 
 def test_ephemeris_target_info_lists_only_full_transit_fit_runs(
-    mock_db, monkeypatch, tmp_path
+    mock_db, monkeypatch, tmp_path, mock_target_coord_resolution
 ):
     target = "ZZZ ephemeris run filter"
     for run_id, run_type in (("production", "full"), ("preview", "test")):

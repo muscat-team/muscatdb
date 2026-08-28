@@ -118,6 +118,24 @@ def _browser_request_headers(monkeypatch):
     monkeypatch.setattr(TestClient, "request", request)
 
 
+@pytest.fixture
+def mock_target_coord_resolution(monkeypatch):
+    """Stub the live SIMBAD/Sesame name-resolution fallback.
+
+    ``exposure.resolve_target_coords`` calls astropy's ``SkyCoord.from_name``,
+    a real network request, whenever a target isn't found in the local (git-
+    ignored, often-absent) NASA/TOI catalog CSVs. ``catalog.py`` and ``web.py``
+    both reach it via ``from muscat_db import exposure as exp_calc``, a module
+    alias, so patching the attribute here covers both call sites. Coordinates
+    below are an arbitrary stand-in near TOI-837's field, not a verified
+    catalog value -- tests using this only need *some* resolvable coordinate.
+    """
+    monkeypatch.setattr(
+        "muscat_db.exposure.resolve_target_coords",
+        lambda name: (140.0, -64.0),
+    )
+
+
 @pytest.fixture(autouse=True)
 def _reset_web_catalog_caches():
     """Clear muscat_db.web's process-level catalog caches before each test."""
