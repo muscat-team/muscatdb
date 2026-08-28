@@ -69,6 +69,7 @@ _NAV_PAGES: tuple[str, ...] = (
     "/",
     "/targets",
     "/logs",
+    "/projects",
     "/guide",
     "/jobs",
     "/settings",
@@ -82,11 +83,12 @@ _NAV_PAGES: tuple[str, ...] = (
     "/photometry",
     "/transit-fit",
     "/target",
+    "/tag",
 )
 
 # Parent routes whose navbar link should resolve to a populated example detail
 # page when one exists, falling back to the captured empty shell otherwise.
-_PARAM_PARENTS: frozenset[str] = frozenset({"/photometry", "/transit-fit", "/target"})
+_PARAM_PARENTS: frozenset[str] = frozenset({"/photometry", "/transit-fit", "/target", "/tag"})
 
 # 6-digit observation date, e.g. 231201.
 _DATE_RE = re.compile(r"^\d{6}$")
@@ -518,6 +520,13 @@ def _enumerate(database, phot, instruments, n_examples: int) -> tuple[list[_Capt
     for name in list(dict.fromkeys(target_names))[: max(n_examples, 1) + len(example_targets)]:
         sitedir = add(f"/target?{urlencode({'name': name})}")
         route_map.setdefault("/target", sitedir)
+
+    # Project pages: one populated example if any project exists, else /tag
+    # only gets the empty-shell fallback captured via _NAV_PAGES above.
+    projects = database.list_project_tags(db)
+    if projects:
+        sitedir = add(f"/tag?{urlencode({'name': projects[0]['tag']})}")
+        route_map.setdefault("/tag", sitedir)
 
     return captures, route_map
 

@@ -13,6 +13,7 @@
   <input id="target-search" type="text" placeholder="Search by object name in fits header…" autocomplete="off">
   <label><input id="regex-toggle" type="checkbox"> Regex</label>
   <label><input id="case-toggle" type="checkbox"> Case-sensitive</label>
+  <label>Nframes &gt; <input id="nframe-filter" type="number" min="0" step="1" value="0" style="width:5rem;"></label>
   <span id="search-status" class="hint"></span>
   <a href="/api/targets/export.csv" class="csv-btn" download>CSV</a>
 </div>
@@ -21,7 +22,7 @@
 <div class="instrument-badges">
   <span class="instrument-badges-label">Filter by instrument:</span>
   {% for inst in unique_instruments %}
-    <span class="badge instrument-badge" data-instrument="{{ inst }}">{{ inst }}</span>
+    <span class="badge instrument-badge" data-instrument="{{ inst }}">{{ inst }} ({% if inst == 'muscat' %}M1{% elif inst == 'muscat2' %}M2{% elif inst == 'muscat3' %}M3{% elif inst == 'muscat4' %}M4{% elif inst == 'sinistro' %}S{% elif inst == 'sbig' %}SB{% elif inst == 'qhy600' %}Q{% endif %})</span>
   {% endfor %}
 </div>
 
@@ -58,26 +59,18 @@
     <tr>
       <th data-sort-attr="name">Object</th>
       <th data-sort-attr="normName">Normalized Target</th>
-      <th data-sort-attr="dates">Dates</th>
-      <th data-sort-attr="nDates"      data-sort-type="number" title="This row's dataset count (total across the normalized target)">Ndataset</th>
-      <th data-sort-attr="ra"          data-sort-type="ra">RA</th>
-      <th data-sort-attr="dec"         data-sort-type="dec">Dec</th>
+      <th data-sort-attr="dates">Dates &middot; Inst &middot; Nframes</th>
+      <th data-sort-attr="nDates"      data-sort-type="number" title="This row's dataset count (total across the normalized target)">Ndataset (total)</th>
       <th data-sort-attr="filters">Filters</th>
-      <th data-sort-attr="airmassMax"  data-sort-type="number">Airmass</th>
-      <th data-sort-attr="frames"      data-sort-type="number"># Frames</th>
-      <th style="width:1px;">Move</th>
+      <th data-sort-attr="tags">Tags</th>
     </tr>
     <tr class="filter-row">
       <th><input type="text" data-col="name"        placeholder="raw OBJECT…"></th>
-      <th><input type="text" data-col="norm_name"   placeholder="V1298TAU"></th>
+      <th><input type="text" data-col="norm_name"   placeholder="e.g. V1298Tau"></th>
       <th><input type="text" data-col="date"        placeholder="YYMMDD"></th>
       <th><input type="text" data-col="ndataset"    placeholder="<10  >5"></th>
-      <th><input type="text" data-col="ra"          placeholder="hr: >10  5-15"></th>
-      <th><input type="text" data-col="dec"         placeholder="deg: >0  -30:30"></th>
       <th><input type="text" data-col="filter"      placeholder="g, r, i, z"></th>
-      <th><input type="text" data-col="airmass"     placeholder="<1.5  1.1-2"></th>
-      <th><input type="text" data-col="frames"      placeholder="<100  >500"></th>
-      <th></th>
+      <th><input type="text" data-col="tags"        placeholder="e.g. FollowUp"></th>
     </tr>
   </thead>
   <tbody>
@@ -85,34 +78,34 @@
     {% set display_dates %}{% for d in t.dates %}{% set inst = t.date_to_inst.get(d, t.instruments[0] if t.instruments else '') %}{{ d }}{% if inst == 'muscat' %}(M1){% elif inst == 'muscat2' %}(M2){% elif inst == 'muscat3' %}(M3){% elif inst == 'muscat4' %}(M4){% elif inst == 'sinistro' %}(S){% elif inst == 'sbig' %}(SB){% elif inst == 'qhy600' %}(Q){% endif %}{% if not loop.last %},{% endif %}{% endfor %}{% endset %}
     <tr data-name="{{ t.object }}"
         data-norm-name="{{ t.norm_name }}"
-        data-ra="{{ t.ra }}"
-        data-dec="{{ t.declination }}"
         data-filters="{{ t.filters|join(',') }}"
-        data-frames="{{ t.n_frames }}"
         data-n-dates="{{ t.n_dates }}"
-        data-airmass-min="{{ t.airmass_min if t.airmass_min is not none else '' }}"
-        data-airmass-max="{{ t.airmass_max if t.airmass_max is not none else '' }}"
         data-instruments="{{ t.instruments|join(',') }}"
         data-dates="{{ display_dates|trim }}"
         data-note="{{ t.note|default('', true) }}"
-        data-search="{{ t.object }} {{ t.norm_name }} {{ t.ra }} {{ t.declination }} {{ t.filters|join(' ') }} {{ t.instruments|join(' ') }} {{ display_dates|trim }} {{ t.note|default('', true) }}">
+        data-tags="{{ t.tags|join(',') }}"
+        data-search="{{ t.object }} {{ t.norm_name }} {{ t.filters|join(' ') }} {{ t.instruments|join(' ') }} {{ display_dates|trim }} {{ t.note|default('', true) }} {{ t.tags|join(' ') }}">
       <td><strong>{{ t.object }}</strong></td>
       <td class="norm-name-cell" data-object="{{ t.object }}" data-norm-name="{{ t.norm_name }}">
         <a href="/target?name={{ t.norm_name | urlencode }}" style="text-decoration:none;"><strong>{{ t.norm_name }}</strong></a>
         <span class="norm-name-edit-hint" title="Click to edit normalized name">&#9998;</span>
       </td>
-      <td class="mono" style="white-space:nowrap; vertical-align:top;">
+      <td class="mono dates-cell" style="white-space:nowrap; vertical-align:top;">
         {% for d in t.dates %}
           {% set inst = t.date_to_inst.get(d, t.instruments[0] if t.instruments else '') %}
-          <div style="margin-bottom:2px;">
-            <a href="/{{ inst }}/{{ d }}">{{ d }}{% if inst == 'muscat' %}(M1){% elif inst == 'muscat2' %}(M2){% elif inst == 'muscat3' %}(M3){% elif inst == 'muscat4' %}(M4){% elif inst == 'sinistro' %}(S){% elif inst == 'sbig' %}(SB){% elif inst == 'qhy600' %}(Q){% endif %}</a>
+          <div class="date-entry" data-frames="{{ t.date_frames.get(d, 0) }}" style="margin-bottom:2px;">
+            <a href="/{{ inst }}/{{ d }}">{{ d }}</a> &middot; {% if inst == 'muscat' %}M1{% elif inst == 'muscat2' %}M2{% elif inst == 'muscat3' %}M3{% elif inst == 'muscat4' %}M4{% elif inst == 'sinistro' %}S{% elif inst == 'sbig' %}SB{% elif inst == 'qhy600' %}Q{% endif %} &middot; {{ t.date_frames.get(d, 0) }}
+            <span class="date-filter-chips" style="display:none;">
+              {% for c in t.date_filter_chips.get(d, []) %}
+                <span class="badge badge-filter-{{ c.color }}{% if c.narrow %} narrow filter-narrow-line{% endif %}">{{ c.label }}</span>
+              {% endfor %}
+            </span>
           </div>
         {% endfor %}
+        <div class="date-entry-empty hint" style="display:none;">no dates above threshold</div>
       </td>
-      <td class="mono" title="This row's dataset count (total across the normalized target)">{{ t.n_dates }} ({{ t.norm_n_dates }})</td>
-      <td class="mono">{{ t.ra }}</td>
-      <td class="mono">{{ t.declination }}</td>
-      <td>
+      <td class="mono ndataset-cell" title="This row's dataset count (total across the normalized target)"><span class="ndataset-own">{{ t.n_dates }}</span> ({{ t.norm_n_dates }})</td>
+      <td class="filters-cell">
         {% for c in t.filter_chips if not c.narrow %}
           <span class="badge badge-filter-{{ c.color }}">{{ c.label }}</span>
         {% endfor %}
@@ -120,18 +113,13 @@
           <span class="badge badge-filter-{{ c.color }} narrow filter-narrow-line">{{ c.label }}</span>
         {% endfor %}
       </td>
-      <td class="mono">
-        {% set amin = t.get('airmass_min') %}
-        {% set amax = t.get('airmass_max') %}
-        {% if amin is not none and amax is not none %}
-          {{ '%.2f'|format(amin) }}–{{ '%.2f'|format(amax) }}
-        {% else %}—{% endif %}
-      </td>
-      <td>{{ t.n_frames }}</td>
-      <td style="text-align:center;">
-        <button class="btn-move" data-object="{{ t.object }}" title="{% if t.is_identified %}Move to Unidentified{% else %}Move to Identified{% endif %}">
-          {% if t.is_identified %}X{% else %}I{% endif %}
-        </button>
+      <td class="tags-cell" data-object="{{ t.object }}" data-norm-name="{{ t.norm_name }}">
+        <span class="tags-chip-list">
+        {% for tag in t.tags %}
+          <a href="/tag?name={{ tag | urlencode }}" style="text-decoration:none;"><span class="badge badge-tag">{{ tag }}</span></a>
+        {% endfor %}
+        </span>
+        <span class="tag-add-hint" title="Add to a project">+ Tag</span>
       </td>
     </tr>
   {% endfor %}
@@ -173,21 +161,12 @@
   <a href="#" class="btn solid">Back to Top</a>
 </div>
 
-<div id="move-confirm-overlay">
-  <div class="modal-box">
-    <p id="move-confirm-msg" style="margin-bottom:1.25rem;font-size:0.95rem;font-weight:600;"></p>
-    <div style="display:flex;gap:0.5rem;justify-content:flex-end;">
-      <button class="btn" onclick="closeMoveConfirm()">Cancel</button>
-      <button class="btn danger" onclick="confirmMove()">Move</button>
-    </div>
-  </div>
-</div>
-
 <script>
   (function () {
     const input  = document.getElementById('target-search');
     const regex  = document.getElementById('regex-toggle');
     const caseCB = document.getElementById('case-toggle');
+    const nframeFilter = document.getElementById('nframe-filter');
     const status = document.getElementById('search-status');
     const rows = Array.from(document.querySelectorAll(
       '#targets-table tbody tr, #unidentified-table tbody tr'
@@ -211,6 +190,7 @@
         colInputs.forEach(inp => { colVals[inp.dataset.col] = inp.value; });
         localStorage.setItem('home:cols', JSON.stringify(colVals));
         localStorage.setItem('home:inst', activeInstrument || '');
+        localStorage.setItem('home:nframe', nframeFilter.value);
       } catch (_) {}
     }
     function restoreFilters() {
@@ -235,9 +215,50 @@
             if (b.dataset.instrument === instVal) b.classList.add('active');
           });
         }
+        const nv = localStorage.getItem('home:nframe');
+        if (nv != null) nframeFilter.value = nv;
       } catch (_) {}
     }
     restoreFilters();
+
+    // ── #Frames filter: hides dates at/below the threshold, per target row,
+    //    and recomputes that row's own Ndataset/Filters from whichever dates
+    //    currently pass (rather than leaving those columns showing the
+    //    unfiltered totals while the Dates column shows a filtered subset).
+    //    Mirrors the Project Detail page's (/tag) identical filter.
+    function applyNframeFilter() {
+      const threshold = parseFloat(nframeFilter.value);
+      const min = isNaN(threshold) ? -Infinity : threshold;
+      rows.forEach(row => {
+        const cell = row.querySelector('.dates-cell');
+        if (!cell) return;
+        const entries = cell.querySelectorAll('.date-entry');
+        let visibleCount = 0;
+        const chipsByKey = new Map();
+        entries.forEach(entry => {
+          const frames = parseFloat(entry.dataset.frames) || 0;
+          const visible = frames > min;
+          entry.style.display = visible ? '' : 'none';
+          if (!visible) return;
+          visibleCount++;
+          entry.querySelectorAll('.date-filter-chips .badge').forEach(chip => {
+            const key = chip.className + '|' + chip.textContent;
+            if (!chipsByKey.has(key)) chipsByKey.set(key, chip.cloneNode(true));
+          });
+        });
+        const empty = cell.querySelector('.date-entry-empty');
+        if (empty) empty.style.display = (entries.length && !visibleCount) ? '' : 'none';
+
+        const ndatasetOwn = row.querySelector('.ndataset-cell .ndataset-own');
+        if (ndatasetOwn) ndatasetOwn.textContent = visibleCount;
+        const filtersCell = row.querySelector('.filters-cell');
+        if (filtersCell) filtersCell.replaceChildren(...chipsByKey.values());
+      });
+    }
+    if (nframeFilter) {
+      nframeFilter.addEventListener('input', function () { applyNframeFilter(); saveFilters(); });
+      applyNframeFilter();
+    }
 
     // ── persist sort state ────────────────────────────────────────────────────
     function saveSort(tableId, colIdx, dir) {
@@ -353,30 +374,14 @@
       };
     }
 
-    function raToHours(s) {
-      const m = (s || '').match(/^\s*(-?\d+):(\d+)(?::(\d+(?:\.\d+)?))?/);
-      if (!m) return NaN;
-      return parseInt(m[1], 10) + parseInt(m[2], 10)/60 + (parseFloat(m[3]) || 0)/3600;
-    }
-    function decToDegrees(s) {
-      const m = (s || '').match(/^\s*([+-]?)(\d+):(\d+)(?::(\d+(?:\.\d+)?))?/);
-      if (!m) return NaN;
-      const sign = m[1] === '-' ? -1 : 1;
-      const d = parseInt(m[2], 10);
-      return sign * (d + parseInt(m[3], 10)/60 + (parseFloat(m[4]) || 0)/3600);
-    }
-
     // Map data-col → (row → value, parser builder)
     const colSpec = {
       name:       { val: r => r.dataset.name,        build: makeText    },
       norm_name:  { val: r => r.dataset.normName,    build: makeText    },
-      ra:         { val: r => raToHours(r.dataset.ra),   build: makeNumeric },
-      dec:        { val: r => decToDegrees(r.dataset.dec), build: makeNumeric },
       filter:     { val: r => r.dataset.filters,     build: makeText    },
-      airmass:    { val: r => parseFloat(r.dataset.airmassMax),  build: makeNumeric },
-      frames:     { val: r => parseInt(r.dataset.frames, 10),    build: makeNumeric },
       date:       { val: r => r.dataset.dates,       build: makeText    },
       ndataset:   { val: r => parseInt(r.dataset.nDates, 10), build: makeNumeric },
+      tags:       { val: r => r.dataset.tags,        build: makeText    },
     };
 
     function buildColPredicates() {
@@ -453,34 +458,6 @@
         saveFilters();
       });
     });
-    let pendingMove = null;
-    document.querySelectorAll('.btn-move').forEach(btn => {
-      btn.addEventListener('click', function () {
-        const wasIdentified = this.closest('table').id === 'targets-table';
-        const targetName = this.closest('tr').querySelector('td strong').textContent;
-        const targetTable = wasIdentified ? 'Unidentified' : 'Identified';
-        pendingMove = { obj: this.dataset.object, newVal: wasIdentified ? 0 : 1 };
-        document.getElementById('move-confirm-msg').textContent =
-          `Move "${targetName}" to the ${targetTable} targets table?`;
-        document.getElementById('move-confirm-overlay').classList.add('visible');
-      });
-    });
-    window.confirmMove = function() {
-      if (!pendingMove) return;
-      const { obj, newVal } = pendingMove;
-      pendingMove = null;
-      document.getElementById('move-confirm-overlay').classList.remove('visible');
-      fetch('/api/targets/' + encodeURIComponent(obj) + '/identified', {
-        method: 'PUT',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({is_identified: newVal}),
-      }).then(r => { if (r.ok) location.reload(); });
-    };
-    window.closeMoveConfirm = function() {
-      pendingMove = null;
-      document.getElementById('move-confirm-overlay').classList.remove('visible');
-    };
-
     // ── inline norm-name editor ──────────────────────────────────────────
     document.querySelectorAll('.norm-name-cell').forEach(cell => {
       cell.addEventListener('click', function(e) {
@@ -557,6 +534,93 @@
       input.addEventListener('keydown', e => {
         if (e.key === 'Enter') { e.preventDefault(); commit(); }
         else if (e.key === 'Escape') { e.preventDefault(); close(current); }
+      });
+    }
+
+    // ── quick "+ Tag" adder (attaches an existing project only) ─────────────
+    let _allProjectTags = null;
+    async function fetchProjectTags() {
+      if (_allProjectTags) return _allProjectTags;
+      try {
+        const res = await fetch('/api/tags');
+        const data = await res.json();
+        _allProjectTags = (data.tags || []).map(t => t.tag);
+      } catch (_) {
+        _allProjectTags = [];
+      }
+      return _allProjectTags;
+    }
+
+    document.querySelectorAll('.tag-add-hint').forEach(hint => {
+      hint.addEventListener('click', function () {
+        openTagAdder(hint.closest('.tags-cell'));
+      });
+    });
+
+    async function openTagAdder(cell) {
+      if (cell.classList.contains('editing')) return;
+      cell.classList.add('editing');
+      const obj = cell.dataset.object;
+      const options = await fetchProjectTags();
+
+      let datalist = document.getElementById('project-tag-options');
+      if (!datalist) {
+        datalist = document.createElement('datalist');
+        datalist.id = 'project-tag-options';
+        document.body.appendChild(datalist);
+      }
+      datalist.replaceChildren(...options.map(t => {
+        const opt = document.createElement('option');
+        opt.value = t;
+        return opt;
+      }));
+
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.className = 'tag-add-input';
+      input.setAttribute('list', 'project-tag-options');
+      input.placeholder = 'Project name…';
+      const actions = document.createElement('div');
+      actions.className = 'note-actions';
+      const save = document.createElement('button');
+      save.className = 'save'; save.textContent = 'Add';
+      const cancel = document.createElement('button');
+      cancel.textContent = 'Cancel';
+      actions.append(save, cancel);
+      cell.append(input, actions);
+      input.focus();
+
+      function close() {
+        cell.classList.remove('editing');
+        input.remove();
+        actions.remove();
+      }
+
+      async function commit() {
+        const tag = input.value.trim();
+        if (!tag) { close(); return; }
+        try {
+          const res = await fetch('/api/targets/' + encodeURIComponent(obj) + '/tags', {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({tag}),
+          });
+          if (!res.ok) {
+            const body = await res.json().catch(() => ({}));
+            throw new Error(body.detail || ('HTTP ' + res.status));
+          }
+          location.reload();
+        } catch (err) {
+          showMessageModal('Error', 'Could not add tag: ' + err.message);
+          close();
+        }
+      }
+
+      save.addEventListener('click', commit);
+      cancel.addEventListener('click', close);
+      input.addEventListener('keydown', e => {
+        if (e.key === 'Enter') { e.preventDefault(); commit(); }
+        else if (e.key === 'Escape') { e.preventDefault(); close(); }
       });
     }
 

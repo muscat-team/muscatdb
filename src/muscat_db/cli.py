@@ -142,6 +142,10 @@ def scan(
             per_ccd = result["per_ccd"]
             parts = [f"CCD{c}: {n}" for c, n in sorted(per_ccd.items())]
             console.print(f"[green]{instrument} {obsdate}: {result['total']} frames ({', '.join(parts)})[/]")
+            removed_ccds = result.get("removed_ccds") or []
+            if removed_ccds:
+                ccd_list = ", ".join(f"CCD{c}" for c in removed_ccds)
+                console.print(f"[yellow]Removed stale obslog CSV(s) with no current matches: {ccd_list}[/]")
     except Exception as e:
         console.print(f"[red]Error: {e}[/]")
         raise typer.Exit(1)
@@ -849,6 +853,53 @@ def restart(
         console.print(f"[dim]No server running on port {port}[/]")
     console.print(f"[green]Starting server on {host}:{port}[/]")
     _run_server(db, host, port, reload, workers, nginx)
+
+
+@app.command(cls=_Cmd)
+def worker(
+    pipeline: str = typer.Option(
+        ..., "--pipeline",
+        help='Pipeline(s) to run: photometry, transit_fit, ttv_fit '
+             '(comma-separated for more than one), or "all".',
+    ),
+    db: str = typer.Option("muscat.db", "--db", help="SQLite database path"),
+    interval: float = typer.Option(
+        None, "--interval",
+        help="Seconds between claim/reconcile passes "
+             "(default: $MUSCAT_JOB_RECONCILE_INTERVAL_S, else 2.0)",
+    ),
+    once: bool = typer.Option(
+        False, "--once", help="Run a single claim/reconcile pass and exit (for scripting/tests)",
+    ),
+):
+    """Run a standalone job-queue worker against the existing SQLite job store.
+
+    Claims <pipeline>'s pending jobs and reconciles jobs already launched,
+    using the same job_store.py seam (claim_slot/pending/enqueue) the web
+    server's own background reconciliation loop already uses -- from a
+    separate OS process instead of the web process's asyncio task.
+    Single-host, SQLite-backed, no new infrastructure: this validates the
+    claim/lease/finalize machinery decoupled from serving HTTP, the first
+    step toward eventually running it on a separate host (architecture
+    issue #51).
+    """
+    os.environ["MUSCAT_DB_PATH"] = db
+    if interval is None:
+        interval = float(os.environ.get("MUSCAT_JOB_RECONCILE_INTERVAL_S", "2"))
+    from muscat_db.worker import resolve_pipelines
+    from muscat_db.worker import run as run_worker
+
+    try:
+        fns = resolve_pipelines(pipeline)
+    except ValueError as e:
+        console.print(f"[red]Error: {e}[/]")
+        raise typer.Exit(1)
+
+    console.print(
+        f"[green]worker started[/] pipeline={','.join(n for n, _ in fns)} "
+        f"db={db} interval={interval}s pid={os.getpid()}"
+    )
+    run_worker(pipeline, interval=interval, once=once)
 
 
 if __name__ == "__main__":

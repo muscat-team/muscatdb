@@ -20,7 +20,7 @@ from typing import IO
 import yaml
 
 from muscat_db import jobs, database
-from muscat_db.job_store import get_job_store
+from muscat_db.job_store import current_owner, get_job_store
 from muscat_db import __meta__, __muscatdb_version__, __version__
 from muscat_db.photometry import (
     _conda_env_python,
@@ -150,10 +150,11 @@ def get_ttv_command(target: str, options: dict) -> str:
         rdir = ttv_output_dir(target, run_name)
     except ValueError:
         return ""
+    input_dir = ttv_input_dir(rdir)
     cmd = [
         *_harmonic_prefix(),
-        "-i", str(rdir / "data.csv"),
-        "-c", str(rdir / "config.ini"),
+        "-i", str(input_dir / "data.csv"),
+        "-c", str(input_dir / "config.ini"),
         "-o", str(rdir),
     ]
     letters = options.get("planet_letters", "")
@@ -322,15 +323,33 @@ def _make_harmonic_config(
     return "\n".join(lines)
 
 
+def ttv_input_dir(rdir: pathlib.Path) -> pathlib.Path:
+    """Staging directory for harmonic's ``-i``/``-c`` inputs, distinct from ``rdir``.
+
+    harmonic's own ``-o`` handling copies its ``-i`` input onto
+    ``<outdir>/data.csv``; passing the same directory for both would make that
+    a copy onto itself (``SameFileError`` on harmonic upstream ``master`` —
+    see #77). Staging outside ``rdir`` keeps ``-i``/``-c`` and ``-o`` disjoint
+    regardless of which harmonic version is checked out.
+    """
+    return rdir / "_input"
+
+
 def write_ttv_inputs(
     rdir: pathlib.Path,
     csv_content: str,
     ini_content: str,
     options: dict,
-) -> None:
-    data_path = rdir / "data.csv"
+) -> pathlib.Path:
+    """Stage harmonic's inputs and write this run's meta.yaml.
+
+    Returns the staging directory ``-i``/``-c`` should point at.
+    """
+    input_dir = ttv_input_dir(rdir)
+    input_dir.mkdir(parents=True, exist_ok=True)
+    data_path = input_dir / "data.csv"
     data_path.write_text(csv_content)
-    config_path = rdir / "config.ini"
+    config_path = input_dir / "config.ini"
     config_path.write_text(ini_content)
     meta: dict = {
         "__muscatdb_version__": __muscatdb_version__,
@@ -341,6 +360,7 @@ def write_ttv_inputs(
     }
     with open(rdir / "meta.yaml", "w") as f:
         yaml.dump(meta, f, Dumper=_MetaDumper, default_flow_style=False, sort_keys=False)
+    return input_dir
 
 
 def validate_ttv_options(options: dict | None) -> str | None:
@@ -458,12 +478,12 @@ def start_ttv_fit(
 
     csv_content = options.get("csv_content", "")
     ini_content = options.get("ini_content", "")
-    write_ttv_inputs(rdir, csv_content, ini_content, options)
+    input_dir = write_ttv_inputs(rdir, csv_content, ini_content, options)
 
     cmd = [
         *_harmonic_prefix(),
-        "-i", str(rdir / "data.csv"),
-        "-c", str(rdir / "config.ini"),
+        "-i", str(input_dir / "data.csv"),
+        "-c", str(input_dir / "config.ini"),
         "-o", str(rdir),
     ]
     letters = options.get("planet_letters", "")
@@ -551,6 +571,7 @@ def start_ttv_fit(
             params=json.dumps({"options": options}, separators=(",", ":")),
             run_name=run_name,
             user_name=user_name,
+            owner=current_owner(),
         )
 
     return {"ok": True, "key": key}
@@ -1224,6 +1245,12 @@ def sync_jobs() -> None:
             row = next((j for j in db_jobs if j["key"] == db_key), None)
             if row is None:
                 continue
+            owner = row.get("owner") or ""
+            if owner and owner != current_owner():
+                # Another role's process launched this job; only its own
+                # sync_jobs() pass may judge it lost. See photometry.py's
+                # matching guard for the full rationale.
+                continue
             target = row["target"]
             run_name = row.get("run_name") or ""
             completed_ok = False
@@ -1306,11 +1333,11 @@ def sync_jobs() -> None:
                 rdir.mkdir(parents=True, exist_ok=True)
                 csv_content = opts.get("csv_content", "")
                 ini_content = opts.get("ini_content", "")
-                write_ttv_inputs(rdir, csv_content, ini_content, opts)
+                input_dir = write_ttv_inputs(rdir, csv_content, ini_content, opts)
                 cmd = [
                     *_harmonic_prefix(),
-                    "-i", str(rdir / "data.csv"),
-                    "-c", str(rdir / "config.ini"),
+                    "-i", str(input_dir / "data.csv"),
+                    "-c", str(input_dir / "config.ini"),
                     "-o", str(rdir),
                 ]
                 letters = opts.get("planet_letters", "")
@@ -1373,7 +1400,7 @@ def sync_jobs() -> None:
                     continue
                 _TTV_JOBS[key] = TTVFitJob(key=key, inst="_", date="_", target=target, cmd=cmd, proc=proc, logf=logf, log_path=log_path, run_type="full", run_id=run_seg, run_name=run_name)
                 try:
-                    store.save(type_="ttv_fit", inst="_", date="_", target=target, state="running", returncode=None, elapsed=0, started_at=_TTV_JOBS[key].started_at, run_type="full", params=entry.get("params", ""), run_id=run_seg, run_name=run_name)
+                    store.save(type_="ttv_fit", inst="_", date="_", target=target, state="running", returncode=None, elapsed=0, started_at=_TTV_JOBS[key].started_at, run_type="full", params=entry.get("params", ""), run_id=run_seg, run_name=run_name, owner=current_owner())
                 except Exception:
                     logger.debug("failed to persist queued ttv-fit launch for %s", rdir, exc_info=True)
                     try:

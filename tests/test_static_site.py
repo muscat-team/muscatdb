@@ -33,6 +33,11 @@ from muscat_db.static_site import (
 
 _SECRET_NOTE = "SECRETNOTE12345"
 
+# Every test in this module builds a real site, which renders a live target
+# page; stub the SIMBAD/Sesame name-resolution fallback (see the fixture's
+# docstring in conftest.py) so none of them depend on outbound network.
+pytestmark = pytest.mark.usefixtures("mock_target_coord_resolution")
+
 
 def _build_tiny_db(db_path: str) -> None:
     """Create a minimal but valid DB with two instruments and a noted target."""
@@ -42,8 +47,8 @@ def _build_tiny_db(db_path: str) -> None:
     frame_rows = [
         ("muscat", "260101", 0, "MSCT0_2601010001", "M67", 1.0),
         ("muscat", "260101", 0, "MSCT0_2601010002", "M67", 2.0),
-        ("muscat3", "260102", 0, "MSCT3_2601020001", "TOI-1", 3.0),
-        ("muscat3", "260102", 0, "MSCT3_2601020002", "TOI-1", 4.0),
+        ("muscat3", "260102", 0, "MSCT3_2601020001", "TOI-837", 3.0),
+        ("muscat3", "260102", 0, "MSCT3_2601020002", "TOI-837", 4.0),
     ]
     conn.executemany(
         """INSERT INTO frames
@@ -227,6 +232,20 @@ def test_targets_page_is_published_and_linked(tiny_db, tmp_path):
         if 'href="targets/"' in _read(page) or 'href="../targets/"' in _read(page)
     ]
     assert len(linking) > 0, "targets/ should be linked in navigation"
+
+
+def test_projects_page_is_published_and_linked(tiny_db, tmp_path):
+    """/projects is published and linked from navbar, mirroring /targets above."""
+    out = tmp_path / "site"
+    build_site(out, db_path=tiny_db, n_examples=1, include_figures=False, log=lambda _m: None)
+
+    assert (out / "projects" / "index.html").is_file(), "projects page should be published"
+    linking = [
+        page.relative_to(out).as_posix()
+        for page in out.rglob("index.html")
+        if 'href="projects/"' in _read(page) or 'href="../projects/"' in _read(page)
+    ]
+    assert len(linking) > 0, "projects/ should be linked in navigation"
 
 
 def test_nav_pages_do_not_collide_on_output_directory():

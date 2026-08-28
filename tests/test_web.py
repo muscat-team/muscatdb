@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import json
 import sqlite3
-import tempfile
 import zipfile
 import pytest
 from fastapi.testclient import TestClient
@@ -47,33 +46,6 @@ def test_script_json_round_trips_to_original_values():
     )
     assert json.loads(decoded) == original
 
-
-@pytest.fixture
-def mock_db(monkeypatch):
-    """Set up a temporary database for testing web endpoints."""
-    fd, path = tempfile.mkstemp(suffix=".db")
-    os.close(fd)
-    monkeypatch.setenv("MUSCAT_DB_PATH", path)
-    
-    # Initialize the database schema
-    conn = sqlite3.connect(path)
-    from muscat_db.database import SCHEMA
-    conn.executescript(SCHEMA)
-    conn.commit()
-    conn.close()
-    
-    # Mock sync_jobs so it doesn't clean up our mock active jobs
-    monkeypatch.setattr("muscat_db.photometry.sync_jobs", lambda: None)
-    monkeypatch.setattr("muscat_db.transit_fit.sync_jobs", lambda: None)
-    # Mock discover_orphan_fits so it doesn't load production files from disk
-    monkeypatch.setattr("muscat_db.transit_fit._discover_orphan_fits", lambda existing: [])
-    monkeypatch.setattr("muscat_db.lco.archive_download_jobs", lambda: [])
-    
-    yield path
-    try:
-        os.unlink(path)
-    except OSError:
-        pass
 
 def test_jobs_status_response_counts_and_started_at(mock_db, monkeypatch):
     # Save a running job, a cancelling job, and a done job on different targets to avoid key collisions
@@ -830,7 +802,7 @@ def test_ephemeris_targets_are_normalized_unique_names(mock_db):
 
 
 def test_ephemeris_target_info_lists_only_full_transit_fit_runs(
-    mock_db, monkeypatch, tmp_path
+    mock_db, monkeypatch, tmp_path, mock_target_coord_resolution
 ):
     target = "ZZZ ephemeris run filter"
     for run_id, run_type in (("production", "full"), ("preview", "test")):
@@ -1382,7 +1354,7 @@ def test_telescope_required_error_blocks_ambiguous_selection(mock_db):
 # --------------------------------------------------------------------------- #
 
 
-def test_lco_pages_render_and_nav_links_it():
+def test_lco_pages_render_and_nav_links_it(mock_db):
     client = TestClient(app)
     page = client.get("/lco")
     assert page.status_code == 200

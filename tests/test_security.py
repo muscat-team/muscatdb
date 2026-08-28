@@ -69,8 +69,14 @@ def test_all_unsafe_routes_share_central_csrf_guard(monkeypatch):
         headers={**auth, "Origin": "https://evil.example"},
         json={"note": "x"},
     )
+    tag_create_missing = client.post(
+        "/api/tags",
+        headers={**auth, "X-Test-No-Origin": "1"},
+        json={"tag": "example"},
+    )
     assert missing.status_code == 403
     assert foreign.status_code == 403
+    assert tag_create_missing.status_code == 403
 
 
 def test_jobs_page_never_interpolates_persisted_values_into_javascript(

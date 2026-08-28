@@ -14,12 +14,43 @@ later test with an empty cached result.
 
 from __future__ import annotations
 
+import os
+import sqlite3
+import tempfile
 from pathlib import Path
 
 import pytest
 from starlette.testclient import TestClient
 
 _DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+
+
+@pytest.fixture
+def mock_db(monkeypatch):
+    """Set up a temporary database for testing web endpoints."""
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    monkeypatch.setenv("MUSCAT_DB_PATH", path)
+
+    # Initialize the database schema
+    conn = sqlite3.connect(path)
+    from muscat_db.database import SCHEMA
+    conn.executescript(SCHEMA)
+    conn.commit()
+    conn.close()
+
+    # Mock sync_jobs so it doesn't clean up our mock active jobs
+    monkeypatch.setattr("muscat_db.photometry.sync_jobs", lambda: None)
+    monkeypatch.setattr("muscat_db.transit_fit.sync_jobs", lambda: None)
+    # Mock discover_orphan_fits so it doesn't load production files from disk
+    monkeypatch.setattr("muscat_db.transit_fit._discover_orphan_fits", lambda existing: [])
+    monkeypatch.setattr("muscat_db.lco.archive_download_jobs", lambda: [])
+
+    yield path
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
 
 
 def catalog_available() -> bool:
@@ -85,6 +116,24 @@ def _browser_request_headers(monkeypatch):
         return original(self, method, url, headers=headers, **kwargs)
 
     monkeypatch.setattr(TestClient, "request", request)
+
+
+@pytest.fixture
+def mock_target_coord_resolution(monkeypatch):
+    """Stub the live SIMBAD/Sesame name-resolution fallback.
+
+    ``exposure.resolve_target_coords`` calls astropy's ``SkyCoord.from_name``,
+    a real network request, whenever a target isn't found in the local (git-
+    ignored, often-absent) NASA/TOI catalog CSVs. ``catalog.py`` and ``web.py``
+    both reach it via ``from muscat_db import exposure as exp_calc``, a module
+    alias, so patching the attribute here covers both call sites. Coordinates
+    below are an arbitrary stand-in near TOI-837's field, not a verified
+    catalog value -- tests using this only need *some* resolvable coordinate.
+    """
+    monkeypatch.setattr(
+        "muscat_db.exposure.resolve_target_coords",
+        lambda name: (140.0, -64.0),
+    )
 
 
 @pytest.fixture(autouse=True)

@@ -278,6 +278,57 @@ class TestScanner:
         assert result["per_ccd"][1] == 3
         assert result["per_ccd"][2] == 1
 
+    def test_scan_date_removes_stale_csv_for_ccd_with_no_current_matches(
+        self, tmp_obslog, tmp_data,
+    ):
+        """Regression test for #81: a CCD's frames that moved elsewhere must
+        not leave that CCD's obslog CSV behind once a sibling CCD proves the
+        date directory is genuinely readable.
+        """
+        from muscat_db.scanner import scan_date
+        inst = INSTRUMENTS["muscat"]
+        obsdate = "260101"
+
+        # Pre-existing stale CSV for ccd1, as if its frames were listed here
+        # before they moved to a different obsdate.
+        stale_csv = _make_csv(
+            f"{tmp_obslog}/muscat/{obsdate}/obslog-muscat-{obsdate}-ccd1.csv",
+            inst.csv_header.split(","),
+            [{"FRAME": "stale-frame"}],
+        )
+
+        # Only ccd0 has real files today.
+        self._make_fits_for_instrument(tmp_data, inst, obsdate, 0, 2)
+
+        result = scan_date("muscat", obsdate, max_workers=1)
+        assert result["total"] == 2
+        assert 1 not in result["per_ccd"]
+        assert result["removed_ccds"] == [1]
+        assert not os.path.isfile(stale_csv)
+
+    def test_scan_date_leaves_stale_csv_when_every_ccd_is_empty(
+        self, tmp_obslog, tmp_data,
+    ):
+        """A date whose FITS directory holds nothing at all cannot tell a
+        real gap apart from a transient read failure, so scan_date must keep
+        returning early there and leave any pre-existing CSV untouched — the
+        single-CCD half of #81 needs the dedicated regeneration pass, not
+        this loop.
+        """
+        from muscat_db.scanner import scan_date
+        inst = INSTRUMENTS["muscat"]
+        obsdate = "260101"
+
+        stale_csv = _make_csv(
+            f"{tmp_obslog}/muscat/{obsdate}/obslog-muscat-{obsdate}-ccd0.csv",
+            inst.csv_header.split(","),
+            [{"FRAME": "stale-frame"}],
+        )
+
+        result = scan_date("muscat", obsdate, max_workers=1)
+        assert not result
+        assert os.path.isfile(stale_csv)
+
     def test_scan_missing_dates(self, tmp_obslog, tmp_data):
         from muscat_db.scanner import scan_missing_dates
         obsdate = tmp_data
@@ -620,6 +671,13 @@ class TestDatabase:
                     "(request_id,frame_id,filename,instrument,obsdate,metadata_json,updated_at) "
                     "VALUES (179,'frame-1','frame-1.fits','sinistro','2026-07-14','{}',1.0)"
                 )
+                conn.execute(
+                    "INSERT INTO tag_descriptions (tag, description) "
+                    "VALUES ('young ttv', 'Young TTV follow-up targets')"
+                )
+                conn.execute(
+                    "INSERT INTO target_tags (norm_name, tag) VALUES ('TIC 12345', 'young ttv')"
+                )
                 conn.commit()
 
             # Rebuild from the same obslog CSVs.
@@ -646,6 +704,12 @@ class TestDatabase:
                     "SELECT COUNT(*) FROM lco_observation_frames "
                     "WHERE request_id=179 AND frame_id='frame-1'"
                 ).fetchone()[0]
+                tag_description = conn.execute(
+                    "SELECT description FROM tag_descriptions WHERE tag = 'young ttv'"
+                ).fetchone()
+                target_tag = conn.execute(
+                    "SELECT 1 FROM target_tags WHERE norm_name = 'TIC 12345' AND tag = 'young ttv'"
+                ).fetchone()
             assert note is not None and note[0] == "keep me across rebuilds"
             assert override is not None and override[0] == 0
             assert coeff is not None and coeff[0] == 1.5
@@ -653,6 +717,8 @@ class TestDatabase:
             assert test_observations == 1
             assert lco_requests == 1
             assert lco_frames == 1
+            assert tag_description is not None and tag_description[0] == "Young TTV follow-up targets"
+            assert target_tag is not None
         finally:
             os.unlink(db_path)
 

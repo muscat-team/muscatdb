@@ -16,7 +16,17 @@ dependencies = [
     "pyarrow>=17",
     "httpx>=0.28",
     "python-socketio>=5.11.2",
+    "markdown>=3.10.3",
+    "nh3>=0.3.7",
 ]
+
+[project.optional-dependencies]
+# PostgreSQL control-plane adapter for multi-host distributed execution
+# (MUSCATDB-LITE.md §12, architecture issue #51). Orthogonal to every other
+# extra; installed on the web host and every worker host of a multi-host
+# deployment. Single-host runs stay on the SQLite-backed default with no
+# extra installed at all.
+cluster = ["psycopg[binary,pool]>=3.2"]
 
 [project.scripts]
 muscat-db = "muscat_db.cli:app"

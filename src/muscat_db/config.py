@@ -215,6 +215,20 @@ ENV_VARS: tuple[EnvVar, ...] = (
     EnvVar("MUSCAT_NGINX_GROUP", "www-data", "Group given read access to the htpasswd file"),
 
     # --- job concurrency and finalizing grace windows ------------------------
+    EnvVar(
+        "MUSCAT_CONTROL_PLANE",
+        "sqlite",
+        "Job-store backend selector: 'sqlite' (DatabaseJobStore, default) or "
+        "'postgres' (PostgresJobStore, needs the muscatdb[cluster] extra and "
+        "MUSCAT_POSTGRES_DSN); see job_store.py",
+    ),
+    EnvVar(
+        "MUSCAT_POSTGRES_DSN",
+        None,
+        "PostgreSQL connection string for PostgresJobStore; required when "
+        "MUSCAT_CONTROL_PLANE=postgres, unused otherwise",
+        secret=True,
+    ),
     EnvVar("MUSCAT_MAX_FULL_JOBS", "1", "Concurrent full runs allowed per pipeline across all processes sharing the database; 0 disables full runs (use on a staging instance so it cannot compete with production)"),
     EnvVar("MUSCAT_MAX_TEST_JOBS", "4", "Concurrent test runs allowed per pipeline (full runs use durable slots)"),
     EnvVar("MUSCAT_PHOT_FINALIZE_GRACE_TERMINAL_S", "2", "Photometry finalizing grace once a terminal log marker is seen (seconds)"),

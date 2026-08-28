@@ -23,10 +23,18 @@ BLOCKING_PATHS = {
     "/",
     "/target",
     "/logs",
+    "/projects",
+    "/tag",
     "/{instrument}",
     "/{instrument}/{obsdate}",
     "/api/targets/{obj}/note",
     "/api/targets/{obj}/identified",
+    "/api/targets/norm-names",
+    "/api/targets/{obj}/tags",
+    "/api/tags",
+    "/api/tags/{tag}",
+    "/api/tags/{tag}/rename",
+    "/api/tags/{tag}/export.csv",
 }
 
 # Routes whose entire job is a single external archive call and must be

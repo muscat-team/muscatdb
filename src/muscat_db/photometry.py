@@ -42,7 +42,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from muscat_db import jobs, database
-from muscat_db.job_store import get_job_store
+from muscat_db.job_store import current_owner, get_job_store
 from muscat_db.instruments import INSTRUMENTS
 from muscat_db.cache import register_cache
 from muscat_db.band_utils import DEFAULT_BANDS, NARROW_BANDS, _FILTER_BAND_ALIAS, bands_from_filters  # noqa: F401
@@ -290,11 +290,16 @@ def _conda_env_python(env: str) -> str | None:
 
 
 def _prose_prefix() -> list[str]:
-    """Resolve how to invoke the prose pipeline module, most robust first.
+    """Resolve how to invoke the prose pipeline, most robust first.
 
-    The local prose source (``prose_project_dir``) is put on ``sys.path`` by
-    running with that directory as cwd (see ``start_run``); the interpreter
-    only needs prose's dependencies, which live in the conda env.
+    Prefers the ``photometry`` console script installed into the prose conda
+    env (``prose.scripts.run_photometry:main`` per prose2's ``pyproject.toml``)
+    over ``-m`` module invocation, matching ``transit_fit._timer_prefix`` /
+    ``ttv_fit``'s equivalent. This makes whatever prose2 is actually installed
+    into the env authoritative (editable checkout today; a pinned
+    ``pip install git+...@<sha>`` for #101) rather than a checkout pointed at
+    by cwd, so the launch path no longer needs cwd for ``sys.path`` injection
+    (see ``start_run``, which now runs with the job's own output dir as cwd).
     """
     explicit = prose_python()
     if explicit:
@@ -302,6 +307,9 @@ def _prose_prefix() -> list[str]:
     env = prose_conda_env()
     conda_py = _conda_env_python(env)
     if conda_py:
+        photometry_path = Path(conda_py).parent / "photometry"
+        if photometry_path.is_file():
+            return [str(photometry_path)]
         return [conda_py, "-m", _MODULE]
     if shutil.which("conda"):
         return ["conda", "run", "-n", env, "--no-capture-output",
@@ -1682,7 +1690,7 @@ def start_run(
             env = _job_env()
             proc = subprocess.Popen(
                 cmd,
-                cwd=str(prose_project_dir()),
+                cwd=str(rdir),
                 stdout=logf,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -1718,6 +1726,7 @@ def start_run(
                 run_id=run_id,
                 run_name=run_name,
                 user_name=user_name,
+                owner=current_owner(),
             )
         except sqlite3.OperationalError as exc:
             # DB write failed (e.g. read-only database). Roll back the launched
@@ -2153,11 +2162,20 @@ def sync_jobs() -> None:
             run_id = "/".join(parts[3:]) if len(parts) > 3 else ""
             started_at = time.time()
             elapsed = 0
+            owner = ""
             for j in db_jobs:
                 if j["key"] == db_key:
                     started_at = j["started_at"]
                     elapsed = j["elapsed"]
+                    owner = j.get("owner") or ""
                     break
+            if owner and owner != current_owner():
+                # Another role's process (e.g. the web process, if this is the
+                # standalone worker, or vice versa) launched this job and is
+                # the only one whose own registry can tell whether it is truly
+                # orphaned. Reconciling it here would be a false "Process
+                # lost" verdict for a job that is not actually lost.
+                continue
             # The tracked parent is gone (server --reload / restart lost _JOBS),
             # but prose's detached workers run independently and may well have
             # finished. Trust the log's success marker over the lost parent so a
@@ -2239,7 +2257,7 @@ def sync_jobs() -> None:
                     logf.write(f"$ {shlex.join(cmd)}\n\n")
                     logf.flush()
                     proc_env = _job_env()
-                    proc = subprocess.Popen(cmd, cwd=str(prose_project_dir()), stdout=logf, stderr=subprocess.STDOUT, text=True, start_new_session=True, env=proc_env)
+                    proc = subprocess.Popen(cmd, cwd=str(rdir), stdout=logf, stderr=subprocess.STDOUT, text=True, start_new_session=True, env=proc_env)
                 except (FileNotFoundError, OSError) as exc:
                     try: logf.close()
                     except OSError: pass
@@ -2248,7 +2266,7 @@ def sync_jobs() -> None:
                     continue
                 _JOBS[key] = Job(key=key, inst=inst, date=date, target=target, cmd=cmd, proc=proc, logf=logf, log_path=pending_log_path, run_type=run_type, run_id=run_id, site=site, telescope=telescope, mode=mode, run_name=run_name)
                 try:
-                    store.save(type_="photometry", inst=inst, date=date, target=target, state="running", returncode=None, elapsed=0, started_at=_JOBS[key].started_at, run_type=run_type, params=entry.get("params", ""), run_id=run_id, run_name=run_name)
+                    store.save(type_="photometry", inst=inst, date=date, target=target, state="running", returncode=None, elapsed=0, started_at=_JOBS[key].started_at, run_type=run_type, params=entry.get("params", ""), run_id=run_id, run_name=run_name, owner=current_owner())
                 except sqlite3.OperationalError as exc:
                     try: proc.terminate()
                     except OSError: pass

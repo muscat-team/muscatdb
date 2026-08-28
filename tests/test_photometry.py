@@ -579,7 +579,9 @@ class TestCommand:
         cmd = phot.build_command(INST, DATE, TARGET, test_run=True)
         assert "--test_run" in cmd
         assert "--overwrite" in cmd
-        assert "run_photometry" in " ".join(cmd)
+        # Invocation prefix (console script vs. `-m`) is covered precisely by
+        # TestCommand.test_conda_env_python_used_by_default below; this test
+        # only cares about the argument list.
         i = cmd.index("--target_name")
         assert cmd[i + 1] == TARGET
         j = cmd.index("--results_dir")
@@ -605,6 +607,28 @@ class TestCommand:
         cmd = phot.build_command(INST, DATE, TARGET)
         assert cmd[0] == str(envpy)
         assert cmd[1:3] == ["-m", "prose.scripts.run_photometry"]
+        assert "uv" not in cmd
+
+    def test_console_script_preferred_over_module_invocation(self, monkeypatch, tmp_path):
+        # A conda env with the `photometry` console script installed (prose2's
+        # `[project.scripts]` entry point) must be used directly, so a pinned
+        # non-editable install (#101) governs what runs instead of `-m`
+        # re-deriving the module path.
+        base = tmp_path / "miniconda3"
+        env_bin = base / "envs" / "prose" / "bin"
+        env_bin.mkdir(parents=True)
+        envpy = env_bin / "python"
+        envpy.write_text("")
+        envpy.chmod(0o755)
+        photometry_bin = env_bin / "photometry"
+        photometry_bin.write_text("")
+        photometry_bin.chmod(0o755)
+        monkeypatch.delenv("MUSCAT_PROSE_PYTHON", raising=False)
+        monkeypatch.setenv("CONDA_EXE", str(base / "bin" / "conda"))
+        monkeypatch.setenv("MUSCAT_PROSE_CONDA_ENV", "prose")
+        cmd = phot.build_command(INST, DATE, TARGET)
+        assert cmd[0] == str(photometry_bin)
+        assert "-m" not in cmd
         assert "uv" not in cmd
 
     def test_command_str_full_run_has_no_test_run(self, monkeypatch, tmp_path):
@@ -1031,6 +1055,53 @@ class TestStartRun:
                         job.logf.close()
                     except OSError:
                         pass
+                phot._JOBS.clear()
+
+    def test_launches_with_run_output_dir_as_cwd(self, monkeypatch, tmp_path):
+        """The subprocess cwd is the job's own run dir, not the prose2 checkout
+        (#101): `_prose_prefix()` now resolves the installed console script
+        directly, so nothing needs cwd for `sys.path` injection any more, and a
+        pinned engine install no longer depends on where a job happens to run.
+        """
+        from dataclasses import replace
+        from muscat_db.instruments import INSTRUMENTS
+
+        class FakeProc:
+            pid = os.getpid()
+
+            def poll(self):
+                return None
+
+        raw_root = tmp_path / "raw"
+        (raw_root / DATE).mkdir(parents=True)
+        out_root = tmp_path / "out"
+
+        patched = dict(INSTRUMENTS)
+        patched[INST] = replace(INSTRUMENTS[INST], data_subdir=str(raw_root))
+        monkeypatch.setenv("MUSCAT_PROSE_DIR", str(out_root))
+        monkeypatch.setattr("muscat_db.photometry.INSTRUMENTS", patched)
+
+        captured = {}
+
+        def fake_popen(*_args, **kwargs):
+            captured.update(kwargs)
+            return FakeProc()
+
+        monkeypatch.setattr(phot.subprocess, "Popen", fake_popen)
+
+        with phot._LOCK:
+            phot._JOBS.clear()
+        try:
+            result = phot.start_run(
+                INST, DATE, TARGET,
+                options={"run_name": "", "overwrite": True},
+                test_run=True,
+            )
+            assert result["ok"] is True, result
+            expected_rdir = phot.run_output_dir(INST, DATE, TARGET, result["run_id"])
+            assert captured["cwd"] == str(expected_rdir)
+        finally:
+            with phot._LOCK:
                 phot._JOBS.clear()
 
     def test_job_status_none_when_not_started(self):
@@ -2790,12 +2861,16 @@ class TestRoutes:
         assert res["ok"] is True
         assert isinstance(res["targets"], list)
 
-    def test_api_ephemeris_target_info(self, client, catalog):
+    def test_api_ephemeris_target_info(self, client, catalog, monkeypatch):
         r = client.get("/api/ephemeris/target-info")
         assert r.status_code == 422
-        
+
         # Test no-match behavior for a dummy target. Missing ephemerides should
         # stay empty; the scheduler must not silently use placeholder values.
+        # "test_star" isn't a real designation, so the live SIMBAD/Sesame
+        # fallback in resolve_target_coords() would otherwise fire (and fail)
+        # on every run; stub it to fail fast instead of over the network.
+        monkeypatch.setattr("muscat_db.exposure.resolve_target_coords", lambda name: None)
         r2 = client.get("/api/ephemeris/target-info?target=test_star")
         assert r2.status_code == 200
         res = r2.json()
@@ -2941,6 +3016,20 @@ class TestRoutes:
         # recognized date + coordinate decoration may be removed.
         assert _normalize_target_name("TOI_2457") == "TOI2457"
         assert _normalize_target_name("HIP 67522") == "HIP67522"
+
+    def test_target_name_normalization_keeps_au_mic_intact(self):
+        """AU Mic (AU Microscopii) ends in 'C' -- the constellation
+        abbreviation, not a planet letter -- which the trailing-letter-strip
+        heuristic below would otherwise mistake for one (as it correctly does
+        for V1298Tauc above). Every raw spelling must normalize the same way
+        without needing a per-object target_overrides row, or two different
+        raw OBJECT spellings of the same star silently diverge."""
+        from muscat_db.web import _normalize_target_name
+
+        assert _normalize_target_name("AU Mic") == "AUMIC"
+        assert _normalize_target_name("AUMic") == "AUMIC"
+        assert _normalize_target_name("AU-Mic") == "AUMIC"
+        assert _normalize_target_name("au mic") == "AUMIC"
 
     def test_target_name_normalization_does_not_reinterpret_malformed_tois(self):
         from muscat_db.web import _normalize_target_name

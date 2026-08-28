@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+{% block title %}Projects — MuSCAT-db{% endblock %}
+{% block content %}
+<h1>Projects</h1>
+
+<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1.25rem; flex-wrap:wrap; gap:1rem;">
+  <p class="hint" style="margin:0;">Group targets by observing program.</p>
+  <button id="create-project-btn" class="btn solid" type="button">+ Create New Project</button>
+</div>
+
+{% if projects %}
+<div class="card-grid">
+{% for p in projects %}
+  <div class="card">
+    <a href="/tag?name={{ p.tag | urlencode }}">
+      <div class="name">{{ p.tag }}</div>
+      <div class="meta">{{ p.target_count }} target{{ '' if p.target_count == 1 else 's' }}</div>
+      {% if p.description %}
+        <div class="meta">{{ p.description[:140] }}{% if p.description|length > 140 %}…{% endif %}</div>
+      {% endif %}
+    </a>
+  </div>
+{% endfor %}
+</div>
+{% else %}
+  <div class="empty-state">
+    <div class="empty-icon">🗂️</div>
+    <h2>No projects yet</h2>
+    <p>Create a project to start grouping targets by observing program.</p>
+  </div>
+{% endif %}
+
+<div id="create-project-overlay">
+  <div class="modal-box">
+    <p class="modal-title">Create New Project</p>
+    <div style="margin-bottom:1rem;">
+      <input id="create-project-name" type="text" placeholder="Project name…"
+             style="width:100%; box-sizing:border-box; background:var(--input-bg); color:var(--text); border:1px solid var(--border); border-radius:4px; padding:0.4rem 0.6rem; font:inherit; margin-bottom:0.5rem;">
+      <textarea id="create-project-desc" rows="3" placeholder="Description (optional)…"
+                style="width:100%; box-sizing:border-box; background:var(--input-bg); color:var(--text); border:1px solid var(--border); border-radius:4px; padding:0.4rem 0.6rem; font:inherit;"></textarea>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" id="create-project-cancel" type="button">Cancel</button>
+      <button class="btn solid" id="create-project-save" type="button">Create</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  const openBtn = document.getElementById('create-project-btn');
+  const overlay = document.getElementById('create-project-overlay');
+  const nameInput = document.getElementById('create-project-name');
+  const descInput = document.getElementById('create-project-desc');
+  const cancelBtn = document.getElementById('create-project-cancel');
+  const saveBtn = document.getElementById('create-project-save');
+
+  function open() {
+    nameInput.value = '';
+    descInput.value = '';
+    overlay.classList.add('visible');
+    nameInput.focus();
+  }
+  function close() {
+    overlay.classList.remove('visible');
+  }
+
+  async function create() {
+    const tag = nameInput.value.trim();
+    if (!tag) { nameInput.focus(); return; }
+    const description = descInput.value.trim();
+    try {
+      const res = await fetch('/api/tags', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({tag, description}),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail || ('HTTP ' + res.status));
+      }
+      window.location.href = '/tag?name=' + encodeURIComponent(tag);
+    } catch (err) {
+      close();
+      showMessageModal('Error', 'Could not create project: ' + err.message);
+    }
+  }
+
+  openBtn.addEventListener('click', open);
+  cancelBtn.addEventListener('click', close);
+  saveBtn.addEventListener('click', create);
+  nameInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); create(); }
+    else if (e.key === 'Escape') { e.preventDefault(); close(); }
+  });
+})();
+</script>
+{% endblock %}

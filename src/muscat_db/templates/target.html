@@ -14,8 +14,19 @@
     {% endif %}
 </div>
   <p style="color: var(--text-dim); margin-bottom: 1.5rem;">
-    <a href="/targets">← Back to database search</a>
+    <a id="back-link" href="/targets">← Back to database search</a>
   </p>
+  <script>
+    (function () {
+      var params = new URLSearchParams(window.location.search);
+      if (params.get('from') === 'project' && params.get('project')) {
+        var project = params.get('project');
+        var link = document.getElementById('back-link');
+        link.href = '/tag?name=' + encodeURIComponent(project);
+        link.textContent = '← Back to project ' + project;
+      }
+    })();
+  </script>
 
   <details class="adv" open id="datasets-details">
     <summary>Photometric Observations ({{ datasets|length if datasets else 0 }})</summary>
