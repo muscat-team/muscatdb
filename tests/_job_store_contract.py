@@ -144,3 +144,25 @@ class JobStoreContractTests:
 
     def test_reconcile_on_empty_pipeline_is_noop(self, store):
         assert store.reconcile_slots("photometry") == 0
+
+    # --- owner tagging (architecture issue #51 step 1 follow-up) ------
+    #
+    # A row's `owner` records which role (job_store.current_owner(): "web" or
+    # "worker") launched it, so a process reconciling orphaned running rows
+    # can tell "another live role owns this" apart from "the owner is gone" --
+    # see job_store.py's `_OWNER` docstring. Preserved on empty, same pattern
+    # as run_name/user_name, so a later state-transition save() (which never
+    # passes owner) does not erase it.
+
+    def test_save_persists_owner(self, store):
+        save(store, target="HIP1", state="running", started_at=100.0, owner="worker")
+        assert store.all()[0]["owner"] == "worker"
+
+    def test_save_without_owner_defaults_empty(self, store):
+        save(store, target="HIP1", state="running", started_at=100.0)
+        assert store.all()[0].get("owner", "") == ""
+
+    def test_save_preserves_owner_when_later_save_omits_it(self, store):
+        save(store, target="HIP1", state="running", started_at=100.0, owner="worker")
+        save(store, target="HIP1", state="error", started_at=100.0)
+        assert store.all()[0]["owner"] == "worker"
