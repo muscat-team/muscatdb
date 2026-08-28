@@ -290,11 +290,16 @@ def _conda_env_python(env: str) -> str | None:
 
 
 def _prose_prefix() -> list[str]:
-    """Resolve how to invoke the prose pipeline module, most robust first.
+    """Resolve how to invoke the prose pipeline, most robust first.
 
-    The local prose source (``prose_project_dir``) is put on ``sys.path`` by
-    running with that directory as cwd (see ``start_run``); the interpreter
-    only needs prose's dependencies, which live in the conda env.
+    Prefers the ``photometry`` console script installed into the prose conda
+    env (``prose.scripts.run_photometry:main`` per prose2's ``pyproject.toml``)
+    over ``-m`` module invocation, matching ``transit_fit._timer_prefix`` /
+    ``ttv_fit``'s equivalent. This makes whatever prose2 is actually installed
+    into the env authoritative (editable checkout today; a pinned
+    ``pip install git+...@<sha>`` for #101) rather than a checkout pointed at
+    by cwd, so the launch path no longer needs cwd for ``sys.path`` injection
+    (see ``start_run``, which now runs with the job's own output dir as cwd).
     """
     explicit = prose_python()
     if explicit:
@@ -302,6 +307,9 @@ def _prose_prefix() -> list[str]:
     env = prose_conda_env()
     conda_py = _conda_env_python(env)
     if conda_py:
+        photometry_path = Path(conda_py).parent / "photometry"
+        if photometry_path.is_file():
+            return [str(photometry_path)]
         return [conda_py, "-m", _MODULE]
     if shutil.which("conda"):
         return ["conda", "run", "-n", env, "--no-capture-output",
@@ -1682,7 +1690,7 @@ def start_run(
             env = _job_env()
             proc = subprocess.Popen(
                 cmd,
-                cwd=str(prose_project_dir()),
+                cwd=str(rdir),
                 stdout=logf,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -2249,7 +2257,7 @@ def sync_jobs() -> None:
                     logf.write(f"$ {shlex.join(cmd)}\n\n")
                     logf.flush()
                     proc_env = _job_env()
-                    proc = subprocess.Popen(cmd, cwd=str(prose_project_dir()), stdout=logf, stderr=subprocess.STDOUT, text=True, start_new_session=True, env=proc_env)
+                    proc = subprocess.Popen(cmd, cwd=str(rdir), stdout=logf, stderr=subprocess.STDOUT, text=True, start_new_session=True, env=proc_env)
                 except (FileNotFoundError, OSError) as exc:
                     try: logf.close()
                     except OSError: pass
