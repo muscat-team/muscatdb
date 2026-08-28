@@ -191,6 +191,25 @@ this host is reverted by the next `git pull`, and until then both repositories b
 differently from their source. Commit and push the fix, or revert it and adapt
 muscat-db instead. `AGENTS.md` has the rule for deciding which.
 
+**Production should not run out of these `-e` checkouts at all — tracked in #101.**
+The editable installs above are correct for interactive engine development (that is
+what `-e` is for), but a job subprocess launched against the same env a `pip install
+-e` was just run into picks up the next uncommitted save with no error and no
+deploy step, which is how #77/#84 happened. The decided approach (see #26's
+comment thread, which found and fixed the same problem one layer up for the
+muscat-db checkout itself): separate conda envs for production from the ones used
+for dev — e.g. `prose-prod`/`timer-prod`/`harmonic-prod`, each `pip install
+git+https://github.com/<owner>/<repo>@<sha>` (non-editable) rather than `-e`, left
+alongside the existing `prose`/`timer`/`harmonic` dev envs untouched. Point
+`MUSCAT_PROSE_CONDA_ENV`/`MUSCAT_TIMER_CONDA_ENV`/`MUSCAT_HARMONIC_CONDA_ENV` at the
+`-prod` envs in production's `.env` once they exist; record each engine's pinned
+remote+SHA here, next to the dev-checkout table above, when that lands. Not done as
+of this writing — see #101 for status. muscat-db's own launch path no longer needs
+an engine checkout on `sys.path` via `cwd` to find the code (photometry now resolves
+the `photometry` console script from the conda env directly, matching how transit-fit
+and TTV already resolved `timer-fit`/`harmonic`), so the env's installed package is
+authoritative for all three pipelines once the `-prod` envs exist.
+
 ### Cross-mounted raids
 Three NFS servers auto-mount each other's storage:
 - ut2 exports `/raid_ut2`
