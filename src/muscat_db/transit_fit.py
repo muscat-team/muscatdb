@@ -955,13 +955,22 @@ def _write_fit_inputs(
     # runs default to 4 chains on 4 cores so all chains sample in parallel
     # (a lone core-24 server has ample headroom, and only one full fit runs
     # at a time — see _MAX_FULL_JOBS) for a more reliable r_hat convergence
-    # check; test runs ignore both values entirely since timer's --test_run
-    # path forces chains=1/cores=2 (a quick sanity check gains nothing from
-    # multiple chains) regardless of what's written to fit.yaml.
-    fit_data["tune"] = _int_opt("tune", 2000)
-    fit_data["draws"] = _int_opt("draws", 2000)
-    fit_data["chains"] = _int_opt("chains", 4)
-    fit_data["cores"] = _int_opt("cores", 4)
+    # check. A test run writes its own small values instead — tune=20,
+    # draws=20, chains=1, cores=2 — rather than relying on timer's
+    # --test_run flag to override whatever landed in fit.yaml: that flag
+    # doesn't exist on timer upstream master (#77), and muscat-db already
+    # writes every value --test_run would force, so the flag was always
+    # redundant with what's here.
+    if run_type == "test":
+        fit_data["tune"] = 20
+        fit_data["draws"] = 20
+        fit_data["chains"] = 1
+        fit_data["cores"] = 2
+    else:
+        fit_data["tune"] = _int_opt("tune", 2000)
+        fit_data["draws"] = _int_opt("draws", 2000)
+        fit_data["chains"] = _int_opt("chains", 4)
+        fit_data["cores"] = _int_opt("cores", 4)
 
     # Model options (timer defaults: include_mean and use_custom_optimizer on).
     fit_data["include_mean"] = _bool_opt("include_mean", default=True)
@@ -1440,10 +1449,10 @@ def start_fit(
     # Clear cached outputs so the next page load reads fresh results from disk.
     _fit_outputs_cache.clear()
 
-    # Launch process
+    # Launch process. Sampler size for a test run (tune=20/draws=20/chains=1/
+    # cores=2) is already in fit.yaml above, so no --test_run flag is needed
+    # here — that flag doesn't exist on timer upstream master (#77).
     cmd = [*_timer_prefix(), "-v", str(rdir)]
-    if test_run:
-        cmd.append("--test_run")
     log_path = rdir / "timer-fit.log"
     logf = open(log_path, "w")
     _write_log_banner(logf, cmd, options)
@@ -2337,9 +2346,9 @@ def sync_jobs() -> None:
                                   site=site, telescope=telescope, mode=mode, run_name=run_name, run_id=run_id,
                                   run_type=run_type)
                 _fit_outputs_cache.clear()
+                # Sampler size for a test run is already in fit.yaml (see
+                # _write_fit_inputs); no --test_run flag needed (#77).
                 cmd = [*_timer_prefix(), "-v", str(rdir)]
-                if test_run:
-                    cmd.append("--test_run")
                 log_path = rdir / "timer-fit.log"
                 try:
                     logf = open(log_path, "w")
