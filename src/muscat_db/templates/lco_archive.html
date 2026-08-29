@@ -164,10 +164,19 @@
     return dirs;
   }
 
+  // Patches each frame's status cell in place rather than calling
+  // renderFrameGroups(), which rebuilds every dataset <details> from scratch
+  // (and unconditionally reopens them, see frameRowHtml/renderFrameGroups
+  // below) -- this runs on every ~1.5s download-progress poll tick, so a
+  // full rebuild there was popping open any dataset card the operator had
+  // collapsed. Each row's status <td> already carries data-i matching its
+  // lastFrames index (frameRowHtml), so the running poll can update it
+  // directly without touching the surrounding DOM at all.
   function applyDownloadResults(results) {
     var byName = {};
     (results || []).forEach(function (r) { byName[r.filename] = r; });
-    lastFrames.forEach(function (f) {
+    var host = el('frames-groups');
+    lastFrames.forEach(function (f, i) {
       var r = byName[f.filename || f.basename];
       if (!r) return;
       if (r.status === 'downloaded' || r.status === 'exists') {
@@ -176,8 +185,9 @@
       } else {
         f._downloadStatus = r.status + (r.error ? ': ' + r.error : '');
       }
+      var cell = host.querySelector('td.frame-status[data-i="' + i + '"]');
+      if (cell) cell.textContent = f._downloadStatus || '';
     });
-    renderFrameGroups(selectedFrameKeys());
     saveArchiveState();
   }
 
