@@ -227,10 +227,46 @@ origin/<branch>` target the right ref.
 - Repo CI (`ruff`, fast `pytest`) green on the `deploy.yml` change.
 
 ## Open items to confirm at execution
-- **matrix vs. explicit jobs** for the two deploy jobs — lean matrix; validate the
-  heredoc quoting (port / tmux differ per stage).
+- ~~**matrix vs. explicit jobs**~~ → **resolved: matrix** (deploy.yml PR #119). The two
+  jobs differ only in branch/checkout/tmux/port, so a single templated body via a
+  `strategy.matrix` is used; `concurrency: group: deploy-${{ github.ref }}` stays per-ref
+  so prod/staging runs never cancel each other. Each matrix entry is gated on its branch.
 - **Staging periodic-refresh chain** — whether staging `build-db` reuses prod obslog
   CSVs or re-scans staging's own `MUSCAT_OBSLOG_DIR`. Default: re-scan staging's own
   (fully isolated), seeded from the prod DB snapshot.
 - Final `deploy.yml` becomes the source of truth for the exact launch commands; keep
   `notes/DEPLOYMENT.md`'s verification one-liners in sync.
+
+---
+
+## Execution status (2026-08-29)
+
+**Done**
+- Phase 0: daily (2026-08-29) + predeploy backups taken, `PRAGMA integrity_check` ok;
+  no running photometry/transit jobs; 8002/8003 free.
+- Phase 1: `$HOME/deploy/{main,test}/app` cloned (main / test), `uv sync` (prod `--dev`,
+  staging plain). Both track their origin branch.
+- Phase 2: prod `.env` and staging `.env` written (gitignored), with absolute paths and
+  `MUSCAT_REQUIRE_AUTH=1`; verified load in a clean env.
+- Phase 3: staging DB seeded from prod via `sqlite3 .backup` (integrity ok).
+- Phase 4 (repo): deploy.yml matrix + `deploy/nginx-staging.conf` → **PR #119** (CI green);
+  plan doc committed there too.
+- Phase 4b (repo, discovered gap): **PR #120** — `build-db` (and the other `--db` CLI
+  commands) now default `--db` from `MUSCAT_DB_PATH`, red-green tested. Required before the
+  cron/refresh moves, else `build-db` would write a fresh `./muscat.db` in each checkout.
+
+**Blocked / not yet done**
+- Phase 5 (nginx install): `deploy/nginx-staging.conf` written but install to
+  `/etc/nginx/sites-available` + `nginx -t` + reload needs **sudo** (interactive auth
+  required on this host). Run as root when convenient.
+- Phase 6 (cron move): must wait for **PR #120** to reach the production checkout
+  (`test` merge + `test`→`main` release + redeploy), otherwise `build-db` targets the
+  wrong file. Then repoint `MUSCATDB_ROOT` to `$HOME/deploy/main/app` and add the Phase 3
+  staging-refresh steps.
+- Phase 7 (vars + secrets): set `DEPLOY_*` Actions vars (org admin), bootstrap/verify the
+  staging server, and only then set the `DEPLOY_*` secrets. This is the final gate.
+
+**Findings beyond the original plan**
+- `MUSCAT_REQUIRE_AUTH` is set to 1 by `restart --nginx` (`_prepare_nginx_auth`); a bare
+  `uvicorn` launch skips it, so both `.env` files set `MUSCAT_REQUIRE_AUTH=1` explicitly.
+- `load_dotenv` does not expand `$HOME` or `~`, so all `.env` path values are absolute.
