@@ -3,17 +3,25 @@
 ExoFOP (https://exofop.ipac.caltech.edu) records ground-based ``time_series``
 entries (typically TFOPWG transit follow-up reports) against a TESS/TOI target.
 Each entry describes one reported observing run: telescope, camera, filter, the
-UT date observed, the number of frames, and — uniquely useful here — the LCO
-``tag``/request id (``tstag``) that produced it.
+UT date observed, the number of frames, and a ``tstag``.
+
+``tstag`` is *not* an LCO request id, despite the name resembling one -- per
+ExoFOP's own documentation it is ExoFOP's internal Data Tag (format
+``YYYYMMDD_username_description_number``, shortened to an integer), used to
+link an observer's own uploads together. It carries no relationship to LCO's
+request/observation numbering. Verified against the live archive for both a
+2020 and a 2024 report: ``request_id=<tstag>`` resolves to zero frames every
+time. The download pathway therefore searches the archive by target
+coordinates + a date window around the entry's reported UT date (the same
+"Search LCO Archive" tab search), not by ``tstag``.
 
 This module lets the LCO archive page answer "which reported ExoFOP time series
 for this target do we already have in muscat-db, and which are missing?", so an
 operator can fetch the ones we lack from the LCO archive.
 
 The "already in the database" test is purely local (against the muscat-db frames
-table) so the report makes no extra LCO archive API calls. The download pathway
-reuses the existing request-id based archive search + background download job in
-``lco.py`` (``tstag`` is an LCO observation request id).
+table) so the report makes no extra LCO archive API calls; only the download
+pathway (``archive_search_by_target_date``) queries the LCO archive.
 """
 
 from __future__ import annotations
@@ -262,31 +270,31 @@ def _target_coords(target: str) -> tuple[float, float] | None:
 
 
 # --------------------------------------------------------------------------- #
-# Archive fallback search (when tstag doesn't resolve via request_id)
+# Archive search for one ExoFOP time-series entry (by target + date, not tag)
 # --------------------------------------------------------------------------- #
 
-def archive_fallback_search(
+def archive_search_by_target_date(
     target: str,
     tsdate: str,
     *,
     reduction_level: str = "91",
     user_name: str | None = None,
 ) -> list[dict]:
-    """Search the LCO archive by target coordinates + date window.
+    """Search the LCO archive for the observation behind one time-series entry.
 
-    An ExoFOP time-series entry's ``tstag`` is documented as the LCO request
-    id that produced it, and searching the archive by ``request_id=<tstag>``
-    is the primary, precise download path. That assumption doesn't hold for
-    at least some older TFOPWG reports though (observed: TOI-1807's 2020-era
-    LCO/Sinistro rows all resolve to zero frames under ``request_id``, even
-    though the same nights are still archived and findable by target+date --
-    ``tstag`` there evidently predates the modern archive's request-id
-    numbering). This is the same coordinate + date-window search the "Search
-    LCO Archive" tab uses, so the one-click download still works once the
-    precise path comes up empty. Returns ``[]`` (never raises) when the
-    target's coordinates can't be resolved, ``tsdate`` can't be parsed, or
-    the archive call itself fails, so callers can treat this purely as "try
-    the fallback, then report not-found" without extra error handling.
+    ``tstag`` is not usable for this: it is ExoFOP's own internal Data Tag,
+    not an LCO request id (see the module docstring), and confirmed against
+    the live archive to resolve to zero frames for both a 2020 and a 2024
+    report. So instead of ``request_id=<tstag>``, this runs the same
+    coordinate + date-window search the "Search LCO Archive" tab uses: the
+    target's resolved coordinates via ``covers=POINT(...)``, bounded to +/-1
+    day around the entry's reported UT date (matching ``_obsdate_window``'s
+    existing tolerance rationale for the same reason -- the observing-night
+    label can lag the UT date by a day at sites whose night crosses local
+    midnight). Returns ``[]`` (never raises) when the target's coordinates
+    can't be resolved, ``tsdate`` can't be parsed, or the archive call itself
+    fails, so callers can treat this uniformly as "search, then report
+    not-found" without extra error handling.
     """
     coords = _target_coords(target)
     if coords is None:

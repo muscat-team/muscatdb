@@ -519,9 +519,12 @@
 
   el('btn-download').addEventListener('click', function () {
     var exoTags = [];
+    // Every checked box here was only rendered because its row had a usable
+    // tsdate (see renderExofopRows), so push unconditionally -- gating on
+    // data-exofop-tag would wrongly skip a row whose tstag happens to be
+    // empty even though the date (what the download actually needs) is set.
     document.querySelectorAll('#exofop-tbody input[type=checkbox]:checked').forEach(function (c) {
-      var tag = c.getAttribute('data-exofop-tag');
-      if (tag) exoTags.push([tag, c.getAttribute('data-exofop-date') || '', c]);
+      exoTags.push([c.getAttribute('data-exofop-tag') || '', c.getAttribute('data-exofop-date') || '', c]);
     });
     exoTags.forEach(function (t) { startExofopDownload(t[0], t[1], t[2]); });
     if (exoTags.length) msg('msg-download', 'Queued ' + exoTags.length + ' ExoFOP dataset' + (exoTags.length === 1 ? '' : 's') + ' for download…');
@@ -619,7 +622,10 @@
             : '<span style="color:#e67e22;">Not in database</span>')
         : '<span style="color:var(--text-dim);">N/A</span>';
       var dl = '';
-      if (r.exists_checked && !exists && tag && /^[0-9]+$/.test(tag)) {
+      // The download searches the archive by target+date (tstag isn't an LCO
+      // request id -- see exofop.py), so a reported UT date is what's
+      // actually required here, not a particular tag format.
+      if (r.exists_checked && !exists && r.tsdate) {
         dl = '<input type="checkbox" data-exofop-tag="' + esc(tag) + '" data-exofop-date="' + esc(r.tsdate || '') + '" title="Queue download">';
       }
       var tr = document.createElement('tr');
@@ -666,15 +672,15 @@
       .catch(function () { msg('msg-download', 'ExoFOP download job ' + jobId + ' failed', 'err'); });
   }
 
-  // Start a background download/ingest for one checked ExoFOP LCO request id.
-  // The request id (tstag) is documented as the LCO request that produced the
-  // entry, but that doesn't hold for at least some older TFOPWG reports (real
-  // case: TOI-1807's 2020-era rows) -- the server falls back to a target+date
-  // archive search when the request-id lookup comes up empty, so the target
-  // name and reported UT date are sent along to make that possible.
+  // Start a background download/ingest for one checked ExoFOP time-series
+  // entry. Its tstag is ExoFOP's own internal Data Tag, not an LCO request
+  // id (confirmed against the live archive -- request_id=<tstag> never
+  // resolves, for old or recent reports alike), so the server searches the
+  // archive by target name + reported UT date instead; "tag" here is only
+  // used for the status message, not sent to the API.
   function startExofopDownload(tag, tsdate, row) {
     var body = {
-      request_id: tag, tsdate: tsdate || '', target: val('dl-object'),
+      target: val('dl-object'), tsdate: tsdate || '',
       reduction_level: val('dl-rlevel') || '91', overwrite: chk('dl-overwrite'), background: true,
     };
     fetch('/api/lco/archive/exofop-download', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
@@ -683,8 +689,7 @@
         if (!d.ok) { msg('msg-download', d.error || 'ExoFOP download failed', 'err'); if (row) row.checked = false; return; }
         var link = el('link-to-jobs');
         if (link && d.job_id) link.style.display = '';
-        var via = d.fallback_search ? ' (found via target+date fallback search)' : '';
-        msg('msg-download', 'ExoFOP dataset ' + tag + ' queued for download…' + via);
+        msg('msg-download', 'ExoFOP dataset ' + (tag || tsdate) + ' queued for download…');
         if (row) row.checked = false;
         if (d.job_id) pollExofopDownload(d.job_id);
       })

@@ -4704,47 +4704,34 @@ def api_lco_archive_exofop(
 def api_lco_archive_exofop_download(request: Request, payload: dict = Body(...)):
     """Download the LCO frames behind one ExoFOP time-series entry.
 
-    An ExoFOP ``time_series`` row's ``tstag`` is documented as the LCO
-    observation request id that produced it, so the primary path pulls every
-    frame for that request (reusing the existing request-id archive search).
-    That assumption doesn't hold for at least some older TFOPWG reports
-    though (observed: TOI-1807's 2020-era LCO/Sinistro rows all resolve to
-    zero frames under ``request_id``), so when the precise lookup comes back
-    empty and the caller supplied the target name and the entry's reported
-    UT date, this falls back to the same coordinate + date-window search the
-    "Search LCO Archive" tab uses (``exofop.archive_fallback_search``)
-    before giving up. Either way this starts the standard background
+    An ExoFOP ``time_series`` row's ``tstag`` is *not* an LCO request id --
+    it's ExoFOP's own internal Data Tag (see ``exofop`` module docstring),
+    confirmed against the live archive to resolve to zero frames under
+    ``request_id=<tstag>`` for both a 2020 and a 2024 report. So this
+    searches the archive by the entry's target name + reported UT date
+    instead (``exofop.archive_search_by_target_date``, the same search the
+    "Search LCO Archive" tab uses), then starts the standard background
     download + ingest job, so a missing dataset can be fetched in one click.
     """
     try:
-        request_id = str(payload.get("request_id") or payload.get("tstag") or "").strip()
-        if not request_id or not request_id.isdigit():
+        target = str(payload.get("target") or "").strip()
+        tsdate = str(payload.get("tsdate") or "").strip()
+        if not target or not tsdate:
             return JSONResponse(
-                {"ok": False, "error": "No LCO request id (tstag) for this time-series entry."},
+                {
+                    "ok": False,
+                    "error": "Target name and observation date are required to search "
+                             "the LCO archive for this time-series entry.",
+                },
                 status_code=400,
             )
         reduction_level = str(payload.get("reduction_level") or "91")
-        user_name = _request_user(request)
-        result = lco.archive_search_all(
-            {"request_id": request_id, "reduction_level": reduction_level, "limit": "1000"},
-            user_name,
+        rows = exofop.archive_search_by_target_date(
+            target, tsdate, reduction_level=reduction_level, user_name=_request_user(request),
         )
-        rows = result.get("results") or []
-        used_fallback = False
-        target = str(payload.get("target") or "").strip()
-        tsdate = str(payload.get("tsdate") or "").strip()
-        if not rows and target and tsdate:
-            rows = exofop.archive_fallback_search(
-                target, tsdate, reduction_level=reduction_level, user_name=user_name,
-            )
-            used_fallback = bool(rows)
         if not rows:
-            detail = (
-                f" (also tried a {target!r} + {tsdate} archive search)"
-                if target and tsdate else ""
-            )
             return JSONResponse(
-                {"ok": False, "error": f"No frames found in the LCO archive for request {request_id}{detail}."},
+                {"ok": False, "error": f"No frames found in the LCO archive for {target!r} around {tsdate}."},
                 status_code=404,
             )
         annotated, _dataset_count = _annotate_lco_archive_results(
@@ -4758,7 +4745,7 @@ def api_lco_archive_exofop_download(request: Request, payload: dict = Body(...))
             user_name=request.state.user,
         )
         _persist_lco_archive_download_row(_lco_archive_download_row(job))
-        return JSONResponse({"ok": True, "fallback_search": used_fallback, **job})
+        return JSONResponse({"ok": True, **job})
     except lco.LcoError as e:
         return _lco_error_response(e)
 

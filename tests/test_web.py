@@ -3559,78 +3559,47 @@ def test_exofop_archive_endpoint_rejects_blank_target(mock_db):
 
 
 def test_exofop_download_endpoint_invokes_archive_download(mock_db):
+    """tstag is not sent to the archive at all -- it's ExoFOP's own internal
+    Data Tag, not an LCO request id (confirmed against the live archive for
+    both a 2020 and a 2024 report). The download searches by target+date."""
     client = TestClient(app)
-    with patch("muscat_db.web.lco.archive_search_all", return_value={
-        "results": [{"filename": "cpt1m010-fa03-20240513-0001-e91.fits"}],
-    }), \
+    with patch("muscat_db.web.exofop.archive_search_by_target_date", return_value=[
+        {"filename": "cpt1m010-fa03-20240513-0001-e91.fits"},
+    ]) as search, \
          patch("muscat_db.web.lco.start_archive_download", return_value={
              "job_id": "exofop-dl", "state": "running",
          }) as start:
         r = client.post(
             "/api/lco/archive/exofop-download",
-            json={"request_id": "440757", "instrument": "sinistro"},
+            json={"target": "TOI-6715", "tsdate": "2024-05-13", "instrument": "sinistro"},
         )
     assert r.status_code == 200
     body = r.json()
     assert body["ok"] is True
+    search.assert_called_once()
+    args, kwargs = search.call_args
+    assert args[:2] == ("TOI-6715", "2024-05-13")
     start.assert_called_once()
-    call_kwargs = start.call_args
-    assert call_kwargs is not None
 
 
-def test_exofop_download_endpoint_missing_request_id(mock_db):
+def test_exofop_download_endpoint_missing_target_or_date(mock_db):
     client = TestClient(app)
-    r = client.post("/api/lco/archive/exofop-download", json={"instrument": "sinistro"})
+    r = client.post("/api/lco/archive/exofop-download", json={"target": "TOI-6715"})
+    assert r.status_code == 400
+    assert r.json()["ok"] is False
+
+    r = client.post("/api/lco/archive/exofop-download", json={"tsdate": "2024-05-13"})
     assert r.status_code == 400
     assert r.json()["ok"] is False
 
 
-def test_exofop_download_endpoint_falls_back_to_target_date_search(mock_db):
-    """Real case: TOI-1807's tstag doesn't resolve via request_id, but the
-    dataset is still archived and findable by target+date. When the caller
-    supplies target+tsdate, an empty request_id search must fall back to
-    exofop.archive_fallback_search rather than reporting not-found."""
+def test_exofop_download_endpoint_reports_not_found_when_search_empty(mock_db):
     client = TestClient(app)
-    with patch("muscat_db.web.lco.archive_search_all", return_value={"results": []}), \
-         patch("muscat_db.web.exofop.archive_fallback_search", return_value=[
-             {"filename": "elp1m008-fa05-20200429-0001-e91.fits"},
-         ]) as fallback, \
-         patch("muscat_db.web.lco.start_archive_download", return_value={
-             "job_id": "exofop-dl-fb", "state": "running",
-         }) as start:
+    with patch("muscat_db.web.exofop.archive_search_by_target_date", return_value=[]):
         r = client.post(
             "/api/lco/archive/exofop-download",
-            json={"request_id": "18922", "target": "TOI-1807", "tsdate": "2020-04-30"},
-        )
-    assert r.status_code == 200
-    body = r.json()
-    assert body["ok"] is True
-    assert body["fallback_search"] is True
-    fallback.assert_called_once()
-    start.assert_called_once()
-
-
-def test_exofop_download_endpoint_reports_not_found_without_fallback_inputs(mock_db):
-    """No target/tsdate supplied -> no fallback attempted, plain 404."""
-    client = TestClient(app)
-    with patch("muscat_db.web.lco.archive_search_all", return_value={"results": []}), \
-         patch("muscat_db.web.exofop.archive_fallback_search") as fallback:
-        r = client.post(
-            "/api/lco/archive/exofop-download",
-            json={"request_id": "18922"},
+            json={"target": "TOI-1807", "tsdate": "2020-04-30"},
         )
     assert r.status_code == 404
     assert r.json()["ok"] is False
-    fallback.assert_not_called()
-
-
-def test_exofop_download_endpoint_reports_not_found_when_fallback_also_empty(mock_db):
-    client = TestClient(app)
-    with patch("muscat_db.web.lco.archive_search_all", return_value={"results": []}), \
-         patch("muscat_db.web.exofop.archive_fallback_search", return_value=[]):
-        r = client.post(
-            "/api/lco/archive/exofop-download",
-            json={"request_id": "18922", "target": "TOI-1807", "tsdate": "2020-04-30"},
-        )
-    assert r.status_code == 404
     assert r.json()["ok"] is False
