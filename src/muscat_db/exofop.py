@@ -38,7 +38,6 @@ _exofop_cache_lock = threading.Lock()
 # --------------------------------------------------------------------------- #
 
 _TOI_NAME_RE = re.compile(r"^TOI0*(\d+)(?:\.\d+)?$", re.IGNORECASE)
-_TIC_NAME_RE = re.compile(r"^TIC[\s_-]*0*(\d+)$", re.IGNORECASE)
 _PLAIN_TOI_RE = re.compile(r"^toi0*(\d+)$", re.IGNORECASE)
 
 
@@ -189,12 +188,20 @@ def _site_from_tel(tstel: str) -> str:
 
 
 def _tel_class(tstel: str) -> str:
-    token = (tstel or "").lower().replace(".", "")
-    if "0m4" in token or "0.4 m" in token or "0m4" in token:
+    # ExoFOP tstel strings mix a bare telescope-class token (e.g. "1m0") with a
+    # decimal descriptive form (e.g. "(1.0 m)"), and either can appear alone
+    # (compare the "LCO-SAAO (1 m)" vs "LCO-CTIO-1m0 (1.0 m)" test fixtures).
+    # The decimal checks must run against the *unstripped* lowercased string:
+    # matching them against a period-stripped token (as before) turns "0.4 m"
+    # into dead code that can never match, since the literal "." it looks for
+    # has already been removed.
+    raw = (tstel or "").lower()
+    token = raw.replace(".", "")
+    if "0m4" in token or "0.4m" in raw or "0.4 m" in raw:
         return "0m4"
-    if "1m0" in token or "1 m" in token or "1m" in token and "0m" not in token:
+    if "1m0" in token or "1 m" in token or "1.0m" in raw or "1.0 m" in raw or ("1m" in token and "0m" not in token):
         return "1m0"
-    if "2m0" in token or "2 m" in token or "2m" in token:
+    if "2m0" in token or "2 m" in token or "2.0m" in raw or "2.0 m" in raw:
         return "2m0"
     return ""
 

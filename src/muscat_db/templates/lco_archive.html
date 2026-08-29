@@ -521,9 +521,9 @@
     var exoTags = [];
     document.querySelectorAll('#exofop-tbody input[type=checkbox]:checked').forEach(function (c) {
       var tag = c.getAttribute('data-exofop-tag');
-      if (tag) exoTags.push(tag);
+      if (tag) exoTags.push([tag, c]);
     });
-    exoTags.forEach(function (tag) { startExofopDownload(tag); });
+    exoTags.forEach(function (pair) { startExofopDownload(pair[0], pair[1]); });
     if (exoTags.length) msg('msg-download', 'Queued ' + exoTags.length + ' ExoFOP dataset' + (exoTags.length === 1 ? '' : 's') + ' for download…');
 
     var picked = [];

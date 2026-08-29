@@ -1641,6 +1641,23 @@ class ExofopTimeSeriesTest(unittest.TestCase):
         entry = {"tstel": "LCO-SAAO (1 m)", "tscam": "SINISTRO"}
         self.assertEqual(exofop._instrument_from(entry), "sinistro")
 
+    def test_tel_class_recognizes_decimal_point4_meter_descriptions(self):
+        """Regression: a 0.4m description with no bare '0m4' token (analogous
+        to the 1m fixture above, "LCO-SAAO (1 m)", which has no '1m0' token
+        either) must still classify as the 0.4m telescope class.
+
+        The check for this used to run against a period-stripped token
+        (``.replace(".", "")``), so the literal ``"0.4 m"`` substring it
+        looked for could never match -- always dead code -- and any such
+        ExoFOP entry silently fell through to an empty telescope class,
+        breaking site/instrument inference for archival 0.4m (sbig/qhy600)
+        time-series entries.
+        """
+        self.assertEqual(exofop._tel_class("LCO-SAAO (0.4 m)"), "0m4")
+        self.assertEqual(exofop._tel_class("LCO-CTIO-0m4 (0.4 m)"), "0m4")
+        entry = {"tstel": "LCO-SAAO (0.4 m)", "tscam": "QHY600"}
+        self.assertEqual(exofop._instrument_from(entry), "qhy600")
+
     def test_fetch_time_series_cached_and_mocked(self):
         payload = {"time_series": [{"tsid": "1"}, {"tsid": "2"}]}
         class _Resp:
