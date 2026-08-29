@@ -270,3 +270,64 @@ origin/<branch>` target the right ref.
 - `MUSCAT_REQUIRE_AUTH` is set to 1 by `restart --nginx` (`_prepare_nginx_auth`); a bare
   `uvicorn` launch skips it, so both `.env` files set `MUSCAT_REQUIRE_AUTH=1` explicitly.
 - `load_dotenv` does not expand `$HOME` or `~`, so all `.env` path values are absolute.
+
+---
+
+## Hand-off checklist — complete Phases 5–7 (2026-08-29)
+
+Execution is blocked on sudo, PR review/merge, and org admin. Work through the gates in
+order; verify each gate before moving on.
+
+### Gate A — Merge PRs onto `test` (needs a human reviewer)
+1. Review **PR #119** (deploy.yml matrix + `deploy/nginx-staging.conf` + plan doc) →
+   merge to `test`.
+2. Review **PR #120** (`build-db --db` from `MUSCAT_DB_PATH`, red-green tested) → merge
+   to `test`. No explicit `--db` needed in the cron once this lands — the default resolves
+   `MUSCAT_DB_PATH` from the checkout's `.env`.
+
+> Self-approval is not possible on `test` (requires a non-author approval). Here the
+> issue's body says `Refs #26` — it outlives the merge, so **close by hand** at release.
+
+### Gate B — Release `test → main`
+3. `gh pr create --base main --head test` (the only PR needing an explicit base).
+4. Merge with a **merge commit, never squash** (ruleset on `main` enforces this; a squash
+   recurses into add/add conflicts on the next test→main merge — see AGENTS.md).
+5. Deploy.yml auto-runs on the `main` push (pins prod checkout with
+   `git reset --hard origin/main`). **Prod uvicorn relaunches on :8001 in tmux
+   `muscatdbgui`; prod now has the `--db` fix.**
+
+### Gate C — Verify prod redeploy (no sudo needed)
+6. `:8001/healthz` → 200; full `/` still 401 unauthenticated.
+7. From `$HOME/deploy/main/app`: `uv run muscat-db build-db --help` — confirm default
+   `--db` resolves to the production path (proves PR #120 is live).
+
+### Gate D — Phase 6: move the nightly cron (host, `crontab -e`)
+8. Repoint `MUSCATDB_ROOT=/ut2/jerome/deploy/main/app` so nightly ingest runs from the
+   prod checkout; no explicit `--db` (fix is live).
+9. Add staging-refresh steps after prod ingest:
+   - `sqlite3 "$MUSCATDB_ROOT/muscat.db" ".backup '/ut2/jerome/deploy/test/muscat_test.db'"`
+   - from `$HOME/deploy/test/app`: `scan-yesterday` +
+     `build-db --db /ut2/jerome/deploy/test/muscat_test.db`
+   - confirm logs move to the new checkout paths.
+
+### Gate E — Phase 5: nginx (needs **sudo**, interactive auth)
+10. `sudo cp $HOME/deploy/main/app/deploy/nginx-staging.conf /etc/nginx/sites-available/muscat-staging`
+11. Symlink into `sites-enabled`, `sudo nginx -t`, `sudo systemctl reload nginx`.
+12. Verify `:8002` reverse-proxies to `:8003` and serves the staging app.
+
+### Gate F — Phase 7: Actions vars + secrets (**org admin**)
+13. Set `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY` **vars** (after Phases 1–6
+    verified, per issue ordering) into both branches' environments.
+14. Bootstrap staging: `git push` to `test` → staging uvicorn :8003 in tmux
+    `muscatdb-test`.
+15. Verify :8003 (via :8002) + `/healthz`, then set the `DEPLOY_*` **secrets** for both.
+
+### Final verification (from the plan)
+- `:8001` / `:8003` refuse unauthenticated `/` (401); `/healthz` → 200.
+- Staging `build-db` never touches prod `muscat.db`.
+- Prod `:8001` and prod cron both healthy on the new checkout.
+- Close issue #26 by hand.
+
+**Live-verification reminders:** after deploy the server runs via bare `uvicorn`
+(no `--reload`); HTML/JS changes need a server restart to show. Server runs in tmux
+`muscatdbgui` (prod) / `muscatdb-test` (staging).
