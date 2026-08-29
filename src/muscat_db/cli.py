@@ -63,7 +63,18 @@ app = typer.Typer(
     help="MuSCAT observation log pipeline",
     no_args_is_help=True,
 )
-console = Console()
+# highlight=False: rich's automatic repr-highlighting inserts its own ANSI
+# spans around anything that looks like a Python literal (numbers, quoted
+# strings, list brackets) *inside* an already-styled message, splitting a
+# plain substring like "unknown pipeline" or "0 frames remain" across several
+# escape-coded fragments. That only matters when color is actually emitted --
+# but rich decides whether to color at Console-construction time from the
+# ambient environment (this module-level singleton is built once, at import),
+# so a later per-invocation override (e.g. a test passing NO_COLOR) cannot
+# undo it. Disabling highlighting keeps our own explicit "[red]"/"[green]"
+# markup intact while making every message's substrings contiguous
+# regardless of the ambient FORCE_COLOR/NO_COLOR/TTY state.
+console = Console(highlight=False)
 
 _WORKER_OPTION = typer.Option(None, "--workers", "-w", help="Parallel worker count (default: cpu_count)")
 
