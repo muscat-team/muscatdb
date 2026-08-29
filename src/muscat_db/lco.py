@@ -425,6 +425,26 @@ def archive_search_all(
     return {"count": total, "results": results[:max_frames], "truncated": truncated}
 
 
+# OBJECT values LCO stamps on engineering frames that still carry a real
+# science-looking OBSTYPE (observed: an auto-focus sequence submitted as a
+# plain EXPOSE block, filed with a normal "e91" filename, OBJECT="auto_focus").
+# OBSTYPE=EXPOSE alone can't catch these -- confirmed live, some of these are
+# genuinely OBSTYPE=EXPOSE -- so this is a second, narrower filter on the one
+# concrete pattern actually observed, not a speculative deny-list of every
+# conceivable engineering keyword.
+_ENGINEERING_OBJECT_NAMES = frozenset({"autofocus"})
+
+
+def is_engineering_object(object_name: str) -> bool:
+    """True if *object_name* is a known non-science placeholder, not a target.
+
+    Matches case- and separator-insensitively (``AUTO_FOCUS``, ``Auto Focus``,
+    ``auto-focus`` and ``auto_focus`` all normalize to ``autofocus``).
+    """
+    normalized = re.sub(r"[^a-z0-9]", "", str(object_name or "").lower())
+    return normalized in _ENGINEERING_OBJECT_NAMES
+
+
 def infer_archive_instrument(frame: dict) -> str:
     """Infer the muscat-db instrument name from LCO archive frame metadata."""
     site = str(frame.get("SITEID") or frame.get("site_id") or "").lower()

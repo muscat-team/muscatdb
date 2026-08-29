@@ -4659,6 +4659,15 @@ def api_lco_archive_frames(
     try:
         result = lco.archive_search(filters, _request_user(request))
         rows = result.get("results") or []
+        if isinstance(rows, list):
+            # OBSTYPE=EXPOSE (above) doesn't catch an engineering frame that
+            # was itself submitted as a plain EXPOSE block (observed:
+            # auto-focus sequences filed with a real "e91" filename) -- this
+            # is the narrower, OBJECT-based net for that specific case.
+            rows = [r for r in rows if not lco.is_engineering_object(r.get("OBJECT") or "")]
+            result = dict(result)
+            result["results"] = rows
+            result["count"] = len(rows)
         if tel_class and isinstance(rows, list):
             rows = [r for r in rows if str(r.get("TELID") or "").lower().startswith(tel_class)]
             result = dict(result)

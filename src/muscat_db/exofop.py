@@ -325,7 +325,12 @@ def archive_search_by_target_date(
         )
     except lco.LcoError:
         return []
-    return result.get("results") or []
+    rows = result.get("results") or []
+    # OBSTYPE=EXPOSE (above) doesn't catch an engineering frame that was
+    # itself submitted as a plain EXPOSE block (observed: an auto-focus
+    # sequence filed with a real "e91" filename) -- this is the narrower,
+    # OBJECT-based net for that specific case.
+    return [r for r in rows if not lco.is_engineering_object(r.get("OBJECT") or "")]
 
 
 # --------------------------------------------------------------------------- #

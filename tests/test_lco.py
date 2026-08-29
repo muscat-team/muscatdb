@@ -1475,6 +1475,23 @@ class InferArchiveInstrumentTest(unittest.TestCase):
             lco.infer_archive_instrument({"SITEID": "xyz", "TELID": "9m9x"})
 
 
+class IsEngineeringObjectTest(unittest.TestCase):
+    """OBSTYPE=EXPOSE alone doesn't exclude every engineering frame: real
+    case, TOI-1807 turned up "auto_focus" frames tagged OBSTYPE=EXPOSE with
+    a normal "e91" filename. is_engineering_object is the narrower,
+    OBJECT-based net for that specific, observed pattern."""
+
+    def test_matches_case_and_separator_variants(self):
+        for name in ("auto_focus", "AUTO_FOCUS", "Auto Focus", "auto-focus", "autofocus"):
+            with self.subTest(name=name):
+                self.assertTrue(lco.is_engineering_object(name))
+
+    def test_does_not_match_real_targets(self):
+        for name in ("TOI-1807", "TIC 180695581.01 (TOI 1807.01)", "WASP-12", "", None):
+            with self.subTest(name=name):
+                self.assertFalse(lco.is_engineering_object(name))
+
+
 class ExofopTimeSeriesTest(unittest.TestCase):
     """ExoFOP time-series cross-check for the LCO archive page."""
 
@@ -1771,6 +1788,20 @@ class ExofopTimeSeriesTest(unittest.TestCase):
         self.assertEqual(filters["reduction_level"], "91")
         self.assertEqual(filters["OBSTYPE"], "EXPOSE")
         self.assertEqual(user_name, "jerome")
+
+    def test_archive_search_by_target_date_excludes_engineering_frames(self):
+        """Real case: an auto-focus frame tagged OBSTYPE=EXPOSE with a real
+        "e91" filename slips past the server-side OBSTYPE filter -- this
+        must still be excluded client-side by OBJECT name."""
+        with patch("muscat_db.exofop.catalog._resolve_archive_coords",
+                   return_value=(159.15817, -64.79805, "toi")), \
+             patch("muscat_db.exofop.lco.archive_search_all", return_value={"results": [
+                 {"filename": "tfn1m014-fa05-20260617-0078-e91.fits.fz", "OBJECT": "auto_focus"},
+                 {"filename": "lsc1m004-fa03-20240417-0092-e91.fits", "OBJECT": "TIC 460950389.01 (TOI 6715.01)"},
+             ]}):
+            rows = exofop.archive_search_by_target_date("TOI-1807", "2020-04-30")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["OBJECT"], "TIC 460950389.01 (TOI 6715.01)")
 
     def test_archive_search_by_target_date_returns_empty_without_coords(self):
         with patch("muscat_db.exofop.catalog._resolve_archive_coords", return_value=None):

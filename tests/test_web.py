@@ -2000,6 +2000,27 @@ def test_lco_archive_frames_excludes_non_expose_obstype(monkeypatch):
     assert captured.get("OBSTYPE") == "EXPOSE"
 
 
+def test_lco_archive_frames_excludes_engineering_object_names(monkeypatch):
+    """Real case: an auto-focus frame tagged OBSTYPE=EXPOSE with a real
+    "e91" filename slips past the server-side OBSTYPE filter and must be
+    excluded client-side by OBJECT name instead."""
+    monkeypatch.setattr("muscat_db.lco.archive_search", lambda filters, token=None: {
+        "count": 2,
+        "results": [
+            {"filename": "tfn1m001-fa20-20260317-0087-e91.fits.fz", "OBJECT": "auto_focus", "SITEID": "tfn", "TELID": "1m0a"},
+            {"filename": "ogg2m001-ep05-20260102-0001-e91.fits.fz", "OBJECT": "TOI-1807", "SITEID": "ogg", "TELID": "2m0a"},
+        ],
+    })
+    monkeypatch.setattr("muscat_db.web._resolve_archive_coords", lambda name: (97.6367, 29.6725, "catalog"))
+
+    r = TestClient(app).get("/api/lco/archive/frames", params={"OBJECT": "TOI-1807", "limit": "10"})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["count"] == 1
+    assert len(data["results"]) == 1
+    assert data["results"][0]["OBJECT"] == "TOI-1807"
+
+
 def test_lco_archive_frames_by_request_id_does_not_filter_obstype(monkeypatch):
     """The request-id path fetches every frame for a specific, already-known
     request -- including calibration frames -- so it must not apply the
