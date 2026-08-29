@@ -15,6 +15,7 @@ import urllib.request
 from pathlib import Path
 
 from muscat_db import lco
+from muscat_db import exofop
 from muscat_db.database import set_user_lco_token
 
 class LcoTest(unittest.TestCase):
@@ -1472,3 +1473,215 @@ class InferArchiveInstrumentTest(unittest.TestCase):
     def test_unrecognized_frame_raises(self):
         with self.assertRaises(lco.LcoError):
             lco.infer_archive_instrument({"SITEID": "xyz", "TELID": "9m9x"})
+
+
+class ExofopTimeSeriesTest(unittest.TestCase):
+    """ExoFOP time-series cross-check for the LCO archive page."""
+
+    def _make_db(self):
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        import sqlite3
+        conn = sqlite3.connect(path)
+        conn.executescript(
+            """
+            CREATE TABLE frames (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                instrument TEXT NOT NULL,
+                obsdate TEXT NOT NULL,
+                ccd INTEGER NOT NULL,
+                filename TEXT NOT NULL,
+                object TEXT,
+                ra TEXT,
+                declination TEXT
+            );
+            """
+        )
+        conn.commit()
+        conn.close()
+        return path
+
+    def _insert_frame(self, db, *, instrument, obsdate, filename, object, ra, dec):
+        import sqlite3
+        conn = sqlite3.connect(db)
+        conn.execute(
+            "INSERT INTO frames (instrument, obsdate, ccd, filename, object, ra, declination) VALUES (?,?,?,?,?,?,?)",
+            (instrument, obsdate, 0, filename, object, ra, dec),
+        )
+        conn.commit()
+        conn.close()
+
+    @patch.dict(os.environ, {}, clear=False)
+    def test_local_lco_dataset_match_presence_and_absence(self):
+        db = self._make_db()
+        self.addCleanup(os.unlink, db)
+        # TOI-6715 (TIC 460950389): RA 10:36:37.96, Dec -64:47:53.0, sinistro/cpt.
+        ra = "10:36:37.96"
+        dec = "-64:47:53.0"
+        self._insert_frame(
+            db, instrument="sinistro", obsdate="240513",
+            filename="cpt1m010-fa03-20240513-0001-e91.fits",
+            object="TIC 460950389", ra=ra, dec=dec,
+        )
+        ra_deg = 159.15817
+        dec_deg = -64.79805
+
+        with patch("muscat_db.lco._db_path", return_value=db):
+            hit = lco.local_lco_dataset_match(
+                "sinistro", ["240512", "240513", "240514"], "cpt", ra_deg, dec_deg
+            )
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit["object"], "TIC 460950389")
+        self.assertEqual(hit["nframes"], 1)
+
+        with patch("muscat_db.lco._db_path", return_value=db):
+            # A far-away position must not match.
+            miss = lco.local_lco_dataset_match(
+                "sinistro", ["240512", "240513", "240514"], "cpt", 20.0, 20.0
+            )
+        self.assertIsNone(miss)
+
+        # A different site must not match either.
+        with patch("muscat_db.lco._db_path", return_value=db):
+            other = lco.local_lco_dataset_match(
+                "sinistro", ["240513"], "lsc", ra_deg, dec_deg
+            )
+        self.assertIsNone(other)
+
+    @patch.dict(os.environ, {}, clear=False)
+    def test_local_lco_dataset_match_by_object_name_when_pointing_offset(self):
+        """A dithered pointing (frame centre far from the target) must still
+        match when the dataset OBJECT header shares the target's TIC id.
+
+        Regression: LCO frames store their pointing centre, which can sit
+        hundreds of arcseconds from the scientific target (TOI-6715's lsc
+        2024-04-17 dataset centre is ~203\" off). Matching purely on resolved
+        target coords vs the stored centre misses an already-ingested dataset.
+        """
+        db = self._make_db()
+        self.addCleanup(os.unlink, db)
+        # True TOI-6715 centre.
+        ra_deg = 159.15817
+        dec_deg = -64.79805
+        # The frame's stored pointing centre is ~203" from the target.
+        self._insert_frame(
+            db, instrument="sinistro", obsdate="240417",
+            filename="lsc1m004-fa03-20240417-0092-e91.fits",
+            object="TIC 460950389.01 (TOI 6715.01)",
+            ra="10:37:01.1975", dec="-64:45:34.947",
+        )
+
+        # Coordinate-only probe misses (centre is beyond the 60" tolerance).
+        with patch("muscat_db.lco._db_path", return_value=db):
+            coord_only = lco.local_lco_dataset_match(
+                "sinistro", ["240416", "240417", "240418"], "lsc",
+                ra_deg, dec_deg,
+            )
+        self.assertIsNone(coord_only)
+
+        # Supplying the target name makes the same dataset match by identity.
+        with patch("muscat_db.lco._db_path", return_value=db):
+            by_name = lco.local_lco_dataset_match(
+                "sinistro", ["240416", "240417", "240418"], "lsc",
+                ra_deg, dec_deg, object_name="TIC 460950389",
+            )
+        self.assertIsNotNone(by_name)
+        self.assertEqual(by_name["nframes"], 1)
+
+        # Name matching still respects the date/site window: a far date misses.
+        with patch("muscat_db.lco._db_path", return_value=db):
+            far = lco.local_lco_dataset_match(
+                "sinistro", ["240501", "240502", "240503"], "lsc",
+                ra_deg, dec_deg, object_name="TIC 460950389",
+            )
+        self.assertIsNone(far)
+
+    @patch.dict(os.environ, {}, clear=False)
+    def test_check_time_series_exists_uses_local_db(self):
+        db = self._make_db()
+        self.addCleanup(os.unlink, db)
+        self._insert_frame(
+            db, instrument="sinistro", obsdate="240513",
+            filename="cpt1m010-fa03-20240513-0001-e91.fits",
+            object="TIC 460950389", ra="10:36:37.96", dec="-64:47:53.0",
+        )
+        entry = {
+            "tstel": "LCO-SAAO (1 m)",
+            "tscam": "SINISTRO",
+            "tsfilt": "gp",
+            "tsdate": "2024-05-13",
+            "tsnum": "158",
+            "tstag": "440757",
+        }
+        missing = {
+            "tstel": "LCO-CTIO-1m0 (1.0 m)",
+            "tscam": "SINISTRO",
+            "tsfilt": "ip",
+            "tsdate": "2024-04-17",
+            "tsnum": "175",
+            "tstag": "439700",
+        }
+        with patch("muscat_db.lco._db_path", return_value=db):
+            with patch("muscat_db.exofop.catalog._resolve_archive_coords",
+                       return_value=(159.15817, -64.79805, "toi")):
+                hit = exofop.check_time_series_exists(entry, target="TOI-6715")
+                miss = exofop.check_time_series_exists(missing, target="TOI-6715")
+        self.assertTrue(hit["exists"])
+        self.assertEqual(hit["instrument"], "sinistro")
+        self.assertEqual(hit["site"], "cpt")
+        self.assertEqual(hit["dataset_local_frames"], 1)
+        self.assertFalse(miss["exists"])
+        self.assertTrue(miss["exists_checked"])
+
+    def test_site_and_tel_and_instrument_inference(self):
+        self.assertEqual(exofop._site_from_tel("LCO-SAAO (1 m)"), "cpt")
+        self.assertEqual(exofop._site_from_tel("LCO-CTIO-1m0 (1.0 m)"), "lsc")
+        self.assertEqual(exofop._tel_class("LCO-SAAO (1 m)"), "1m0")
+        self.assertEqual(exofop._tel_class("LCO-CTIO-1m0 (1.0 m)"), "1m0")
+        entry = {"tstel": "LCO-SAAO (1 m)", "tscam": "SINISTRO"}
+        self.assertEqual(exofop._instrument_from(entry), "sinistro")
+
+    def test_fetch_time_series_cached_and_mocked(self):
+        payload = {"time_series": [{"tsid": "1"}, {"tsid": "2"}]}
+        class _Resp:
+            def __init__(self, data):
+                self._data = data
+            def json(self):
+                return self._data
+        calls = []
+        def fake_get(url, **kwargs):
+            calls.append(url)
+            return _Resp(payload)
+        exofop._exofop_cache.clear()
+        with patch("muscat_db.exofop.catalog._sync_get", side_effect=fake_get):
+            first = exofop.fetch_time_series("6715")
+            second = exofop.fetch_time_series("6715")
+        self.assertEqual(len(first), 2)
+        self.assertEqual(len(second), 2)
+        # Second call served from cache -> only one HTTP request.
+        self.assertEqual(len(calls), 1)
+        exofop._exofop_cache.clear()
+
+    def test_fetch_time_series_empty_on_error(self):
+        with patch("muscat_db.exofop.catalog._sync_get", side_effect=RuntimeError("boom")):
+            self.assertEqual(exofop.fetch_time_series("6715"), [])
+        exofop._exofop_cache.clear()
+
+    def test_build_report_non_toi(self):
+        with patch("muscat_db.exofop.resolve_toi_number", return_value=None):
+            r = exofop.build_time_series_report("WASP-12")
+        self.assertFalse(r["ok"])
+
+
+class ToiResolutionTest(unittest.TestCase):
+    """Target -> TOI host-number resolution for the ExoFOP cross-check."""
+
+    def test_toi_name_variants(self):
+        for name in ("TOI-6715", "toi6715", "TOI01404.02", "TOI 6715"):
+            num = exofop.resolve_toi_number(name)
+            self.assertEqual(num, "6715" if "1404" not in name else "1404", name)
+
+    def test_non_toi_returns_none(self):
+        self.assertIsNone(exofop.resolve_toi_number("WASP-12"))
+        self.assertIsNone(exofop.resolve_toi_number(""))
+        self.assertIsNone(exofop.resolve_toi_number("   "))

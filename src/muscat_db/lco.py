@@ -627,6 +627,80 @@ def _local_lco_datasets(inst: str, obsdate: str, site: str) -> list[dict]:
     return out
 
 
+_TARGET_IDENTIFIER_RE = re.compile(r"\b(?:TIC|TOI)\s*(\d+)", re.IGNORECASE)
+
+
+def _target_identifiers(name: str) -> set[str]:
+    """Extract the TIC / TOI numeric ids referenced by a target or OBJECT name.
+
+    LCO dithers/offsets its pointings, so a frame's stored pointing centre can
+    sit hundreds of arcseconds from the scientific target. Matching on the object
+    name's TIC/TOI id is the robust identity signal for "is this observation the
+    same one", whereas a strict coordinate probe against the pointing centre is
+    not. Leading zeros are stripped so ``TOI01404`` and ``TOI-1404`` agree.
+    """
+    return {
+        m.group(1).lstrip("0") or "0"
+        for m in _TARGET_IDENTIFIER_RE.finditer(str(name or ""))
+    }
+
+
+def local_lco_dataset_match(
+    inst: str,
+    obsdates: list[str] | str,
+    site: str,
+    ra_deg: float,
+    dec_deg: float,
+    match_arcsec: float = _LCO_DATASET_MATCH_ARCSEC,
+    object_name: str = "",
+) -> dict | None:
+    """Return the local frames dataset (if any) matching an observation.
+
+    Used by the ExoFOP time-series cross-check to decide whether a reported
+    observation is already in muscat-db, without hitting the LCO archive. Scans
+    ``frames`` for ``inst`` over one or more ``obsdates`` (YYMMDD labels) on
+    ``site`` and returns the matching dataset.
+
+    A dataset matches if (in priority order):
+
+    1. its OBJECT header shares a TIC/TOI identifier with ``object_name`` (the
+       robust identity — LCO pointings are dithered, so strict coordinate
+       proximity against the pointing centre is unreliable), or
+    2. its coordinate median is within ``match_arcsec`` of ``(ra_deg, dec_deg)``,
+       mirroring the coordinate membership rule used by
+       ``_annotate_lco_archive_results``.
+
+    Returns ``None`` when nothing matches.
+    """
+    if not inst or not site or ra_deg is None or dec_deg is None:
+        return None
+    labels = [obsdates] if isinstance(obsdates, str) else list(obsdates or [])
+    candidates: list[dict] = []
+    for label in labels:
+        candidates.extend(_local_lco_datasets(inst, label, site))
+
+    obj_ids = _target_identifiers(object_name)
+    if obj_ids:
+        for cand in candidates:
+            if obj_ids & _target_identifiers(cand.get("object", "")):
+                return cand
+
+    best = None
+    best_sep = None
+    for cand in candidates:
+        ra2 = cand.get("ra_deg")
+        dec2 = cand.get("dec_deg")
+        if ra2 is None or dec2 is None:
+            continue
+        sep = _angular_sep_arcsec(ra_deg, dec_deg, ra2, dec2)
+        if best_sep is None or sep < best_sep:
+            best_sep = sep
+            best = cand
+    if best is not None and best_sep is not None and best_sep <= match_arcsec:
+        return best
+    return None
+
+
 def _annotate_lco_archive_results(inst: str, results: list[dict]) -> tuple[list[dict], int]:
     if not results:
         return [], 0

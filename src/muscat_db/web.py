@@ -49,6 +49,7 @@ from muscat_db import transit_fit as fit
 from muscat_db import ttv_fit as ttv
 from muscat_db import lco
 from muscat_db.lco import _annotate_lco_archive_results
+from muscat_db import exofop
 from muscat_db import transit_obs
 from muscat_db import fov as fov_opt
 from muscat_db import ephemeris_math
@@ -4663,6 +4664,81 @@ def api_lco_archive_frames(
             payload["resolved_dec"] = round(resolved[1], 5)
             payload["resolved_source"] = resolved[2]
         return JSONResponse(payload)
+    except lco.LcoError as e:
+        return _lco_error_response(e)
+
+
+@lco_router.get("/archive/exofop", response_class=JSONResponse)
+def api_lco_archive_exofop(
+    OBJECT: str = "",
+    instrument: str = "",
+):
+    """Cross-check an ExoFOP target's reported LCO ``time_series`` against the DB.
+
+    When the ``OBJECT`` target names a known TOI (or resolves to one via the
+    local catalogs), fetch the ExoFOP ``time_series`` list and flag each entry as
+    already in muscat-db or missing. The existence check is entirely local; it
+    makes no LCO archive calls.
+    """
+    target = (OBJECT or "").strip()
+    if not target:
+        return JSONResponse(
+            {"ok": False, "error": "Enter a target name to check ExoFOP time series."},
+            status_code=400,
+        )
+    report = exofop.build_time_series_report(target)
+    if not report.get("ok"):
+        return JSONResponse({"ok": False, "error": report.get("error", "not a TOI")})
+    return JSONResponse(
+        {
+            "ok": True,
+            "match_mode": "exofop",
+            "toi": report["toi"],
+            "time_series": report["time_series"],
+            "total": report["total"],
+        }
+    )
+
+
+@lco_router.post("/archive/exofop-download", response_class=JSONResponse)
+def api_lco_archive_exofop_download(request: Request, payload: dict = Body(...)):
+    """Download the LCO frames behind one ExoFOP time-series entry.
+
+    An ExoFOP ``time_series`` row's ``tstag`` is the LCO observation request id
+    that produced it. This pulls every frame for that request (reusing the
+    existing request-id archive search) and starts the standard background
+    download + ingest job, so a missing dataset can be fetched in one click.
+    """
+    try:
+        request_id = str(payload.get("request_id") or payload.get("tstag") or "").strip()
+        if not request_id or not request_id.isdigit():
+            return JSONResponse(
+                {"ok": False, "error": "No LCO request id (tstag) for this time-series entry."},
+                status_code=400,
+            )
+        reduction_level = str(payload.get("reduction_level") or "91")
+        result = lco.archive_search_all(
+            {"request_id": request_id, "reduction_level": reduction_level, "limit": "1000"},
+            _request_user(request),
+        )
+        rows = result.get("results") or []
+        if not rows:
+            return JSONResponse(
+                {"ok": False, "error": f"No frames found in the LCO archive for request {request_id}."},
+                status_code=404,
+            )
+        annotated, _dataset_count = _annotate_lco_archive_results(
+            str(payload.get("instrument") or ""), rows
+        )
+        frames = [dict(f) for f in annotated]
+        job = lco.start_archive_download(
+            frames,
+            overwrite=bool(payload.get("overwrite")),
+            auto_ingest=True,
+            user_name=request.state.user,
+        )
+        _persist_lco_archive_download_row(_lco_archive_download_row(job))
+        return JSONResponse({"ok": True, **job})
     except lco.LcoError as e:
         return _lco_error_response(e)
 

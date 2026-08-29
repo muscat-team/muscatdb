@@ -7,6 +7,7 @@ import zipfile
 import pytest
 from fastapi.testclient import TestClient
 from starlette.responses import Response
+from unittest.mock import patch
 
 from muscat_db.database import save_job, get_persisted_jobs
 from muscat_db.web import app, _annotate_lco_archive_results, _script_json
@@ -3505,3 +3506,80 @@ def test_transit_fit_target_params_populates_without_inst_date(mock_db):
     assert r.status_code == 200
     assert "DEFAULTS" in r.text
     assert '"teff": 5778.0' in r.text
+
+
+def test_exofop_archive_endpoint_non_toi(mock_db):
+    client = TestClient(app)
+    with patch("muscat_db.web.exofop.build_time_series_report", return_value={
+        "ok": False, "error": "Target does not resolve to a known TOI",
+    }):
+        r = client.get("/api/lco/archive/exofop", params={"OBJECT": "WASP-12"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False
+    assert body["error"]
+
+
+def test_exofop_archive_endpoint_rows(mock_db):
+    client = TestClient(app)
+    rows = [
+        {
+            "tsid": "123", "tsurl": "https://exo.mk/123", "tsdate": "2024-05-13",
+            "tsnum": "158", "tsfilt": "gp", "instrument": "sinistro", "site": "cpt",
+            "exists": False, "exists_checked": True,
+        },
+        {
+            "tsid": "999", "tsurl": "https://exo.mk/999", "tsdate": "2024-05-14",
+            "tsnum": "159", "tsfilt": "ip", "instrument": "sinistro", "site": "cpt",
+            "exists": True, "exists_checked": True,
+        },
+    ]
+    with patch("muscat_db.web.exofop.build_time_series_report", return_value={
+        "ok": True, "toi": "6715", "time_series": rows, "total": 2,
+    }):
+        r = client.get("/api/lco/archive/exofop", params={"OBJECT": "TIC 460950389"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["toi"] == "6715"
+    assert body["total"] == 2
+    assert len(body["time_series"]) == 2
+    assert body["time_series"][0]["exists"] is False
+    assert body["time_series"][1]["exists"] is True
+    missing = [x for x in body["time_series"] if not x["exists"]]
+    assert len(missing) == 1
+    assert missing[0]["tsid"] == "123"
+
+
+def test_exofop_archive_endpoint_rejects_blank_target(mock_db):
+    client = TestClient(app)
+    r = client.get("/api/lco/archive/exofop", params={"OBJECT": "   "})
+    assert r.status_code == 400
+    assert r.json()["ok"] is False
+
+
+def test_exofop_download_endpoint_invokes_archive_download(mock_db):
+    client = TestClient(app)
+    with patch("muscat_db.web.lco.archive_search_all", return_value={
+        "results": [{"filename": "cpt1m010-fa03-20240513-0001-e91.fits"}],
+    }), \
+         patch("muscat_db.web.lco.start_archive_download", return_value={
+             "job_id": "exofop-dl", "state": "running",
+         }) as start:
+        r = client.post(
+            "/api/lco/archive/exofop-download",
+            json={"request_id": "440757", "instrument": "sinistro"},
+        )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    start.assert_called_once()
+    call_kwargs = start.call_args
+    assert call_kwargs is not None
+
+
+def test_exofop_download_endpoint_missing_request_id(mock_db):
+    client = TestClient(app)
+    r = client.post("/api/lco/archive/exofop-download", json={"instrument": "sinistro"})
+    assert r.status_code == 400
+    assert r.json()["ok"] is False
