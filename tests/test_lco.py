@@ -1700,6 +1700,20 @@ class ExofopTimeSeriesTest(unittest.TestCase):
         entry = {"tstel": "LCO-SAAO (0.4 m)", "tscam": "QHY600"}
         self.assertEqual(exofop._instrument_from(entry), "qhy600")
 
+    def test_site_from_tel_recognizes_mcdonald_abbreviation(self):
+        """Regression: TOI-1807's real reported ExoFOP time series abbreviate
+        McDonald Observatory (LCO's ELP site) as "McD", not the full
+        "MCDONALD" _SITE_TOKENS previously matched only -- e.g.
+        "LCO-McD-1m (1.0 m)" and "LCO-McD (1.0 m)". That left every LCO/
+        Sinistro row for TOI-1807 with site="" and exists_checked=False
+        even though the instrument itself resolved correctly, silently
+        disabling the in-db/missing cross-check for a real target.
+        """
+        self.assertEqual(exofop._site_from_tel("LCO-McD-1m (1.0 m)"), "elp")
+        self.assertEqual(exofop._site_from_tel("LCO-McD (1.0 m)"), "elp")
+        entry = {"tstel": "LCO-McD-1m (1.0 m)", "tscam": "SINISTRO"}
+        self.assertEqual(exofop._instrument_from(entry), "sinistro")
+
     def test_fetch_time_series_cached_and_mocked(self):
         payload = {"time_series": [{"tsid": "1"}, {"tsid": "2"}]}
         class _Resp:

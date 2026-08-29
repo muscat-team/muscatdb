@@ -160,6 +160,10 @@ _SITE_TOKENS = {
     "SIDING SPRING": "coj",
     "ELP": "elp",
     "MCDONALD": "elp",
+    # Real ExoFOP tstel values abbreviate McDonald Observatory as "McD", not
+    # the full "MCDONALD" (e.g. "LCO-McD-1m (1.0 m)", "LCO-McD (1.0 m)" --
+    # confirmed against TOI-1807's reported LCO/Sinistro time-series entries).
+    "MCD": "elp",
     "TFN": "tfn",
     "TEIDE": "tfn",
     "TLV": "tlv",
