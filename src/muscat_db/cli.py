@@ -68,6 +68,24 @@ console = Console()
 _WORKER_OPTION = typer.Option(None, "--workers", "-w", help="Parallel worker count (default: cpu_count)")
 
 
+def _db_option() -> typer.Option:
+    """``--db`` option whose default comes from ``MUSCAT_DB_PATH``.
+
+    The web server and ``db_path()`` already resolve the database from
+    ``MUSCAT_DB_PATH`` (loaded from the checkout's ``.env``), but the CLI
+    ``--db`` flags hard-coded ``muscat.db`` relative to cwd. That only worked by
+    accident (cwd happened to be a tree that held ``muscat.db``) and breaks once
+    a command runs from a dedicated deploy checkout (issue #26) where the real
+    DB lives elsewhere. Default the option from the same env the rest of the app
+    reads so every command targets the configured DB regardless of cwd.
+    """
+    return typer.Option(
+        os.environ.get("MUSCAT_DB_PATH", "muscat.db"),
+        "--db",
+        help="SQLite database path (default: $MUSCAT_DB_PATH or muscat.db)",
+    )
+
+
 def _log_startup_banner(command: str) -> None:
     """Print a versioned startup header so log files show exactly which build ran and when.
 
@@ -262,7 +280,7 @@ def summary(
 
 @app.command(cls=_Cmd)
 def build_db(
-    db: str = typer.Option("muscat.db", "--db", help="SQLite database path"),
+    db: str = _db_option(),
 ):
     """Build SQLite database from all CSV observation logs."""
     _log_startup_banner(f"build-db --db {db}")
@@ -282,7 +300,7 @@ def build_db(
 @app.command(cls=_Cmd, name="build-static-site")
 def build_static_site(
     out: str = typer.Option("site", "--out", "-o", help="Output directory for the static site"),
-    db: str = typer.Option("muscat.db", "--db", help="SQLite database path"),
+    db: str = _db_option(),
     scrub_notes: bool = typer.Option(
         True, "--scrub-notes/--keep-notes",
         help="Blank private notes/usernames and redact host home paths",
@@ -338,7 +356,7 @@ def ingest_date(
         ..., help="Observation date (yymmdd)", autocompletion=_complete_obsdate,
         callback=_obsdate_callback,
     ),
-    db: str = typer.Option("muscat.db", "--db", help="SQLite database path"),
+    db: str = _db_option(),
 ):
     """Ingest one instrument/date from obslog CSVs into the database."""
     _log_startup_banner(f"ingest-date {instrument} {obsdate} --db {db}")
@@ -405,7 +423,7 @@ def normalize_obsdates(
         True, "--rescan/--no-rescan",
         help="Rescan and re-ingest affected dates after moving",
     ),
-    db: str = typer.Option("muscat.db", "--db", help="SQLite database path"),
+    db: str = _db_option(),
 ):
     """Repair midnight-split date directories in the raw LCO data tree.
 
@@ -812,7 +830,7 @@ def _run_server(
 
 @app.command(cls=_Cmd)
 def serve(
-    db: str = typer.Option("muscat.db", "--db", help="SQLite database path"),
+    db: str = _db_option(),
     host: str = typer.Option("127.0.0.1", "--host", help="Bind address"),
     port: int = typer.Option(8000, "--port", "-p", help="Port number"),
     reload: bool = typer.Option(False, "--reload", help="Auto-reload on code changes"),
@@ -830,7 +848,7 @@ def serve(
 
 @app.command(cls=_Cmd)
 def restart(
-    db: str = typer.Option("muscat.db", "--db", help="SQLite database path"),
+    db: str = _db_option(),
     host: str = typer.Option("127.0.0.1", "--host", help="Bind address"),
     port: int = typer.Option(8000, "--port", "-p", help="Port number"),
     reload: bool = typer.Option(False, "--reload", help="Auto-reload on code changes"),
@@ -862,7 +880,7 @@ def worker(
         help='Pipeline(s) to run: photometry, transit_fit, ttv_fit '
              '(comma-separated for more than one), or "all".',
     ),
-    db: str = typer.Option("muscat.db", "--db", help="SQLite database path"),
+    db: str = _db_option(),
     interval: float = typer.Option(
         None, "--interval",
         help="Seconds between claim/reconcile passes "
