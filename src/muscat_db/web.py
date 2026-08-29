@@ -4704,9 +4704,16 @@ def api_lco_archive_exofop(
 def api_lco_archive_exofop_download(request: Request, payload: dict = Body(...)):
     """Download the LCO frames behind one ExoFOP time-series entry.
 
-    An ExoFOP ``time_series`` row's ``tstag`` is the LCO observation request id
-    that produced it. This pulls every frame for that request (reusing the
-    existing request-id archive search) and starts the standard background
+    An ExoFOP ``time_series`` row's ``tstag`` is documented as the LCO
+    observation request id that produced it, so the primary path pulls every
+    frame for that request (reusing the existing request-id archive search).
+    That assumption doesn't hold for at least some older TFOPWG reports
+    though (observed: TOI-1807's 2020-era LCO/Sinistro rows all resolve to
+    zero frames under ``request_id``), so when the precise lookup comes back
+    empty and the caller supplied the target name and the entry's reported
+    UT date, this falls back to the same coordinate + date-window search the
+    "Search LCO Archive" tab uses (``exofop.archive_fallback_search``)
+    before giving up. Either way this starts the standard background
     download + ingest job, so a missing dataset can be fetched in one click.
     """
     try:
@@ -4717,14 +4724,27 @@ def api_lco_archive_exofop_download(request: Request, payload: dict = Body(...))
                 status_code=400,
             )
         reduction_level = str(payload.get("reduction_level") or "91")
+        user_name = _request_user(request)
         result = lco.archive_search_all(
             {"request_id": request_id, "reduction_level": reduction_level, "limit": "1000"},
-            _request_user(request),
+            user_name,
         )
         rows = result.get("results") or []
+        used_fallback = False
+        target = str(payload.get("target") or "").strip()
+        tsdate = str(payload.get("tsdate") or "").strip()
+        if not rows and target and tsdate:
+            rows = exofop.archive_fallback_search(
+                target, tsdate, reduction_level=reduction_level, user_name=user_name,
+            )
+            used_fallback = bool(rows)
         if not rows:
+            detail = (
+                f" (also tried a {target!r} + {tsdate} archive search)"
+                if target and tsdate else ""
+            )
             return JSONResponse(
-                {"ok": False, "error": f"No frames found in the LCO archive for request {request_id}."},
+                {"ok": False, "error": f"No frames found in the LCO archive for request {request_id}{detail}."},
                 status_code=404,
             )
         annotated, _dataset_count = _annotate_lco_archive_results(
@@ -4738,7 +4758,7 @@ def api_lco_archive_exofop_download(request: Request, payload: dict = Body(...))
             user_name=request.state.user,
         )
         _persist_lco_archive_download_row(_lco_archive_download_row(job))
-        return JSONResponse({"ok": True, **job})
+        return JSONResponse({"ok": True, "fallback_search": used_fallback, **job})
     except lco.LcoError as e:
         return _lco_error_response(e)
 

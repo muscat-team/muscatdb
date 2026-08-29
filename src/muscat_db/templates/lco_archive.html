@@ -521,9 +521,9 @@
     var exoTags = [];
     document.querySelectorAll('#exofop-tbody input[type=checkbox]:checked').forEach(function (c) {
       var tag = c.getAttribute('data-exofop-tag');
-      if (tag) exoTags.push([tag, c]);
+      if (tag) exoTags.push([tag, c.getAttribute('data-exofop-date') || '', c]);
     });
-    exoTags.forEach(function (pair) { startExofopDownload(pair[0], pair[1]); });
+    exoTags.forEach(function (t) { startExofopDownload(t[0], t[1], t[2]); });
     if (exoTags.length) msg('msg-download', 'Queued ' + exoTags.length + ' ExoFOP dataset' + (exoTags.length === 1 ? '' : 's') + ' for download…');
 
     var picked = [];
@@ -667,15 +667,24 @@
   }
 
   // Start a background download/ingest for one checked ExoFOP LCO request id.
-  function startExofopDownload(tag, row) {
-    var body = { request_id: tag, reduction_level: val('dl-rlevel') || '91', overwrite: chk('dl-overwrite'), background: true };
+  // The request id (tstag) is documented as the LCO request that produced the
+  // entry, but that doesn't hold for at least some older TFOPWG reports (real
+  // case: TOI-1807's 2020-era rows) -- the server falls back to a target+date
+  // archive search when the request-id lookup comes up empty, so the target
+  // name and reported UT date are sent along to make that possible.
+  function startExofopDownload(tag, tsdate, row) {
+    var body = {
+      request_id: tag, tsdate: tsdate || '', target: val('dl-object'),
+      reduction_level: val('dl-rlevel') || '91', overwrite: chk('dl-overwrite'), background: true,
+    };
     fetch('/api/lco/archive/exofop-download', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
       .then(function (r) { return r.json(); })
       .then(function (d) {
         if (!d.ok) { msg('msg-download', d.error || 'ExoFOP download failed', 'err'); if (row) row.checked = false; return; }
         var link = el('link-to-jobs');
         if (link && d.job_id) link.style.display = '';
-        msg('msg-download', 'ExoFOP dataset ' + tag + ' queued for download…');
+        var via = d.fallback_search ? ' (found via target+date fallback search)' : '';
+        msg('msg-download', 'ExoFOP dataset ' + tag + ' queued for download…' + via);
         if (row) row.checked = false;
         if (d.job_id) pollExofopDownload(d.job_id);
       })

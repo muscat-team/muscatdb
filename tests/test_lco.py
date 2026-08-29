@@ -1745,6 +1745,47 @@ class ExofopTimeSeriesTest(unittest.TestCase):
             r = exofop.build_time_series_report("WASP-12")
         self.assertFalse(r["ok"])
 
+    def test_archive_fallback_search_queries_by_coords_and_date_window(self):
+        """Real case: TOI-1807's tstag values don't resolve via request_id,
+        but the dataset is still archived and findable by target+date. This
+        builds the same covers=POINT(...) + start/end window the "Search LCO
+        Archive" tab uses, +/-1 day around the reported UT date."""
+        calls = []
+
+        def fake_search_all(filters, user_name):
+            calls.append((filters, user_name))
+            return {"results": [{"filename": "elp1m008-fa05-20200429-0001-e91.fits"}]}
+
+        with patch("muscat_db.exofop.catalog._resolve_archive_coords",
+                   return_value=(159.15817, -64.79805, "toi")), \
+             patch("muscat_db.exofop.lco.archive_search_all", side_effect=fake_search_all):
+            rows = exofop.archive_fallback_search(
+                "TOI-1807", "2020-04-30", reduction_level="91", user_name="jerome",
+            )
+        self.assertEqual(len(rows), 1)
+        filters, user_name = calls[0]
+        self.assertEqual(filters["covers"], "POINT(159.15817 -64.79805)")
+        self.assertEqual(filters["start"], "2020-04-29")
+        self.assertEqual(filters["end"], "2020-05-01")
+        self.assertEqual(filters["reduction_level"], "91")
+        self.assertEqual(user_name, "jerome")
+
+    def test_archive_fallback_search_returns_empty_without_coords(self):
+        with patch("muscat_db.exofop.catalog._resolve_archive_coords", return_value=None):
+            self.assertEqual(exofop.archive_fallback_search("nonsense", "2020-04-30"), [])
+
+    def test_archive_fallback_search_returns_empty_on_bad_date(self):
+        with patch("muscat_db.exofop.catalog._resolve_archive_coords",
+                   return_value=(1.0, 2.0, "toi")):
+            self.assertEqual(exofop.archive_fallback_search("TOI-1807", "not-a-date"), [])
+
+    def test_archive_fallback_search_returns_empty_on_archive_error(self):
+        with patch("muscat_db.exofop.catalog._resolve_archive_coords",
+                   return_value=(1.0, 2.0, "toi")), \
+             patch("muscat_db.exofop.lco.archive_search_all",
+                   side_effect=lco.LcoError("boom")):
+            self.assertEqual(exofop.archive_fallback_search("TOI-1807", "2020-04-30"), [])
+
 
 class ToiResolutionTest(unittest.TestCase):
     """Target -> TOI host-number resolution for the ExoFOP cross-check."""

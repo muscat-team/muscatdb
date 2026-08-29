@@ -262,6 +262,59 @@ def _target_coords(target: str) -> tuple[float, float] | None:
 
 
 # --------------------------------------------------------------------------- #
+# Archive fallback search (when tstag doesn't resolve via request_id)
+# --------------------------------------------------------------------------- #
+
+def archive_fallback_search(
+    target: str,
+    tsdate: str,
+    *,
+    reduction_level: str = "91",
+    user_name: str | None = None,
+) -> list[dict]:
+    """Search the LCO archive by target coordinates + date window.
+
+    An ExoFOP time-series entry's ``tstag`` is documented as the LCO request
+    id that produced it, and searching the archive by ``request_id=<tstag>``
+    is the primary, precise download path. That assumption doesn't hold for
+    at least some older TFOPWG reports though (observed: TOI-1807's 2020-era
+    LCO/Sinistro rows all resolve to zero frames under ``request_id``, even
+    though the same nights are still archived and findable by target+date --
+    ``tstag`` there evidently predates the modern archive's request-id
+    numbering). This is the same coordinate + date-window search the "Search
+    LCO Archive" tab uses, so the one-click download still works once the
+    precise path comes up empty. Returns ``[]`` (never raises) when the
+    target's coordinates can't be resolved, ``tsdate`` can't be parsed, or
+    the archive call itself fails, so callers can treat this purely as "try
+    the fallback, then report not-found" without extra error handling.
+    """
+    coords = _target_coords(target)
+    if coords is None:
+        return []
+    ra_deg, dec_deg = coords
+    try:
+        d = datetime.date.fromisoformat(str(tsdate or "")[:10])
+    except ValueError:
+        return []
+    start = (d - datetime.timedelta(days=1)).isoformat()
+    end = (d + datetime.timedelta(days=1)).isoformat()
+    try:
+        result = lco.archive_search_all(
+            {
+                "covers": f"POINT({ra_deg} {dec_deg})",
+                "reduction_level": reduction_level,
+                "start": start,
+                "end": end,
+                "limit": "1000",
+            },
+            user_name,
+        )
+    except lco.LcoError:
+        return []
+    return result.get("results") or []
+
+
+# --------------------------------------------------------------------------- #
 # Existence cross-check against muscat-db
 # --------------------------------------------------------------------------- #
 
