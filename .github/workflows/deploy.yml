@@ -2,22 +2,39 @@ name: Deploy
 
 on:
   push:
-    branches: [main]
+    branches: [main, test]
 
+# One deploy group per branch/ref, so a production (main) deploy and a staging
+# (test) deploy never cancel each other, while repeated pushes to the same
+# branch cancel an in-progress deploy in favour of the latest.
 concurrency:
   group: deploy-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   deploy:
-    name: Deploy to production
+    name: Deploy ${{ matrix.name }}
     runs-on: ubuntu-latest
-    environment: production
+    environment: ${{ matrix.environment }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: production, environment: production, branch: main,  path: /raid_ut2/home/jerome/deploy/main/app,  session: muscatdbgui,     port: 8001 }
+          - { name: staging,    environment: staging,    branch: test,  path: /raid_ut2/home/jerome/deploy/test/app,  session: muscatdb-test,  port: 8003 }
     steps:
       - uses: actions/checkout@v4
 
+      # Skip this matrix entry when the push is not on the branch it targets.
+      # Secrets are never consumed here (the deploy steps are also gated), so
+      # the redundant run is inert on the other branch.
+      - name: Skip on non-target branch
+        if: github.ref_name != matrix.branch
+        run: echo "Skipping ${{ matrix.name }} — branch is ${{ github.ref_name }}, expected ${{ matrix.branch }}"
+
       - name: Check deploy secrets
         id: check
+        if: github.ref_name == matrix.branch
         env:
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
@@ -31,28 +48,24 @@ jobs:
           fi
 
       - name: Install SSH key
-        if: steps.check.outputs.configured == 'true'
+        if: github.ref_name == matrix.branch && steps.check.outputs.configured == 'true'
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
 
-      - name: Pull and restart
-        if: steps.check.outputs.configured == 'true'
+      - name: Pull and restart ${{ matrix.name }}
+        if: github.ref_name == matrix.branch && steps.check.outputs.configured == 'true'
         run: |
           ssh -i ~/.ssh/deploy_key "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" << 'EOF'
             set -e
-            DEPLOY_PATH='${{ vars.DEPLOY_PATH }}'
-            DEPLOY_PATH="${DEPLOY_PATH:-$HOME/github/research/project/muscat-db}"
-            TMUX_SESSION='${{ vars.DEPLOY_TMUX_SESSION }}'
-            TMUX_SESSION="${TMUX_SESSION:-muscatdbgui}"
-            cd "$DEPLOY_PATH"
-            git fetch origin main
-            git reset --hard origin/main
+            cd '${{ matrix.path }}'
+            git fetch origin '${{ matrix.branch }}'
+            git reset --hard origin/${{ matrix.branch }}
             uv sync --dev
-            tmux send-keys -t "$TMUX_SESSION" "" C-c || true
+            tmux send-keys -t '${{ matrix.session }}' "" C-c || true
             sleep 2
-            tmux send-keys -t "$TMUX_SESSION" "uv run uvicorn muscat_db.web:sio_app --host 127.0.0.1 --port 8001 --reload" Enter || \
-              tmux new-session -d -s "$TMUX_SESSION" "uv run uvicorn muscat_db.web:sio_app --host 127.0.0.1 --port 8001 --reload"
+            tmux send-keys -t '${{ matrix.session }}' "uv run uvicorn muscat_db.web:sio_app --host 127.0.0.1 --port ${{ matrix.port }}" Enter || \
+              tmux new-session -d -s '${{ matrix.session }}' "uv run uvicorn muscat_db.web:sio_app --host 127.0.0.1 --port ${{ matrix.port }}"
           EOF
