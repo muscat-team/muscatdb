@@ -1981,6 +1981,41 @@ def test_lco_archive_frames_coordinate_primary_by_default(monkeypatch):
     assert data["resolved_source"] == "catalog"
 
 
+def test_lco_archive_frames_excludes_non_expose_obstype(monkeypatch):
+    """Real case: searching TOI-1807 turned up "auto_focus"/EXPERIMENTAL
+    frames at the same reduction_level as the real science data -- RLEVEL
+    doesn't distinguish an engineering frame from a real exposure, but
+    OBSTYPE does, and the archive filters on it server-side."""
+    captured = {}
+
+    def _fake_search(filters, token=None):
+        captured.update(filters)
+        return {"count": 0, "results": []}
+
+    monkeypatch.setattr("muscat_db.lco.archive_search", _fake_search)
+    monkeypatch.setattr("muscat_db.web._resolve_archive_coords", lambda name: (97.6367, 29.6725, "catalog"))
+
+    r = TestClient(app).get("/api/lco/archive/frames", params={"OBJECT": "TOI-1807", "limit": "10"})
+    assert r.status_code == 200
+    assert captured.get("OBSTYPE") == "EXPOSE"
+
+
+def test_lco_archive_frames_by_request_id_does_not_filter_obstype(monkeypatch):
+    """The request-id path fetches every frame for a specific, already-known
+    request -- including calibration frames -- so it must not apply the
+    coordinate/name search's OBSTYPE=EXPOSE filter."""
+    captured = {}
+
+    def _fake_search_all(filters, token=None):
+        captured.update(filters)
+        return {"count": 0, "results": []}
+
+    monkeypatch.setattr("muscat_db.lco.archive_search_all", _fake_search_all)
+    r = TestClient(app).get("/api/lco/archive/frames", params={"request_id": "4236675"})
+    assert r.status_code == 200
+    assert "OBSTYPE" not in captured
+
+
 def test_lco_archive_frames_coordinate_unresolved_returns_422(monkeypatch):
     monkeypatch.setattr("muscat_db.lco.archive_search", lambda filters, token=None: {"count": 0, "results": []})
     monkeypatch.setattr("muscat_db.web._resolve_archive_coords", lambda name: None)

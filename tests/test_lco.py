@@ -1769,6 +1769,7 @@ class ExofopTimeSeriesTest(unittest.TestCase):
         self.assertEqual(filters["start"], "2020-04-29")
         self.assertEqual(filters["end"], "2020-05-01")
         self.assertEqual(filters["reduction_level"], "91")
+        self.assertEqual(filters["OBSTYPE"], "EXPOSE")
         self.assertEqual(user_name, "jerome")
 
     def test_archive_search_by_target_date_returns_empty_without_coords(self):

@@ -4622,6 +4622,17 @@ def api_lco_archive_frames(
         "start": start,
         "end": end,
         "limit": limit,
+        # A target's coordinates/name also match auto-focus, standard-field,
+        # and other engineering frames the telescope happened to take near
+        # the same footprint (observed: TOI-1807 turned up "auto_focus"
+        # frames at the same RLEVEL as real science). reduction_level alone
+        # doesn't distinguish these -- an auto-focus frame can carry RLEVEL
+        # 91 same as a real exposure -- but OBSTYPE does, and the archive
+        # filters on it server-side, so this is one query, not a client-side
+        # pass. This is a search for a target's own observations, not a
+        # frame-by-request-id lookup, so it's fine for that request-id path
+        # above to keep returning every frame regardless of type.
+        "OBSTYPE": "EXPOSE",
     }
     # Default: coordinate-primary. Resolve the target name to RA/Dec (ICRS deg)
     # and return every frame whose footprint covers that position. This is robust

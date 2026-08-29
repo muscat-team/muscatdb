@@ -314,6 +314,12 @@ def archive_search_by_target_date(
                 "start": start,
                 "end": end,
                 "limit": "1000",
+                # Exclude auto-focus/engineering frames the telescope took
+                # near the same footprint (real example: TOI-1807 turns up
+                # "auto_focus" frames at the same reduction level as its
+                # actual science data). See the matching comment on the
+                # "Search LCO Archive" tab's own coordinate search.
+                "OBSTYPE": "EXPOSE",
             },
             user_name,
         )
