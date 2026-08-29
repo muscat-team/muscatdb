@@ -627,7 +627,7 @@ def _local_lco_datasets(inst: str, obsdate: str, site: str) -> list[dict]:
     return out
 
 
-_TARGET_IDENTIFIER_RE = re.compile(r"\b(?:TIC|TOI)\s*(\d+)", re.IGNORECASE)
+_TARGET_IDENTIFIER_RE = re.compile(r"\b(?:TIC|TOI)[\s_-]*(\d+)", re.IGNORECASE)
 
 
 def _target_identifiers(name: str) -> set[str]:
@@ -638,6 +638,11 @@ def _target_identifiers(name: str) -> set[str]:
     name's TIC/TOI id is the robust identity signal for "is this observation the
     same one", whereas a strict coordinate probe against the pointing centre is
     not. Leading zeros are stripped so ``TOI01404`` and ``TOI-1404`` agree.
+
+    The separator class (``[\\s_-]*``) must include a literal hyphen: "TOI-1807"
+    is the standard TOI naming convention and exactly what a user types into the
+    archive page's search box, so a whitespace-only separator would silently
+    return no identifier for the single most common input shape.
     """
     return {
         m.group(1).lstrip("0") or "0"

@@ -1596,6 +1596,48 @@ class ExofopTimeSeriesTest(unittest.TestCase):
             )
         self.assertIsNone(far)
 
+    def test_target_identifiers_accepts_hyphenated_toi_names(self):
+        """Regression: the hyphenated "TOI-6715" form -- the standard TOI
+        naming convention, and exactly what a user types into the archive
+        page's search box -- must yield the same identifier as "TOI 6715".
+
+        _TARGET_IDENTIFIER_RE previously required whitespace (``\\s*``)
+        between the prefix and the digits, so a literal hyphen matched
+        nothing: ``_target_identifiers("TOI-6715")`` silently returned an
+        empty set. That defeats identity-based matching for the single most
+        common way this value actually arrives (real case: searching
+        "TOI-1807" reported every LCO/Sinistro night as unmatched even after
+        ingesting the exact dataset, because local_lco_dataset_match fell
+        back to a coordinate-only probe -- the same dithered-pointing failure
+        mode the identity match was built to fix).
+        """
+        self.assertEqual(lco._target_identifiers("TOI-6715"), {"6715"})
+        self.assertEqual(lco._target_identifiers("TOI-6715"), lco._target_identifiers("TOI 6715"))
+        self.assertEqual(lco._target_identifiers("TIC-460950389"), {"460950389"})
+
+    def test_local_lco_dataset_match_by_object_name_accepts_hyphenated_query(self):
+        """Same dithered-pointing scenario as above, but with the search
+        string exactly as a user would type it into the archive page:
+        hyphenated ("TOI-6715"), not space-separated ("TIC 460950389").
+        """
+        db = self._make_db()
+        self.addCleanup(os.unlink, db)
+        ra_deg = 159.15817
+        dec_deg = -64.79805
+        self._insert_frame(
+            db, instrument="sinistro", obsdate="240417",
+            filename="lsc1m004-fa03-20240417-0092-e91.fits",
+            object="TIC 460950389.01 (TOI 6715.01)",
+            ra="10:37:01.1975", dec="-64:45:34.947",
+        )
+        with patch("muscat_db.lco._db_path", return_value=db):
+            by_name = lco.local_lco_dataset_match(
+                "sinistro", ["240416", "240417", "240418"], "lsc",
+                ra_deg, dec_deg, object_name="TOI-6715",
+            )
+        self.assertIsNotNone(by_name)
+        self.assertEqual(by_name["nframes"], 1)
+
     @patch.dict(os.environ, {}, clear=False)
     def test_check_time_series_exists_uses_local_db(self):
         db = self._make_db()
