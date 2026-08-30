@@ -59,6 +59,31 @@ pins use absolute paths so a future non-`jerome` deploy account cannot mis-resol
    `restart --nginx` invocation provided today. (The proxy secret is still verified
    either way — it is present in `/etc/muscat-db`.)
 
+### Amendments adopted from PR #119 review (2026-08-31)
+8. **Dropped the `strategy.matrix` job for two explicit jobs** (`deploy-production`,
+   `deploy-staging`), each with a job-level `if: github.ref_name == '...'`. A matrix
+   job's `if` can only see `github`/`needs`/`vars`/`inputs` — `matrix` is not in scope
+   there — so a matrix leg cannot skip its own job-level `environment:` claim. Every
+   push to either branch was spinning up *both* legs and touching *both* GitHub
+   Environments; once either gets required reviewers, an unrelated push opens a pending
+   approval on a job that does nothing. Two plain jobs sidestep this since a non-matrix
+   job's `if` only needs `github.ref_name`.
+9. **Fixed the tmux launch to carry its own `cd`.** The heredoc's `cd "$DEPLOY_PATH"`
+   only moves the *SSH shell's* cwd (for `git fetch`/`reset`/`uv sync`); `tmux send-keys`
+   targets an *existing* pane with its own unrelated shell and cwd, which the heredoc's
+   `cd` never touches. A reused session (`muscatdbgui` already existed) kept launching
+   `uv run uvicorn` from wherever that pane last was — the old dev tree — so `uv run`
+   resolved the wrong project and `load_dotenv(usecwd=True)` loaded the wrong `.env`,
+   silently leaving `MUSCAT_REQUIRE_AUTH` at its fail-open default. Fix: the sent
+   keystrokes now do `cd '$DEPLOY_PATH' && uv run ...` themselves, and the `new-session`
+   fallback gets an explicit `-c "$DEPLOY_PATH"`.
+10. **Reverted the hard-coded absolute paths back to `vars.DEPLOY_PATH` /
+    `vars.DEPLOY_TMUX_SESSION`**, scoped per GitHub Environment (`production`,
+    `staging`) so each job resolves its own value — same value per job as before, but no
+    longer published in a public repo. No `:-` fallback is reintroduced: an unset var
+    resolves to `cd ''`, which fails under `set -e` exactly as a hard-coded path failing
+    open would not.
+
 ### Explicitly out of scope here
 - Dedicated service user / systemd (tracked in issue #50, Cloudflare / systemd).
 - `systemd vs tmux` decision (deferred; both servers stay under tmux for phase 1).
@@ -169,19 +194,25 @@ origin/<branch>` target the right ref.
 
 ## Phase 4 — Amend `deploy.yml` (*repo*, PR to `test`) — the code change
 
-- **Prod job:**
-  - Drop `--reload` from both launch lines (`--port 8001` only).
-  - Replace the `DEPLOY_PATH`/`DEPLOY_TMUX_SESSION` fallback lines with the hard-coded
-    `/raid_ut2/home/jerome/deploy/main/app` and `muscatdbgui` (no default-variable
-    indirection, no `$HOME` fallback to the dev tree).
-- **New `staging` job:** triggers on `push: branches: [test]`, deploys to
-  `/raid_ut2/home/jerome/deploy/test/app`, tmux `muscatdb-test`, uvicorn `--port 8003`,
-  no `--reload`; gated on the same `configured` secret check (stays inert until secrets
-  are set).
-- Prefer a **matrix** over two copy-pasted heredocs (prod vs staging differ only in
-  branch / checkout / tmux / port); validate that `concurrency: group:
-  deploy-${{ github.ref }}` stays per-ref so prod (`main`) and staging (`test`) runs do
-  not cancel each other.
+- **Two explicit jobs** (`deploy-production`, `deploy-staging`), not a `strategy.matrix`
+  — a matrix job's `if` cannot see the `matrix` context, so it cannot gate its own
+  job-level `environment:`, and both legs (and both Environments) would run on every
+  push. Each job instead carries its own `if: github.ref_name == 'main' | 'test'`.
+- **Prod job** (`environment: production`):
+  - Drop `--reload` from the launch line (`--port 8001` only).
+  - `DEPLOY_PATH`/`DEPLOY_TMUX_SESSION` come from `vars.DEPLOY_PATH` /
+    `vars.DEPLOY_TMUX_SESSION` (Environment-scoped to `production`), with **no**
+    `$HOME`/dev-checkout fallback — an unset var fails the SSH script closed (`cd ''`
+    under `set -e`) instead of silently landing on the dev tree.
+  - The tmux launch command carries its own `cd "$DEPLOY_PATH" &&` (send-keys runs in an
+    existing pane whose cwd the script's own `cd` never reaches); the `new-session`
+    fallback gets an explicit `-c "$DEPLOY_PATH"`.
+- **Staging job** (`environment: staging`): same shape, `vars.DEPLOY_PATH` /
+  `vars.DEPLOY_TMUX_SESSION` scoped to the `staging` Environment, `git fetch/reset
+  origin/test`, uvicorn `--port 8003`, no `--reload`; gated on the same `configured`
+  secret check (stays inert until secrets are set).
+- `concurrency: group: deploy-${{ github.ref }}` stays workflow-level and per-ref, so
+  prod (`main`) and staging (`test`) runs do not cancel each other.
 - Keep `DEPLOY_*` secrets unset (per the issue's ordering — arming deploy must not be
   able to hit the old tree before Phases 1–3 exist).
 - CI: `ruff` + fast `pytest` green.
@@ -227,10 +258,13 @@ origin/<branch>` target the right ref.
 - Repo CI (`ruff`, fast `pytest`) green on the `deploy.yml` change.
 
 ## Open items to confirm at execution
-- ~~**matrix vs. explicit jobs**~~ → **resolved: matrix** (deploy.yml PR #119). The two
-  jobs differ only in branch/checkout/tmux/port, so a single templated body via a
-  `strategy.matrix` is used; `concurrency: group: deploy-${{ github.ref }}` stays per-ref
-  so prod/staging runs never cancel each other. Each matrix entry is gated on its branch.
+- ~~**matrix vs. explicit jobs**~~ → **resolved: two explicit jobs** (deploy.yml PR #119,
+  amended after review). A `strategy.matrix` job's `if` cannot see the `matrix` context,
+  so it cannot gate its own job-level `environment:` — both legs would run (and both
+  Environments get touched) on every push. `deploy-production` and `deploy-staging` each
+  carry their own job-level `if: github.ref_name == 'main' | 'test'` instead;
+  `concurrency: group: deploy-${{ github.ref }}` stays per-ref so prod/staging runs never
+  cancel each other.
 - **Staging periodic-refresh chain** — whether staging `build-db` reuses prod obslog
   CSVs or re-scans staging's own `MUSCAT_OBSLOG_DIR`. Default: re-scan staging's own
   (fully isolated), seeded from the prod DB snapshot.
@@ -249,8 +283,11 @@ origin/<branch>` target the right ref.
 - Phase 2: prod `.env` and staging `.env` written (gitignored), with absolute paths and
   `MUSCAT_REQUIRE_AUTH=1`; verified load in a clean env.
 - Phase 3: staging DB seeded from prod via `sqlite3 .backup` (integrity ok).
-- Phase 4 (repo): deploy.yml matrix + `deploy/nginx-staging.conf` → **PR #119** (CI green);
-  plan doc committed there too.
+- Phase 4 (repo): deploy.yml + `deploy/nginx-staging.conf` → **PR #119** (CI green);
+  plan doc committed there too. Review (2026-08-30) found the tmux launch never reached
+  the new checkout (amendment 9) and the matrix couldn't gate its own `environment:`
+  (amendment 8); both fixed 2026-08-31 along with reverting to `vars.DEPLOY_PATH` /
+  `vars.DEPLOY_TMUX_SESSION` (amendment 10, two explicit jobs instead of a matrix).
 - Phase 4b (repo, discovered gap): **PR #120** — `build-db` (and the other `--db` CLI
   commands) now default `--db` from `MUSCAT_DB_PATH`, red-green tested. Required before the
   cron/refresh moves, else `build-db` would write a fresh `./muscat.db` in each checkout.

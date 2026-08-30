@@ -12,29 +12,16 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  deploy:
-    name: Deploy ${{ matrix.name }}
+  deploy-production:
+    name: Deploy production
+    if: github.ref_name == 'main'
     runs-on: ubuntu-latest
-    environment: ${{ matrix.environment }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { name: production, environment: production, branch: main,  path: /raid_ut2/home/jerome/deploy/main/app,  session: muscatdbgui,     port: 8001 }
-          - { name: staging,    environment: staging,    branch: test,  path: /raid_ut2/home/jerome/deploy/test/app,  session: muscatdb-test,  port: 8003 }
+    environment: production
     steps:
       - uses: actions/checkout@v4
 
-      # Skip this matrix entry when the push is not on the branch it targets.
-      # Secrets are never consumed here (the deploy steps are also gated), so
-      # the redundant run is inert on the other branch.
-      - name: Skip on non-target branch
-        if: github.ref_name != matrix.branch
-        run: echo "Skipping ${{ matrix.name }} — branch is ${{ github.ref_name }}, expected ${{ matrix.branch }}"
-
       - name: Check deploy secrets
         id: check
-        if: github.ref_name == matrix.branch
         env:
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
@@ -48,24 +35,81 @@ jobs:
           fi
 
       - name: Install SSH key
-        if: github.ref_name == matrix.branch && steps.check.outputs.configured == 'true'
+        if: steps.check.outputs.configured == 'true'
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
 
-      - name: Pull and restart ${{ matrix.name }}
-        if: github.ref_name == matrix.branch && steps.check.outputs.configured == 'true'
+      - name: Pull and restart production
+        if: steps.check.outputs.configured == 'true'
         run: |
           ssh -i ~/.ssh/deploy_key "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" << 'EOF'
             set -e
-            cd '${{ matrix.path }}'
-            git fetch origin '${{ matrix.branch }}'
-            git reset --hard origin/${{ matrix.branch }}
+            DEPLOY_PATH='${{ vars.DEPLOY_PATH }}'
+            DEPLOY_TMUX_SESSION='${{ vars.DEPLOY_TMUX_SESSION }}'
+            cd "$DEPLOY_PATH"
+            git fetch origin main
+            git reset --hard origin/main
             uv sync --dev
-            tmux send-keys -t '${{ matrix.session }}' "" C-c || true
+            tmux send-keys -t "$DEPLOY_TMUX_SESSION" "" C-c || true
             sleep 2
-            tmux send-keys -t '${{ matrix.session }}' "uv run uvicorn muscat_db.web:sio_app --host 127.0.0.1 --port ${{ matrix.port }}" Enter || \
-              tmux new-session -d -s '${{ matrix.session }}' "uv run uvicorn muscat_db.web:sio_app --host 127.0.0.1 --port ${{ matrix.port }}"
+            # The path has to travel inside the sent keystrokes, not just the SSH
+            # shell's own cwd: send-keys runs in an *existing* pane's own shell,
+            # which never saw this script's `cd`, so a bare launch command would
+            # run wherever that pane last was (e.g. the old checkout) and load
+            # its .env, not this one.
+            tmux send-keys -t "$DEPLOY_TMUX_SESSION" "cd '$DEPLOY_PATH' && uv run uvicorn muscat_db.web:sio_app --host 127.0.0.1 --port 8001" Enter || \
+              tmux new-session -d -s "$DEPLOY_TMUX_SESSION" -c "$DEPLOY_PATH" "uv run uvicorn muscat_db.web:sio_app --host 127.0.0.1 --port 8001"
+          EOF
+
+  deploy-staging:
+    name: Deploy staging
+    if: github.ref_name == 'test'
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check deploy secrets
+        id: check
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          if [ -z "$DEPLOY_SSH_KEY" ] || [ -z "$DEPLOY_HOST" ] || [ -z "$DEPLOY_USER" ]; then
+            echo "::notice::DEPLOY_SSH_KEY, DEPLOY_HOST, or DEPLOY_USER not set — skipping deploy"
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install SSH key
+        if: steps.check.outputs.configured == 'true'
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Pull and restart staging
+        if: steps.check.outputs.configured == 'true'
+        run: |
+          ssh -i ~/.ssh/deploy_key "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" << 'EOF'
+            set -e
+            DEPLOY_PATH='${{ vars.DEPLOY_PATH }}'
+            DEPLOY_TMUX_SESSION='${{ vars.DEPLOY_TMUX_SESSION }}'
+            cd "$DEPLOY_PATH"
+            git fetch origin test
+            git reset --hard origin/test
+            uv sync --dev
+            tmux send-keys -t "$DEPLOY_TMUX_SESSION" "" C-c || true
+            sleep 2
+            # See the comment in the production job: the launch command must
+            # carry its own `cd` because send-keys targets an existing pane
+            # whose cwd this script's own `cd` never touches.
+            tmux send-keys -t "$DEPLOY_TMUX_SESSION" "cd '$DEPLOY_PATH' && uv run uvicorn muscat_db.web:sio_app --host 127.0.0.1 --port 8003" Enter || \
+              tmux new-session -d -s "$DEPLOY_TMUX_SESSION" -c "$DEPLOY_PATH" "uv run uvicorn muscat_db.web:sio_app --host 127.0.0.1 --port 8003"
           EOF
