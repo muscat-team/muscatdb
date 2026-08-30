@@ -4612,6 +4612,16 @@ def api_lco_archive_frames(
 
     use_fuzzy = fuzzy_name.strip().lower() in ("1", "true", "yes", "on")
     tel_class = TELID if TELID in ("0m4", "1m0", "2m0") else ""
+    try:
+        requested_limit = int(limit)
+    except (TypeError, ValueError):
+        requested_limit = 50
+    # "Limit" is the user-facing total frame count across pages, not the
+    # archive's own per-request page size (which is hard-capped at 1000
+    # regardless of what's requested -- see the request-id path above). Pass
+    # 1000 as the page size and let archive_search_all follow `next` to
+    # satisfy a larger total, bounded by the same safety cap used there.
+    max_frames = max(1, min(requested_limit, lco._ARCHIVE_MAX_FRAMES))
     filters = {
         "proposal_id": proposal_id,
         "SITEID": SITEID,
@@ -4621,7 +4631,7 @@ def api_lco_archive_frames(
         "reduction_level": reduction_level,
         "start": start,
         "end": end,
-        "limit": limit,
+        "limit": str(min(max_frames, 1000)),
         # A target's coordinates/name also match auto-focus, standard-field,
         # and other engineering frames the telescope happened to take near
         # the same footprint (observed: TOI-1807 turned up "auto_focus"
@@ -4657,7 +4667,7 @@ def api_lco_archive_frames(
         ra_deg, dec_deg, _source = resolved
         filters["covers"] = f"POINT({ra_deg} {dec_deg})"
     try:
-        result = lco.archive_search(filters, _request_user(request))
+        result = lco.archive_search_all(filters, _request_user(request), max_frames=max_frames)
         rows = result.get("results") or []
         if isinstance(rows, list):
             # OBSTYPE=EXPOSE (above) doesn't catch an engineering frame that

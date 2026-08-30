@@ -1913,8 +1913,8 @@ def test_lco_split_partial_booking_still_registers_successful_leg(mock_db, monke
 
 def test_lco_archive_frames_search(monkeypatch):
     monkeypatch.setattr(
-        "muscat_db.lco.archive_search",
-        lambda filters, token=None: {"count": 1, "results": [{"filename": "ogg2m001-ep05-20260102-0001-e91.fits.fz", "SITEID": "ogg", "TELID": "2m0a"}]},
+        "muscat_db.lco.archive_search_all",
+        lambda filters, *a, **kw: {"count": 1, "results": [{"filename": "ogg2m001-ep05-20260102-0001-e91.fits.fz", "SITEID": "ogg", "TELID": "2m0a"}]},
     )
     r = TestClient(app).get("/api/lco/archive/frames", params={"OBJECT": "WASP-12", "limit": "10", "fuzzy_name": "1"})
     assert r.status_code == 200
@@ -1963,11 +1963,11 @@ def test_lco_archive_frames_request_id_must_be_numeric():
 def test_lco_archive_frames_coordinate_primary_by_default(monkeypatch):
     captured = {}
 
-    def _fake_search(filters, token=None):
+    def _fake_search(filters, *a, **kw):
         captured.update(filters)
         return {"count": 1, "results": [{"filename": "ogg2m001-ep05-20260102-0001-e91.fits.fz", "SITEID": "ogg", "TELID": "2m0a"}]}
 
-    monkeypatch.setattr("muscat_db.lco.archive_search", _fake_search)
+    monkeypatch.setattr("muscat_db.lco.archive_search_all", _fake_search)
     monkeypatch.setattr("muscat_db.web._resolve_archive_coords", lambda name: (97.6367, 29.6725, "catalog"))
 
     r = TestClient(app).get("/api/lco/archive/frames", params={"OBJECT": "WASP-12", "limit": "10"})
@@ -1988,11 +1988,11 @@ def test_lco_archive_frames_excludes_non_expose_obstype(monkeypatch):
     OBSTYPE does, and the archive filters on it server-side."""
     captured = {}
 
-    def _fake_search(filters, token=None):
+    def _fake_search(filters, *a, **kw):
         captured.update(filters)
         return {"count": 0, "results": []}
 
-    monkeypatch.setattr("muscat_db.lco.archive_search", _fake_search)
+    monkeypatch.setattr("muscat_db.lco.archive_search_all", _fake_search)
     monkeypatch.setattr("muscat_db.web._resolve_archive_coords", lambda name: (97.6367, 29.6725, "catalog"))
 
     r = TestClient(app).get("/api/lco/archive/frames", params={"OBJECT": "TOI-1807", "limit": "10"})
@@ -2004,7 +2004,7 @@ def test_lco_archive_frames_excludes_engineering_object_names(monkeypatch):
     """Real case: an auto-focus frame tagged OBSTYPE=EXPOSE with a real
     "e91" filename slips past the server-side OBSTYPE filter and must be
     excluded client-side by OBJECT name instead."""
-    monkeypatch.setattr("muscat_db.lco.archive_search", lambda filters, token=None: {
+    monkeypatch.setattr("muscat_db.lco.archive_search_all", lambda filters, *a, **kw: {
         "count": 2,
         "results": [
             {"filename": "tfn1m001-fa20-20260317-0087-e91.fits.fz", "OBJECT": "auto_focus", "SITEID": "tfn", "TELID": "1m0a"},
@@ -2038,7 +2038,7 @@ def test_lco_archive_frames_by_request_id_does_not_filter_obstype(monkeypatch):
 
 
 def test_lco_archive_frames_coordinate_unresolved_returns_422(monkeypatch):
-    monkeypatch.setattr("muscat_db.lco.archive_search", lambda filters, token=None: {"count": 0, "results": []})
+    monkeypatch.setattr("muscat_db.lco.archive_search_all", lambda filters, *a, **kw: {"count": 0, "results": []})
     monkeypatch.setattr("muscat_db.web._resolve_archive_coords", lambda name: None)
 
     r = TestClient(app).get("/api/lco/archive/frames", params={"OBJECT": "NoSuchTarget"})
@@ -2047,15 +2047,15 @@ def test_lco_archive_frames_coordinate_unresolved_returns_422(monkeypatch):
 
 
 def test_lco_archive_frames_coordinate_requires_name(monkeypatch):
-    monkeypatch.setattr("muscat_db.lco.archive_search", lambda filters, token=None: {"count": 0, "results": []})
+    monkeypatch.setattr("muscat_db.lco.archive_search_all", lambda filters, *a, **kw: {"count": 0, "results": []})
     r = TestClient(app).get("/api/lco/archive/frames", params={"limit": "10"})
     assert r.status_code == 400
 
 
 def test_lco_archive_frames_telescope_class_filters_locally(monkeypatch):
     monkeypatch.setattr(
-        "muscat_db.lco.archive_search",
-        lambda filters, token=None: {
+        "muscat_db.lco.archive_search_all",
+        lambda filters, *a, **kw: {
             "count": 2,
             "results": [
                 {"filename": "a.fits.fz", "SITEID": "ogg", "TELID": "2m0a"},
@@ -2080,8 +2080,8 @@ def test_lco_archive_frames_groups_overnight_dataset_and_marks_existing(mock_db,
     conn.close()
 
     monkeypatch.setattr(
-        "muscat_db.lco.archive_search",
-        lambda filters, token=None: {
+        "muscat_db.lco.archive_search_all",
+        lambda filters, *a, **kw: {
             "count": 2,
             "results": [
                 {
@@ -2120,8 +2120,8 @@ def test_lco_archive_frames_groups_overnight_dataset_and_marks_existing(mock_db,
 
 def test_lco_archive_frames_same_date_same_target_same_site_stay_one_dataset(mock_db, monkeypatch):
     monkeypatch.setattr(
-        "muscat_db.lco.archive_search",
-        lambda filters, token=None: {
+        "muscat_db.lco.archive_search_all",
+        lambda filters, *a, **kw: {
             "count": 3,
             "results": [
                 {

@@ -55,7 +55,7 @@
       <select id="dl-rlevel"><option value="">any</option><option value="91" selected>91 (reduced)</option><option value="0">0 (raw)</option></select></div>
     <div class="lco-field"><label for="dl-start">Start (UTC)</label><input id="dl-start" type="date" min="2014-01-01"></div>
     <div class="lco-field"><label for="dl-end">End (UTC)</label><input id="dl-end" type="date" min="2014-01-01"></div>
-    <div class="lco-field"><label for="dl-limit">Limit</label><input id="dl-limit" type="number" min="1" max="1000" value="50"></div>
+    <div class="lco-field"><label for="dl-limit">Limit <span class="help-tooltip" title="Total frames to fetch across the whole search, not a single archive page (the archive itself caps each page at 1000; a higher limit here paginates through more pages to reach it).">?</span></label><input id="dl-limit" type="number" min="1" max="10000" value="50"></div>
   </div>
   <div class="lco-actions">
     <button class="btn primary" type="button" id="btn-search">Search frames</button>
