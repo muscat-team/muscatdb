@@ -141,4 +141,13 @@ class TestJobsColumnMigrations:
         assert declared - _ORIGINAL_JOBS_COLUMNS == migrated
 
     def test_migration_lists_match_between_backends(self):
-        assert database._JOBS_COLUMN_MIGRATIONS == job_store._PG_JOBS_COLUMN_MIGRATIONS
+        # Column names/order only -- not (name, type) pairs. The two backends'
+        # type vocabularies already diverge in this table (started_at is REAL
+        # in database.SCHEMA but DOUBLE PRECISION in job_store._PG_SCHEMA), so
+        # comparing full tuples fails on any correctly-typed non-TEXT column
+        # even when the migration itself is right. Each backend's own type is
+        # already covered by test_sqlite_/test_pg_migrations_cover_every_post_
+        # release_column against its own schema.
+        assert [col for col, _ in database._JOBS_COLUMN_MIGRATIONS] == [
+            col for col, _ in job_store._PG_JOBS_COLUMN_MIGRATIONS
+        ]
