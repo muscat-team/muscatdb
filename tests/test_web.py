@@ -2016,9 +2016,34 @@ def test_lco_archive_frames_excludes_engineering_object_names(monkeypatch):
     r = TestClient(app).get("/api/lco/archive/frames", params={"OBJECT": "TOI-1807", "limit": "10"})
     assert r.status_code == 200
     data = r.json()
-    assert data["count"] == 1
+    # `count` stays the archive's raw total; the engineering-object filter
+    # dropping a frame client-side must not shrink it.
+    assert data["count"] == 2
     assert len(data["results"]) == 1
     assert data["results"][0]["OBJECT"] == "TOI-1807"
+
+
+def test_lco_archive_frames_all_filtered_still_reports_archive_total(monkeypatch):
+    """Regression: when every frame the archive returns is filtered out
+    client-side (engineering object here), `count` must still carry the
+    archive's real total so the frontend's "No frames returned (archive
+    reports N match)" branch fires instead of the indistinguishable
+    "No frames found" -- and so a truncated multi-page search doesn't read
+    as fully shown just because the local filter emptied the page."""
+    monkeypatch.setattr("muscat_db.lco.archive_search_all", lambda filters, *a, **kw: {
+        "count": 5000,
+        "truncated": True,
+        "results": [
+            {"filename": "tfn1m001-fa20-20260317-0087-e91.fits.fz", "OBJECT": "auto_focus", "SITEID": "tfn", "TELID": "1m0a"},
+        ],
+    })
+    monkeypatch.setattr("muscat_db.web._resolve_archive_coords", lambda name: (97.6367, 29.6725, "catalog"))
+
+    r = TestClient(app).get("/api/lco/archive/frames", params={"OBJECT": "TOI-1807", "limit": "10"})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["count"] == 5000
+    assert data["results"] == []
 
 
 def test_lco_archive_frames_by_request_id_does_not_filter_obstype(monkeypatch):
@@ -2066,7 +2091,10 @@ def test_lco_archive_frames_telescope_class_filters_locally(monkeypatch):
     r = TestClient(app).get("/api/lco/archive/frames", params={"TELID": "2m0", "fuzzy_name": "1"})
     assert r.status_code == 200
     data = r.json()
-    assert data["count"] == 1
+    # `count` stays the archive's raw total; the local TELID filter dropping
+    # a frame must not shrink it.
+    assert data["count"] == 2
+    assert len(data["results"]) == 1
     assert data["results"][0]["TELID"] == "2m0a"
 
 

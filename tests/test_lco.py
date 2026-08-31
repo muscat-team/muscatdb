@@ -1628,9 +1628,45 @@ class ExofopTimeSeriesTest(unittest.TestCase):
         back to a coordinate-only probe -- the same dithered-pointing failure
         mode the identity match was built to fix).
         """
-        self.assertEqual(lco._target_identifiers("TOI-6715"), {"6715"})
+        self.assertEqual(lco._target_identifiers("TOI-6715"), {"TOI:6715"})
         self.assertEqual(lco._target_identifiers("TOI-6715"), lco._target_identifiers("TOI 6715"))
-        self.assertEqual(lco._target_identifiers("TIC-460950389"), {"460950389"})
+        self.assertEqual(lco._target_identifiers("TIC-460950389"), {"TIC:460950389"})
+
+    def test_target_identifiers_namespaces_tic_and_toi_separately(self):
+        """Regression (PR #121 review): a bare numeric set pools TIC and TOI
+        ids into one namespace, which is the bug #100 fixed. Against
+        ``data/TOIs.csv``, #100 established that a TIC number and a TOI host
+        number can be numerically equal while naming different stars (TIC
+        2876 and TIC 4711 both equal existing TOI host numbers of different
+        targets). Pooling means ``TOI-2876`` and ``TIC 2876`` would wrongly
+        share an identifier and short-circuit ``local_lco_dataset_match``'s
+        identity branch before the coordinate check ever runs.
+        """
+        self.assertEqual(lco._target_identifiers("TOI-2876"), {"TOI:2876"})
+        self.assertEqual(lco._target_identifiers("TIC 2876"), {"TIC:2876"})
+        self.assertNotEqual(lco._target_identifiers("TOI-2876"), lco._target_identifiers("TIC 2876"))
+        self.assertFalse(lco._target_identifiers("TOI-2876") & lco._target_identifiers("TIC 2876"))
+
+    def test_local_lco_dataset_match_does_not_pool_tic_and_toi(self):
+        """Regression (PR #121 review): with a candidate dataset whose OBJECT
+        is ``TIC 2876`` sitting many degrees from the query coordinates,
+        searching for ``TOI-2876`` must not match it by numeric-id pooling --
+        that would make ``check_time_series_exists`` report an ExoFOP
+        observation as already in muscat-db when it is not, so it never gets
+        downloaded.
+        """
+        far_ra, far_dec = 10.0, 10.0
+        query_ra, query_dec = 200.0, -40.0
+        with patch(
+            "muscat_db.lco._local_lco_datasets",
+            return_value=[
+                {"object": "TIC 2876", "ra_deg": far_ra, "dec_deg": far_dec, "nframes": 1},
+            ],
+        ):
+            result = lco.local_lco_dataset_match(
+                "sinistro", ["240416"], "lsc", query_ra, query_dec, object_name="TOI-2876",
+            )
+        self.assertIsNone(result)
 
     def test_local_lco_dataset_match_by_object_name_accepts_hyphenated_query(self):
         """Same dithered-pointing scenario as above, but with the search

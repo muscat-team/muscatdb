@@ -647,11 +647,11 @@ def _local_lco_datasets(inst: str, obsdate: str, site: str) -> list[dict]:
     return out
 
 
-_TARGET_IDENTIFIER_RE = re.compile(r"\b(?:TIC|TOI)[\s_-]*(\d+)", re.IGNORECASE)
+_TARGET_IDENTIFIER_RE = re.compile(r"\b(TIC|TOI)[\s_-]*(\d+)", re.IGNORECASE)
 
 
 def _target_identifiers(name: str) -> set[str]:
-    """Extract the TIC / TOI numeric ids referenced by a target or OBJECT name.
+    """Extract the TIC / TOI ids referenced by a target or OBJECT name.
 
     LCO dithers/offsets its pointings, so a frame's stored pointing centre can
     sit hundreds of arcseconds from the scientific target. Matching on the object
@@ -663,9 +663,16 @@ def _target_identifiers(name: str) -> set[str]:
     is the standard TOI naming convention and exactly what a user types into the
     archive page's search box, so a whitespace-only separator would silently
     return no identifier for the single most common input shape.
+
+    Ids are namespaced by catalog (``"TOI:2876"`` vs ``"TIC:2876"``), not pooled
+    into a bare number. #100 established, against ``data/TOIs.csv``, that a TIC
+    number and a TOI host number can be numerically equal while naming different
+    stars (e.g. TIC 2876 and TIC 4711 both equal existing TOI host numbers of
+    different targets). Pooling the two into one numeric set lets a coincidental
+    numeric match override the coordinate check that would otherwise catch it.
     """
     return {
-        m.group(1).lstrip("0") or "0"
+        f"{m.group(1).upper()}:{m.group(2).lstrip('0') or '0'}"
         for m in _TARGET_IDENTIFIER_RE.finditer(str(name or ""))
     }
 

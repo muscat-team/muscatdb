@@ -4674,15 +4674,20 @@ def api_lco_archive_frames(
             # was itself submitted as a plain EXPOSE block (observed:
             # auto-focus sequences filed with a real "e91" filename) -- this
             # is the narrower, OBJECT-based net for that specific case.
+            # `count` stays the archive's own total (from archive_search_all),
+            # not len(rows): these are local, post-hoc filters on frames the
+            # archive already returned as matches, so overwriting `count` here
+            # would make a truncated/filtered search's "of N" total equal
+            # whatever's left after filtering -- collapsing the "Showing X of
+            # Y" truncation banner and the "archive reports N match" branch
+            # the template shows when every returned frame gets filtered out.
             rows = [r for r in rows if not lco.is_engineering_object(r.get("OBJECT") or "")]
             result = dict(result)
             result["results"] = rows
-            result["count"] = len(rows)
         if tel_class and isinstance(rows, list):
             rows = [r for r in rows if str(r.get("TELID") or "").lower().startswith(tel_class)]
             result = dict(result)
             result["results"] = rows
-            result["count"] = len(rows)
         if isinstance(rows, list):
             annotated, dataset_count = _annotate_lco_archive_results(instrument, rows)
             result = dict(result)
