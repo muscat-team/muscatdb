@@ -77,12 +77,27 @@ pins use absolute paths so a future non-`jerome` deploy account cannot mis-resol
    silently leaving `MUSCAT_REQUIRE_AUTH` at its fail-open default. Fix: the sent
    keystrokes now do `cd '$DEPLOY_PATH' && uv run ...` themselves, and the `new-session`
    fallback gets an explicit `-c "$DEPLOY_PATH"`.
-10. **Reverted the hard-coded absolute paths back to `vars.DEPLOY_PATH` /
-    `vars.DEPLOY_TMUX_SESSION`**, scoped per GitHub Environment (`production`,
-    `staging`) so each job resolves its own value — same value per job as before, but no
-    longer published in a public repo. No `:-` fallback is reintroduced: an unset var
-    resolves to `cd ''`, which fails under `set -e` exactly as a hard-coded path failing
-    open would not.
+10. **Reverted the hard-coded absolute paths back to Actions variables**, so each job
+    resolves its own value — same value per job as before, but no longer published in a
+    public repo.
+
+### Amendments adopted from PR #119 review round 2 (2026-08-31)
+11. **`cd ""` does not fail, so the amendment-10 "unset var fails closed" claim was
+    wrong.** Verified directly: `cd ""` exits nonzero under bash (`set -e` catches it),
+    but exits 0 and leaves cwd unchanged under sh, dash, and zsh. The deploy account's
+    login shell is zsh (`/etc/passwd`), and `ssh user@host <<EOF` with no remote command
+    runs the login shell against the heredoc — so on the actual target, an unset var
+    would silently `git fetch`/`reset --hard` in the SSH session's default directory
+    (the account's home) instead of aborting. Fixed with the portable, shell-independent
+    guard `: "${VAR:?msg}"` (POSIX parameter expansion, not reliant on `set -e`) right
+    after each var is read, verified to abort in bash/sh/dash/zsh alike.
+12. **Split the shared `vars.DEPLOY_PATH` / `vars.DEPLOY_TMUX_SESSION` names into
+    per-job variables** (`DEPLOY_PATH_PRODUCTION` / `DEPLOY_TMUX_SESSION_PRODUCTION`,
+    `DEPLOY_PATH_STAGING` / `DEPLOY_TMUX_SESSION_STAGING`). The identical name in both
+    jobs only stayed safe if the values were always set at *Environment* scope, never
+    *repository* scope — one repo-level `DEPLOY_PATH` would silently feed both jobs, and
+    the staging job would `git reset --hard origin/test` inside the production checkout.
+    Distinct names remove that failure mode regardless of which scope they're set at.
 
 ### Explicitly out of scope here
 - Dedicated service user / systemd (tracked in issue #50, Cloudflare / systemd).
@@ -200,17 +215,21 @@ origin/<branch>` target the right ref.
   push. Each job instead carries its own `if: github.ref_name == 'main' | 'test'`.
 - **Prod job** (`environment: production`):
   - Drop `--reload` from the launch line (`--port 8001` only).
-  - `DEPLOY_PATH`/`DEPLOY_TMUX_SESSION` come from `vars.DEPLOY_PATH` /
-    `vars.DEPLOY_TMUX_SESSION` (Environment-scoped to `production`), with **no**
-    `$HOME`/dev-checkout fallback — an unset var fails the SSH script closed (`cd ''`
-    under `set -e`) instead of silently landing on the dev tree.
+  - `DEPLOY_PATH`/`DEPLOY_TMUX_SESSION` come from `vars.DEPLOY_PATH_PRODUCTION` /
+    `vars.DEPLOY_TMUX_SESSION_PRODUCTION` — a name distinct from staging's, so a
+    variable accidentally set at *repository* scope (instead of per-Environment) can
+    only ever feed this one job, never cross-contaminate the other checkout. No
+    `$HOME`/dev-checkout fallback — an unset/empty var is caught by the portable
+    `: "${VAR:?msg}"` guard (verified to abort in bash/sh/dash/zsh; a bare `cd ""` does
+    *not* fail under the deploy account's actual shell, zsh) instead of silently landing
+    on the dev tree or the SSH session's home directory.
   - The tmux launch command carries its own `cd "$DEPLOY_PATH" &&` (send-keys runs in an
     existing pane whose cwd the script's own `cd` never reaches); the `new-session`
     fallback gets an explicit `-c "$DEPLOY_PATH"`.
-- **Staging job** (`environment: staging`): same shape, `vars.DEPLOY_PATH` /
-  `vars.DEPLOY_TMUX_SESSION` scoped to the `staging` Environment, `git fetch/reset
-  origin/test`, uvicorn `--port 8003`, no `--reload`; gated on the same `configured`
-  secret check (stays inert until secrets are set).
+- **Staging job** (`environment: staging`): same shape, `vars.DEPLOY_PATH_STAGING` /
+  `vars.DEPLOY_TMUX_SESSION_STAGING`, `git fetch/reset origin/test`, uvicorn `--port
+  8003`, no `--reload`; gated on the same `configured` secret check (stays inert until
+  secrets are set).
 - `concurrency: group: deploy-${{ github.ref }}` stays workflow-level and per-ref, so
   prod (`main`) and staging (`test`) runs do not cancel each other.
 - Keep `DEPLOY_*` secrets unset (per the issue's ordering — arming deploy must not be
@@ -284,10 +303,13 @@ origin/<branch>` target the right ref.
   `MUSCAT_REQUIRE_AUTH=1`; verified load in a clean env.
 - Phase 3: staging DB seeded from prod via `sqlite3 .backup` (integrity ok).
 - Phase 4 (repo): deploy.yml + `deploy/nginx-staging.conf` → **PR #119** (CI green);
-  plan doc committed there too. Review (2026-08-30) found the tmux launch never reached
-  the new checkout (amendment 9) and the matrix couldn't gate its own `environment:`
-  (amendment 8); both fixed 2026-08-31 along with reverting to `vars.DEPLOY_PATH` /
-  `vars.DEPLOY_TMUX_SESSION` (amendment 10, two explicit jobs instead of a matrix).
+  plan doc committed there too. Review round 1 (2026-08-30) found the tmux launch never
+  reached the new checkout (amendment 9) and the matrix couldn't gate its own
+  `environment:` (amendment 8); both fixed 2026-08-31 along with reverting to Actions
+  variables (amendment 10, two explicit jobs instead of a matrix). Review round 2
+  (2026-08-31) found the reverted-to variables shared one name across both jobs
+  (amendment 12) and that the "unset var fails closed" claim was wrong under the
+  deploy account's actual shell (amendment 11); both fixed same day.
 - Phase 4b (repo, discovered gap): **PR #120** — `build-db` (and the other `--db` CLI
   commands) now default `--db` from `MUSCAT_DB_PATH`, red-green tested. Required before the
   cron/refresh moves, else `build-db` would write a fresh `./muscat.db` in each checkout.
@@ -341,8 +363,11 @@ order; verify each gate before moving on.
 ### Gate D — Phase 6: move the nightly cron (host, `crontab -e`)
 8. Repoint `MUSCATDB_ROOT=/ut2/jerome/deploy/main/app` so nightly ingest runs from the
    prod checkout; no explicit `--db` (fix is live).
-9. Add staging-refresh steps after prod ingest:
-   - `sqlite3 "$MUSCATDB_ROOT/muscat.db" ".backup '/ut2/jerome/deploy/test/muscat_test.db'"`
+9. Add staging-refresh steps after prod ingest. The production DB stays at its
+   unchanged location (see the layout table), **not** under `$MUSCATDB_ROOT` — `sqlite3
+   .backup` against a nonexistent source silently creates an empty destination DB (exit
+   0, no error), so the wrong source here would leave staging looking fine but empty:
+   - `sqlite3 "/raid_ut2/home/jerome/github/research/project/muscat-db/muscat.db" ".backup '/ut2/jerome/deploy/test/muscat_test.db'"`
    - from `$HOME/deploy/test/app`: `scan-yesterday` +
      `build-db --db /ut2/jerome/deploy/test/muscat_test.db`
    - confirm logs move to the new checkout paths.
@@ -353,11 +378,14 @@ order; verify each gate before moving on.
 12. Verify `:8002` reverse-proxies to `:8003` and serves the staging app.
 
 ### Gate F — Phase 7: Actions vars + secrets (**org admin**)
-13. Set `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY` **vars** (after Phases 1–6
-    verified, per issue ordering) into both branches' environments.
+13. Set the **vars** `DEPLOY_PATH_PRODUCTION`/`DEPLOY_TMUX_SESSION_PRODUCTION` on the
+    `production` Environment and `DEPLOY_PATH_STAGING`/`DEPLOY_TMUX_SESSION_STAGING` on
+    `staging` (after Phases 1–6 verified, per issue ordering). `DEPLOY_HOST`,
+    `DEPLOY_USER`, `DEPLOY_SSH_KEY` are **secrets**, not vars — set in step 15, not here.
 14. Bootstrap staging: `git push` to `test` → staging uvicorn :8003 in tmux
     `muscatdb-test`.
-15. Verify :8003 (via :8002) + `/healthz`, then set the `DEPLOY_*` **secrets** for both.
+15. Verify :8003 (via :8002) + `/healthz`, then set the `DEPLOY_SSH_KEY`/`DEPLOY_HOST`/
+    `DEPLOY_USER` **secrets** for both Environments.
 
 ### Final verification (from the plan)
 - `:8001` / `:8003` refuse unauthenticated `/` (401); `/healthz` → 200.

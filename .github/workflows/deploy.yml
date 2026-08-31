@@ -47,8 +47,14 @@ jobs:
         run: |
           ssh -i ~/.ssh/deploy_key "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" << 'EOF'
             set -e
-            DEPLOY_PATH='${{ vars.DEPLOY_PATH }}'
-            DEPLOY_TMUX_SESSION='${{ vars.DEPLOY_TMUX_SESSION }}'
+            DEPLOY_PATH='${{ vars.DEPLOY_PATH_PRODUCTION }}'
+            DEPLOY_TMUX_SESSION='${{ vars.DEPLOY_TMUX_SESSION_PRODUCTION }}'
+            # Portable across shells: cd "" does not fail (does not even change
+            # cwd) in sh/dash/zsh -- only bash treats it as an error. The
+            # deploy account's login shell is zsh, so `set -e` alone does not
+            # catch an unset var here; :? does, unconditionally, in all of them.
+            : "${DEPLOY_PATH:?DEPLOY_PATH_PRODUCTION not set}"
+            : "${DEPLOY_TMUX_SESSION:?DEPLOY_TMUX_SESSION_PRODUCTION not set}"
             cd "$DEPLOY_PATH"
             git fetch origin main
             git reset --hard origin/main
@@ -99,8 +105,13 @@ jobs:
         run: |
           ssh -i ~/.ssh/deploy_key "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" << 'EOF'
             set -e
-            DEPLOY_PATH='${{ vars.DEPLOY_PATH }}'
-            DEPLOY_TMUX_SESSION='${{ vars.DEPLOY_TMUX_SESSION }}'
+            DEPLOY_PATH='${{ vars.DEPLOY_PATH_STAGING }}'
+            DEPLOY_TMUX_SESSION='${{ vars.DEPLOY_TMUX_SESSION_STAGING }}'
+            # See the comment in the production job: portable across shells
+            # (including the deploy account's zsh, where set -e alone would
+            # not catch an unset var here), :? errors out unconditionally.
+            : "${DEPLOY_PATH:?DEPLOY_PATH_STAGING not set}"
+            : "${DEPLOY_TMUX_SESSION:?DEPLOY_TMUX_SESSION_STAGING not set}"
             cd "$DEPLOY_PATH"
             git fetch origin test
             git reset --hard origin/test
