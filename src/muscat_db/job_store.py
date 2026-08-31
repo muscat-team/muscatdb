@@ -375,6 +375,33 @@ CREATE TABLE IF NOT EXISTS job_concurrency_slots (
 """
 
 
+# Columns added to `jobs` after its initial release, in landing order. Mirrors
+# database._ensure_jobs_schema's ALTER TABLE loop: a Postgres control plane
+# created before one of these columns existed gets it added here at connection
+# setup, instead of failing the next write with UndefinedColumn (issue #118).
+# Postgres supports `ADD COLUMN IF NOT EXISTS` natively, unlike SQLite, so this
+# needs no try/except probing. Keep this in sync with _PG_SCHEMA and with
+# database.SCHEMA whenever a new column lands on `jobs` -- see
+# tests/test_job_store.py's TestJobsSchemaParity, which asserts the two
+# schemas declare identical columns for `jobs` and `job_concurrency_slots`.
+_PG_JOBS_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
+    ("run_type", "TEXT NOT NULL DEFAULT ''"),
+    ("params", "TEXT NOT NULL DEFAULT ''"),
+    ("run_id", "TEXT NOT NULL DEFAULT ''"),
+    ("run_name", "TEXT NOT NULL DEFAULT ''"),
+    ("user_name", "TEXT NOT NULL DEFAULT ''"),
+    ("owner", "TEXT NOT NULL DEFAULT ''"),
+]
+
+
+def _ensure_pg_jobs_schema(conn) -> None:
+    """Create the control-plane tables if absent, then add any `jobs` column
+    a pre-existing table predates (see _PG_JOBS_COLUMN_MIGRATIONS above)."""
+    conn.execute(_PG_SCHEMA)
+    for col, col_type in _PG_JOBS_COLUMN_MIGRATIONS:
+        conn.execute(f"ALTER TABLE jobs ADD COLUMN IF NOT EXISTS {col} {col_type}")
+
+
 def _pg_rows_to_dicts(columns: list[str], rows: list[tuple]) -> list[dict]:
     """Row-shaping shared by every PostgresJobStore read method: alias
     instrument/obsdate to the inst/date keys callers already use, and fall
@@ -422,7 +449,7 @@ class PostgresJobStore(JobRepository, JobQueue, JobConcurrency):
                 )
         self._pool: ConnectionPool = ConnectionPool(dsn, min_size=1, max_size=5, open=True)
         with self._pool.connection() as conn:
-            conn.execute(_PG_SCHEMA)
+            _ensure_pg_jobs_schema(conn)
 
     def close(self) -> None:
         """Release the connection pool. Not part of the Protocol -- callers

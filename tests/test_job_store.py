@@ -7,9 +7,11 @@ tests/test_job_store_postgres.py); this file adds the seam's swap point
 (set_job_store/get_job_store) checks, which are backend-agnostic.
 """
 
+import re
+
 import pytest
 
-from muscat_db import job_store
+from muscat_db import database, job_store
 from muscat_db.job_store import (
     DatabaseJobStore,
     JobConcurrency,
@@ -49,3 +51,59 @@ class TestSeamSwap:
 
     def test_default_store_is_database_backed(self):
         assert isinstance(job_store.get_job_store(), DatabaseJobStore)
+
+
+_CONSTRAINT_KEYWORDS = {"PRIMARY", "FOREIGN", "UNIQUE", "CHECK", "CONSTRAINT"}
+
+
+def _table_columns(schema_sql: str, table: str) -> set[str]:
+    """Column names declared in `table`'s ``CREATE TABLE`` block within
+    schema_sql. Splits the column-def body on top-level commas (nested parens,
+    e.g. ``PRIMARY KEY (a, b)``, are not split) and takes each segment's first
+    token as the column name, skipping table-level constraint clauses."""
+    match = re.search(
+        rf"CREATE TABLE IF NOT EXISTS {re.escape(table)}\s*\((.*?)\)\s*;",
+        schema_sql,
+        re.DOTALL,
+    )
+    assert match, f"no CREATE TABLE IF NOT EXISTS {table} found"
+    body = match.group(1)
+    parts: list[str] = []
+    current: list[str] = []
+    depth = 0
+    for ch in body:
+        if ch == "(":
+            depth += 1
+            current.append(ch)
+        elif ch == ")":
+            depth -= 1
+            current.append(ch)
+        elif ch == "," and depth == 0:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(ch)
+    parts.append("".join(current))
+
+    columns = set()
+    for part in parts:
+        tokens = part.strip().split()
+        if not tokens or tokens[0].upper() in _CONSTRAINT_KEYWORDS:
+            continue
+        columns.add(tokens[0])
+    return columns
+
+
+class TestJobsSchemaParity:
+    """database.SCHEMA (SQLite) and job_store._PG_SCHEMA (Postgres) must
+    declare the same columns for `jobs` and `job_concurrency_slots`, or a
+    column added to one backend silently drifts from the other -- the two
+    control-plane implementations otherwise disagree about upgrades (issue
+    #118). Runs unconditionally: it only parses the two DDL strings, so it
+    does not need a reachable PostgreSQL server."""
+
+    @pytest.mark.parametrize("table", ["jobs", "job_concurrency_slots"])
+    def test_column_sets_match(self, table):
+        sqlite_columns = _table_columns(database.SCHEMA, table)
+        postgres_columns = _table_columns(job_store._PG_SCHEMA, table)
+        assert sqlite_columns == postgres_columns
