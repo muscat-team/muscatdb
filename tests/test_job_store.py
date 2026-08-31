@@ -107,3 +107,38 @@ class TestJobsSchemaParity:
         sqlite_columns = _table_columns(database.SCHEMA, table)
         postgres_columns = _table_columns(job_store._PG_SCHEMA, table)
         assert sqlite_columns == postgres_columns
+
+
+# Columns `jobs` declared at its initial release, before either backend's
+# migration list existed. Anything declared in SCHEMA / _PG_SCHEMA beyond this
+# set must appear in that backend's migration list, or a control plane created
+# before the PR that added the column never gets it (issue #118).
+_ORIGINAL_JOBS_COLUMNS = {
+    "key", "type", "instrument", "obsdate", "target", "state",
+    "returncode", "elapsed", "started_at", "error_desc",
+}
+
+
+class TestJobsColumnMigrations:
+    """TestJobsSchemaParity only compares the two schema strings to each
+    other: a column added to `jobs` in both SCHEMA and _PG_SCHEMA but wired
+    into neither migration list still leaves the schemas agreeing with each
+    other, so that test alone would not have caught it -- and a control plane
+    created before the column existed would keep the old shape forever,
+    exactly as in #118. These tests instead tie each backend's migration list
+    to its own schema's post-baseline columns, and the two migration lists to
+    each other directly, so a forgotten migration entry fails here even when
+    the schemas still match."""
+
+    def test_sqlite_migrations_cover_every_post_release_column(self):
+        declared = _table_columns(database.SCHEMA, "jobs")
+        migrated = {col for col, _ in database._JOBS_COLUMN_MIGRATIONS}
+        assert declared - _ORIGINAL_JOBS_COLUMNS == migrated
+
+    def test_pg_migrations_cover_every_post_release_column(self):
+        declared = _table_columns(job_store._PG_SCHEMA, "jobs")
+        migrated = {col for col, _ in job_store._PG_JOBS_COLUMN_MIGRATIONS}
+        assert declared - _ORIGINAL_JOBS_COLUMNS == migrated
+
+    def test_migration_lists_match_between_backends(self):
+        assert database._JOBS_COLUMN_MIGRATIONS == job_store._PG_JOBS_COLUMN_MIGRATIONS

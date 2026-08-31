@@ -1884,17 +1884,26 @@ def user_eso_credentials_configured(username: str | None) -> bool:
         return False
 
 
+# Columns added to `jobs` after its initial release, in landing order. A
+# module constant (not an inline literal) so tests/test_job_store.py can hold
+# it to the same coverage/parity checks as job_store._PG_JOBS_COLUMN_MIGRATIONS
+# instead of comparing the two by eye. Keep in sync with SCHEMA and with
+# job_store._PG_SCHEMA / _PG_JOBS_COLUMN_MIGRATIONS whenever a new column
+# lands on `jobs` -- see tests/test_job_store.py's TestJobsColumnMigrations.
+_JOBS_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
+    ("run_type", "TEXT NOT NULL DEFAULT ''"),
+    ("params", "TEXT NOT NULL DEFAULT ''"),
+    ("run_id", "TEXT NOT NULL DEFAULT ''"),
+    ("run_name", "TEXT NOT NULL DEFAULT ''"),
+    ("user_name", "TEXT NOT NULL DEFAULT ''"),
+    ("owner", "TEXT NOT NULL DEFAULT ''"),
+]
+
+
 def _ensure_jobs_schema(conn: sqlite3.Connection) -> None:
     _apply_schema(conn)
     # Migrations for databases created before these columns existed.
-    for col, col_type in [
-        ("run_type", "TEXT NOT NULL DEFAULT ''"),
-        ("params", "TEXT NOT NULL DEFAULT ''"),
-        ("run_id", "TEXT NOT NULL DEFAULT ''"),
-        ("run_name", "TEXT NOT NULL DEFAULT ''"),
-        ("user_name", "TEXT NOT NULL DEFAULT ''"),
-        ("owner", "TEXT NOT NULL DEFAULT ''"),
-    ]:
+    for col, col_type in _JOBS_COLUMN_MIGRATIONS:
         try:
             conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} {col_type}")
         except sqlite3.OperationalError:
