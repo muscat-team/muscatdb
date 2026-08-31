@@ -1054,32 +1054,56 @@ class TestCLI:
         assert r.exit_code == 0
         assert "frames" in r.output or "Database built" in r.output
 
-    def test_build_db_refuses_bare_default_when_env_and_target_both_missing(
-        self, tmp_path, monkeypatch, tmp_obslog,
-    ):
+    def test_build_db_refuses_bare_default_when_env_and_target_both_missing(self, tmp_path):
         """Regression for #122: with no --db and no MUSCAT_DB_PATH, `db`
         resolves to the bare "muscat.db" fallback against whatever cwd this
         happened to run from. If that path doesn't exist either, build-db
         must refuse rather than silently create a near-empty database there.
+
+        Run in a subprocess, not via ``self._invoke``: ``db: str =
+        _db_option()`` is a Typer default *argument*, bound once when
+        ``muscat_db.cli`` is first imported (see tests/test_cli_db_path.py,
+        added by #120). ``self._invoke`` imports that module in-process via
+        CliRunner, so if any earlier test in the session left MUSCAT_DB_PATH
+        set at that first import, a plain ``monkeypatch.delenv`` here cannot
+        reach the already-bound default -- the command would silently run
+        against whatever path was ambient then, up to and including a real
+        configured database.
         """
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.delenv("MUSCAT_DB_PATH", raising=False)
-        r = self._invoke("build-db")
-        assert r.exit_code != 0
-        assert "Refusing to build" in r.output
+        import subprocess
+        import sys
+        env = dict(os.environ)
+        env.pop("MUSCAT_DB_PATH", None)
+        result = subprocess.run(
+            [sys.executable, "-m", "muscat_db.cli", "build-db"],
+            capture_output=True, text=True, env=env, cwd=tmp_path,
+        )
+        assert result.returncode != 0
+        assert "Refusing to build" in result.stdout + result.stderr
         assert not (tmp_path / "muscat.db").exists()
 
-    def test_build_db_default_proceeds_when_muscat_db_path_is_set(
-        self, tmp_path, monkeypatch, tmp_obslog,
-    ):
+    def test_build_db_default_proceeds_when_muscat_db_path_is_set(self, tmp_path):
         """MUSCAT_DB_PATH being set is a deliberate configuration signal, so
-        the guard must not refuse just because the (still bare-fallback,
-        pending #120) default path happens not to exist yet.
+        the guard must not refuse just because the default path happens not
+        to exist yet.
+
+        Run in a subprocess for the same import-time-binding reason as
+        above. MUSCAT_OBSLOG_DIR is also pinned to an empty directory:
+        OBSLOG_BASE (instruments.py) is bound the same way at import time
+        from that var, so leaving it ambient would have this subprocess walk
+        whatever obslog tree the host actually has -- including, without the
+        override, the real one.
         """
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.setenv("MUSCAT_DB_PATH", str(tmp_path / "elsewhere.db"))
-        r = self._invoke("build-db")
-        assert r.exit_code == 0
+        import subprocess
+        import sys
+        env = dict(os.environ)
+        env["MUSCAT_DB_PATH"] = str(tmp_path / "elsewhere.db")
+        env["MUSCAT_OBSLOG_DIR"] = str(tmp_path / "empty_obslog")
+        result = subprocess.run(
+            [sys.executable, "-m", "muscat_db.cli", "build-db"],
+            capture_output=True, text=True, env=env, cwd=tmp_path,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
 
     def test_build_db_explicit_flag_is_never_refused(self, tmp_path, monkeypatch, tmp_obslog):
         """An explicit --db is a deliberate action, per #122's own proposed
