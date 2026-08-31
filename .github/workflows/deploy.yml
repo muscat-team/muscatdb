@@ -2,15 +2,19 @@ name: Deploy
 
 on:
   push:
-    branches: [main]
+    branches: [main, test]
 
+# One deploy group per branch/ref, so a production (main) deploy and a staging
+# (test) deploy never cancel each other, while repeated pushes to the same
+# branch cancel an in-progress deploy in favour of the latest.
 concurrency:
   group: deploy-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  deploy:
-    name: Deploy to production
+  deploy-production:
+    name: Deploy production
+    if: github.ref_name == 'main'
     runs-on: ubuntu-latest
     environment: production
     steps:
@@ -38,21 +42,85 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
 
-      - name: Pull and restart
+      - name: Pull and restart production
         if: steps.check.outputs.configured == 'true'
         run: |
           ssh -i ~/.ssh/deploy_key "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" << 'EOF'
             set -e
-            DEPLOY_PATH='${{ vars.DEPLOY_PATH }}'
-            DEPLOY_PATH="${DEPLOY_PATH:-$HOME/github/research/project/muscat-db}"
-            TMUX_SESSION='${{ vars.DEPLOY_TMUX_SESSION }}'
-            TMUX_SESSION="${TMUX_SESSION:-muscatdbgui}"
+            DEPLOY_PATH='${{ vars.DEPLOY_PATH_PRODUCTION }}'
+            DEPLOY_TMUX_SESSION='${{ vars.DEPLOY_TMUX_SESSION_PRODUCTION }}'
+            # Portable across shells: cd "" does not fail (does not even change
+            # cwd) in sh/dash/zsh -- only bash treats it as an error. The
+            # deploy account's login shell is zsh, so `set -e` alone does not
+            # catch an unset var here; :? does, unconditionally, in all of them.
+            : "${DEPLOY_PATH:?DEPLOY_PATH_PRODUCTION not set}"
+            : "${DEPLOY_TMUX_SESSION:?DEPLOY_TMUX_SESSION_PRODUCTION not set}"
             cd "$DEPLOY_PATH"
             git fetch origin main
             git reset --hard origin/main
             uv sync --dev
-            tmux send-keys -t "$TMUX_SESSION" "" C-c || true
+            tmux send-keys -t "$DEPLOY_TMUX_SESSION" "" C-c || true
             sleep 2
-            tmux send-keys -t "$TMUX_SESSION" "uv run uvicorn muscat_db.web:sio_app --host 127.0.0.1 --port 8001 --reload" Enter || \
-              tmux new-session -d -s "$TMUX_SESSION" "uv run uvicorn muscat_db.web:sio_app --host 127.0.0.1 --port 8001 --reload"
+            # The path has to travel inside the sent keystrokes, not just the SSH
+            # shell's own cwd: send-keys runs in an *existing* pane's own shell,
+            # which never saw this script's `cd`, so a bare launch command would
+            # run wherever that pane last was (e.g. the old checkout) and load
+            # its .env, not this one.
+            tmux send-keys -t "$DEPLOY_TMUX_SESSION" "cd '$DEPLOY_PATH' && uv run uvicorn muscat_db.web:sio_app --host 127.0.0.1 --port 8001" Enter || \
+              tmux new-session -d -s "$DEPLOY_TMUX_SESSION" -c "$DEPLOY_PATH" "uv run uvicorn muscat_db.web:sio_app --host 127.0.0.1 --port 8001"
+          EOF
+
+  deploy-staging:
+    name: Deploy staging
+    if: github.ref_name == 'test'
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check deploy secrets
+        id: check
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          if [ -z "$DEPLOY_SSH_KEY" ] || [ -z "$DEPLOY_HOST" ] || [ -z "$DEPLOY_USER" ]; then
+            echo "::notice::DEPLOY_SSH_KEY, DEPLOY_HOST, or DEPLOY_USER not set — skipping deploy"
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install SSH key
+        if: steps.check.outputs.configured == 'true'
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Pull and restart staging
+        if: steps.check.outputs.configured == 'true'
+        run: |
+          ssh -i ~/.ssh/deploy_key "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" << 'EOF'
+            set -e
+            DEPLOY_PATH='${{ vars.DEPLOY_PATH_STAGING }}'
+            DEPLOY_TMUX_SESSION='${{ vars.DEPLOY_TMUX_SESSION_STAGING }}'
+            # See the comment in the production job: portable across shells
+            # (including the deploy account's zsh, where set -e alone would
+            # not catch an unset var here), :? errors out unconditionally.
+            : "${DEPLOY_PATH:?DEPLOY_PATH_STAGING not set}"
+            : "${DEPLOY_TMUX_SESSION:?DEPLOY_TMUX_SESSION_STAGING not set}"
+            cd "$DEPLOY_PATH"
+            git fetch origin test
+            git reset --hard origin/test
+            uv sync --dev
+            tmux send-keys -t "$DEPLOY_TMUX_SESSION" "" C-c || true
+            sleep 2
+            # See the comment in the production job: the launch command must
+            # carry its own `cd` because send-keys targets an existing pane
+            # whose cwd this script's own `cd` never touches.
+            tmux send-keys -t "$DEPLOY_TMUX_SESSION" "cd '$DEPLOY_PATH' && uv run uvicorn muscat_db.web:sio_app --host 127.0.0.1 --port 8003" Enter || \
+              tmux new-session -d -s "$DEPLOY_TMUX_SESSION" -c "$DEPLOY_PATH" "uv run uvicorn muscat_db.web:sio_app --host 127.0.0.1 --port 8003"
           EOF
