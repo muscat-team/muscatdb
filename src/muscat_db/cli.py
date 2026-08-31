@@ -285,10 +285,37 @@ def summary(
 
 @app.command(cls=_Cmd)
 def build_db(
+    ctx: typer.Context,
     db: str = _db_option(),
 ):
     """Build SQLite database from all CSV observation logs."""
     _log_startup_banner(f"build-db --db {db}")
+    # build_db() drops and rebuilds frames/summaries/targets from scratch. If
+    # --db wasn't passed and MUSCAT_DB_PATH isn't set either, `db` is just the
+    # bare "muscat.db" fallback resolved against whatever cwd this happened to
+    # run from -- a misconfigured cron cwd or a missing .env then silently
+    # creates a near-empty database there instead of rebuilding the real one
+    # (issue #122). Refuse instead. get_parameter_source lets an explicit
+    # `--db <path>` through even when that path doesn't exist yet, since a
+    # caller that types it out is acting deliberately, not falling through to
+    # a default.
+    if (
+        ctx.get_parameter_source("db") == click.ParameterSource.DEFAULT
+        and not os.environ.get("MUSCAT_DB_PATH")
+        and not os.path.exists(db)
+    ):
+        console.print(
+            f"[red]Refusing to build: no database exists at the default path "
+            f"'{db}', and MUSCAT_DB_PATH is not set.[/]"
+        )
+        console.print(
+            "[red]This usually means the command ran from the wrong working "
+            "directory, or the deploy checkout's .env is missing -- building "
+            "here would silently create a near-empty database instead of "
+            "rebuilding the real one.[/]"
+        )
+        console.print("[dim]Pass --db <path> explicitly to build a genuinely new database.[/]")
+        raise typer.Exit(1)
     from muscat_db.database import build_db as _build_db
     console.print("[cyan]Scanning observation logs...[/]")
     with Progress(
