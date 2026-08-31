@@ -7,6 +7,7 @@ import zipfile
 import pytest
 from fastapi.testclient import TestClient
 from starlette.responses import Response
+from unittest.mock import patch
 
 from muscat_db.database import save_job, get_persisted_jobs
 from muscat_db.web import app, _annotate_lco_archive_results, _script_json
@@ -1912,8 +1913,8 @@ def test_lco_split_partial_booking_still_registers_successful_leg(mock_db, monke
 
 def test_lco_archive_frames_search(monkeypatch):
     monkeypatch.setattr(
-        "muscat_db.lco.archive_search",
-        lambda filters, token=None: {"count": 1, "results": [{"filename": "ogg2m001-ep05-20260102-0001-e91.fits.fz", "SITEID": "ogg", "TELID": "2m0a"}]},
+        "muscat_db.lco.archive_search_all",
+        lambda filters, *a, **kw: {"count": 1, "results": [{"filename": "ogg2m001-ep05-20260102-0001-e91.fits.fz", "SITEID": "ogg", "TELID": "2m0a"}]},
     )
     r = TestClient(app).get("/api/lco/archive/frames", params={"OBJECT": "WASP-12", "limit": "10", "fuzzy_name": "1"})
     assert r.status_code == 200
@@ -1962,11 +1963,11 @@ def test_lco_archive_frames_request_id_must_be_numeric():
 def test_lco_archive_frames_coordinate_primary_by_default(monkeypatch):
     captured = {}
 
-    def _fake_search(filters, token=None):
+    def _fake_search(filters, *a, **kw):
         captured.update(filters)
         return {"count": 1, "results": [{"filename": "ogg2m001-ep05-20260102-0001-e91.fits.fz", "SITEID": "ogg", "TELID": "2m0a"}]}
 
-    monkeypatch.setattr("muscat_db.lco.archive_search", _fake_search)
+    monkeypatch.setattr("muscat_db.lco.archive_search_all", _fake_search)
     monkeypatch.setattr("muscat_db.web._resolve_archive_coords", lambda name: (97.6367, 29.6725, "catalog"))
 
     r = TestClient(app).get("/api/lco/archive/frames", params={"OBJECT": "WASP-12", "limit": "10"})
@@ -1980,8 +1981,89 @@ def test_lco_archive_frames_coordinate_primary_by_default(monkeypatch):
     assert data["resolved_source"] == "catalog"
 
 
+def test_lco_archive_frames_excludes_non_expose_obstype(monkeypatch):
+    """Real case: searching TOI-1807 turned up "auto_focus"/EXPERIMENTAL
+    frames at the same reduction_level as the real science data -- RLEVEL
+    doesn't distinguish an engineering frame from a real exposure, but
+    OBSTYPE does, and the archive filters on it server-side."""
+    captured = {}
+
+    def _fake_search(filters, *a, **kw):
+        captured.update(filters)
+        return {"count": 0, "results": []}
+
+    monkeypatch.setattr("muscat_db.lco.archive_search_all", _fake_search)
+    monkeypatch.setattr("muscat_db.web._resolve_archive_coords", lambda name: (97.6367, 29.6725, "catalog"))
+
+    r = TestClient(app).get("/api/lco/archive/frames", params={"OBJECT": "TOI-1807", "limit": "10"})
+    assert r.status_code == 200
+    assert captured.get("OBSTYPE") == "EXPOSE"
+
+
+def test_lco_archive_frames_excludes_engineering_object_names(monkeypatch):
+    """Real case: an auto-focus frame tagged OBSTYPE=EXPOSE with a real
+    "e91" filename slips past the server-side OBSTYPE filter and must be
+    excluded client-side by OBJECT name instead."""
+    monkeypatch.setattr("muscat_db.lco.archive_search_all", lambda filters, *a, **kw: {
+        "count": 2,
+        "results": [
+            {"filename": "tfn1m001-fa20-20260317-0087-e91.fits.fz", "OBJECT": "auto_focus", "SITEID": "tfn", "TELID": "1m0a"},
+            {"filename": "ogg2m001-ep05-20260102-0001-e91.fits.fz", "OBJECT": "TOI-1807", "SITEID": "ogg", "TELID": "2m0a"},
+        ],
+    })
+    monkeypatch.setattr("muscat_db.web._resolve_archive_coords", lambda name: (97.6367, 29.6725, "catalog"))
+
+    r = TestClient(app).get("/api/lco/archive/frames", params={"OBJECT": "TOI-1807", "limit": "10"})
+    assert r.status_code == 200
+    data = r.json()
+    # `count` stays the archive's raw total; the engineering-object filter
+    # dropping a frame client-side must not shrink it.
+    assert data["count"] == 2
+    assert len(data["results"]) == 1
+    assert data["results"][0]["OBJECT"] == "TOI-1807"
+
+
+def test_lco_archive_frames_all_filtered_still_reports_archive_total(monkeypatch):
+    """Regression: when every frame the archive returns is filtered out
+    client-side (engineering object here), `count` must still carry the
+    archive's real total so the frontend's "No frames returned (archive
+    reports N match)" branch fires instead of the indistinguishable
+    "No frames found" -- and so a truncated multi-page search doesn't read
+    as fully shown just because the local filter emptied the page."""
+    monkeypatch.setattr("muscat_db.lco.archive_search_all", lambda filters, *a, **kw: {
+        "count": 5000,
+        "truncated": True,
+        "results": [
+            {"filename": "tfn1m001-fa20-20260317-0087-e91.fits.fz", "OBJECT": "auto_focus", "SITEID": "tfn", "TELID": "1m0a"},
+        ],
+    })
+    monkeypatch.setattr("muscat_db.web._resolve_archive_coords", lambda name: (97.6367, 29.6725, "catalog"))
+
+    r = TestClient(app).get("/api/lco/archive/frames", params={"OBJECT": "TOI-1807", "limit": "10"})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["count"] == 5000
+    assert data["results"] == []
+
+
+def test_lco_archive_frames_by_request_id_does_not_filter_obstype(monkeypatch):
+    """The request-id path fetches every frame for a specific, already-known
+    request -- including calibration frames -- so it must not apply the
+    coordinate/name search's OBSTYPE=EXPOSE filter."""
+    captured = {}
+
+    def _fake_search_all(filters, token=None):
+        captured.update(filters)
+        return {"count": 0, "results": []}
+
+    monkeypatch.setattr("muscat_db.lco.archive_search_all", _fake_search_all)
+    r = TestClient(app).get("/api/lco/archive/frames", params={"request_id": "4236675"})
+    assert r.status_code == 200
+    assert "OBSTYPE" not in captured
+
+
 def test_lco_archive_frames_coordinate_unresolved_returns_422(monkeypatch):
-    monkeypatch.setattr("muscat_db.lco.archive_search", lambda filters, token=None: {"count": 0, "results": []})
+    monkeypatch.setattr("muscat_db.lco.archive_search_all", lambda filters, *a, **kw: {"count": 0, "results": []})
     monkeypatch.setattr("muscat_db.web._resolve_archive_coords", lambda name: None)
 
     r = TestClient(app).get("/api/lco/archive/frames", params={"OBJECT": "NoSuchTarget"})
@@ -1990,15 +2072,15 @@ def test_lco_archive_frames_coordinate_unresolved_returns_422(monkeypatch):
 
 
 def test_lco_archive_frames_coordinate_requires_name(monkeypatch):
-    monkeypatch.setattr("muscat_db.lco.archive_search", lambda filters, token=None: {"count": 0, "results": []})
+    monkeypatch.setattr("muscat_db.lco.archive_search_all", lambda filters, *a, **kw: {"count": 0, "results": []})
     r = TestClient(app).get("/api/lco/archive/frames", params={"limit": "10"})
     assert r.status_code == 400
 
 
 def test_lco_archive_frames_telescope_class_filters_locally(monkeypatch):
     monkeypatch.setattr(
-        "muscat_db.lco.archive_search",
-        lambda filters, token=None: {
+        "muscat_db.lco.archive_search_all",
+        lambda filters, *a, **kw: {
             "count": 2,
             "results": [
                 {"filename": "a.fits.fz", "SITEID": "ogg", "TELID": "2m0a"},
@@ -2009,7 +2091,10 @@ def test_lco_archive_frames_telescope_class_filters_locally(monkeypatch):
     r = TestClient(app).get("/api/lco/archive/frames", params={"TELID": "2m0", "fuzzy_name": "1"})
     assert r.status_code == 200
     data = r.json()
-    assert data["count"] == 1
+    # `count` stays the archive's raw total; the local TELID filter dropping
+    # a frame must not shrink it.
+    assert data["count"] == 2
+    assert len(data["results"]) == 1
     assert data["results"][0]["TELID"] == "2m0a"
 
 
@@ -2023,8 +2108,8 @@ def test_lco_archive_frames_groups_overnight_dataset_and_marks_existing(mock_db,
     conn.close()
 
     monkeypatch.setattr(
-        "muscat_db.lco.archive_search",
-        lambda filters, token=None: {
+        "muscat_db.lco.archive_search_all",
+        lambda filters, *a, **kw: {
             "count": 2,
             "results": [
                 {
@@ -2063,8 +2148,8 @@ def test_lco_archive_frames_groups_overnight_dataset_and_marks_existing(mock_db,
 
 def test_lco_archive_frames_same_date_same_target_same_site_stay_one_dataset(mock_db, monkeypatch):
     monkeypatch.setattr(
-        "muscat_db.lco.archive_search",
-        lambda filters, token=None: {
+        "muscat_db.lco.archive_search_all",
+        lambda filters, *a, **kw: {
             "count": 3,
             "results": [
                 {
@@ -3505,3 +3590,100 @@ def test_transit_fit_target_params_populates_without_inst_date(mock_db):
     assert r.status_code == 200
     assert "DEFAULTS" in r.text
     assert '"teff": 5778.0' in r.text
+
+
+def test_exofop_archive_endpoint_non_toi(mock_db):
+    client = TestClient(app)
+    with patch("muscat_db.web.exofop.build_time_series_report", return_value={
+        "ok": False, "error": "Target does not resolve to a known TOI",
+    }):
+        r = client.get("/api/lco/archive/exofop", params={"OBJECT": "WASP-12"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False
+    assert body["error"]
+
+
+def test_exofop_archive_endpoint_rows(mock_db):
+    client = TestClient(app)
+    rows = [
+        {
+            "tsid": "123", "tsurl": "https://exo.mk/123", "tsdate": "2024-05-13",
+            "tsnum": "158", "tsfilt": "gp", "instrument": "sinistro", "site": "cpt",
+            "exists": False, "exists_checked": True,
+        },
+        {
+            "tsid": "999", "tsurl": "https://exo.mk/999", "tsdate": "2024-05-14",
+            "tsnum": "159", "tsfilt": "ip", "instrument": "sinistro", "site": "cpt",
+            "exists": True, "exists_checked": True,
+        },
+    ]
+    with patch("muscat_db.web.exofop.build_time_series_report", return_value={
+        "ok": True, "toi": "6715", "time_series": rows, "total": 2,
+    }):
+        r = client.get("/api/lco/archive/exofop", params={"OBJECT": "TIC 460950389"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["toi"] == "6715"
+    assert body["total"] == 2
+    assert len(body["time_series"]) == 2
+    assert body["time_series"][0]["exists"] is False
+    assert body["time_series"][1]["exists"] is True
+    missing = [x for x in body["time_series"] if not x["exists"]]
+    assert len(missing) == 1
+    assert missing[0]["tsid"] == "123"
+
+
+def test_exofop_archive_endpoint_rejects_blank_target(mock_db):
+    client = TestClient(app)
+    r = client.get("/api/lco/archive/exofop", params={"OBJECT": "   "})
+    assert r.status_code == 400
+    assert r.json()["ok"] is False
+
+
+def test_exofop_download_endpoint_invokes_archive_download(mock_db):
+    """tstag is not sent to the archive at all -- it's ExoFOP's own internal
+    Data Tag, not an LCO request id (confirmed against the live archive for
+    both a 2020 and a 2024 report). The download searches by target+date."""
+    client = TestClient(app)
+    with patch("muscat_db.web.exofop.archive_search_by_target_date", return_value=[
+        {"filename": "cpt1m010-fa03-20240513-0001-e91.fits"},
+    ]) as search, \
+         patch("muscat_db.web.lco.start_archive_download", return_value={
+             "job_id": "exofop-dl", "state": "running",
+         }) as start:
+        r = client.post(
+            "/api/lco/archive/exofop-download",
+            json={"target": "TOI-6715", "tsdate": "2024-05-13", "instrument": "sinistro"},
+        )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    search.assert_called_once()
+    args, kwargs = search.call_args
+    assert args[:2] == ("TOI-6715", "2024-05-13")
+    start.assert_called_once()
+
+
+def test_exofop_download_endpoint_missing_target_or_date(mock_db):
+    client = TestClient(app)
+    r = client.post("/api/lco/archive/exofop-download", json={"target": "TOI-6715"})
+    assert r.status_code == 400
+    assert r.json()["ok"] is False
+
+    r = client.post("/api/lco/archive/exofop-download", json={"tsdate": "2024-05-13"})
+    assert r.status_code == 400
+    assert r.json()["ok"] is False
+
+
+def test_exofop_download_endpoint_reports_not_found_when_search_empty(mock_db):
+    client = TestClient(app)
+    with patch("muscat_db.web.exofop.archive_search_by_target_date", return_value=[]):
+        r = client.post(
+            "/api/lco/archive/exofop-download",
+            json={"target": "TOI-1807", "tsdate": "2020-04-30"},
+        )
+    assert r.status_code == 404
+    assert r.json()["ok"] is False
+    assert r.json()["ok"] is False

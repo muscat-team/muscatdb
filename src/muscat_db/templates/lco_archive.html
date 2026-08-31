@@ -4,12 +4,12 @@
 {% set active_lco_page = "archive" %}
 {% include "_lco_shared.html" %}
 
-<details class="lco-section section-fold" open>
+<details class="lco-section section-fold" id="fold-request" open>
   <summary><h3>Search by Request ID</h3></summary>
   <div class="lco-grid">
     <div class="lco-field">
-      <label for="dl-request-id">Request ID</label>
-      <input id="dl-request-id" type="text" inputmode="numeric" pattern="[0-9]*" placeholder="4236675">
+      <label for="dl-request-id">Request ID <span class="help-tooltip" title="The numeric LCO observation request ID from the observe.lco.global portal URL (e.g. 4236675 from observe.lco.global/requests/4236675). Fetches every frame for that request, ignoring the search fields below.">?</span></label>
+      <input id="dl-request-id" type="text" inputmode="numeric" pattern="[0-9]*" placeholder="e.g. 4236675">
     </div>
     <div class="lco-field"><label for="dl-req-rlevel">Reduction level</label>
       <select id="dl-req-rlevel"><option value="">any</option><option value="91" selected>91 (reduced)</option><option value="0">0 (raw)</option></select></div>
@@ -21,33 +21,41 @@
   <p class="lco-note">Enter the numeric request ID from an observation portal URL (e.g. <code>4236675</code> from <code>observe.lco.global/requests/4236675</code>) to pull every frame for that request. It ignores the search fields above; results appear below for selection and download.</p>
 </details>
 
-<details class="lco-section section-fold" open>
+<details class="lco-section section-fold" id="fold-search" open>
   <summary><h3>Search LCO Archive</h3></summary>
   <div class="lco-grid">
-    <div class="lco-field"><label for="dl-proposal">Proposal ID</label><input id="dl-proposal" type="text" placeholder="KEY2023-04"></div>
     <div class="lco-field">
-      <label for="dl-object">Object</label>
-      <input id="dl-object" type="text" placeholder="WASP-12">
+      <label for="dl-proposal">Proposal ID <span class="help-tooltip" title="LCO proposal ID (e.g. KEY2023B-04) to restrict the archive search to observations taken under that proposal.">?</span></label>
+      <input id="dl-proposal" type="text" placeholder="e.g. KEY2023B-04">
+      <label for="dl-exofop" style="display: flex; align-items: center; gap: 0.35rem; margin-top: 0.3rem; font-size: 0.78rem; color: var(--text-dim);">
+        <input type="checkbox" id="dl-exofop"> Check ExoFOP obslog
+        <span class="help-tooltip" title="When on, the search also fetches the target's ExoFOP time-series obslog and flags each reported LCO run as already in muscat-db or missing. The check is purely local (no extra LCO calls); tick the missing rows and use Download selected to fetch them.">?</span>
+      </label>
+    </div>
+    <div class="lco-field">
+      <label for="dl-object">Object <span class="help-tooltip" title="Target star name (e.g. WASP-12, TIC 460950389). Resolved to sky coordinates via the NASA/TOI catalog then SIMBAD; every frame whose footprint covers that position is returned.">?</span></label>
+      <input id="dl-object" type="text" placeholder="e.g. WASP-12">
       <label style="display: flex; align-items: center; gap: 0.35rem; margin-top: 0.3rem; font-size: 0.78rem; color: var(--text-dim);">
         <input type="checkbox" id="dl-fuzzy-name"> Fuzzy name match
+        <span class="help-tooltip" title="When on, falls back to matching the raw OBJECT header text instead of the coordinate-footprint match, useful when the object name does not resolve to a known catalog position.">?</span>
       </label>
     </div>
     <div class="lco-field"><label for="dl-tel">Telescope</label>
       <select id="dl-tel">
-        <option value="">none</option>
+        <option value="">any</option>
         <option value="0m4">0.4m</option>
         <option value="1m0">1m</option>
         <option value="2m0">2m</option>
       </select></div>
     <div class="lco-field"><label for="dl-site">Site</label>
       <select id="dl-site"><option value="">none</option></select></div>
-    <div class="lco-field"><label for="dl-instrume">Instrument (header)</label><input id="dl-instrume" type="text" placeholder="ep05 / fa..."></div>
-    <div class="lco-field"><label for="dl-filter">Filter</label><input id="dl-filter" type="text" placeholder="rp"></div>
+    <div class="lco-field"><label for="dl-instrume">Instrument (header)</label><input id="dl-instrume" type="text" placeholder="e.g. ep05 / fa..."></div>
+    <div class="lco-field"><label for="dl-filter">Filter</label><input id="dl-filter" type="text" placeholder="e.g. rp"></div>
     <div class="lco-field"><label for="dl-rlevel">Reduction level</label>
       <select id="dl-rlevel"><option value="">any</option><option value="91" selected>91 (reduced)</option><option value="0">0 (raw)</option></select></div>
     <div class="lco-field"><label for="dl-start">Start (UTC)</label><input id="dl-start" type="date" min="2014-01-01"></div>
     <div class="lco-field"><label for="dl-end">End (UTC)</label><input id="dl-end" type="date" min="2014-01-01"></div>
-    <div class="lco-field"><label for="dl-limit">Limit</label><input id="dl-limit" type="number" min="1" max="1000" value="50"></div>
+    <div class="lco-field"><label for="dl-limit">Limit <span class="help-tooltip" title="Total frames to fetch across the whole search, not a single archive page (the archive itself caps each page at 1000; a higher limit here paginates through more pages to reach it).">?</span></label><input id="dl-limit" type="number" min="1" max="10000" value="50"></div>
   </div>
   <div class="lco-actions">
     <button class="btn primary" type="button" id="btn-search">Search frames</button>
@@ -57,7 +65,7 @@
   <p class="lco-note">Files save to <code>&lt;MUSCAT_LCO_DIR&gt;/&lt;inferred instrument&gt;/&lt;date&gt;/</code> (or that instrument's data dir). The destination instrument is inferred from the archive metadata: OGG 2m0 MuSCAT → muscat3, COJ 2m0 MuSCAT → muscat4, LCO 1m0 → sinistro, and LCO 0.4m → sbig (SBIG STL-6303, "kb"-prefixed camera code) or qhy600 (QHY600 CMOS, "sq"-prefixed camera code).</p>
 </details>
 
-<details class="lco-section section-fold" open>
+<details class="lco-section section-fold" id="fold-results" open>
   <summary><h3>Results</h3></summary>
   <div class="lco-actions" style="margin-bottom: 0.6rem;">
     <button class="btn primary" type="button" id="btn-download" disabled>Download selected</button>
@@ -68,6 +76,20 @@
     <a id="link-to-jobs" href="/jobs" class="btn" style="display: none; margin-left: 0.4rem; font-size: 0.82rem;">To Jobs</a>
   </div>
   <div id="frames-groups" style="display: none;"></div>
+  <div id="exofop-report" style="display: none; margin-top: 0.75rem;">
+    <h4 style="margin: 0 0 0.4rem;">ExoFOP obslog <span id="exofop-title" style="font-size: 0.8rem; color: var(--text-dim);"></span></h4>
+    <p class="lco-note" id="exofop-msg" style="margin: 0 0 0.4rem;"></p>
+    <div class="lco-table-wrap">
+      <table class="lco-table">
+        <thead>
+          <tr>
+            <th><input type="checkbox" id="exofop-sel-all" title="Select all missing"></th><th>Telescope</th><th>Camera</th><th>Filter</th><th>Date (UT)</th><th>Frames</th><th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="exofop-tbody"></tbody>
+      </table>
+    </div>
+  </div>
 </details>
 {% endblock %}
 
@@ -78,6 +100,8 @@
   var CURRENT_YEAR = (new Date()).getFullYear();
   var OPT_KEY = 'lco:archive:options';
   var STATE_KEY = 'lco:archive:state';
+  var FOLD_KEY = 'lco:archive:fold-state';
+  var FOLD_IDS = ['fold-request', 'fold-search', 'fold-results'];
   var el = MuscatDom.el, val = MuscatDom.val;
   var chk = MuscatDom.chk, setVal = MuscatDom.setVal;
   function setChk(id, v) { var e = el(id); if (e) e.checked = !!v; }
@@ -97,7 +121,7 @@
     'dl-filter','dl-rlevel','dl-start','dl-end','dl-limit',
     'dl-request-id','dl-req-rlevel'
   ];
-  var CHECK_IDS = ['dl-overwrite', 'dl-fuzzy-name'];
+  var CHECK_IDS = ['dl-overwrite', 'dl-fuzzy-name', 'dl-exofop'];
   var DL_SITE_OPTIONS = {
     '': [],
     '0m4': ['ogg', 'coj', 'lsc', 'cpt', 'tfn', 'elp'],
@@ -140,10 +164,19 @@
     return dirs;
   }
 
+  // Patches each frame's status cell in place rather than calling
+  // renderFrameGroups(), which rebuilds every dataset <details> from scratch
+  // (and unconditionally reopens them, see frameRowHtml/renderFrameGroups
+  // below) -- this runs on every ~1.5s download-progress poll tick, so a
+  // full rebuild there was popping open any dataset card the operator had
+  // collapsed. Each row's status <td> already carries data-i matching its
+  // lastFrames index (frameRowHtml), so the running poll can update it
+  // directly without touching the surrounding DOM at all.
   function applyDownloadResults(results) {
     var byName = {};
     (results || []).forEach(function (r) { byName[r.filename] = r; });
-    lastFrames.forEach(function (f) {
+    var host = el('frames-groups');
+    lastFrames.forEach(function (f, i) {
       var r = byName[f.filename || f.basename];
       if (!r) return;
       if (r.status === 'downloaded' || r.status === 'exists') {
@@ -152,8 +185,9 @@
       } else {
         f._downloadStatus = r.status + (r.error ? ': ' + r.error : '');
       }
+      var cell = host.querySelector('td.frame-status[data-i="' + i + '"]');
+      if (cell) cell.textContent = f._downloadStatus || '';
     });
-    renderFrameGroups(selectedFrameKeys());
     saveArchiveState();
   }
 
@@ -318,7 +352,7 @@
     host.innerHTML = '';
     if (!lastFrames.length) {
       host.style.display = 'none';
-      el('btn-download').disabled = true;
+      updateDownloadButton();
       return;
     }
     var selectedSet = {};
@@ -337,7 +371,22 @@
     groups.forEach(function (g) {
       var f = g.first;
       var existing = (f.dataset_existing_count || 0) > 0;
-      var existingText = existing ? ('already in muscat-db (' + f.dataset_existing_count + '/' + (f.dataset_frame_count || 0) + ' frames)') : 'not in muscat-db';
+      // dataset_frame_count is the number of archive rows actually returned,
+      // which the search can cap (limit). dataset_existing_count is the full
+      // local count, so when it meets or exceeds the returned count the archive
+      // was capped and the ratio would be misleading — fall back to the local
+      // count alone. Only show "X/Y" when the archive returned strictly more
+      // than we hold, i.e. a trustworthy partial match.
+      var ec = f.dataset_existing_count || 0;
+      var fc = f.dataset_frame_count || 0;
+      var existingText;
+      if (!existing) {
+        existingText = 'not in muscat-db';
+      } else if (fc > ec) {
+        existingText = 'already in muscat-db (' + ec + '/' + fc + ' frames)';
+      } else {
+        existingText = 'already in muscat-db (' + ec + ' frame' + (ec === 1 ? '' : 's') + ')';
+      }
       var matchBits = '';
       if (existing && f.dataset_matched_object) matchBits += '<span>Matched: ' + esc(f.dataset_matched_object) + '</span>';
       if (existing && f.dataset_match_sep_arcsec !== null && f.dataset_match_sep_arcsec !== undefined) matchBits += '<span>Sep: ' + esc(String(f.dataset_match_sep_arcsec)) + ' arcsec</span>';
@@ -364,7 +413,16 @@
       host.appendChild(details);
     });
     host.style.display = '';
-    el('btn-download').disabled = false;
+    updateDownloadButton();
+  }
+
+  // The "Download selected" button acts on both the frame groups and the
+  // ExoFOP obslog table, so it stays enabled as long as either has an
+  // actionable (downloadable) checkbox present.
+  function updateDownloadButton() {
+    var framesOk = !!el('frames-groups').querySelector('tbody input[type=checkbox]');
+    var exoOk = !!el('exofop-tbody').querySelector('input[data-exofop-tag]');
+    el('btn-download').disabled = !(framesOk || exoOk);
   }
 
   function restoreArchiveState() {
@@ -402,14 +460,27 @@
       lastFrames = d.results || [];
       renderFrameGroups();
       saveArchiveState();
+      fetchExofopReport(val('dl-object'));
+      var shown = lastFrames.length;
+      var total = d.count !== undefined ? d.count : shown;
       var datasetMsg = d.dataset_count !== undefined ? (' across ' + d.dataset_count + ' dataset' + (d.dataset_count === 1 ? '' : 's')) : '';
+      var head;
+      if (shown > 0) {
+        head = (total > shown || d.truncated)
+          ? ('Showing ' + shown + ' of ' + total + ' frame' + (shown === 1 ? '' : 's'))
+          : ('Showing ' + shown + ' frame' + (shown === 1 ? '' : 's'));
+      } else if (total > 0) {
+        head = 'No frames returned (archive reports ' + total + ' match)';
+      } else {
+        head = 'No frames found';
+      }
       var modeMsg = '';
       if (d.match_mode === 'coord' && d.resolved_ra !== undefined) {
         modeMsg = ' — resolved to RA ' + d.resolved_ra + ', Dec ' + d.resolved_dec + ' (' + (d.resolved_source || 'catalog') + ')';
       } else if (d.match_mode === 'name') {
         modeMsg = ' — fuzzy name match';
       }
-      msg('msg-search', 'Found ' + (d.count !== undefined ? d.count : lastFrames.length) + ' frames (showing ' + lastFrames.length + ')' + datasetMsg + modeMsg, 'ok');
+      msg('msg-search', head + datasetMsg + modeMsg, 'ok');
     }).catch(function (e) { msg('msg-search', String(e), 'err'); });
   });
 
@@ -428,9 +499,14 @@
       renderFrameGroups();
       saveArchiveState();
       if (!lastFrames.length) { msg('msg-request', 'No frames found for request ' + reqId, 'err'); return; }
+      var shown = lastFrames.length;
+      var total = d.count !== undefined ? d.count : shown;
       var datasetMsg = d.dataset_count !== undefined ? (' across ' + d.dataset_count + ' dataset' + (d.dataset_count === 1 ? '' : 's')) : '';
       var truncMsg = d.truncated ? ' — capped, refine reduction level to narrow' : '';
-      msg('msg-request', 'Found ' + (d.count !== undefined ? d.count : lastFrames.length) + ' frames (showing ' + lastFrames.length + ')' + datasetMsg + truncMsg, d.truncated ? 'err' : 'ok');
+      var head = (total > shown || d.truncated)
+        ? ('Showing ' + shown + ' of ' + total + ' frame' + (shown === 1 ? '' : 's'))
+        : ('Showing ' + shown + ' frame' + (shown === 1 ? '' : 's'));
+      msg('msg-request', head + datasetMsg + truncMsg, d.truncated ? 'err' : 'ok');
     }).catch(function (e) { msg('msg-request', String(e), 'err'); });
   });
 
@@ -452,12 +528,26 @@
   }
 
   el('btn-download').addEventListener('click', function () {
+    var exoTags = [];
+    // Every checked box here was only rendered because its row had a usable
+    // tsdate (see renderExofopRows), so push unconditionally -- gating on
+    // data-exofop-tag would wrongly skip a row whose tstag happens to be
+    // empty even though the date (what the download actually needs) is set.
+    document.querySelectorAll('#exofop-tbody input[type=checkbox]:checked').forEach(function (c) {
+      exoTags.push([c.getAttribute('data-exofop-tag') || '', c.getAttribute('data-exofop-date') || '', c]);
+    });
+    exoTags.forEach(function (t) { startExofopDownload(t[0], t[1], t[2]); });
+    if (exoTags.length) msg('msg-download', 'Queued ' + exoTags.length + ' ExoFOP dataset' + (exoTags.length === 1 ? '' : 's') + ' for download…');
+
     var picked = [];
     document.querySelectorAll('#frames-groups tbody input[type=checkbox]:checked').forEach(function (c) {
       var f = lastFrames[+c.dataset.i];
       if (f) picked.push(f);
     });
-    if (!picked.length) { msg('msg-download', 'Select frames first', 'err'); return; }
+    if (!picked.length) {
+      if (exoTags.length) return;
+      msg('msg-download', 'Select frames first', 'err'); return;
+    }
     var saveDirs = uniqueSaveDirs(picked);
     var locText = saveDirs.length
       ? ' — saving to ' + saveDirs.join(', ')
@@ -493,6 +583,176 @@
       }).catch(function (e) { msg('msg-download', String(e), 'err'); });
   });
 
+  // Fetch and render the ExoFOP time-series cross-check for the searched target.
+  // Runs only when the "Check ExoFOP obslog" checkbox is on; the backend
+  // does a purely local existence test, so this makes no extra LCO calls.
+  function fetchExofopReport(target) {
+    var region = el('exofop-report');
+    var tbody = el('exofop-tbody');
+    if (!chk('dl-exofop') || !(target || '').trim()) {
+      if (region) region.style.display = 'none';
+      return;
+    }
+    region.style.display = '';
+    var msgEl = el('exofop-msg');
+    msgEl.textContent = 'Checking ExoFOP for ' + target + '…';
+    tbody.innerHTML = '';
+    el('exofop-title').textContent = '';
+    var q = new URLSearchParams();
+    q.set('OBJECT', target);
+    fetch('/api/lco/archive/exofop?' + q.toString()).then(function (r) { return r.json(); }).then(function (d) {
+      if (!d.ok) {
+        msgEl.textContent = d.error || 'Not a known TOI — no ExoFOP time-series cross-check.';
+        return;
+      }
+      el('exofop-title').textContent = '(TOI ' + d.toi + ')';
+      renderExofopRows(d.time_series || []);
+    }).catch(function (e) {
+      msgEl.textContent = 'ExoFOP check failed: ' + e;
+    });
+  }
+
+  function renderExofopRows(rows) {
+    var tbody = el('exofop-tbody');
+    var msgEl = el('exofop-msg');
+    tbody.innerHTML = '';
+    if (!rows.length) {
+      msgEl.textContent = 'No ExoFOP time-series entries reported for this target.';
+      updateDownloadButton();
+      return;
+    }
+    var missing = 0;
+    rows.forEach(function (r) {
+      var exists = !!r.exists;
+      if (!exists && r.exists_checked) missing++;
+      var tag = r.tstag || '';
+      var status = r.exists_checked
+        ? (exists
+            ? '<span style="color:#2ecc71;">In muscat-db' + (r.dataset_local_frames ? ' (' + r.dataset_local_frames + ' fr)' : '') + '</span>'
+            : '<span style="color:#e67e22;">Not in database</span>')
+        : '<span style="color:var(--text-dim);">N/A</span>';
+      var dl = '';
+      // The download searches the archive by target+date (tstag isn't an LCO
+      // request id -- see exofop.py), so a reported UT date is what's
+      // actually required here, not a particular tag format.
+      if (r.exists_checked && !exists && r.tsdate) {
+        dl = '<input type="checkbox" data-exofop-tag="' + esc(tag) + '" data-exofop-date="' + esc(r.tsdate || '') + '" title="Queue download">';
+      }
+      var tr = document.createElement('tr');
+      tr.innerHTML =
+        '<td align="center">' + dl + '</td>' +
+        '<td>' + esc(r.tstel || '') + '</td>' +
+        '<td>' + esc(r.tscam || '') + '</td>' +
+        '<td>' + esc(r.tsfilt || '') + '</td>' +
+        '<td>' + esc(r.tsdate || '') + '</td>' +
+        '<td>' + esc(String(r.tsnum !== undefined ? r.tsnum : '')) + '</td>' +
+        '<td>' + status + '</td>';
+      tbody.appendChild(tr);
+    });
+    msgEl.innerHTML =
+      (rows.length - missing) + '/' + rows.length + ' reported in muscat-db, ' +
+      missing + ' missing' + (missing ? ' — tick the missing rows and use <strong>Download selected</strong> to fetch them from the LCO archive.' : '.');
+    updateDownloadButton();
+  }
+
+  // Poll the exofop-download job like the normal archive download does, and
+  // surface the result on the page's download message.
+  function pollExofopDownload(jobId) {
+    fetch('/api/lco/archive/download/' + encodeURIComponent(jobId))
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d.ok) { msg('msg-download', 'ExoFOP download job ' + jobId + ' failed', 'err'); return; }
+        if (d.state === 'pending' || d.state === 'running') {
+          msg('msg-download', 'ExoFOP dataset ' + jobId + ' downloading…');
+          setTimeout(function () { pollExofopDownload(jobId); }, 1500);
+          return;
+        }
+        var results = d.results || [];
+        var ok = results.filter(function (x) { return x.status === 'downloaded'; }).length;
+        var ex = results.filter(function (x) { return x.status === 'exists'; }).length;
+        var er = results.filter(function (x) { return x.status === 'error'; }).length;
+        if (d.state === 'error') {
+          msg('msg-download', 'ExoFOP dataset ' + jobId + ' failed', 'err');
+        } else {
+          msg('msg-download', 'ExoFOP dataset ' + jobId + ' done — ' + ok + ' downloaded, ' + ex + ' already present, ' + er + ' errors');
+        }
+        var link = el('link-to-jobs');
+        if (link) link.style.display = '';
+      })
+      .catch(function () { msg('msg-download', 'ExoFOP download job ' + jobId + ' failed', 'err'); });
+  }
+
+  // Start a background download/ingest for one checked ExoFOP time-series
+  // entry. Its tstag is ExoFOP's own internal Data Tag, not an LCO request
+  // id (confirmed against the live archive -- request_id=<tstag> never
+  // resolves, for old or recent reports alike), so the server searches the
+  // archive by target name + reported UT date instead; "tag" here is only
+  // used for the status message, not sent to the API.
+  function startExofopDownload(tag, tsdate, row) {
+    var body = {
+      target: val('dl-object'), tsdate: tsdate || '',
+      reduction_level: val('dl-rlevel') || '91', overwrite: chk('dl-overwrite'), background: true,
+    };
+    fetch('/api/lco/archive/exofop-download', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d.ok) { msg('msg-download', d.error || 'ExoFOP download failed', 'err'); if (row) row.checked = false; return; }
+        var link = el('link-to-jobs');
+        if (link && d.job_id) link.style.display = '';
+        msg('msg-download', 'ExoFOP dataset ' + (tag || tsdate) + ' queued for download…');
+        if (row) row.checked = false;
+        if (d.job_id) pollExofopDownload(d.job_id);
+      })
+      .catch(function (e) { msg('msg-download', String(e), 'err'); if (row) row.checked = false; });
+  }
+
+  // Header "select all" toggles every downloadable (missing) row.
+  var selAll = el('exofop-sel-all');
+  if (selAll) {
+    selAll.addEventListener('change', function () {
+      var want = selAll.checked;
+      document.querySelectorAll('#exofop-tbody input[data-exofop-tag]').forEach(function (c) {
+        c.checked = want;
+      });
+    });
+  }
+  // Keep the header box in sync when individual rows are toggled.
+  el('exofop-tbody').addEventListener('change', function () {
+    if (!selAll) return;
+    var rows = document.querySelectorAll('#exofop-tbody input[data-exofop-tag]');
+    var checked = document.querySelectorAll('#exofop-tbody input[data-exofop-tag]:checked').length;
+    selAll.checked = rows.length > 0 && checked === rows.length;
+    selAll.indeterminate = checked > 0 && checked < rows.length;
+  });
+
+  // Persist the open/collapsed state of each section-fold card across page
+  // reloads (e.g. a background download refresh collapses the Results card back
+  // to where the operator left it).
+  function restoreFoldState() {
+    var saved;
+    try { saved = JSON.parse(localStorage.getItem(FOLD_KEY) || 'null'); } catch (e) { saved = null; }
+    FOLD_IDS.forEach(function (id) {
+      var d = el(id);
+      if (!d) return;
+      d.open = !saved || saved[id] !== false;
+    });
+  }
+  function bindFoldState() {
+    document.querySelectorAll('details.lco-section.section-fold').forEach(function (d) {
+      d.addEventListener('toggle', function () {
+        var saved = {};
+        try { saved = JSON.parse(localStorage.getItem(FOLD_KEY) || '{}'); } catch (e) { saved = {}; }
+        FOLD_IDS.forEach(function (id) {
+          var e = el(id);
+          if (e) saved[id] = e.open;
+        });
+        try { localStorage.setItem(FOLD_KEY, JSON.stringify(saved)); } catch (e2) {}
+      });
+    });
+  }
+
+  restoreFoldState();
+  bindFoldState();
   restoreOptions();
   applyDateBounds();
   applyDownloadSiteOptions();
