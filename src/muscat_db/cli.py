@@ -68,7 +68,7 @@ console = Console()
 _WORKER_OPTION = typer.Option(None, "--workers", "-w", help="Parallel worker count (default: cpu_count)")
 
 
-def _db_option() -> typer.Option:
+def _db_option() -> typer.models.OptionInfo:
     """``--db`` option whose default comes from ``MUSCAT_DB_PATH``.
 
     The web server and ``db_path()`` already resolve the database from
@@ -77,7 +77,12 @@ def _db_option() -> typer.Option:
     accident (cwd happened to be a tree that held ``muscat.db``) and breaks once
     a command runs from a dedicated deploy checkout (issue #26) where the real
     DB lives elsewhere. Default the option from the same env the rest of the app
-    reads so every command targets the configured DB regardless of cwd.
+    reads so every command targets the configured DB from anywhere *under* that
+    checkout (``find_dotenv(usecwd=True)`` searches upward from cwd for its
+    ``.env``) -- run from an unrelated directory with ``MUSCAT_DB_PATH`` unset
+    and this still falls back to creating an empty ``./muscat.db`` there, same
+    as before this fix. Callers (the nightly cron, deploy.yml) must still cd
+    into the checkout.
     """
     return typer.Option(
         os.environ.get("MUSCAT_DB_PATH", "muscat.db"),

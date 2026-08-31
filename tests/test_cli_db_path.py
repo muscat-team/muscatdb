@@ -9,6 +9,10 @@ read (the checkout's ``.env``), not a fragile cwd-relative default.
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+
 from muscat_db import cli
 
 
@@ -20,3 +24,36 @@ def test_db_option_default_from_env(monkeypatch):
 def test_db_option_defaults_to_muscat_db_when_unset(monkeypatch):
     monkeypatch.delenv("MUSCAT_DB_PATH", raising=False)
     assert cli._db_option().default == "muscat.db"
+
+
+def _build_db_help_output(tmp_path, muscat_db_path: str | None) -> str:
+    """Run ``build-db --help`` in a fresh subprocess and return its output.
+
+    ``db: str = _db_option()`` is a Typer default *argument*, which Python
+    binds once when ``muscat_db.cli`` is first imported. Calling
+    ``cli._db_option()`` directly in-process (as the tests above do)
+    re-evaluates it fresh against the current env and would keep passing even
+    if the fix were never wired into a command's signature. Only a clean
+    process -- with no ``.env`` reachable from ``cwd`` -- exercises the
+    default that ``build-db --help`` actually reports.
+    """
+    env = dict(os.environ)
+    if muscat_db_path is None:
+        env.pop("MUSCAT_DB_PATH", None)
+    else:
+        env["MUSCAT_DB_PATH"] = muscat_db_path
+    result = subprocess.run(
+        [sys.executable, "-m", "muscat_db.cli", "build-db", "--help"],
+        capture_output=True, text=True, env=env, cwd=tmp_path,
+    )
+    return result.stdout + result.stderr
+
+
+def test_build_db_help_default_follows_muscat_db_path(tmp_path):
+    out = _build_db_help_output(tmp_path, "/srv/configured/muscat.db")
+    assert "/srv/configured/muscat.db" in out
+
+
+def test_build_db_help_default_falls_back_to_muscat_db(tmp_path):
+    out = _build_db_help_output(tmp_path, None)
+    assert "muscat.db" in out
