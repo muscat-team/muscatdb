@@ -1054,6 +1054,44 @@ class TestCLI:
         assert r.exit_code == 0
         assert "frames" in r.output or "Database built" in r.output
 
+    def test_build_db_refuses_bare_default_when_env_and_target_both_missing(
+        self, tmp_path, monkeypatch, tmp_obslog,
+    ):
+        """Regression for #122: with no --db and no MUSCAT_DB_PATH, `db`
+        resolves to the bare "muscat.db" fallback against whatever cwd this
+        happened to run from. If that path doesn't exist either, build-db
+        must refuse rather than silently create a near-empty database there.
+        """
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("MUSCAT_DB_PATH", raising=False)
+        r = self._invoke("build-db")
+        assert r.exit_code != 0
+        assert "Refusing to build" in r.output
+        assert not (tmp_path / "muscat.db").exists()
+
+    def test_build_db_default_proceeds_when_muscat_db_path_is_set(
+        self, tmp_path, monkeypatch, tmp_obslog,
+    ):
+        """MUSCAT_DB_PATH being set is a deliberate configuration signal, so
+        the guard must not refuse just because the (still bare-fallback,
+        pending #120) default path happens not to exist yet.
+        """
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("MUSCAT_DB_PATH", str(tmp_path / "elsewhere.db"))
+        r = self._invoke("build-db")
+        assert r.exit_code == 0
+
+    def test_build_db_explicit_flag_is_never_refused(self, tmp_path, monkeypatch, tmp_obslog):
+        """An explicit --db is a deliberate action, per #122's own proposed
+        escape hatch, and must always be honored even when that path doesn't
+        exist yet -- this is how a caller legitimately builds a fresh DB.
+        """
+        monkeypatch.delenv("MUSCAT_DB_PATH", raising=False)
+        target = tmp_path / "fresh.db"
+        r = self._invoke("build-db", "--db", str(target))
+        assert r.exit_code == 0
+        assert target.exists()
+
     def test_ingest_date_no_csvs(self, tmp_obslog):
         r = self._invoke("ingest-date", "muscat", "260101", "--db", "/tmp/__test_ingest.db")
         assert r.exit_code != 0
