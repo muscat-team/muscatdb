@@ -62,6 +62,7 @@ If agent restarts the muscat-db by itself, make sure do it inside tmux session m
 * consider CPU parallelization with a JIT compiler such as Numba, porting the inner loop into Cython, or implementing a CUDA GPU function with Numba or CuPy
 
 ## git branch
+* CONTRIBUTING.md has the human-contributor-facing version of this section (setup, pre-PR checklist, the same branch rules in plain form). Keep both in sync when either changes; this file keeps the mechanics CONTRIBUTING.md deliberately leaves out -- ruleset internals, review-dismissal behavior, and the specific incidents that motivated each rule
 * work goes on a feature branch off test, which PRs into test. never PR a feature branch straight into main
 * features accumulate on test, then test is merged into main as a release
 * no direct pushes to test or main. everything goes through a PR, except that org admins bypass the review and status-check rules on both branches, so this is a convention rather than something enforced against them
