@@ -1,3 +1,6 @@
 MUSCAT_OBSLOG_DIR=/ut2/muscat/obslog
-MUSCATDB_ROOT=/ut2/jerome/github/research/project/muscat-db
-30 17 * * * cd $MUSCATDB_ROOT && bash scripts/download_catalogs.sh >> $MUSCATDB_ROOT/logs/download_catalogs.log 2>&1 && /ut2/jerome/.local/bin/uv run muscat-db scan-yesterday >> $MUSCATDB_ROOT/logs/scan.log 2>&1 && /ut2/jerome/.local/bin/uv run muscat-db build-db >> $MUSCATDB_ROOT/logs/build-db.log 2>&1
+MUSCATDB_ROOT=/ut2/jerome/deploy/main/app
+MUSCAT_TEST_ROOT=/ut2/jerome/deploy/test/app
+MUSCAT_TEST_DB=/ut2/jerome/deploy/test/muscat_test.db
+MUSCAT_TEST_OBSLOG_DIR=/ut2/jerome/deploy/test/obslog
+30 17 * * * cd $MUSCATDB_ROOT && bash scripts/download_catalogs.sh >> $MUSCATDB_ROOT/logs/download_catalogs.log 2>&1 && /ut2/jerome/.local/bin/uv run muscat-db scan-yesterday >> $MUSCATDB_ROOT/logs/scan.log 2>&1 && /ut2/jerome/.local/bin/uv run muscat-db build-db >> $MUSCATDB_ROOT/logs/build-db.log 2>&1 && /usr/bin/python3 -c "import sqlite3; s=sqlite3.connect('file:/ut2/jerome/github/research/project/muscat-db/muscat.db?mode=ro',uri=True); d=sqlite3.connect('$MUSCAT_TEST_DB'); s.backup(d); d.close(); s.close()" >> $MUSCAT_TEST_ROOT/logs/staging-refresh.log 2>&1 && cd $MUSCAT_TEST_ROOT && MUSCAT_OBSLOG_DIR=$MUSCAT_TEST_OBSLOG_DIR /ut2/jerome/.local/bin/uv run muscat-db scan-yesterday >> $MUSCAT_TEST_ROOT/logs/scan.log 2>&1
