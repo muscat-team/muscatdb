@@ -378,9 +378,19 @@ Gate F is deliberately last (see the issue's original sequencing), so nothing mo
 checkout automatically yet. Mirror by hand what deploy.yml's production job will eventually
 do once secrets are set:
 6. `cd $HOME/deploy/main/app && git fetch origin main && git reset --hard origin/main && uv sync --dev`.
-7. Relaunch uvicorn in tmux `muscatdbgui` from that checkout (same command deploy.yml sends:
-   `uv run uvicorn muscat_db.web:sio_app --host 127.0.0.1 --port 8001`) so the new checkout
-   actually takes effect.
+7. **This is the actual production cutover, not a refresh — do it in a window where you can
+   watch `:8001` come back.** Relaunch uvicorn in tmux `muscatdbgui` exactly as deploy.yml
+   does (`.github/workflows/deploy.yml:62-69`): stop the old process with a `C-c` sent into
+   the pane's own shell, then send the launch command *with its `cd`* into that same
+   keystroke — `send-keys` types into the pane's existing shell, which never saw step 6's
+   `cd`, so a bare launch command here would relaunch from wherever `muscatdbgui` was last
+   sitting (the old dev tree per #26) and load its `.env`, the exact bug this plan exists to
+   fix. Skipping the `C-c` instead leaves the old process holding `:8001`, so the new one
+   fails to bind.
+   ```
+   tmux send-keys -t muscatdbgui "" C-c   # then wait a couple of seconds
+   tmux send-keys -t muscatdbgui "cd /ut2/jerome/deploy/main/app && uv run uvicorn muscat_db.web:sio_app --host 127.0.0.1 --port 8001" Enter
+   ```
 8. `:8001/healthz` → 200; full `/` still 401 unauthenticated.
 9. From `$HOME/deploy/main/app`: `uv run muscat-db build-db --help` — confirm default
    `--db` resolves to the production path (proves PR #120 is live).
