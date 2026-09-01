@@ -212,6 +212,18 @@ origin/<branch>` target the right ref.
   the reseed to 0 rows every night. Run `build-db` on staging by hand when actually
   testing that command; don't wire it into the nightly chain.
 
+  **This is deliberately a scanner smoke test, not a data-accumulation step.**
+  Nightly `scan-yesterday` writes CSVs under staging's `MUSCAT_OBSLOG_DIR`, but
+  with no `build-db` and no `ingest-date` following it, nothing loads those CSVs
+  into `muscat_test.db` — the next night's `.backup` reseed discards them anyway.
+  The point of running it is to catch scanner regressions against a real
+  (if isolated) obslog tree, not to give staging its own accumulating dataset.
+  If staging should instead hold its own night's data on top of the prod
+  snapshot, swap this step for `ingest-date` (adds to the existing tables
+  instead of dropping them, unlike `build-db`) — that is a real behavior
+  change to what the production cron does and needs its own decision, not an
+  assumption baked into this plan.
+
 ## Phase 4 — Amend `deploy.yml` (*repo*, PR to `test`) — the code change
 
 - **Two explicit jobs** (`deploy-production`, `deploy-staging`), not a `strategy.matrix`
