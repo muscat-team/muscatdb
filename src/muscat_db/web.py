@@ -1800,6 +1800,14 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
             sel_run = "" if "" in run_ids else None
         elif run in run_ids:
             sel_run = run
+        elif run in run_outputs:
+            # The run directory exists (list_photometry_runs() scanned it and
+            # populated run_outputs for it) but produced no output files --
+            # still running, or it failed before writing anything, so
+            # has_any is False and it was excluded from `runs`/`run_ids`.
+            # Keep its id selected anyway so the page's live status/log/error
+            # for THIS run is not silently swapped for a different one.
+            sel_run = run
         else:
             sel_run = newest
 
