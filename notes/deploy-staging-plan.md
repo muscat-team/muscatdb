@@ -197,15 +197,20 @@ origin/<branch>` target the right ref.
   sqlite3 "$PROD_DB" ".backup '$HOME/deploy/test/muscat_test.db'"
   ```
 - **Periodic refresh** is part of the Phase 6 cron rewrite: after prod's
-  `build-db`, re-seed staging and re-ingest from staging's own `MUSCAT_OBSLOG_DIR`
+  `build-db`, re-seed staging and re-scan from staging's own `MUSCAT_OBSLOG_DIR` — but
+  **no `build-db` on staging**, confirmed destructive at execution (Gate D finding):
 
   ```bash
   sqlite3 "$PROD_DB" ".backup '$HOME/deploy/test/muscat_test.db'" &&
-  cd "$HOME/deploy/test/app" && uv run muscat-db scan-yesterday && uv run muscat-db build-db
+  cd "$HOME/deploy/test/app" && MUSCAT_OBSLOG_DIR="$HOME/deploy/test/obslog" uv run muscat-db scan-yesterday
   ```
-  This keeps `muscat_test.db` a fresh copy of prod, then ingests from staging's own
-  obslog tree — fully isolated from the shared `/ut2/muscat/obslog`. (Confirm the exact
-  chain at execution; see open item below.)
+  This keeps `muscat_test.db` a fresh copy of prod every night and exercises the scan
+  path against staging's own obslog tree — fully isolated from the shared
+  `/ut2/muscat/obslog`. `build-db` is deliberately left out: it drops and rebuilds
+  `frames`/`summaries`/`targets` from *only* the CSVs under `MUSCAT_OBSLOG_DIR`, and
+  staging's tree starts empty by design, so chaining it after the `.backup` reseed wipes
+  the reseed to 0 rows every night. Run `build-db` on staging by hand when actually
+  testing that command; don't wire it into the nightly chain.
 
 ## Phase 4 — Amend `deploy.yml` (*repo*, PR to `test`) — the code change
 
@@ -284,9 +289,14 @@ origin/<branch>` target the right ref.
   carry their own job-level `if: github.ref_name == 'main' | 'test'` instead;
   `concurrency: group: deploy-${{ github.ref }}` stays per-ref so prod/staging runs never
   cancel each other.
-- **Staging periodic-refresh chain** — whether staging `build-db` reuses prod obslog
-  CSVs or re-scans staging's own `MUSCAT_OBSLOG_DIR`. Default: re-scan staging's own
-  (fully isolated), seeded from the prod DB snapshot.
+- ~~**Staging periodic-refresh chain**~~ → **resolved, the other way**: re-scanning
+  staging's own (fully isolated) `MUSCAT_OBSLOG_DIR` and then running `build-db` against
+  it is actively destructive, not just a style choice — see the Gate D finding below.
+  `build-db` drops `frames`/`summaries`/`targets` and rebuilds only from whatever CSVs
+  exist under its `MUSCAT_OBSLOG_DIR`. Staging's tree starts empty by
+  design (#71's isolation), so running `build-db` there right after a `.backup` reseed
+  wipes the reseed back to 0 rows. Nightly chain drops `build-db` for staging entirely;
+  `.backup` (realistic data) + `scan-yesterday` (CSV-only, harmless) is what runs.
 - Final `deploy.yml` becomes the source of truth for the exact launch commands; keep
   `notes/DEPLOYMENT.md`'s verification one-liners in sync.
 
@@ -316,17 +326,26 @@ origin/<branch>` target the right ref.
 - Release (2026-08-31): **PR #125** merged `test → main` as a merge commit. This lands
   PR #119 and #120 on `main`, but merging alone does not redeploy anything — see the
   correction below and in Gate B/C.
+- Gate C (2026-09-01): `$HOME/deploy/main/app` synced by hand to `origin/main` (`3deda33`)
+  and cut over live in tmux `muscatdbgui` — `:8001/healthz` 200, `:8001/` and `:8000/`
+  401, `build-db --help` confirms `--db` now defaults from `MUSCAT_DB_PATH` (PR #120 live
+  in prod).
+- Gate D / Phase 6 (2026-09-01): cron `MUSCATDB_ROOT` repointed to `$HOME/deploy/main/app`;
+  staging-refresh steps added (`.backup` reseed + isolated `scan-yesterday`, **no**
+  `build-db` — see the finding below and [DEPLOYMENT.md](DEPLOYMENT.md#shared-input-paths-must-be-pinned-not-left-home-relative)). `logs/` created in both deploy
+  checkouts (gitignored, cron's `>>` redirection needs the directory to pre-exist; a
+  missing `logs/` would fail closed and abort the rest of the `&&` chain, not silently
+  skip). `sqlite3` CLI is not installed on this host — substituted Python's stdlib
+  `sqlite3.Connection.backup()`, same backup-API safety against a live WAL DB the plan
+  called for, verified standalone (~11s against the live prod DB, no tearing).
+- Gate E / Phase 5 (2026-09-01, root): installed `deploy/nginx-staging.conf` as
+  `/etc/nginx/sites-available/muscat-db-staging` (the file's own header comment names it
+  this way, matching production's `muscat-db` — the plan text below originally said
+  `muscat-staging`, corrected), symlinked into `sites-enabled`, `nginx -t` + reload clean.
+  `:8002` listening, `curl 127.0.0.1:8002/` → `401` (`auth_basic` firing correctly with no
+  backend on `:8003` yet — that's Gate F's bootstrap step).
 
 **Blocked / not yet done**
-- Phase 5 (nginx install): `deploy/nginx-staging.conf` written but install to
-  `/etc/nginx/sites-available` + `nginx -t` + reload needs **sudo** (interactive auth
-  required on this host). Run as root when convenient.
-- Phase 6 (cron move): needs **PR #120** on the production checkout (`$HOME/deploy/main/app`),
-  otherwise `build-db` targets the wrong file. The `test`→`main` release (PR #125) landed the
-  fix on `main`, but it does **not** reach the checkout by itself — deploy.yml's "Pull and
-  restart production" step is gated on `DEPLOY_*` secrets, which are deliberately not set
-  until Gate F (see the correction below). Until Gate F runs, sync the checkout by hand
-  (Gate C) before repointing `MUSCATDB_ROOT` and adding the Phase 3 staging-refresh steps.
 - Phase 7 (vars + secrets): set `DEPLOY_*` Actions vars (org admin), bootstrap/verify the
   staging server, and only then set the `DEPLOY_*` secrets. This is the final gate.
 
@@ -344,6 +363,29 @@ relying on CI. Gate B and C below are corrected accordingly.
 - `MUSCAT_REQUIRE_AUTH` is set to 1 by `restart --nginx` (`_prepare_nginx_auth`); a bare
   `uvicorn` launch skips it, so both `.env` files set `MUSCAT_REQUIRE_AUTH=1` explicitly.
 - `load_dotenv` does not expand `$HOME` or `~`, so all `.env` path values are absolute.
+- **`build-db` on staging is destructive against an isolated `MUSCAT_OBSLOG_DIR` (found
+  2026-09-01, executing Gate D).** Ran the Phase 3 chain by hand before wiring it into
+  cron: `.backup` reseed (9,547,144 frames) → staging `scan-yesterday` → staging
+  `build-db --db muscat_test.db` left `frames`/`summaries`/`targets` at **0 rows**.
+  `build_db()` unconditionally drops and rebuilds those tables from *only* the CSVs under
+  `MUSCAT_OBSLOG_DIR`, and staging's tree is empty by design (#71's isolation from the
+  shared production tree) — so any `build-db` run there wipes whatever `.backup` just
+  seeded. Restored via a second `.backup` (10.4s, 9,547,144 frames back). Nightly chain
+  drops `build-db` for staging; keeps `.backup` + `scan-yesterday` only. `build-db` on
+  staging is now a manual, deliberate action, not an automatic one.
+- `OBSLOG_BASE` (`muscat_db/instruments.py`) is a module-level constant read once via
+  `os.environ.get(...)` at import time. A crontab's top-of-file env vars (here
+  `MUSCAT_OBSLOG_DIR=/ut2/muscat/obslog`, for prod) are exported to every job process
+  spawned from that crontab, and `load_dotenv()` does not override an already-set OS env
+  var — so staging's own `.env` value is silently shadowed unless the staging commands
+  in the cron line explicitly prefix `MUSCAT_OBSLOG_DIR=...` on the command itself. Without
+  that prefix, staging's `scan-yesterday`/`build-db` would resolve `OBSLOG_BASE` to
+  production's shared tree, reproducing the #66/#71 incident under the new cron.
+- `sqlite3` CLI is not installed on this host (`command -v sqlite3` fails). Substituted
+  Python's stdlib `sqlite3.Connection.backup()` (`/usr/bin/python3 -c "..."`, absolute
+  path — cron's `PATH` is minimal, same reasoning as the existing `uv` absolute-path
+  calls) — same backup-API guarantee against a live WAL-mode DB, no CLI dependency to
+  install.
 
 ---
 
@@ -395,22 +437,42 @@ do once secrets are set:
 9. From `$HOME/deploy/main/app`: `uv run muscat-db build-db --help` — confirm default
    `--db` resolves to the production path (proves PR #120 is live).
 
-### Gate D — Phase 6: move the nightly cron (host, `crontab -e`)
-10. Repoint `MUSCATDB_ROOT=/ut2/jerome/deploy/main/app` so nightly ingest runs from the
-    prod checkout; no explicit `--db` (fix is live once Gate C has synced the checkout).
-11. Add staging-refresh steps after prod ingest. The production DB stays at its
-    unchanged location (see the layout table), **not** under `$MUSCATDB_ROOT` — `sqlite3
-    .backup` against a nonexistent source silently creates an empty destination DB (exit
-    0, no error), so the wrong source here would leave staging looking fine but empty:
-    - `sqlite3 "/raid_ut2/home/jerome/github/research/project/muscat-db/muscat.db" ".backup '/ut2/jerome/deploy/test/muscat_test.db'"`
-    - from `$HOME/deploy/test/app`: `scan-yesterday` +
-      `build-db --db /ut2/jerome/deploy/test/muscat_test.db`
-    - confirm logs move to the new checkout paths.
+### Gate D — Phase 6: move the nightly cron (host, `crontab -e`) — **done** (2026-09-01)
+10. ~~Repoint `MUSCATDB_ROOT=/ut2/jerome/deploy/main/app`~~ done — nightly ingest now runs
+    from the prod checkout; no explicit `--db` (`.env` supplies `MUSCAT_DB_PATH`, fix is
+    live since Gate C synced the checkout).
+11. Add staging-refresh steps after prod ingest — **without `build-db`**, confirmed
+    destructive against staging's empty, isolated `MUSCAT_OBSLOG_DIR` (see the finding
+    above: it drops and rebuilds from CSVs only, wiping a fresh `.backup` seed to 0 rows).
+    The production DB stays at its unchanged location (see the layout table), **not**
+    under `$MUSCATDB_ROOT` — a `.backup` against a nonexistent source silently creates an
+    empty destination DB (no error), so the wrong source here would leave staging looking
+    fine but empty. `sqlite3` CLI isn't installed on this host, so the backup step uses
+    Python's stdlib `sqlite3.Connection.backup()` instead (same backup-API guarantee):
+    - `/usr/bin/python3 -c "import sqlite3; s=sqlite3.connect('file:/ut2/jerome/github/research/project/muscat-db/muscat.db?mode=ro',uri=True); d=sqlite3.connect('$MUSCAT_TEST_DB'); s.backup(d); d.close(); s.close()"`
+    - from `$MUSCAT_TEST_ROOT`: `MUSCAT_OBSLOG_DIR=$MUSCAT_TEST_OBSLOG_DIR scan-yesterday`
+      only — the explicit env-var prefix matters here: cron's top-of-file
+      `MUSCAT_OBSLOG_DIR` is exported to every job process, and `load_dotenv()` won't
+      override an already-set OS var, so staging's own `.env` value would otherwise be
+      silently shadowed (see the finding above).
+    - `build-db` on staging is intentionally **not** in the nightly chain — run it by hand
+      when specifically testing that command.
+    - Logs land in each checkout's own `logs/` (created 2026-09-01, gitignored,
+      pre-created since cron's `>>` redirection needs the directory to exist first).
+    - Full chain recorded in [DEPLOYMENT.md](DEPLOYMENT.md#shared-input-paths-must-be-pinned-not-left-home-relative)
+      rather than a tracked `cronjob.txt` (see #129 — the root-level file was dropped as
+      host-specific; the literal crontab line lives alongside the rest of this file's
+      deliberately-recorded host state instead).
 
-### Gate E — Phase 5: nginx (needs **sudo**, interactive auth)
-12. `sudo cp $HOME/deploy/main/app/deploy/nginx-staging.conf /etc/nginx/sites-available/muscat-staging`
-13. Symlink into `sites-enabled`, `sudo nginx -t`, `sudo systemctl reload nginx`.
-14. Verify `:8002` reverse-proxies to `:8003` and serves the staging app.
+### Gate E — Phase 5: nginx (needs **sudo**, interactive auth) — **done** (2026-09-01)
+12. ~~`sudo cp $HOME/deploy/main/app/deploy/nginx-staging.conf /etc/nginx/sites-available/muscat-staging`~~
+    done, as `muscat-db-staging` — the config file's own header comment names it that way
+    (matching production's `muscat-db`), not `muscat-staging` as originally written here.
+13. ~~Symlink into `sites-enabled`, `sudo nginx -t`, `sudo systemctl reload nginx`.~~ done,
+    clean.
+14. Verified `:8002` is listening and `curl 127.0.0.1:8002/` → `401` (`auth_basic` firing
+    correctly). Full reverse-proxy-to-`:8003` verification waits for Gate F's staging
+    bootstrap — nothing is listening on `:8003` yet.
 
 ### Gate F — Phase 7: Actions vars + secrets (**org admin**)
 15. Set the **vars** `DEPLOY_PATH_PRODUCTION`/`DEPLOY_TMUX_SESSION_PRODUCTION` on the
