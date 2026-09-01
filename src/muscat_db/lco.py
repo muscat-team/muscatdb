@@ -425,6 +425,26 @@ def archive_search_all(
     return {"count": total, "results": results[:max_frames], "truncated": truncated}
 
 
+# OBJECT values LCO stamps on engineering frames that still carry a real
+# science-looking OBSTYPE (observed: an auto-focus sequence submitted as a
+# plain EXPOSE block, filed with a normal "e91" filename, OBJECT="auto_focus").
+# OBSTYPE=EXPOSE alone can't catch these -- confirmed live, some of these are
+# genuinely OBSTYPE=EXPOSE -- so this is a second, narrower filter on the one
+# concrete pattern actually observed, not a speculative deny-list of every
+# conceivable engineering keyword.
+_ENGINEERING_OBJECT_NAMES = frozenset({"autofocus"})
+
+
+def is_engineering_object(object_name: str) -> bool:
+    """True if *object_name* is a known non-science placeholder, not a target.
+
+    Matches case- and separator-insensitively (``AUTO_FOCUS``, ``Auto Focus``,
+    ``auto-focus`` and ``auto_focus`` all normalize to ``autofocus``).
+    """
+    normalized = re.sub(r"[^a-z0-9]", "", str(object_name or "").lower())
+    return normalized in _ENGINEERING_OBJECT_NAMES
+
+
 def infer_archive_instrument(frame: dict) -> str:
     """Infer the muscat-db instrument name from LCO archive frame metadata."""
     site = str(frame.get("SITEID") or frame.get("site_id") or "").lower()
@@ -625,6 +645,92 @@ def _local_lco_datasets(inst: str, obsdate: str, site: str) -> list[dict]:
             }
         )
     return out
+
+
+_TARGET_IDENTIFIER_RE = re.compile(r"\b(TIC|TOI)[\s_-]*(\d+)", re.IGNORECASE)
+
+
+def _target_identifiers(name: str) -> set[str]:
+    """Extract the TIC / TOI ids referenced by a target or OBJECT name.
+
+    LCO dithers/offsets its pointings, so a frame's stored pointing centre can
+    sit hundreds of arcseconds from the scientific target. Matching on the object
+    name's TIC/TOI id is the robust identity signal for "is this observation the
+    same one", whereas a strict coordinate probe against the pointing centre is
+    not. Leading zeros are stripped so ``TOI01404`` and ``TOI-1404`` agree.
+
+    The separator class (``[\\s_-]*``) must include a literal hyphen: "TOI-1807"
+    is the standard TOI naming convention and exactly what a user types into the
+    archive page's search box, so a whitespace-only separator would silently
+    return no identifier for the single most common input shape.
+
+    Ids are namespaced by catalog (``"TOI:2876"`` vs ``"TIC:2876"``), not pooled
+    into a bare number. #100 established, against ``data/TOIs.csv``, that a TIC
+    number and a TOI host number can be numerically equal while naming different
+    stars (e.g. TIC 2876 and TIC 4711 both equal existing TOI host numbers of
+    different targets). Pooling the two into one numeric set lets a coincidental
+    numeric match override the coordinate check that would otherwise catch it.
+    """
+    return {
+        f"{m.group(1).upper()}:{m.group(2).lstrip('0') or '0'}"
+        for m in _TARGET_IDENTIFIER_RE.finditer(str(name or ""))
+    }
+
+
+def local_lco_dataset_match(
+    inst: str,
+    obsdates: list[str] | str,
+    site: str,
+    ra_deg: float,
+    dec_deg: float,
+    match_arcsec: float = _LCO_DATASET_MATCH_ARCSEC,
+    object_name: str = "",
+) -> dict | None:
+    """Return the local frames dataset (if any) matching an observation.
+
+    Used by the ExoFOP time-series cross-check to decide whether a reported
+    observation is already in muscat-db, without hitting the LCO archive. Scans
+    ``frames`` for ``inst`` over one or more ``obsdates`` (YYMMDD labels) on
+    ``site`` and returns the matching dataset.
+
+    A dataset matches if (in priority order):
+
+    1. its OBJECT header shares a TIC/TOI identifier with ``object_name`` (the
+       robust identity — LCO pointings are dithered, so strict coordinate
+       proximity against the pointing centre is unreliable), or
+    2. its coordinate median is within ``match_arcsec`` of ``(ra_deg, dec_deg)``,
+       mirroring the coordinate membership rule used by
+       ``_annotate_lco_archive_results``.
+
+    Returns ``None`` when nothing matches.
+    """
+    if not inst or not site or ra_deg is None or dec_deg is None:
+        return None
+    labels = [obsdates] if isinstance(obsdates, str) else list(obsdates or [])
+    candidates: list[dict] = []
+    for label in labels:
+        candidates.extend(_local_lco_datasets(inst, label, site))
+
+    obj_ids = _target_identifiers(object_name)
+    if obj_ids:
+        for cand in candidates:
+            if obj_ids & _target_identifiers(cand.get("object", "")):
+                return cand
+
+    best = None
+    best_sep = None
+    for cand in candidates:
+        ra2 = cand.get("ra_deg")
+        dec2 = cand.get("dec_deg")
+        if ra2 is None or dec2 is None:
+            continue
+        sep = _angular_sep_arcsec(ra_deg, dec_deg, ra2, dec2)
+        if best_sep is None or sep < best_sep:
+            best_sep = sep
+            best = cand
+    if best is not None and best_sep is not None and best_sep <= match_arcsec:
+        return best
+    return None
 
 
 def _annotate_lco_archive_results(inst: str, results: list[dict]) -> tuple[list[dict], int]:

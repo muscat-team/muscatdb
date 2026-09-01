@@ -313,17 +313,32 @@ origin/<branch>` target the right ref.
 - Phase 4b (repo, discovered gap): **PR #120** — `build-db` (and the other `--db` CLI
   commands) now default `--db` from `MUSCAT_DB_PATH`, red-green tested. Required before the
   cron/refresh moves, else `build-db` would write a fresh `./muscat.db` in each checkout.
+- Release (2026-08-31): **PR #125** merged `test → main` as a merge commit. This lands
+  PR #119 and #120 on `main`, but merging alone does not redeploy anything — see the
+  correction below and in Gate B/C.
 
 **Blocked / not yet done**
 - Phase 5 (nginx install): `deploy/nginx-staging.conf` written but install to
   `/etc/nginx/sites-available` + `nginx -t` + reload needs **sudo** (interactive auth
   required on this host). Run as root when convenient.
-- Phase 6 (cron move): must wait for **PR #120** to reach the production checkout
-  (`test` merge + `test`→`main` release + redeploy), otherwise `build-db` targets the
-  wrong file. Then repoint `MUSCATDB_ROOT` to `$HOME/deploy/main/app` and add the Phase 3
-  staging-refresh steps.
+- Phase 6 (cron move): needs **PR #120** on the production checkout (`$HOME/deploy/main/app`),
+  otherwise `build-db` targets the wrong file. The `test`→`main` release (PR #125) landed the
+  fix on `main`, but it does **not** reach the checkout by itself — deploy.yml's "Pull and
+  restart production" step is gated on `DEPLOY_*` secrets, which are deliberately not set
+  until Gate F (see the correction below). Until Gate F runs, sync the checkout by hand
+  (Gate C) before repointing `MUSCATDB_ROOT` and adding the Phase 3 staging-refresh steps.
 - Phase 7 (vars + secrets): set `DEPLOY_*` Actions vars (org admin), bootstrap/verify the
   staging server, and only then set the `DEPLOY_*` secrets. This is the final gate.
+
+**Correction (2026-08-31, post #125):** the hand-off checklist below originally had Gate B's
+`main` push auto-redeploying production and Gate C verifying that redeploy. It doesn't — the
+#125 merge triggered deploy.yml (run `33381068874`), and `Check deploy secrets` reported
+`configured=false` (no `DEPLOY_*` secrets/vars exist at repo or environment scope — confirmed
+via `gh secret list`, `gh variable list`, and both `production`/`staging` environments), so
+every later step was skipped and production kept serving unchanged. Gate F is intentionally
+last (see the issue's original sequencing: settle the host layout and verify everything else
+before arming secrets), so Gates C and D now do the checkout sync **by hand** instead of
+relying on CI. Gate B and C below are corrected accordingly.
 
 **Findings beyond the original plan**
 - `MUSCAT_REQUIRE_AUTH` is set to 1 by `restart --nginx` (`_prepare_nginx_auth`); a bare
@@ -347,45 +362,66 @@ order; verify each gate before moving on.
 > Self-approval is not possible on `test` (requires a non-author approval). Here the
 > issue's body says `Refs #26` — it outlives the merge, so **close by hand** at release.
 
-### Gate B — Release `test → main`
-3. `gh pr create --base main --head test` (the only PR needing an explicit base).
-4. Merge with a **merge commit, never squash** (ruleset on `main` enforces this; a squash
-   recurses into add/add conflicts on the next test→main merge — see AGENTS.md).
-5. Deploy.yml auto-runs on the `main` push (pins prod checkout with
-   `git reset --hard origin/main`). **Prod uvicorn relaunches on :8001 in tmux
-   `muscatdbgui`; prod now has the `--db` fix.**
+### Gate B — Release `test → main` — **done** (2026-08-31, PR #125)
+3. ~~`gh pr create --base main --head test` (the only PR needing an explicit base).~~ done.
+4. ~~Merge with a **merge commit, never squash**~~ (ruleset on `main` enforces this; a squash
+   recurses into add/add conflicts on the next test→main merge — see AGENTS.md). Done —
+   PR #125 merged as commit `3deda33`.
+5. Deploy.yml runs on the `main` push but does **not** redeploy anything: `Check deploy
+   secrets` finds no `DEPLOY_*` secrets (Gate F hasn't run yet), so every later step is
+   skipped and production keeps serving from wherever it already was. Confirmed on the
+   #125 push (run `33381068874`, conclusion `success` with the deploy steps skipped).
+   `$HOME/deploy/main/app` is **not** touched by this push — Gate C below does that by hand.
 
-### Gate C — Verify prod redeploy (no sudo needed)
-6. `:8001/healthz` → 200; full `/` still 401 unauthenticated.
-7. From `$HOME/deploy/main/app`: `uv run muscat-db build-db --help` — confirm default
+### Gate C — Sync and verify the prod checkout (no sudo needed; done by hand, not via CI)
+Gate F is deliberately last (see the issue's original sequencing), so nothing moves the
+checkout automatically yet. Mirror by hand what deploy.yml's production job will eventually
+do once secrets are set:
+6. `cd $HOME/deploy/main/app && git fetch origin main && git reset --hard origin/main && uv sync --dev`.
+7. **This is the actual production cutover, not a refresh — do it in a window where you can
+   watch `:8001` come back.** Relaunch uvicorn in tmux `muscatdbgui` exactly as deploy.yml
+   does (`.github/workflows/deploy.yml:62-69`): stop the old process with a `C-c` sent into
+   the pane's own shell, then send the launch command *with its `cd`* into that same
+   keystroke — `send-keys` types into the pane's existing shell, which never saw step 6's
+   `cd`, so a bare launch command here would relaunch from wherever `muscatdbgui` was last
+   sitting (the old dev tree per #26) and load its `.env`, the exact bug this plan exists to
+   fix. Skipping the `C-c` instead leaves the old process holding `:8001`, so the new one
+   fails to bind.
+   ```
+   tmux send-keys -t muscatdbgui "" C-c   # then wait a couple of seconds
+   tmux send-keys -t muscatdbgui "cd /ut2/jerome/deploy/main/app && uv run uvicorn muscat_db.web:sio_app --host 127.0.0.1 --port 8001" Enter
+   ```
+8. `:8001/healthz` → 200; full `/` still 401 unauthenticated.
+9. From `$HOME/deploy/main/app`: `uv run muscat-db build-db --help` — confirm default
    `--db` resolves to the production path (proves PR #120 is live).
 
 ### Gate D — Phase 6: move the nightly cron (host, `crontab -e`)
-8. Repoint `MUSCATDB_ROOT=/ut2/jerome/deploy/main/app` so nightly ingest runs from the
-   prod checkout; no explicit `--db` (fix is live).
-9. Add staging-refresh steps after prod ingest. The production DB stays at its
-   unchanged location (see the layout table), **not** under `$MUSCATDB_ROOT` — `sqlite3
-   .backup` against a nonexistent source silently creates an empty destination DB (exit
-   0, no error), so the wrong source here would leave staging looking fine but empty:
-   - `sqlite3 "/raid_ut2/home/jerome/github/research/project/muscat-db/muscat.db" ".backup '/ut2/jerome/deploy/test/muscat_test.db'"`
-   - from `$HOME/deploy/test/app`: `scan-yesterday` +
-     `build-db --db /ut2/jerome/deploy/test/muscat_test.db`
-   - confirm logs move to the new checkout paths.
+10. Repoint `MUSCATDB_ROOT=/ut2/jerome/deploy/main/app` so nightly ingest runs from the
+    prod checkout; no explicit `--db` (fix is live once Gate C has synced the checkout).
+11. Add staging-refresh steps after prod ingest. The production DB stays at its
+    unchanged location (see the layout table), **not** under `$MUSCATDB_ROOT` — `sqlite3
+    .backup` against a nonexistent source silently creates an empty destination DB (exit
+    0, no error), so the wrong source here would leave staging looking fine but empty:
+    - `sqlite3 "/raid_ut2/home/jerome/github/research/project/muscat-db/muscat.db" ".backup '/ut2/jerome/deploy/test/muscat_test.db'"`
+    - from `$HOME/deploy/test/app`: `scan-yesterday` +
+      `build-db --db /ut2/jerome/deploy/test/muscat_test.db`
+    - confirm logs move to the new checkout paths.
 
 ### Gate E — Phase 5: nginx (needs **sudo**, interactive auth)
-10. `sudo cp $HOME/deploy/main/app/deploy/nginx-staging.conf /etc/nginx/sites-available/muscat-staging`
-11. Symlink into `sites-enabled`, `sudo nginx -t`, `sudo systemctl reload nginx`.
-12. Verify `:8002` reverse-proxies to `:8003` and serves the staging app.
+12. `sudo cp $HOME/deploy/main/app/deploy/nginx-staging.conf /etc/nginx/sites-available/muscat-staging`
+13. Symlink into `sites-enabled`, `sudo nginx -t`, `sudo systemctl reload nginx`.
+14. Verify `:8002` reverse-proxies to `:8003` and serves the staging app.
 
 ### Gate F — Phase 7: Actions vars + secrets (**org admin**)
-13. Set the **vars** `DEPLOY_PATH_PRODUCTION`/`DEPLOY_TMUX_SESSION_PRODUCTION` on the
+15. Set the **vars** `DEPLOY_PATH_PRODUCTION`/`DEPLOY_TMUX_SESSION_PRODUCTION` on the
     `production` Environment and `DEPLOY_PATH_STAGING`/`DEPLOY_TMUX_SESSION_STAGING` on
     `staging` (after Phases 1–6 verified, per issue ordering). `DEPLOY_HOST`,
-    `DEPLOY_USER`, `DEPLOY_SSH_KEY` are **secrets**, not vars — set in step 15, not here.
-14. Bootstrap staging: `git push` to `test` → staging uvicorn :8003 in tmux
+    `DEPLOY_USER`, `DEPLOY_SSH_KEY` are **secrets**, not vars — set in step 17, not here.
+16. Bootstrap staging: `git push` to `test` → staging uvicorn :8003 in tmux
     `muscatdb-test`.
-15. Verify :8003 (via :8002) + `/healthz`, then set the `DEPLOY_SSH_KEY`/`DEPLOY_HOST`/
-    `DEPLOY_USER` **secrets** for both Environments.
+17. Verify :8003 (via :8002) + `/healthz`, then set the `DEPLOY_SSH_KEY`/`DEPLOY_HOST`/
+    `DEPLOY_USER` **secrets** for both Environments. From this point on, a push to `main`
+    or `test` really does redeploy — Gate B/C's manual sync steps are no longer needed.
 
 ### Final verification (from the plan)
 - `:8001` / `:8003` refuse unauthenticated `/` (401); `/healthz` → 200.

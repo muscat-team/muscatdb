@@ -49,6 +49,7 @@ from muscat_db import transit_fit as fit
 from muscat_db import ttv_fit as ttv
 from muscat_db import lco
 from muscat_db.lco import _annotate_lco_archive_results
+from muscat_db import exofop
 from muscat_db import transit_obs
 from muscat_db import fov as fov_opt
 from muscat_db import ephemeris_math
@@ -4611,6 +4612,16 @@ def api_lco_archive_frames(
 
     use_fuzzy = fuzzy_name.strip().lower() in ("1", "true", "yes", "on")
     tel_class = TELID if TELID in ("0m4", "1m0", "2m0") else ""
+    try:
+        requested_limit = int(limit)
+    except (TypeError, ValueError):
+        requested_limit = 50
+    # "Limit" is the user-facing total frame count across pages, not the
+    # archive's own per-request page size (which is hard-capped at 1000
+    # regardless of what's requested -- see the request-id path above). Pass
+    # 1000 as the page size and let archive_search_all follow `next` to
+    # satisfy a larger total, bounded by the same safety cap used there.
+    max_frames = max(1, min(requested_limit, lco._ARCHIVE_MAX_FRAMES))
     filters = {
         "proposal_id": proposal_id,
         "SITEID": SITEID,
@@ -4620,7 +4631,18 @@ def api_lco_archive_frames(
         "reduction_level": reduction_level,
         "start": start,
         "end": end,
-        "limit": limit,
+        "limit": str(min(max_frames, 1000)),
+        # A target's coordinates/name also match auto-focus, standard-field,
+        # and other engineering frames the telescope happened to take near
+        # the same footprint (observed: TOI-1807 turned up "auto_focus"
+        # frames at the same RLEVEL as real science). reduction_level alone
+        # doesn't distinguish these -- an auto-focus frame can carry RLEVEL
+        # 91 same as a real exposure -- but OBSTYPE does, and the archive
+        # filters on it server-side, so this is one query, not a client-side
+        # pass. This is a search for a target's own observations, not a
+        # frame-by-request-id lookup, so it's fine for that request-id path
+        # above to keep returning every frame regardless of type.
+        "OBSTYPE": "EXPOSE",
     }
     # Default: coordinate-primary. Resolve the target name to RA/Dec (ICRS deg)
     # and return every frame whose footprint covers that position. This is robust
@@ -4645,13 +4667,27 @@ def api_lco_archive_frames(
         ra_deg, dec_deg, _source = resolved
         filters["covers"] = f"POINT({ra_deg} {dec_deg})"
     try:
-        result = lco.archive_search(filters, _request_user(request))
+        result = lco.archive_search_all(filters, _request_user(request), max_frames=max_frames)
         rows = result.get("results") or []
+        if isinstance(rows, list):
+            # OBSTYPE=EXPOSE (above) doesn't catch an engineering frame that
+            # was itself submitted as a plain EXPOSE block (observed:
+            # auto-focus sequences filed with a real "e91" filename) -- this
+            # is the narrower, OBJECT-based net for that specific case.
+            # `count` stays the archive's own total (from archive_search_all),
+            # not len(rows): these are local, post-hoc filters on frames the
+            # archive already returned as matches, so overwriting `count` here
+            # would make a truncated/filtered search's "of N" total equal
+            # whatever's left after filtering -- collapsing the "Showing X of
+            # Y" truncation banner and the "archive reports N match" branch
+            # the template shows when every returned frame gets filtered out.
+            rows = [r for r in rows if not lco.is_engineering_object(r.get("OBJECT") or "")]
+            result = dict(result)
+            result["results"] = rows
         if tel_class and isinstance(rows, list):
             rows = [r for r in rows if str(r.get("TELID") or "").lower().startswith(tel_class)]
             result = dict(result)
             result["results"] = rows
-            result["count"] = len(rows)
         if isinstance(rows, list):
             annotated, dataset_count = _annotate_lco_archive_results(instrument, rows)
             result = dict(result)
@@ -4663,6 +4699,88 @@ def api_lco_archive_frames(
             payload["resolved_dec"] = round(resolved[1], 5)
             payload["resolved_source"] = resolved[2]
         return JSONResponse(payload)
+    except lco.LcoError as e:
+        return _lco_error_response(e)
+
+
+@lco_router.get("/archive/exofop", response_class=JSONResponse)
+def api_lco_archive_exofop(
+    OBJECT: str = "",
+    instrument: str = "",
+):
+    """Cross-check an ExoFOP target's reported LCO ``time_series`` against the DB.
+
+    When the ``OBJECT`` target names a known TOI (or resolves to one via the
+    local catalogs), fetch the ExoFOP ``time_series`` list and flag each entry as
+    already in muscat-db or missing. The existence check is entirely local; it
+    makes no LCO archive calls.
+    """
+    target = (OBJECT or "").strip()
+    if not target:
+        return JSONResponse(
+            {"ok": False, "error": "Enter a target name to check ExoFOP time series."},
+            status_code=400,
+        )
+    report = exofop.build_time_series_report(target)
+    if not report.get("ok"):
+        return JSONResponse({"ok": False, "error": report.get("error", "not a TOI")})
+    return JSONResponse(
+        {
+            "ok": True,
+            "match_mode": "exofop",
+            "toi": report["toi"],
+            "time_series": report["time_series"],
+            "total": report["total"],
+        }
+    )
+
+
+@lco_router.post("/archive/exofop-download", response_class=JSONResponse)
+def api_lco_archive_exofop_download(request: Request, payload: dict = Body(...)):
+    """Download the LCO frames behind one ExoFOP time-series entry.
+
+    An ExoFOP ``time_series`` row's ``tstag`` is *not* an LCO request id --
+    it's ExoFOP's own internal Data Tag (see ``exofop`` module docstring),
+    confirmed against the live archive to resolve to zero frames under
+    ``request_id=<tstag>`` for both a 2020 and a 2024 report. So this
+    searches the archive by the entry's target name + reported UT date
+    instead (``exofop.archive_search_by_target_date``, the same search the
+    "Search LCO Archive" tab uses), then starts the standard background
+    download + ingest job, so a missing dataset can be fetched in one click.
+    """
+    try:
+        target = str(payload.get("target") or "").strip()
+        tsdate = str(payload.get("tsdate") or "").strip()
+        if not target or not tsdate:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "Target name and observation date are required to search "
+                             "the LCO archive for this time-series entry.",
+                },
+                status_code=400,
+            )
+        reduction_level = str(payload.get("reduction_level") or "91")
+        rows = exofop.archive_search_by_target_date(
+            target, tsdate, reduction_level=reduction_level, user_name=_request_user(request),
+        )
+        if not rows:
+            return JSONResponse(
+                {"ok": False, "error": f"No frames found in the LCO archive for {target!r} around {tsdate}."},
+                status_code=404,
+            )
+        annotated, _dataset_count = _annotate_lco_archive_results(
+            str(payload.get("instrument") or ""), rows
+        )
+        frames = [dict(f) for f in annotated]
+        job = lco.start_archive_download(
+            frames,
+            overwrite=bool(payload.get("overwrite")),
+            auto_ingest=True,
+            user_name=request.state.user,
+        )
+        _persist_lco_archive_download_row(_lco_archive_download_row(job))
+        return JSONResponse({"ok": True, **job})
     except lco.LcoError as e:
         return _lco_error_response(e)
 
