@@ -161,7 +161,25 @@ The cron now runs from the **production checkout** (`$HOME/deploy/main/app`),
 not the dev tree, so it has no dependency on a dev branch switch (see issue
 #26): it does the nightly prod `scan-yesterday` + `build-db`, then reseeds
 `muscat_test.db` from prod via SQLite's backup API and runs an isolated staging
-`scan-yesterday` against staging's own `MUSCAT_OBSLOG_DIR`.
+`scan-yesterday` against staging's own `MUSCAT_OBSLOG_DIR`. The README's [Cron
+section](../README.md#cron-daily) gives the generic, host-agnostic three-step
+form for anyone else deploying this repo; the literal line actually installed
+on this host, staging refresh included, is:
+
+```
+MUSCAT_OBSLOG_DIR=/ut2/muscat/obslog
+MUSCATDB_ROOT=/ut2/jerome/deploy/main/app
+MUSCAT_TEST_ROOT=/ut2/jerome/deploy/test/app
+MUSCAT_TEST_DB=/ut2/jerome/deploy/test/muscat_test.db
+MUSCAT_TEST_OBSLOG_DIR=/ut2/jerome/deploy/test/obslog
+30 17 * * * cd $MUSCATDB_ROOT && bash scripts/download_catalogs.sh >> $MUSCATDB_ROOT/logs/download_catalogs.log 2>&1 && /ut2/jerome/.local/bin/uv run muscat-db scan-yesterday >> $MUSCATDB_ROOT/logs/scan.log 2>&1 && /ut2/jerome/.local/bin/uv run muscat-db build-db >> $MUSCATDB_ROOT/logs/build-db.log 2>&1 && /usr/bin/python3 -c "import sqlite3; s=sqlite3.connect('file:/ut2/jerome/github/research/project/muscat-db/muscat.db?mode=ro',uri=True); d=sqlite3.connect('$MUSCAT_TEST_DB'); s.backup(d); d.close(); s.close()" >> $MUSCAT_TEST_ROOT/logs/staging-refresh.log 2>&1 && cd $MUSCAT_TEST_ROOT && MUSCAT_OBSLOG_DIR=$MUSCAT_TEST_OBSLOG_DIR /ut2/jerome/.local/bin/uv run muscat-db scan-yesterday >> $MUSCAT_TEST_ROOT/logs/scan.log 2>&1
+```
+
+`cronjob.txt` itself is not tracked (it was a root-level file that only ever
+made sense as this host's literal crontab, never as example config); this
+block is now the record of what the host actually runs, kept alongside the
+other deliberately-recorded host state in this file. Update it here, not in a
+tracked `cronjob.txt`, the next time the crontab changes.
 
 **Rule:** pin `MUSCAT_OBSLOG_DIR` explicitly in `.env`, on a single host or
 many — never rely on its `$HOME`-relative in-code default in production.
