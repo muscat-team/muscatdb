@@ -875,17 +875,22 @@ def _run_server(
 def serve(
     db: str = _db_option(),
     host: str = typer.Option("127.0.0.1", "--host", help="Bind address"),
-    port: int = typer.Option(8000, "--port", "-p", help="Port number"),
+    port: int | None = typer.Option(
+        None, "--port", "-p",
+        help="Port number (default: 8001 with --nginx, else 8000)",
+    ),
     reload: bool = typer.Option(False, "--reload", help="Auto-reload on code changes"),
     workers: int = typer.Option(1, "--workers", "-w", help="Number of worker processes"),
     nginx: bool = typer.Option(
         False, "--nginx",
-        help="Set safe defaults for nginx reverse proxy (127.0.0.1:8001)",
+        help="Set safe defaults for nginx reverse proxy (127.0.0.1:8001 unless --port overrides it)",
     ),
 ):
     """Start the web frontend."""
+    if port is None:
+        port = 8001 if nginx else 8000
     if nginx:
-        host, port = "127.0.0.1", 8001
+        host = "127.0.0.1"
     _run_server(db, host, port, reload, workers, nginx)
 
 
@@ -893,17 +898,22 @@ def serve(
 def restart(
     db: str = _db_option(),
     host: str = typer.Option("127.0.0.1", "--host", help="Bind address"),
-    port: int = typer.Option(8000, "--port", "-p", help="Port number"),
+    port: int | None = typer.Option(
+        None, "--port", "-p",
+        help="Port number (default: 8001 with --nginx, else 8000)",
+    ),
     reload: bool = typer.Option(False, "--reload", help="Auto-reload on code changes"),
     workers: int = typer.Option(1, "--workers", "-w", help="Number of worker processes"),
     nginx: bool = typer.Option(
         False, "--nginx",
-        help="Set safe defaults for nginx reverse proxy (127.0.0.1:8001)",
+        help="Set safe defaults for nginx reverse proxy (127.0.0.1:8001 unless --port overrides it)",
     ),
 ):
     """Stop any server already running on the port, then start a fresh one."""
+    if port is None:
+        port = 8001 if nginx else 8000
     if nginx:
-        host, port = "127.0.0.1", 8001
+        host = "127.0.0.1"
         # Validate before stopping the healthy process.  A missing/unreadable
         # proxy secret must fail the restart without causing an outage.
         _prepare_nginx_auth()

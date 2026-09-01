@@ -143,3 +143,85 @@ def test_nginx_restart_validates_secret_before_stopping_server(monkeypatch):
 
     assert stopped == []
     assert "MUSCAT_REQUIRE_AUTH" not in cli.os.environ
+
+
+def test_nginx_restart_honors_explicit_port_override(monkeypatch):
+    """`restart --nginx` must not silently override an explicit --port.
+
+    Regression for a bug where --nginx unconditionally hardcoded port 8001
+    regardless of --port. Bootstrapping a second environment (e.g. staging
+    on 8003) via `restart --nginx --port 8003` stopped and replaced
+    whatever was actually running on 8001 -- production, on a shared host.
+    """
+    from muscat_db import cli
+
+    captured = {}
+    monkeypatch.setattr(cli, "_prepare_nginx_auth", lambda: None)
+    monkeypatch.setattr(cli, "_stop_running_servers", lambda _port: [])
+    monkeypatch.setattr(
+        cli,
+        "_run_server",
+        lambda db, host, port, reload, workers, nginx: captured.update(
+            db=db, host=host, port=port, reload=reload, workers=workers, nginx=nginx
+        ),
+    )
+
+    cli.restart(
+        db="muscat.db",
+        host="127.0.0.1",
+        port=8003,
+        reload=False,
+        workers=1,
+        nginx=True,
+    )
+
+    assert captured["port"] == 8003
+    assert captured["host"] == "127.0.0.1"
+
+
+def test_nginx_restart_still_defaults_to_8001_without_explicit_port(monkeypatch):
+    from muscat_db import cli
+
+    captured = {}
+    monkeypatch.setattr(cli, "_prepare_nginx_auth", lambda: None)
+    monkeypatch.setattr(cli, "_stop_running_servers", lambda _port: [])
+    monkeypatch.setattr(
+        cli,
+        "_run_server",
+        lambda db, host, port, reload, workers, nginx: captured.update(port=port, host=host),
+    )
+
+    cli.restart(
+        db="muscat.db",
+        host="127.0.0.1",
+        port=None,
+        reload=False,
+        workers=1,
+        nginx=True,
+    )
+
+    assert captured["port"] == 8001
+    assert captured["host"] == "127.0.0.1"
+
+
+def test_nginx_serve_honors_explicit_port_override(monkeypatch):
+    from muscat_db import cli
+
+    captured = {}
+    monkeypatch.setattr(
+        cli,
+        "_run_server",
+        lambda db, host, port, reload, workers, nginx: captured.update(port=port, host=host),
+    )
+
+    cli.serve(
+        db="muscat.db",
+        host="127.0.0.1",
+        port=8003,
+        reload=False,
+        workers=1,
+        nginx=True,
+    )
+
+    assert captured["port"] == 8003
+    assert captured["host"] == "127.0.0.1"

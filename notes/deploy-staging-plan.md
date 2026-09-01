@@ -259,10 +259,19 @@ origin/<branch>` target the right ref.
 ## Phase 7 — Set Actions vars; verify staging; final gate
 
 - Set `DEPLOY_*` vars (absolute), **no secrets yet**.
-- Bootstrap staging once:
+- Bootstrap staging once, in tmux session `muscatdb-test` (matching what
+  `deploy.yml`'s staging job runs — **not** `restart --nginx`: that command
+  hardcoded port 8001 regardless of `--port` until it was fixed, and running
+  it from the staging checkout would have stopped whatever was actually
+  listening on 8001 — production — and brought staging up in its place. Fixed
+  now (`--port` overrides the `--nginx` default), but the direct command
+  below is what actually runs in production, so use it here too rather than
+  drift from `deploy.yml`):
   ```bash
-  cd "$HOME/deploy/test/app" && uv run muscat-db restart --nginx
+  cd "$HOME/deploy/test/app" && uv run uvicorn muscat_db.web:sio_app --host 127.0.0.1 --port 8003
   ```
+  Staging's `.env` already sets `MUSCAT_REQUIRE_AUTH=1`, so `--nginx`'s only
+  other effect (`_prepare_nginx_auth`) costs nothing to skip.
   Verify: `:8003/healthz` → 200; `:8002` (nginx) → 401 (basic auth, same htpasswd);
   `:8001` untouched.
 - Smoke-test staging: a `--test_run` photometry/preview run writes only to
