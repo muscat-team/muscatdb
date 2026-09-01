@@ -338,11 +338,14 @@ origin/<branch>` target the right ref.
   skip). `sqlite3` CLI is not installed on this host — substituted Python's stdlib
   `sqlite3.Connection.backup()`, same backup-API safety against a live WAL DB the plan
   called for, verified standalone (~11s against the live prod DB, no tearing).
+- Gate E / Phase 5 (2026-09-01, root): installed `deploy/nginx-staging.conf` as
+  `/etc/nginx/sites-available/muscat-db-staging` (the file's own header comment names it
+  this way, matching production's `muscat-db` — the plan text below originally said
+  `muscat-staging`, corrected), symlinked into `sites-enabled`, `nginx -t` + reload clean.
+  `:8002` listening, `curl 127.0.0.1:8002/` → `401` (`auth_basic` firing correctly with no
+  backend on `:8003` yet — that's Gate F's bootstrap step).
 
 **Blocked / not yet done**
-- Phase 5 (nginx install): `deploy/nginx-staging.conf` written but install to
-  `/etc/nginx/sites-available` + `nginx -t` + reload needs **sudo** (interactive auth
-  required on this host). Run as root when convenient.
 - Phase 7 (vars + secrets): set `DEPLOY_*` Actions vars (org admin), bootstrap/verify the
   staging server, and only then set the `DEPLOY_*` secrets. This is the final gate.
 
@@ -459,10 +462,15 @@ do once secrets are set:
     - Full chain recorded in `cronjob.txt`, tracked in git per the repo's existing
       convention for this file.
 
-### Gate E — Phase 5: nginx (needs **sudo**, interactive auth)
-12. `sudo cp $HOME/deploy/main/app/deploy/nginx-staging.conf /etc/nginx/sites-available/muscat-staging`
-13. Symlink into `sites-enabled`, `sudo nginx -t`, `sudo systemctl reload nginx`.
-14. Verify `:8002` reverse-proxies to `:8003` and serves the staging app.
+### Gate E — Phase 5: nginx (needs **sudo**, interactive auth) — **done** (2026-09-01)
+12. ~~`sudo cp $HOME/deploy/main/app/deploy/nginx-staging.conf /etc/nginx/sites-available/muscat-staging`~~
+    done, as `muscat-db-staging` — the config file's own header comment names it that way
+    (matching production's `muscat-db`), not `muscat-staging` as originally written here.
+13. ~~Symlink into `sites-enabled`, `sudo nginx -t`, `sudo systemctl reload nginx`.~~ done,
+    clean.
+14. Verified `:8002` is listening and `curl 127.0.0.1:8002/` → `401` (`auth_basic` firing
+    correctly). Full reverse-proxy-to-`:8003` verification waits for Gate F's staging
+    bootstrap — nothing is listening on `:8003` yet.
 
 ### Gate F — Phase 7: Actions vars + secrets (**org admin**)
 15. Set the **vars** `DEPLOY_PATH_PRODUCTION`/`DEPLOY_TMUX_SESSION_PRODUCTION` on the
