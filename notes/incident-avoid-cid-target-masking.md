@@ -1,5 +1,11 @@
 # Avoiding the target source in photometry
 
+> **Status: resolved.** The required invariant below is enforced in prose2's
+> `run_photometry.py` (`target_index in avoid_cids` raises before masking, both
+> at parse time and again after target identification). Kept here as the
+> incident record for the bug and its verification. Moved from the repo root
+> (`photometry_avoid_cid.md`) during the September 2026 root-directory cleanup.
+
 ## Incident
 
 The Sinistro reduction for `TIC 89071445` on `250806` was launched with

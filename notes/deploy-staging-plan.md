@@ -332,7 +332,7 @@ origin/<branch>` target the right ref.
   in prod).
 - Gate D / Phase 6 (2026-09-01): cron `MUSCATDB_ROOT` repointed to `$HOME/deploy/main/app`;
   staging-refresh steps added (`.backup` reseed + isolated `scan-yesterday`, **no**
-  `build-db` — see the finding below and `cronjob.txt`). `logs/` created in both deploy
+  `build-db` — see the finding below and [DEPLOYMENT.md](DEPLOYMENT.md#shared-input-paths-must-be-pinned-not-left-home-relative)). `logs/` created in both deploy
   checkouts (gitignored, cron's `>>` redirection needs the directory to pre-exist; a
   missing `logs/` would fail closed and abort the rest of the `&&` chain, not silently
   skip). `sqlite3` CLI is not installed on this host — substituted Python's stdlib
@@ -459,8 +459,10 @@ do once secrets are set:
       when specifically testing that command.
     - Logs land in each checkout's own `logs/` (created 2026-09-01, gitignored,
       pre-created since cron's `>>` redirection needs the directory to exist first).
-    - Full chain recorded in `cronjob.txt`, tracked in git per the repo's existing
-      convention for this file.
+    - Full chain recorded in [DEPLOYMENT.md](DEPLOYMENT.md#shared-input-paths-must-be-pinned-not-left-home-relative)
+      rather than a tracked `cronjob.txt` (see #129 — the root-level file was dropped as
+      host-specific; the literal crontab line lives alongside the rest of this file's
+      deliberately-recorded host state instead).
 
 ### Gate E — Phase 5: nginx (needs **sudo**, interactive auth) — **done** (2026-09-01)
 12. ~~`sudo cp $HOME/deploy/main/app/deploy/nginx-staging.conf /etc/nginx/sites-available/muscat-staging`~~

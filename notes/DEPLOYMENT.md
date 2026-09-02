@@ -4,9 +4,27 @@
 
 ---
 
-## Single-host deployment (nginx + tmux)
+## Host deployment (nginx + tmux)
 
-muscat-db runs behind nginx (HTTP Basic Auth) reverse-proxying to uvicorn, inside the `muscatdbgui` tmux session. The README "Multi-User Deployment" section has the full walkthrough; the essentials:
+muscat-db runs behind nginx (HTTP Basic Auth) reverse-proxying to uvicorn, inside tmux sessions. There are now **two live environments**, split by feature-landing order in issue #26. Production and staging use **dedicated code checkouts** under `$HOME/deploy/` so no deploy step ever resets the dev tree; the dev checkout (`$HOME/github/research/project/muscat-db`) is pure development.
+
+| | Production | Staging |
+|---|---|---|
+| **Branch** | `main` | `test` |
+| **Checkout** | `$HOME/deploy/main/app` | `$HOME/deploy/test/app` |
+| **nginx port (public)** | `:8000` (Basic Auth) | `:8002` (Basic Auth) |
+| **uvicorn port (loopback)** | `:8001` | `:8003` |
+| **tmux session** | `muscatdbgui` | `muscatdb-test` |
+| **`MUSCAT_DB_PATH`** | `$HOME/github/research/project/muscat-db/muscat.db` | `$HOME/deploy/test/muscat_test.db` (seeded nightly from prod) |
+| **`MUSCAT_OBSLOG_DIR`** | `/ut2/muscat/obslog` | `$HOME/deploy/test/obslog` (its own copy, never the shared tree) |
+| **`MUSCAT_PROSE_DIR`/`TIMER_DIR`/`TTV_DIR`** | `$HOME/ql/{prose,timer,harmonic}` | `$HOME/deploy/test/{prose,timer,harmonic}` |
+| **`MUSCAT_MAX_FULL_JOBS`** | `1` | `0` (staging never runs full jobs) |
+| **`MUSCAT_LCO_MONITOR_ENABLED`** | `1` | `0` |
+| **`MUSCAT_LCO_ALLOW_SUBMIT`** | set | unset — can never book telescope time |
+
+`deploy.yml` deploys each branch to its own checkout on push to `main`/`test`, keyed off the `DEPLOY_PATH_PRODUCTION`/`DEPLOY_PATH_STAGING` and `DEPLOY_TMUX_SESSION_PRODUCTION`/`DEPLOY_TMUX_SESSION_STAGING` actions variables. Each checkout's `.env` pins the absolute paths above. Both launch uvicorn **without `--reload`** (dropped as part of the #26 host split — see the "Authentication boundary" note below for why `--reload` was harmful). `deploy/setup-nginx.sh` handles first-time nginx setup for production; staging's block lives at `/etc/nginx/sites-available/muscat-db-staging` (`:8002` → `:8003`).
+
+The README "Multi-User Deployment" section has the full walkthrough; the essentials:
 
 ```bash
 # First-time nginx setup (as root)
@@ -16,12 +34,9 @@ sudo bash deploy/setup-nginx.sh
 sudo env "PATH=$PATH" uv run muscat-db htpasswd add <user>
 uv run muscat-db htpasswd delete <user>
 uv run muscat-db htpasswd list
-
-# Start / restart behind nginx (binds uvicorn 127.0.0.1:8001; nginx owns :8000)
-uv run muscat-db restart --nginx --reload
 ```
 
-Connect via SSH tunnel: `ssh -L 8000:localhost:8000 <user>@muscat-ut2` → http://localhost:8000.
+Connect to production via SSH tunnel: `ssh -L 8000:localhost:8000 <user>@muscat-ut2` → http://localhost:8000. Staging's public port is `:8002` (`ssh -L 8002:localhost:8002`).
 
 ### Authentication boundary and deployment verification
 
@@ -62,10 +77,15 @@ curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8001/
 
 Changing the secret file's owner/mode and running `nginx -t` do not stop
 nginx, uvicorn, or science-pipeline processes, so they do not interrupt running
-jobs. A muscat-db restart is a separate operation. Restart only in the existing
-`muscatdbgui` tmux session, after checking for active photometry/transit jobs.
-Python changes are picked up by `--reload`; HTML and JavaScript changes require
-a restart before assuming they are deployed.
+jobs. A muscat-db restart is a separate operation. Restart only in the correct
+tmux session (`muscatdbgui` for production, `muscatdb-test` for staging), after
+checking for active photometry/transit jobs. `--reload` is **not** used in
+production or staging: the deployment launches uvicorn without it (see issue
+#26), because a reload mid-`ingest_date` rolls back a whole night's ingest and
+because it lets a dev-tree branch switch restart the live server. Deploys are
+driven by `deploy.yml`, which restarts the matching session after a `git reset
+--hard` in the dedicated checkout; since `--reload` is gone, HTML/JavaScript
+changes require that deploy restart before they are live.
 
 ---
 
@@ -121,7 +141,7 @@ The **linchpin assumption** for multi-host workers: `/ut2` and everything under 
 - External tools: `$HOME/github/research/project/ext_tools/{prose2,timer,harmonic}`
   (see [Engine checkouts](#engine-checkouts) for the remote each must track)
 - Repo: `$HOME/github/research/project/muscat-db/`
-- Database: `$HOME/github/research/project/muscat-db/muscat.db` (**3,066,445,824 bytes** — same size on ut2, ut3, ut4, ut6)
+- Database: `$HOME/github/research/project/muscat-db/muscat.db` (size varies with each nightly `build-db`; ~1.6 GiB as of 2026-09-01 — the previously-recorded 3,066,445,824 bytes is stale, consistent with `build_db` writing a fresh compact file rather than data loss)
 
 ### Shared-input paths must be pinned, not left `$HOME`-relative
 
@@ -137,6 +157,29 @@ no error — see #71. The daily cron already worked around this by exporting
 `MUSCAT_OBSLOG_DIR=/ut2/muscat/obslog` itself (see the [Cron
 section](../README.md#cron-daily) of the README), but that override never
 covered manual CLI runs or the `muscatdbgui` session, which only read `.env`.
+The cron now runs from the **production checkout** (`$HOME/deploy/main/app`),
+not the dev tree, so it has no dependency on a dev branch switch (see issue
+#26): it does the nightly prod `scan-yesterday` + `build-db`, then reseeds
+`muscat_test.db` from prod via SQLite's backup API and runs an isolated staging
+`scan-yesterday` against staging's own `MUSCAT_OBSLOG_DIR`. The README's [Cron
+section](../README.md#cron-daily) gives the generic, host-agnostic three-step
+form for anyone else deploying this repo; the literal line actually installed
+on this host, staging refresh included, is:
+
+```
+MUSCAT_OBSLOG_DIR=/ut2/muscat/obslog
+MUSCATDB_ROOT=/ut2/jerome/deploy/main/app
+MUSCAT_TEST_ROOT=/ut2/jerome/deploy/test/app
+MUSCAT_TEST_DB=/ut2/jerome/deploy/test/muscat_test.db
+MUSCAT_TEST_OBSLOG_DIR=/ut2/jerome/deploy/test/obslog
+30 17 * * * cd $MUSCATDB_ROOT && bash scripts/download_catalogs.sh >> $MUSCATDB_ROOT/logs/download_catalogs.log 2>&1 && /ut2/jerome/.local/bin/uv run muscat-db scan-yesterday >> $MUSCATDB_ROOT/logs/scan.log 2>&1 && /ut2/jerome/.local/bin/uv run muscat-db build-db >> $MUSCATDB_ROOT/logs/build-db.log 2>&1 && /usr/bin/python3 -c "import sqlite3; s=sqlite3.connect('file:/ut2/jerome/github/research/project/muscat-db/muscat.db?mode=ro',uri=True); d=sqlite3.connect('$MUSCAT_TEST_DB'); s.backup(d); d.close(); s.close()" >> $MUSCAT_TEST_ROOT/logs/staging-refresh.log 2>&1 && cd $MUSCAT_TEST_ROOT && MUSCAT_OBSLOG_DIR=$MUSCAT_TEST_OBSLOG_DIR /ut2/jerome/.local/bin/uv run muscat-db scan-yesterday >> $MUSCAT_TEST_ROOT/logs/scan.log 2>&1
+```
+
+`cronjob.txt` itself is not tracked (it was a root-level file that only ever
+made sense as this host's literal crontab, never as example config); this
+block is now the record of what the host actually runs, kept alongside the
+other deliberately-recorded host state in this file. Update it here, not in a
+tracked `cronjob.txt`, the next time the crontab changes.
 
 **Rule:** pin `MUSCAT_OBSLOG_DIR` explicitly in `.env`, on a single host or
 many — never rely on its `$HOME`-relative in-code default in production.
