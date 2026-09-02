@@ -212,6 +212,18 @@ origin/<branch>` target the right ref.
   the reseed to 0 rows every night. Run `build-db` on staging by hand when actually
   testing that command; don't wire it into the nightly chain.
 
+  **This is deliberately a scanner smoke test, not a data-accumulation step.**
+  Nightly `scan-yesterday` writes CSVs under staging's `MUSCAT_OBSLOG_DIR`, but
+  with no `build-db` and no `ingest-date` following it, nothing loads those CSVs
+  into `muscat_test.db` — the next night's `.backup` reseed discards them anyway.
+  The point of running it is to catch scanner regressions against a real
+  (if isolated) obslog tree, not to give staging its own accumulating dataset.
+  If staging should instead hold its own night's data on top of the prod
+  snapshot, swap this step for `ingest-date` (adds to the existing tables
+  instead of dropping them, unlike `build-db`) — that is a real behavior
+  change to what the production cron does and needs its own decision, not an
+  assumption baked into this plan.
+
 ## Phase 4 — Amend `deploy.yml` (*repo*, PR to `test`) — the code change
 
 - **Two explicit jobs** (`deploy-production`, `deploy-staging`), not a `strategy.matrix`
@@ -259,10 +271,19 @@ origin/<branch>` target the right ref.
 ## Phase 7 — Set Actions vars; verify staging; final gate
 
 - Set `DEPLOY_*` vars (absolute), **no secrets yet**.
-- Bootstrap staging once:
+- Bootstrap staging once, in tmux session `muscatdb-test` (matching what
+  `deploy.yml`'s staging job runs — **not** `restart --nginx`: that command
+  hardcoded port 8001 regardless of `--port` until it was fixed, and running
+  it from the staging checkout would have stopped whatever was actually
+  listening on 8001 — production — and brought staging up in its place. Fixed
+  now (`--port` overrides the `--nginx` default), but the direct command
+  below is what actually runs in production, so use it here too rather than
+  drift from `deploy.yml`):
   ```bash
-  cd "$HOME/deploy/test/app" && uv run muscat-db restart --nginx
+  cd "$HOME/deploy/test/app" && uv run uvicorn muscat_db.web:sio_app --host 127.0.0.1 --port 8003
   ```
+  Staging's `.env` already sets `MUSCAT_REQUIRE_AUTH=1`, so `--nginx`'s only
+  other effect (`_prepare_nginx_auth`) costs nothing to skip.
   Verify: `:8003/healthz` → 200; `:8002` (nginx) → 401 (basic auth, same htpasswd);
   `:8001` untouched.
 - Smoke-test staging: a `--test_run` photometry/preview run writes only to
