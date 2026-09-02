@@ -77,6 +77,7 @@ the specific incidents that motivated each rule.
 * never rename the head branch of an open PR. GitHub closes the PR instead of retargeting it, so pick the name before opening
 * test is the default branch, so a new PR targets it without being told to, and `Closes #N` in a feature PR body closes the issue when that PR merges
 * a bare `#N` resolves inside muscatdb. use `owner/repo#N` for prose2, timer and harmonic
+* re-request review only once you are done pushing. `require_last_push_approval` on test voids any approval given before a later push, so a review of a branch still receiving commits has to be redone -- re-requesting mid-stream just makes the reviewer do the work twice. if something does land after a re-request anyway, say so in a one-line comment: a push does not clear the pending request, so the reviewer has no other way to tell the state changed
 
 ### Releases (test -> main)
 * the release PR is the one case needing an explicit base: `gh pr create --base main --head test`, because from test the default base is test itself

@@ -43,6 +43,11 @@ one approving review and up-to-date status checks (see below).
 - Both branches are protected by rulesets: no direct pushes, no force-push or
   deletion, one approving review, and passing status checks required. Org
   admins can bypass this, but it's a convention even for them.
+- Re-request review only once you're finished pushing. A push voids any
+  approval already given, so a review of a branch that's still receiving
+  commits just has to be redone. If you do push again after re-requesting,
+  leave a short comment saying so — there's no other way for the reviewer to
+  tell.
 
 ## Commits and issues
 
