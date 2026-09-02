@@ -8,6 +8,10 @@ dependencies = [
     "astropy>=7",
     "astroquery>=0.4.7",
     "fastapi>=0.115",
+    # Floor, not a direct import: starlette arrives via fastapi. 1.0.0 builds
+    # request.url from the Host header (GHSA-86qp-5c8j-p5mr / CVE-2026-48710),
+    # letting a malformed Host forge url.path. Fixed in 1.0.1.
+    "starlette>=1.0.1,<1.1",
     "uvicorn[standard]>=0.34",
     "jinja2>=3.1",
     "cryptography>=49",

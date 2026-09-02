@@ -292,9 +292,18 @@ async def _nginx_auth_middleware(request: Request, call_next):
     request.state.user = user
     token = _CURRENT_USER.set(user)
     try:
+        # Decide public vs protected from the raw ASGI path, never from
+        # request.url.path. Starlette builds request.url from the Host header
+        # (GHSA-86qp-5c8j-p5mr), so a Host of "evil/static/" collapses
+        # url.path to "/static/" and would flip this flag off while routing
+        # still dispatches on the real path, skipping both gates below.
+        # scope["path"] is set by the ASGI server and the Host header cannot
+        # reach it. The starlette>=1.0.1 floor in pyproject.toml fixes the URL
+        # parsing itself; this keeps the decision correct regardless.
+        raw_path = request.scope.get("path", "")
         protected = not (
-            request.url.path == "/healthz"
-            or request.url.path.startswith("/static/")
+            raw_path == "/healthz"
+            or raw_path.startswith("/static/")
         )
         if _authentication_required() and protected and not user:
             return JSONResponse(
