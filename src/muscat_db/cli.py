@@ -102,6 +102,45 @@ def _db_option() -> typer.models.OptionInfo:
     )
 
 
+def _require_existing_db(ctx: typer.Context, db: str, action: str) -> None:
+    """Refuse when ``--db`` fell through to the bare cwd-relative default.
+
+    ``_db_option()`` defaults to ``$MUSCAT_DB_PATH`` and only falls back to a
+    cwd-relative ``muscat.db`` when that is unset. A command that resolves to
+    the fallback, in a directory with no database, is almost always a
+    misconfiguration (wrong working directory, or a deploy checkout whose
+    ``.env`` is missing) rather than a request to start a fresh database there,
+    and every caller of this writes to whatever it resolves (issue #122, #134).
+
+    ``get_parameter_source`` lets an explicit ``--db <path>`` through even when
+    that path does not exist yet, since typing it out is deliberate. A set
+    ``MUSCAT_DB_PATH`` is likewise treated as deliberate configuration.
+
+    Only the write-side commands call this. ``serve``, ``restart`` and
+    ``build-static-site`` are left unguarded on purpose: an empty database
+    there is visible within seconds and nothing is damaged by finding out that
+    way.
+    """
+    if (
+        ctx.get_parameter_source("db") != click.ParameterSource.DEFAULT
+        or os.environ.get("MUSCAT_DB_PATH")
+        or os.path.exists(db)
+    ):
+        return
+    console.print(
+        f"[red]Refusing to {action}: no database exists at the default path "
+        f"'{db}', and MUSCAT_DB_PATH is not set.[/]"
+    )
+    console.print(
+        "[red]This usually means the command ran from the wrong working "
+        "directory, or the deploy checkout's .env is missing -- continuing "
+        "here would act on a new, near-empty database instead of the real "
+        "one.[/]"
+    )
+    console.print(f"[dim]Pass --db <path> explicitly to {action} against a genuinely new database.[/]")
+    raise typer.Exit(1)
+
+
 def _log_startup_banner(command: str) -> None:
     """Print a versioned startup header so log files show exactly which build ran and when.
 
@@ -301,32 +340,7 @@ def build_db(
 ):
     """Build SQLite database from all CSV observation logs."""
     _log_startup_banner(f"build-db --db {db}")
-    # build_db() drops and rebuilds frames/summaries/targets from scratch. If
-    # --db wasn't passed and MUSCAT_DB_PATH isn't set either, `db` is just the
-    # bare "muscat.db" fallback resolved against whatever cwd this happened to
-    # run from -- a misconfigured cron cwd or a missing .env then silently
-    # creates a near-empty database there instead of rebuilding the real one
-    # (issue #122). Refuse instead. get_parameter_source lets an explicit
-    # `--db <path>` through even when that path doesn't exist yet, since a
-    # caller that types it out is acting deliberately, not falling through to
-    # a default.
-    if (
-        ctx.get_parameter_source("db") == click.ParameterSource.DEFAULT
-        and not os.environ.get("MUSCAT_DB_PATH")
-        and not os.path.exists(db)
-    ):
-        console.print(
-            f"[red]Refusing to build: no database exists at the default path "
-            f"'{db}', and MUSCAT_DB_PATH is not set.[/]"
-        )
-        console.print(
-            "[red]This usually means the command ran from the wrong working "
-            "directory, or the deploy checkout's .env is missing -- building "
-            "here would silently create a near-empty database instead of "
-            "rebuilding the real one.[/]"
-        )
-        console.print("[dim]Pass --db <path> explicitly to build a genuinely new database.[/]")
-        raise typer.Exit(1)
+    _require_existing_db(ctx, db, "build")
     from muscat_db.database import build_db as _build_db
     console.print("[cyan]Scanning observation logs...[/]")
     with Progress(
@@ -391,6 +405,7 @@ def build_static_site(
 
 @app.command(cls=_Cmd)
 def ingest_date(
+    ctx: typer.Context,
     instrument: str = typer.Argument(
         ..., help="Instrument name", autocompletion=_complete_instrument,
         click_type=_INST_CHOICES,
@@ -403,6 +418,7 @@ def ingest_date(
 ):
     """Ingest one instrument/date from obslog CSVs into the database."""
     _log_startup_banner(f"ingest-date {instrument} {obsdate} --db {db}")
+    _require_existing_db(ctx, db, "ingest")
     from muscat_db.database import ingest_date as _ingest_date
     console.print(f"[cyan]Refreshing {instrument} {obsdate} from obslog CSVs...[/]")
     try:
@@ -448,6 +464,7 @@ def _render_plan(plan) -> None:
 
 @app.command(cls=_Cmd, name="normalize-obsdates")
 def normalize_obsdates(
+    ctx: typer.Context,
     instrument: str = typer.Argument(
         "all", help="LCO-fed instrument, or 'all'", click_type=_LCO_INST_CHOICES,
     ),
@@ -482,6 +499,7 @@ def normalize_obsdates(
     from muscat_db.database import ingest_date as _ingest_date
 
     _log_startup_banner(f"normalize-obsdates {instrument} apply={apply}")
+    _require_existing_db(ctx, db, "normalize")
     names = tuple(LCO_INSTRUMENTS) if instrument == "all" else (instrument,)
     plans = plan_all(instruments=names)
 
@@ -928,6 +946,7 @@ def restart(
 
 @app.command(cls=_Cmd)
 def worker(
+    ctx: typer.Context,
     pipeline: str = typer.Option(
         ..., "--pipeline",
         help='Pipeline(s) to run: photometry, transit_fit, ttv_fit '
@@ -954,6 +973,9 @@ def worker(
     step toward eventually running it on a separate host (architecture
     issue #51).
     """
+    # Before the assignment below: that line sets MUSCAT_DB_PATH from `db`, so
+    # a guard placed after it would always see the variable set and never fire.
+    _require_existing_db(ctx, db, "start a worker")
     os.environ["MUSCAT_DB_PATH"] = db
     if interval is None:
         interval = float(os.environ.get("MUSCAT_JOB_RECONCILE_INTERVAL_S", "2"))
