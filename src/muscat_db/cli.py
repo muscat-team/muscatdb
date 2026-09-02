@@ -861,7 +861,7 @@ def _run_server(
     nginx: bool,
 ) -> None:
     if nginx:
-        print("nginx mode: uvicorn bound to 127.0.0.1:8001 (nginx on :8000 expected)")
+        print(f"nginx mode: uvicorn bound to {host}:{port} (nginx on :8000 expected)")
         _prepare_nginx_auth()
     os.environ["MUSCAT_DB_PATH"] = db
     import uvicorn
