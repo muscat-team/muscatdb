@@ -2317,6 +2317,36 @@ class TestRoutes:
         assert seen_queries
         assert "TOI'' OR ''1''=''1" in seen_queries[0]
 
+    def test_transit_fit_query_archive_toi_resolves_lco_key_project_name(self, client, mocker):
+        """Regression for the reported bug: querying the TOI archive for an
+        LCO key-project name like "TIC245728942.01(TOI5012.01)" must use its
+        TOI designation (5012.01), not the leading TIC digit run that
+        split_toi(target) used to grab as if it were the TOI host number --
+        which sent every such lookup to a nonexistent "TOI 245728942.01" and
+        forced manual RA/Dec/parameter entry.
+        """
+        import httpx
+        from urllib.parse import parse_qs, urlparse
+
+        seen_queries = []
+
+        async def side_effect(url, **kwargs):
+            seen_queries.append(parse_qs(urlparse(url).query).get("query", [""])[0])
+            return httpx.Response(200, content=b"[]", request=httpx.Request("GET", url))
+
+        mocker.patch("muscat_db.web._async_get", side_effect=side_effect)
+
+        r = client.get(
+            "/api/transit-fit/query-archive",
+            params={"target": "TIC245728942.01(TOI5012.01)", "source": "toi"},
+        )
+
+        assert r.status_code == 200
+        assert seen_queries
+        q = seen_queries[0]
+        assert "toi = '5012.01'" in q
+        assert "245728942" not in q
+
     def test_transit_fit_query_archive_hip_target(self, client, mocker):
         import httpx
 
@@ -3037,6 +3067,69 @@ class TestRoutes:
         assert _normalize_target_name("TOI06209-01") == "TOI0620901"
         assert _normalize_target_name("TOI2106.01--exp0") == "TOI2106.01EXP0"
         assert _normalize_target_name("TOI3915TRACK") == "TOI3915TRACK"
+
+    def test_resolve_lco_key_project_name(self):
+        """LCO key-project OBJECT/target names decorate a primary designation
+        with a parenthesized alias, e.g. "TIC245728942.01(TOI5012.01)" (the
+        exact format from the reported bug). Treated as one token the
+        leading TIC digit run defeats every TOI-number regex downstream, so
+        this must split the two halves and prefer whichever is TOI-shaped.
+        """
+        from muscat_db.catalog import resolve_lco_key_project_name
+
+        assert resolve_lco_key_project_name("TIC245728942.01(TOI5012.01)") == "TOI5012.01"
+        # Order-independent: the TOI-shaped half can lead too.
+        assert resolve_lco_key_project_name("TOI5012.01(TIC245728942.01)") == "TOI5012.01"
+        # Spacing inside the decoration doesn't matter.
+        assert resolve_lco_key_project_name("TIC 245728942.01 (TOI 5012.01)") == "TOI 5012.01"
+        # Neither half TOI-shaped: falls back to the primary half, never the
+        # undigestible compound string.
+        assert resolve_lco_key_project_name("TIC245728942(WASP-999)") == "TIC245728942"
+        # No parenthetical at all: a no-op (just stripped).
+        assert resolve_lco_key_project_name("  TOI-5012.01  ") == "TOI-5012.01"
+        assert resolve_lco_key_project_name("") == ""
+
+    def test_resolve_archive_coords_simbad_fallback_strips_lco_decoration(self, monkeypatch, tmp_path):
+        """The SIMBAD/Sesame fallback rejects an LCO-decorated compound name
+        outright (parens aren't valid identifier syntax) and, unlike a bare
+        TIC ID, also rejects a TOI candidate suffix -- verified empirically:
+        "TOI-5012.01" 404s, "TOI-5012" resolves. Use bogus TIC/TOI numbers so
+        the local catalog CSVs (which do carry the real TOI-5012.01) never
+        match and this actually reaches the SIMBAD fallback.
+        """
+        from muscat_db import catalog
+
+        # Point the local catalog lookups at an empty data dir so this can't
+        # accidentally pass via a real (or coincidental) local CSV match.
+        (tmp_path / "data").mkdir()
+        monkeypatch.setattr(catalog, "HERE", tmp_path / "src" / "muscat_db")
+        catalog._CATALOG_CACHE.clear()
+
+        seen_names = []
+
+        def fake_resolve(name):
+            seen_names.append(name)
+            return (10.0, -20.0)
+
+        monkeypatch.setattr("muscat_db.exposure.resolve_target_coords", fake_resolve)
+
+        result = catalog._resolve_archive_coords("TIC999999999.01(TOI99999.01)")
+
+        assert result == (10.0, -20.0, "simbad")
+        assert seen_names == ["TOI99999"]
+
+    def test_target_name_normalization_resolves_lco_key_project_decoration(self):
+        """_normalize_target_name must resolve the same decorated compound
+        name (see test_resolve_lco_key_project_name) to the TOI-catalog
+        comparison key, not leave it as an unmatchable literal string --
+        this is what every catalog cross-match in catalog.py keys off.
+        """
+        from muscat_db.web import _normalize_target_name
+
+        assert _normalize_target_name("TIC245728942.01(TOI5012.01)") == "TOI5012"
+        assert _normalize_target_name("TOI5012.01(TIC245728942.01)") == "TOI5012"
+        assert _normalize_target_name("TIC 245728942.01 (TOI 5012.01)") == "TOI5012"
+        assert _normalize_target_name("TIC245728942(WASP-999)") == "TIC245728942"
 
 
 class TestTransitFitJobs:
