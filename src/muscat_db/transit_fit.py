@@ -732,6 +732,29 @@ def _band_sort_key(band: str) -> tuple:
     return order.get(band, (9, 9))
 
 
+# timer's claret_band() only Sloan-asterisks an *exact* 'g'/'r'/'i'/'z' match
+# (timer/util.py SLOAN_BANDS) before calling limbdark.claret(); it has no
+# notion of muscat's '_narrow' suffix convention, and limbdark's Claret+2011
+# tables have no narrow-band entries at all. Treating each narrow filter's
+# limb darkening as equal to its co-located broadband is muscat-db's own
+# approximation, so it is applied here rather than widening timer/limbdark.
+# This mirrors timer's own worked example for MuSCAT4 narrowband data
+# (examples/hip67522b/fit.yaml, docs/examples.md): g_narrow/i_narrow/z_narrow
+# are fit as band: g/i/z, and Na_D as band: r. Na_D (589.3nm) has no letter
+# counterpart of its own: it falls inside SDSS r' (~552-691nm, effective
+# 622nm) and is ~33nm from r vs ~114nm from g, matching timer's example.
+_CLARET_BAND_ALIAS: dict[str, str] = {
+    "g_narrow": "g", "r_narrow": "r", "i_narrow": "i", "z_narrow": "z",
+    "Na_D": "r",
+}
+
+
+def _claret_band(band: str) -> str:
+    """Map a display band (possibly narrow-band) to the band timer/limbdark
+    should use for limb-darkening lookup. See :data:`_CLARET_BAND_ALIAS`."""
+    return _CLARET_BAND_ALIAS.get(band, band)
+
+
 # timer's ``read_afphot`` maps these three to time/flux/error and treats *every*
 # remaining column as a detrending covariate (``timer/io.py`` ``read_generic``).
 _TIMER_RESERVED_COLUMNS: tuple[str, ...] = ("BJD_TDB", "Flux", "Err")
@@ -873,6 +896,15 @@ def _write_fit_inputs(
     repeated = {b for b in (_csv_band(c) for c in ordered)
                 if sum(_csv_band(o) == b for o in ordered) > 1}
 
+    # validate_no_duplicate_datasets allows a genuine broadband file (e.g. "g")
+    # to be selected alongside its narrow-band counterpart ("g_narrow") in the
+    # same run, since they are different mapped_band keys. _claret_band would
+    # collapse both onto the same "g" value sent to timer, silently merging two
+    # physically distinct filters under one shared limb-darkening prior and one
+    # shared chromatic ror_g parameter. Only alias a narrow band when its target
+    # broadband letter is not itself present as a real dataset in this run.
+    present_broadbands = {b for b in (_csv_band(c) for c in ordered) if b in ("g", "r", "i", "z")}
+
     fit_data: dict = {"data": {}}
     for c in ordered:
         fname = c.name
@@ -887,9 +919,13 @@ def _write_fit_inputs(
         while key in fit_data["data"]:
             key = f"{key}_{len(fit_data['data'])}"
 
+        claret_band = _claret_band(mapped_band)
+        if claret_band in present_broadbands and claret_band != mapped_band:
+            claret_band = mapped_band
+
         fit_data["data"][key] = {
             "file": fname,
-            "band": mapped_band,
+            "band": claret_band,
             "trend": trend_val,
             "binsize": 0.00139,
             "format": "afphot",

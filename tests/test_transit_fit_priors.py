@@ -305,6 +305,59 @@ def test_fit_yaml_data_keys_in_canonical_band_order(tmp_path):
     ]
 
 
+def test_fit_yaml_maps_narrow_bands_to_claret_broadband(tmp_path):
+    # Regression for the reported bug: timer/limbdark's Claret+2011 tables have
+    # no narrow-band entries, so a narrow-only fit crashed with "band must be
+    # one of: ...". The dict *key* keeps its narrow-band identity (asserted by
+    # test_fit_yaml_data_keys_in_canonical_band_order above) but the nested
+    # 'band' field -- what timer actually sends to limbdark -- must resolve to
+    # the co-located broadband letter, with Na_D borrowing from r (closest
+    # Sloan band by effective wavelength; see _CLARET_BAND_ALIAS).
+    inst, date, target = "muscat4", "260823", "TIC245728942.01(TOI5012.01)"
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    raw_bands = ["g_narrow", "Na_D", "i_narrow", "z_narrow"]
+    csvs = []
+    for band in raw_bands:
+        p = src_dir / f"{target}_{inst}_{band}_{date}.csv"
+        p.write_text("time,flux\n")
+        csvs.append(p)
+
+    fit._write_fit_inputs(tmp_path, inst, date, target, csvs, {"planets": "b"})
+    fit_yaml = yaml.safe_load((tmp_path / "fit.yaml").read_text())
+
+    assert fit_yaml["data"]["g_narrow"]["band"] == "g"
+    assert fit_yaml["data"]["Na_D"]["band"] == "r"
+    assert fit_yaml["data"]["i_narrow"]["band"] == "i"
+    assert fit_yaml["data"]["z_narrow"]["band"] == "z"
+
+
+def test_fit_yaml_keeps_narrow_band_unmapped_when_broadband_also_selected(tmp_path):
+    # If a run mixes a genuine broadband file ("gp") with its narrow-band
+    # counterpart ("g_narrow"), validate_no_duplicate_datasets allows both
+    # (different mapped_band keys). Collapsing "g_narrow" onto "g" here would
+    # silently merge two physically distinct filters under one shared
+    # limb-darkening prior and one shared chromatic ror_g parameter, so the
+    # alias must be skipped whenever the target broadband is itself present.
+    inst, date, target = "muscat4", "260823", "TIC245728942.01(TOI5012.01)"
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    raw_bands = ["gp", "g_narrow", "Na_D"]
+    csvs = []
+    for band in raw_bands:
+        p = src_dir / f"{target}_{inst}_{band}_{date}.csv"
+        p.write_text("time,flux\n")
+        csvs.append(p)
+
+    fit._write_fit_inputs(tmp_path, inst, date, target, csvs, {"planets": "b"})
+    fit_yaml = yaml.safe_load((tmp_path / "fit.yaml").read_text())
+
+    assert fit_yaml["data"]["g"]["band"] == "g"
+    assert fit_yaml["data"]["g_narrow"]["band"] == "g_narrow"
+    # Na_D's target (r) has no broadband r file in this run, so it still aliases.
+    assert fit_yaml["data"]["Na_D"]["band"] == "r"
+
+
 def test_fit_yaml_normalizes_sinistro_site_bands(tmp_path):
     inst, date, target = "sinistro", "250710", "HIP67522"
     src_dir = tmp_path / "src"
