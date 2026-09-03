@@ -74,6 +74,56 @@ def test_sinistro_duplicate_names_the_distinguishing_fields():
     assert "lsc" in err
 
 
+def test_narrow_band_alone_is_allowed():
+    """A narrow-only run has no broadband to collide with, so it validates fine
+    (it is _write_fit_inputs' _CLARET_BAND_ALIAS that later maps it for
+    limb darkening -- see test_transit_fit_priors.py)."""
+    csvs = [
+        Path("TOI-1_muscat4_g_narrow_260101.csv"),
+        Path("TOI-1_muscat4_Na_D_260101.csv"),
+    ]
+    assert fit.validate_no_duplicate_datasets("muscat4", "260101", csvs) is None
+
+
+def test_narrow_band_with_a_different_broadband_is_allowed():
+    """g_narrow borrows from 'g', not 'r', so pairing it with an 'rp' file is
+    not a collision."""
+    csvs = [
+        Path("TOI-1_muscat4_g_narrow_260101.csv"),
+        Path("TOI-1_muscat4_rp_260101.csv"),
+    ]
+    assert fit.validate_no_duplicate_datasets("muscat4", "260101", csvs) is None
+
+
+def test_narrow_band_with_its_own_broadband_is_rejected():
+    """g_narrow and its co-located 'gp' would otherwise both silently map to
+    'g' in fit.yaml (see _write_fit_inputs' collision guard), merging two
+    physically distinct filters under one shared limb-darkening prior. This
+    must be caught here, at submit time, rather than crash deep in
+    timer-fit.log with the unmapped-band error the guard was written to avoid."""
+    csvs = [
+        Path("TOI-1_muscat4_g_narrow_260101.csv"),
+        Path("TOI-1_muscat4_gp_260101.csv"),
+    ]
+    err = fit.validate_no_duplicate_datasets("muscat4", "260101", csvs)
+    assert err is not None
+    assert "g_narrow" in err
+    assert "'g'" in err
+
+
+def test_na_d_with_its_claret_broadband_is_rejected():
+    """Na_D borrows limb darkening from 'r' (closest Sloan band by effective
+    wavelength), so pairing it with a real 'rp' file is the same collision."""
+    csvs = [
+        Path("TOI-1_muscat4_Na_D_260101.csv"),
+        Path("TOI-1_muscat4_rp_260101.csv"),
+    ]
+    err = fit.validate_no_duplicate_datasets("muscat4", "260101", csvs)
+    assert err is not None
+    assert "Na_D" in err
+    assert "'r'" in err
+
+
 # ---------------------------------------------------------------------------
 # _detect_run_type
 # ---------------------------------------------------------------------------

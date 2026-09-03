@@ -263,10 +263,12 @@ def selected_site_mode(inst: str, csv_names: list[str]) -> tuple[str, str, str]:
 def validate_no_duplicate_datasets(inst: str, date: str, csvs: list[pathlib.Path]) -> str | None:
     """Ensure no selected lightcurves represent the same physical dataset (site, telescope, mode, band)."""
     seen_keys = set()
+    mapped_bands = []
     for c in csvs:
         parts = c.name.split(f"_{inst}_")
         raw_band = parts[1].split(f"_{date}")[0] if len(parts) > 1 else "gp"
         mapped_band = _normalize_band(raw_band)
+        mapped_bands.append(mapped_band)
         site, telescope, mode = csv_site_mode(c.name, inst)
         key = (site or "", telescope or "", mode or "", mapped_band)
         if key in seen_keys:
@@ -278,6 +280,25 @@ def validate_no_duplicate_datasets(inst: str, date: str, csvs: list[pathlib.Path
             else:
                 return f"Multiple lightcurves selected for the same band '{mapped_band}'. Please select only one run."
         seen_keys.add(key)
+
+    # A narrow-band filter borrows its Claret limb-darkening coefficients from
+    # its co-located broadband (see _CLARET_BAND_ALIAS / _claret_band). If that
+    # broadband is *also* selected in this run, _write_fit_inputs' collision
+    # guard leaves the narrow band unmapped rather than silently merging two
+    # physically distinct filters under one shared prior -- which reproduces
+    # the original "band must be one of: ..." crash this function exists to
+    # prevent, except now buried in timer-fit.log with no explanation. Reject
+    # the combination here instead, at submit time, with a message that names
+    # the real problem.
+    present_broadbands = {b for b in mapped_bands if b in ("g", "r", "i", "z")}
+    for narrow in mapped_bands:
+        broad = _claret_band(narrow)
+        if broad != narrow and broad in present_broadbands:
+            return (
+                f"Cannot fit '{narrow}' and '{broad}' in the same run: narrow-band limb "
+                f"darkening is borrowed from the broadband, so both would share one prior. "
+                f"Select one."
+            )
     return None
 
 
