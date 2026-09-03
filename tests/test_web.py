@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import json
+import re
 import sqlite3
 import zipfile
 import pytest
@@ -2942,6 +2943,55 @@ def test_photometry_page_links_to_fov_after_obslog(mock_db, monkeypatch, tmp_pat
         'href="/fov?inst=muscat3&target=TOI-488.01" '
         'target="_blank" rel="noopener"'
     ) in html
+
+
+def test_photometry_page_keeps_selected_run_with_no_outputs(mock_db, monkeypatch, tmp_path):
+    """A run that failed (or is still running) before writing any output file
+    is scanned into run_outputs by list_photometry_runs() but, since has_any
+    is False, excluded from runs/run_ids. Requesting that run id must keep it
+    selected rather than silently falling back to a different run -- otherwise
+    the page polls/displays the wrong job's status and log after an error."""
+    from muscat_db import web
+
+    empty_outputs = {
+        "has_any": False,
+        "summary": {},
+        "summary_items": [],
+        "bands": {},
+        "sites": [],
+        "modes": [],
+        "masters": [],
+        "npz": None,
+        "log": None,
+        "ref_header": None,
+        "ref_selection": None,
+        "site": "",
+        "mode": "",
+    }
+    done_outputs = {**empty_outputs, "has_any": True}
+
+    good_run = web.phot.RunDescriptor(
+        run_id="good_run", run_name="good_run", mtime=200.0, run_type="full",
+    )
+    run_outputs = {"good_run": done_outputs, "failed_run": empty_outputs}
+
+    monkeypatch.setattr(
+        web.phot, "list_photometry_runs",
+        lambda inst, date, target: ([good_run], run_outputs),
+    )
+    monkeypatch.setattr(web.phot, "list_outputs", lambda *args, **kwargs: empty_outputs)
+    monkeypatch.setattr(web.phot, "command_str", lambda inst, date, target, test_run=False: "run photometry")
+    monkeypatch.setattr(web.phot, "raw_data_dir", lambda inst, date: tmp_path)
+
+    r = TestClient(app).get(
+        "/photometry?inst=muscat3&date=260101&target=TOI-488.01&run=failed_run"
+    )
+
+    assert r.status_code == 200
+    html = r.text
+    # sel_run must stay "failed_run", not fall back to newest ("good_run").
+    assert re.search(r'var\s+runId\s*=\s*"failed_run"\s*;', html)
+    assert not re.search(r'var\s+runId\s*=\s*"good_run"\s*;', html)
 
 
 def test_photometry_download_all_endpoints(mock_db, monkeypatch, tmp_path):
