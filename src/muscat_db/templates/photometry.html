@@ -591,6 +591,7 @@
       <code id="full-cmd">{{ command }}</code>
       <button class="btn" type="button" id="copy-cmd">Copy</button>
     </div>
+    <div id="run-status" style="display:none; margin: 0.75rem 0 0.35rem;"></div>
     <pre id="run-log"></pre>
   </div>
 
@@ -666,6 +667,7 @@
       var cqs = 'inst=' + encodeURIComponent(inst) + '&date=' + encodeURIComponent(date) + '&target=' + encodeURIComponent(target);
       if (runId) cqs += '&run=' + encodeURIComponent(runId);
       fetch('/api/photometry/status?' + cqs).then(function (r) { return r.json(); }).then(function (s) {
+        renderRunStatus(s.state, s.error_desc);
         if (s.state === 'pending' || s.state === 'running' || s.state === 'cancelling' || s.state === 'finalizing') {
           saveJob();
           setRunning(true);
@@ -680,6 +682,15 @@
           // whatever (possibly cached) state the page loaded with.
           setRunning(false);
           clearJob();
+          // A run that failed or was cancelled since this page was last
+          // rendered would otherwise vanish here -- job_status() already has
+          // it (via _persisted_status), but nothing on this page read it, so
+          // the Jobs page was the only place the error was ever visible.
+          if (logEl && (s.state === 'error' || s.state === 'cancelled')) {
+            logEl.style.display = 'block';
+            logEl.textContent = terminalLogText(s);
+            MuscatStorage.set(logKey(), logEl.textContent);
+          }
         }
       }).catch(function () { setRunning(false); });
     }
@@ -982,10 +993,51 @@
   var cancelBtn = document.getElementById('cancel-btn');
   var deleteBtn = document.getElementById('delete-btn');
   var logEl     = document.getElementById('run-log');
+  var statusEl  = document.getElementById('run-status');
   var runBtns   = [testBtn, fullBtn].filter(Boolean);
 
   function logKey() {
     return 'phot:log:' + inst + ':' + date + ':' + target + ':' + (runId || 'legacy');
+  }
+
+  // ----- job-state badge: mirrors the Jobs page badges (jobs.html) so a
+  // failed/cancelled run started from this page is visible here too, not
+  // only after navigating to /jobs. -----
+  var STATE_BADGES = {
+    running:    ['Running',     'badge-amber pulse'],
+    cancelling: ['Cancelling…', 'badge-cancelled'],
+    finalizing: ['Finalizing…', 'badge-amber pulse'],
+    pending:    ['Queued',      'badge-pending'],
+    done:       ['Done',        'badge-green'],
+    error:      ['Failed',      'badge-error'],
+    cancelled:  ['Cancelled',   'badge-cancelled']
+  };
+  function renderRunStatus(state, errorDesc) {
+    if (!statusEl) return;
+    var info = STATE_BADGES[state];
+    if (!info) {
+      statusEl.style.display = 'none';
+      statusEl.innerHTML = '';
+      return;
+    }
+    var html = '<span class="badge ' + info[1] + ' status-badge">' + info[0] + '</span>';
+    if (state === 'error' && errorDesc) {
+      html += ' <span class="error-desc mono" style="color:var(--red);margin-left:0.5rem;">' + MuscatDom.escapeHtml(errorDesc) + '</span>';
+    }
+    statusEl.innerHTML = html;
+    statusEl.style.display = '';
+  }
+
+  // Same log text whether it is shown live (poll) or discovered already
+  // terminal on page load (checkSavedJob) -- see that function below.
+  function terminalLogText(s) {
+    var text = s.log || '';
+    if (s.state === 'error') {
+      text += '\n\n✗ ' + (s.error_desc ? s.error_desc + ' ' : '') + '(exit code ' + s.returncode + ')';
+    } else if (s.state === 'cancelled') {
+      text += '\n\n■ cancelled';
+    }
+    return text;
   }
 
   // ----- restore the log if it was previously saved -----
@@ -1251,6 +1303,7 @@
   function handleStatusResponse(jobSpec, s) {
     // Update current target's log if this is the job we're monitoring on this page
     if (jobSpec.inst === inst && jobSpec.date === date && jobSpec.target === target && (jobSpec.run || '') === (runId || '')) {
+      renderRunStatus(s.state, s.error_desc);
       if (s.log) {
         logEl.textContent = s.log;
         logEl.scrollTop = logEl.scrollHeight;
@@ -1278,7 +1331,7 @@
         }, reloadDelay);
       } else if (s.state === 'error') {
         setRunning(false);
-        logEl.textContent = (s.log || '') + '\n\n✗ pipeline exited with code ' + s.returncode;
+        logEl.textContent = terminalLogText(s);
         MuscatStorage.set(logKey(), logEl.textContent);
         if (typeof window.showLoading === 'function') {
           window.showLoading('Reloading…');
@@ -1294,7 +1347,7 @@
         }, 1200);
       } else if (s.state === 'cancelled') {
         setRunning(false); clearJob();
-        logEl.textContent = (s.log || '') + '\n\n■ cancelled';
+        logEl.textContent = terminalLogText(s);
         MuscatStorage.set(logKey(), logEl.textContent);
         if (typeof window.showLoading === 'function') {
           window.showLoading('Reloading…');
@@ -1360,6 +1413,7 @@
 
     stopPolling();
     setRunning(true);
+    renderRunStatus('running', '');
     logEl.style.display = 'block';
     logEl.textContent = 'Launching ' + (testRun ? 'test' : 'full') + ' reduction…';
     MuscatStorage.remove(logKey());
@@ -1375,6 +1429,7 @@
       if (!res.ok) {
         clearJob();
         setRunning(false);
+        renderRunStatus('error', res.error || 'failed to start');
         logEl.style.display = 'block';
         logEl.textContent = 'Error: ' + (res.error || 'failed to start');
         MuscatStorage.set(logKey(), logEl.textContent);
@@ -1385,6 +1440,7 @@
         saveJob();
       }
       if (res.queued) {
+        renderRunStatus('pending', '');
         logEl.textContent = '⏳ Queued — waiting for the running full reduction to finish…';
         MuscatStorage.set(logKey(), logEl.textContent);
       }
@@ -1395,6 +1451,7 @@
     }).catch(function (err) {
       clearJob();
       setRunning(false);
+      renderRunStatus('error', err.message);
       logEl.style.display = 'block';
       logEl.textContent = 'Error: ' + err.message;
       MuscatStorage.set(logKey(), logEl.textContent);
