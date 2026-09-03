@@ -63,11 +63,22 @@ def _timer_version() -> str:
     return _TIMER_VERSION
 
 
-def _write_log_banner(logf: IO, cmd: list[str], options: dict | None = None) -> None:
+def _write_log_banner(
+    logf: IO,
+    cmd: list[str],
+    options: dict | None = None,
+    narrowband_aliases: list[tuple[str, str]] | None = None,
+) -> None:
     """Write a versioned startup header then the command line and parsed args to *logf*.
 
     This is the very first content written to every timer-fit.log so that
     each run is clearly stamped with the muscat-db version and wall-clock time.
+
+    ``narrowband_aliases``, when non-empty, is the list returned by
+    :func:`_write_fit_inputs` -- pairs of (narrow-band filter, broadband it
+    borrows limb darkening from). Surfaced here so the caveat is visible on
+    the transit-fit page's live log for every narrow-band run, not just
+    buried in fit.yaml.
     """
     separator = "=" * 60
     now_utc = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -90,6 +101,17 @@ def _write_log_banner(logf: IO, cmd: list[str], options: dict | None = None) -> 
                 logf.write(f"  {k}: {val!r}\n")
             else:
                 logf.write(f"  {k}: {v!r}\n")
+        logf.write("\n")
+
+    if narrowband_aliases:
+        logf.write("--- narrow-band limb darkening ---\n")
+        logf.write(
+            "NOTE: Claret's limb-darkening tables have no narrow-band entries, so "
+            "each narrow-band filter below is fit using its co-located broadband's "
+            "limb-darkening coefficients:\n"
+        )
+        for narrow, broad in narrowband_aliases:
+            logf.write(f"  {narrow} -> using '{broad}' broadband limb darkening\n")
         logf.write("\n")
 
 
@@ -827,8 +849,14 @@ def _write_fit_inputs(
     run_id: str = "",
     run_type: str = "",
     telescope: str = "",
-) -> None:
+) -> list[tuple[str, str]]:
     """Copy light-curve CSVs into ``rdir`` and write fit.yaml / sys.yaml.
+
+    Returns the narrow-band -> broadband limb-darkening aliases actually
+    applied (see :data:`_CLARET_BAND_ALIAS`), e.g. ``[("g_narrow", "g"),
+    ("Na_D", "r")]``, so callers that log the run (:func:`start_fit`) can
+    surface the approximation to the user. Empty when no narrow-band data was
+    selected, or when the collision guard left it unmapped.
 
     Shared by :func:`start_fit` (real run directory) and :func:`compute_logp`
     (throwaway temp directory) so both build identical timer inputs from the
@@ -905,6 +933,11 @@ def _write_fit_inputs(
     # broadband letter is not itself present as a real dataset in this run.
     present_broadbands = {b for b in (_csv_band(c) for c in ordered) if b in ("g", "r", "i", "z")}
 
+    # Collected in canonical band order (``ordered`` already sorts that way)
+    # and returned to the caller so it can tell the user their narrow-band
+    # data borrowed limb darkening from a broadband filter.
+    narrowband_aliases: list[tuple[str, str]] = []
+
     fit_data: dict = {"data": {}}
     for c in ordered:
         fname = c.name
@@ -922,6 +955,8 @@ def _write_fit_inputs(
         claret_band = _claret_band(mapped_band)
         if claret_band in present_broadbands and claret_band != mapped_band:
             claret_band = mapped_band
+        elif claret_band != mapped_band and (mapped_band, claret_band) not in narrowband_aliases:
+            narrowband_aliases.append((mapped_band, claret_band))
 
         fit_data["data"][key] = {
             "file": fname,
@@ -1245,6 +1280,8 @@ def _write_fit_inputs(
     with open(rdir / "meta.yaml", "w") as f:
         yaml.safe_dump(meta_data, f, default_flow_style=False, sort_keys=False)
 
+    return narrowband_aliases
+
 
 # Path to the standalone helper run inside the `timer` conda env.
 _LOGP_HELPER = pathlib.Path(__file__).parent / "_logp_helper.py"
@@ -1478,9 +1515,10 @@ def start_fit(
     # Full fits always clobber — otherwise timer reuses the cached test-run
     # trace (20 draws) and exits immediately, misleading the user into thinking
     # their full-fit request was silently ignored.
-    _write_fit_inputs(rdir, inst, date, target, csvs, options,
-                      site=site, telescope=telescope, mode=mode, run_name=run_name, run_id=run_id,
-                      run_type=run_type)
+    narrowband_aliases = _write_fit_inputs(
+        rdir, inst, date, target, csvs, options,
+        site=site, telescope=telescope, mode=mode, run_name=run_name, run_id=run_id,
+        run_type=run_type)
 
     # Clear cached outputs so the next page load reads fresh results from disk.
     _fit_outputs_cache.clear()
@@ -1491,7 +1529,7 @@ def start_fit(
     cmd = [*_timer_prefix(), "-v", str(rdir)]
     log_path = rdir / "timer-fit.log"
     logf = open(log_path, "w")
-    _write_log_banner(logf, cmd, options)
+    _write_log_banner(logf, cmd, options, narrowband_aliases)
     logf.flush()
 
     try:
@@ -2385,9 +2423,10 @@ def sync_jobs() -> None:
                 if selected_csvs is not None:
                     selected = set(str(p) for p in selected_csvs)
                     csvs = [c for c in csvs if str(c) in selected]
-                _write_fit_inputs(rdir, inst, date, target, csvs, opts,
-                                  site=site, telescope=telescope, mode=mode, run_name=run_name, run_id=run_id,
-                                  run_type=run_type)
+                narrowband_aliases = _write_fit_inputs(
+                    rdir, inst, date, target, csvs, opts,
+                    site=site, telescope=telescope, mode=mode, run_name=run_name, run_id=run_id,
+                    run_type=run_type)
                 _fit_outputs_cache.clear()
                 # Sampler size for a test run is already in fit.yaml (see
                 # _write_fit_inputs); no --test_run flag needed (#77).
@@ -2395,7 +2434,7 @@ def sync_jobs() -> None:
                 log_path = rdir / "timer-fit.log"
                 try:
                     logf = open(log_path, "w")
-                    _write_log_banner(logf, cmd, opts)
+                    _write_log_banner(logf, cmd, opts, narrowband_aliases)
                     logf.flush()
                     proc = subprocess.Popen(cmd, cwd=str(rdir), stdout=logf, stderr=subprocess.STDOUT, text=True, start_new_session=True)
                     try:

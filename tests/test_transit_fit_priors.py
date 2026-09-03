@@ -407,6 +407,88 @@ def test_write_log_banner_cleans_html_refs():
     assert "  pl_ref_c: 'Source: Some text with Planet C Author (http://url)'" in log_text
 
 
+def test_write_log_banner_omits_narrowband_notice_when_none_applied():
+    import io
+
+    logf = io.StringIO()
+    fit._write_log_banner(logf, ["cmd"], {"planets": "b"}, narrowband_aliases=[])
+    log_text = logf.getvalue()
+
+    assert "narrow-band limb darkening" not in log_text
+
+
+def test_write_log_banner_surfaces_narrowband_claret_notice():
+    import io
+
+    logf = io.StringIO()
+    fit._write_log_banner(
+        logf, ["cmd"], {"planets": "b"},
+        narrowband_aliases=[("g_narrow", "g"), ("Na_D", "r")],
+    )
+    log_text = logf.getvalue()
+
+    assert "--- narrow-band limb darkening ---" in log_text
+    assert "no narrow-band entries" in log_text
+    assert "g_narrow -> using 'g' broadband limb darkening" in log_text
+    assert "Na_D -> using 'r' broadband limb darkening" in log_text
+
+
+def test_write_fit_inputs_returns_narrowband_aliases_for_narrow_only_run(tmp_path):
+    # End-to-end regression for the reported bug + its follow-up: a narrow-only
+    # transit fit must both resolve (band -> broadband, see
+    # test_fit_yaml_maps_narrow_bands_to_claret_broadband) and report what it
+    # did, so start_fit can print the caveat to the transit-fit page's log.
+    inst, date, target = "muscat4", "260823", "TIC245728942.01(TOI5012.01)"
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    raw_bands = ["g_narrow", "Na_D", "i_narrow", "z_narrow"]
+    csvs = []
+    for band in raw_bands:
+        p = src_dir / f"{target}_{inst}_{band}_{date}.csv"
+        p.write_text("time,flux\n")
+        csvs.append(p)
+
+    aliases = fit._write_fit_inputs(tmp_path, inst, date, target, csvs, {"planets": "b"})
+
+    assert aliases == [
+        ("g_narrow", "g"), ("Na_D", "r"), ("i_narrow", "i"), ("z_narrow", "z"),
+    ]
+
+
+def test_write_fit_inputs_reports_no_aliases_for_broadband_only_run(tmp_path):
+    inst, date, target = "muscat4", "250512", "TOI-1234"
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    csvs = []
+    for band in ("gp", "rp", "ip", "zs"):
+        p = src_dir / f"{target}_{inst}_{band}_{date}.csv"
+        p.write_text("time,flux\n")
+        csvs.append(p)
+
+    aliases = fit._write_fit_inputs(tmp_path, inst, date, target, csvs, {"planets": "b"})
+
+    assert aliases == []
+
+
+def test_write_fit_inputs_omits_alias_when_broadband_also_selected(tmp_path):
+    # Mirrors test_fit_yaml_keeps_narrow_band_unmapped_when_broadband_also_selected:
+    # the collision guard means g_narrow is *not* aliased when a real "gp" file
+    # is also in the run, so it must not appear in the reported aliases either.
+    inst, date, target = "muscat4", "260823", "TIC245728942.01(TOI5012.01)"
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    raw_bands = ["gp", "g_narrow", "Na_D"]
+    csvs = []
+    for band in raw_bands:
+        p = src_dir / f"{target}_{inst}_{band}_{date}.csv"
+        p.write_text("time,flux\n")
+        csvs.append(p)
+
+    aliases = fit._write_fit_inputs(tmp_path, inst, date, target, csvs, {"planets": "b"})
+
+    assert aliases == [("Na_D", "r")]
+
+
 def test_bump_model_options_are_encoded_correctly(tmp_path):
     inst = "muscat"
     date = "171103"
