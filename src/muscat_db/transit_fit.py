@@ -260,8 +260,18 @@ def selected_site_mode(inst: str, csv_names: list[str]) -> tuple[str, str, str]:
     return site, telescope, mode
 
 
-def validate_no_duplicate_datasets(inst: str, date: str, csvs: list[pathlib.Path]) -> str | None:
-    """Ensure no selected lightcurves represent the same physical dataset (site, telescope, mode, band)."""
+def validate_no_duplicate_datasets(
+    inst: str,
+    date: str,
+    csvs: list[pathlib.Path],
+    fixed_params: set[str] | None = None,
+) -> str | None:
+    """Ensure no selected lightcurves represent the same physical dataset (site, telescope, mode, band).
+
+    ``fixed_params``, when given, is also checked against narrow-band data:
+    see the narrow-band/u_star block below. Callers that only care about
+    duplicate detection (most existing tests) can omit it.
+    """
     seen_keys = set()
     mapped_bands = []
     for c in csvs:
@@ -298,6 +308,32 @@ def validate_no_duplicate_datasets(inst: str, date: str, csvs: list[pathlib.Path
                 f"Cannot fit '{narrow}' and '{broad}' in the same run: narrow-band limb "
                 f"darkening is borrowed from the broadband, so both would share one prior. "
                 f"Select one."
+            )
+
+    # A broadband Claret coefficient held exactly fixed is a defensible
+    # approximation: one ground-based transit rarely constrains limb darkening
+    # on its own, so theory beats what the data can say. That argument breaks
+    # for narrow-band data, because the theory value is for a different
+    # filter -- the borrowed coefficient is not measured for this band at all.
+    # With 'u_star' fixed, timer holds it at that borrowed value as exact
+    # truth rather than letting it vary, and limb darkening correlates with
+    # transit depth, so the error silently propagates into Rp/R*. Refuse at
+    # submit instead of letting it through quietly: silently unchecking the
+    # box would override what the user explicitly asked for. (A uniform prior
+    # over u_star, seeded from the borrowed Claret value, would be a better
+    # long-term fix than either extreme -- timer's get_priors already supports
+    # u_star_prior='uniform' -- but muscat-db does not expose that control yet;
+    # that is future work, not this guard's job.) Per john-livingston's review
+    # on #138 (https://github.com/muscat-team/muscatdb/pull/138#pullrequestreview-5096974803).
+    if fixed_params is not None and "u_star" in fixed_params:
+        narrow_bands = sorted({b for b in mapped_bands if _claret_band(b) != b})
+        if narrow_bands:
+            return (
+                f"Cannot fix 'u_star' with narrow-band data selected ({', '.join(narrow_bands)}): "
+                "Claret has no narrow-band limb-darkening entries, so the fit would hold a "
+                "coefficient borrowed from a different (broadband) filter as exact truth instead "
+                "of letting it vary, biasing the fitted planet radius. Uncheck 'Fix u_star' "
+                "before submitting."
             )
     return None
 
@@ -449,6 +485,25 @@ def get_target_parameters(target_name: str) -> dict:
 # Parameters the user may hold fixed during the fit (the "Fixed Parameters"
 # checkboxes in the fitting configuration form).
 _FIXABLE_PARAMS = {"t0", "period", "dur", "u_star", "b", "ror"}
+# muscat-db's own default when the form sends no "fixed" list at all (fresh
+# page load, or a client that omits the key). Matches the checkboxes that
+# ship pre-checked in transit_fit.html.
+_DEFAULT_FIXED_PARAMS: tuple[str, ...] = ("period", "u_star")
+
+
+def _resolved_fixed_params(options: dict) -> list:
+    """The 'fixed' parameter list timer will actually fit with.
+
+    ``options.get("fixed")`` is ``None`` when the form sends no "fixed" key at
+    all (falls back to :data:`_DEFAULT_FIXED_PARAMS`); an explicit empty list
+    means the user unchecked every box and must be preserved as "nothing
+    fixed", not treated as "no opinion" -- see
+    test_explicit_empty_fixed_list_is_preserved.
+    """
+    fixed = options.get("fixed")
+    return list(_DEFAULT_FIXED_PARAMS) if fixed is None else fixed
+
+
 # A single planet designation token, e.g. "b" or "c".
 _PLANET_TOKEN_RE = re.compile(r"^[A-Za-z]$")
 
@@ -1216,8 +1271,7 @@ def _write_fit_inputs(
             "ampl_prior": ampl_prior,
         }
 
-    fixed = options.get("fixed")
-    fit_data["fixed"] = ["period", "u_star"] if fixed is None else fixed
+    fit_data["fixed"] = _resolved_fixed_params(options)
 
     # Prior shapes. The GUI sends each parameter as two keys (``ror`` /
     # ``ror_unc``); for Gaussian they are [value, unc] (written to sys.yaml), for
@@ -1342,7 +1396,7 @@ def compute_logp(inst: str, date: str, target: str, options: dict, selected_csvs
         if not csvs:
             return {"ok": False, "error": "No lightcurves selected for logP computation."}
 
-    err = validate_no_duplicate_datasets(inst, date, csvs)
+    err = validate_no_duplicate_datasets(inst, date, csvs, fixed_params=set(_resolved_fixed_params(options)))
     if err:
         return {"ok": False, "error": err}
 
@@ -1436,7 +1490,7 @@ def start_fit(
         if not csvs:
             return {"ok": False, "error": "No lightcurves selected for fitting."}
 
-    err = validate_no_duplicate_datasets(inst, date, csvs)
+    err = validate_no_duplicate_datasets(inst, date, csvs, fixed_params=set(_resolved_fixed_params(options)))
     if err:
         return {"ok": False, "error": err}
 
