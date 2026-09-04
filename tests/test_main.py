@@ -1192,3 +1192,76 @@ class TestCLI:
         assert os.path.exists(
             f"{sinistro_dir}/260102/lsc1m005-fa15-20260102-0001-e91.fits"
         )
+
+
+class TestDbGuardOnWriteCommands:
+    """#134: the bare `muscat.db` fallback reaches more than `build-db`.
+
+    #124 guarded `build-db` because #122 was written about `build-db`. The
+    other commands that *write* to whatever `--db` resolves need the same
+    refusal: `ingest-date` writes a date's frames, `normalize-obsdates
+    --apply` records moves it makes in the real raw tree, and `worker` claims
+    concurrency slots and writes job rows. Read-side commands (`serve`,
+    `restart`, `build-static-site`) are deliberately left unguarded.
+
+    Subprocess, not CliRunner, for the reason spelled out on the `build-db`
+    tests: `--db`'s default binds once at import, so `monkeypatch.delenv`
+    cannot reach it in-process.
+    """
+
+    @staticmethod
+    def _run(args, tmp_path, muscat_db_path=None):
+        import subprocess
+        import sys
+        env = dict(os.environ)
+        env.pop("MUSCAT_DB_PATH", None)
+        if muscat_db_path is not None:
+            env["MUSCAT_DB_PATH"] = muscat_db_path
+        return subprocess.run(
+            [sys.executable, "-m", "muscat_db.cli", *args],
+            capture_output=True, text=True, env=env, cwd=tmp_path,
+        )
+
+    @pytest.mark.parametrize(
+        "args, verb",
+        [
+            (["ingest-date", "muscat", "260101"], "ingest"),
+            (["normalize-obsdates", "all"], "normalize"),
+            (["worker", "--pipeline", "photometry", "--once"], "start a worker"),
+        ],
+    )
+    def test_refuses_bare_default_when_env_and_target_both_missing(
+        self, args, verb, tmp_path,
+    ):
+        result = self._run(args, tmp_path)
+        out = result.stdout + result.stderr
+        assert result.returncode != 0, out
+        assert f"Refusing to {verb}" in out, out
+        assert not (tmp_path / "muscat.db").exists()
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            ["ingest-date", "muscat", "260101"],
+            ["normalize-obsdates", "all"],
+            ["worker", "--pipeline", "photometry", "--once"],
+        ],
+    )
+    def test_explicit_db_flag_is_never_refused(self, args, tmp_path):
+        target = tmp_path / "fresh.db"
+        result = self._run([*args, "--db", str(target)], tmp_path)
+        out = result.stdout + result.stderr
+        assert "Refusing to" not in out, out
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            ["ingest-date", "muscat", "260101"],
+            ["normalize-obsdates", "all"],
+            ["worker", "--pipeline", "photometry", "--once"],
+        ],
+    )
+    def test_set_muscat_db_path_is_never_refused(self, args, tmp_path):
+        result = self._run(args, tmp_path, muscat_db_path=str(tmp_path / "elsewhere.db"))
+        out = result.stdout + result.stderr
+        assert "Refusing to" not in out, out

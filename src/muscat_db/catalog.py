@@ -1576,11 +1576,49 @@ _DECORATED_TOI_OBJECT_RE = re.compile(
 _LETTER_SUFFIX_EXCEPTIONS = {"AUMIC"}
 
 
+# LCO key-project OBJECT/target names decorate a primary designation with a
+# parenthesized alias, e.g. ``TIC245728942.01(TOI5012.01)`` -- the TIC-based
+# candidate label LCO assigns, with the TOI committee's own designation
+# appended for cross-reference. Treated as one token, the leading TIC digit
+# run defeats every TOI-number regex below it (it parses as host 245728942,
+# candidate .01, rather than TOI 5012.01), which is what silently sent every
+# TOI-catalog and SIMBAD lookup for this target to the wrong place.
+_LCO_KEY_PROJECT_ALIAS_RE = re.compile(r"^(?P<primary>[^()]+?)\s*\((?P<alias>[^()]+)\)$")
+_TOI_SHAPE_RE = re.compile(r"TOI[ _-]*0*\d+(?:\.\d+)?(?:\s*[B-H])?", re.IGNORECASE)
+
+
+def resolve_lco_key_project_name(raw: str) -> str:
+    """Resolve an LCO key-project decorated target name to the single
+    designation worth querying a catalog or SIMBAD with.
+
+    Splits a ``PRIMARY(ALIAS)`` name into its two halves and returns whichever
+    is a recognizable TOI designation -- catalogs and SIMBAD are keyed on the
+    TOI number, not LCO's TIC-based candidate label -- preferring the alias
+    since that is where LCO puts it in every observed key-project name.
+    Falls back to the primary half when neither is TOI-shaped, and to *raw*
+    unchanged (just stripped) when there is no parenthetical to split at all,
+    so this is a no-op for every already-plain target name.
+    """
+    raw = (raw or "").strip()
+    m = _LCO_KEY_PROJECT_ALIAS_RE.fullmatch(raw)
+    if not m:
+        return raw
+    primary, alias = m.group("primary").strip(), m.group("alias").strip()
+    for part in (alias, primary):
+        if _TOI_SHAPE_RE.fullmatch(part):
+            return part
+    return primary
+
+
 # Helper to normalize target names for comparison
 def _normalize_target_name(t: str, overrides: dict[str, str] | None = None) -> str:
     # Check user override first
     if overrides and t in overrides:
         return overrides[t]
+    # Resolve an LCO key-project "TIC...(TOI...)" decoration before anything
+    # else, so the TOI-shape checks below see the actual designation instead
+    # of an undigestible compound string. No-op for a plain name.
+    t = resolve_lco_key_project_name(t)
     # Parse recognized TOI spellings before removing punctuation.  Otherwise a
     # malformed value such as ``TOI06209-01`` would be reinterpreted as TOI
     # 620901 after the hyphen is discarded.  TOI comparison keys represent the
@@ -1596,7 +1634,7 @@ def _normalize_target_name(t: str, overrides: dict[str, str] | None = None) -> s
     if toi_match:
         return f"TOI{int(toi_match.group(1))}"
 
-    s = t.strip().upper().replace(" ", "").replace("-", "").replace("_", "")
+    s = raw.replace(" ", "").replace("-", "").replace("_", "")
     s = re.sub(r"\.\d+$", "", s)
     if s in _LETTER_SUFFIX_EXCEPTIONS:
         return s
@@ -1897,7 +1935,17 @@ def _resolve_archive_coords(target: str) -> tuple[float, float, str] | None:
     if cached is not _CACHE_MISS:
         return cached
 
-    radec = exp_calc.resolve_target_coords(target)
+    # Sesame/SIMBAD rejects an LCO-decorated compound name outright -- parens
+    # aren't valid identifier syntax -- and unlike a bare TIC ID, a TOI
+    # candidate suffix (".NN") also fails resolution (verified empirically:
+    # "TOI-5012.01" 404s, "TOI-5012" resolves). resolve_lco_key_project_name
+    # is a no-op for an already-plain name, so the extra ".NN" strip below
+    # only ever fires for a name it actually rewrote.
+    simbad_name = resolve_lco_key_project_name(target)
+    if simbad_name != target.strip():
+        simbad_name = re.sub(r"\.\d+$", "", simbad_name)
+
+    radec = exp_calc.resolve_target_coords(simbad_name)
     result = (float(radec[0]), float(radec[1]), "simbad") if radec else None
     _CATALOG_CACHE[cache_key] = result
     return result

@@ -134,6 +134,24 @@ cp .env.example .env   # then edit
 Each instrument resolves below it using its canonical case-sensitive directory
 name, for example `$MUSCAT_DATA_DIR/MuSCAT3/<yymmdd>/`.
 
+## Cron (daily)
+
+The production database is rebuilt once a day from a crontab entry on the
+deployment host (not checked in, since it's host-specific — the account,
+`MUSCATDB_ROOT`, and `MUSCAT_OBSLOG_DIR` all vary by host):
+
+```
+MUSCAT_OBSLOG_DIR=/ut2/muscat/obslog
+MUSCATDB_ROOT=/path/to/muscat-db
+30 17 * * * cd $MUSCATDB_ROOT && bash scripts/download_catalogs.sh >> $MUSCATDB_ROOT/logs/download_catalogs.log 2>&1 && uv run muscat-db scan-yesterday >> $MUSCATDB_ROOT/logs/scan.log 2>&1 && uv run muscat-db build-db >> $MUSCATDB_ROOT/logs/build-db.log 2>&1
+```
+
+`MUSCAT_OBSLOG_DIR` is exported inline rather than left to `.env` because cron
+runs with a minimal environment; pin it in `.env` too for manual/GUI runs (see
+[Configuration](#configuration)). `scan-yesterday` only scans the previous
+day's obslog, so a one-off manual `build-db` or `scan` never gets silently
+overwritten by the next nightly run of this job.
+
 ## Documentation
 
 The published docs site is https://muscat-team.github.io/muscatdb/ (updates when
@@ -150,6 +168,11 @@ uv run muscat-db build-static-site --out site/home --db mock_muscat.db --no-figu
 
 Use a real `muscat.db` on the host instead of the mock database when you want
 real figures. Rebuild the snapshot after MkDocs; `mkdocs build` deletes `site/`.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, the pre-PR checklist,
+and the branch/PR workflow.
 
 ## Known limitation: the UTC-midnight dataset split
 

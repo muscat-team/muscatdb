@@ -88,6 +88,7 @@ from muscat_db.catalog import (
     _query_target_planets_toi,
     _resolve_all_aliases,
     _resolve_archive_coords,
+    resolve_lco_key_project_name,
     _target_tic_id,
     _toi_db_membership,
     # Test-only compatibility: tests.test_web reach into these via
@@ -292,9 +293,18 @@ async def _nginx_auth_middleware(request: Request, call_next):
     request.state.user = user
     token = _CURRENT_USER.set(user)
     try:
+        # Decide public vs protected from the raw ASGI path, never from
+        # request.url.path. Starlette builds request.url from the Host header
+        # (GHSA-86qp-5c8j-p5mr), so a Host of "evil/static/" collapses
+        # url.path to "/static/" and would flip this flag off while routing
+        # still dispatches on the real path, skipping both gates below.
+        # scope["path"] is set by the ASGI server and the Host header cannot
+        # reach it. The starlette>=1.0.1 floor in pyproject.toml fixes the URL
+        # parsing itself; this keeps the decision correct regardless.
+        raw_path = request.scope.get("path", "")
         protected = not (
-            request.url.path == "/healthz"
-            or request.url.path.startswith("/static/")
+            raw_path == "/healthz"
+            or raw_path.startswith("/static/")
         )
         if _authentication_required() and protected and not user:
             return JSONResponse(
@@ -1800,6 +1810,14 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
             sel_run = "" if "" in run_ids else None
         elif run in run_ids:
             sel_run = run
+        elif run in run_outputs:
+            # The run directory exists (list_photometry_runs() scanned it and
+            # populated run_outputs for it) but produced no output files --
+            # still running, or it failed before writing anything, so
+            # has_any is False and it was excluded from `runs`/`run_ids`.
+            # Keep its id selected anyway so the page's live status/log/error
+            # for THIS run is not silently swapped for a different one.
+            sel_run = run
         else:
             sel_run = newest
 
@@ -2127,6 +2145,14 @@ async def transit_fit_query_archive(target: str, source: str = "nasa", inst: str
     import re
 
     target = target.strip()
+    # LCO key-project OBJECT names decorate a primary designation with a
+    # parenthesized alias, e.g. "TIC245728942.01(TOI5012.01)". Treated as one
+    # token, its leading TIC digit run defeats every TOI-number regex below
+    # (split_toi grabs the TIC digits as if they were the TOI host number),
+    # so every catalog match below is built from this resolved designation
+    # instead -- ``target`` itself is kept for display/error messages, where
+    # the user's original spelling should still show through.
+    query_target = resolve_lco_key_project_name(target)
 
     def clean_archive_name(value: str) -> str:
         return re.sub(r"[^0-9a-zA-Z]", "", value or "").lower()
@@ -2168,7 +2194,10 @@ async def transit_fit_query_archive(target: str, source: str = "nasa", inst: str
     # NASA's confirmed-planet name may differ from its TOI designation
     # (TOI-179 is HD 18599 b).  Resolve the exact TIC alias so the NASA lookup
     # can cross-match identities without accepting unsafe numeric prefixes.
-    nasa_lookup_names = {clean_archive_name(target)}
+    # Both the raw and LCO-resolved spellings are included: an un-decorated
+    # target cleans to the same string either way, so this only widens
+    # matching for the decorated case.
+    nasa_lookup_names = {clean_archive_name(target), clean_archive_name(query_target)}
     normalized_target = _normalize_target_name(target)
     resolved_tic_id = ""
     if re.fullmatch(r"TOI\d+", normalized_target):
@@ -2544,16 +2573,16 @@ async def transit_fit_query_archive(target: str, source: str = "nasa", inst: str
         ]
         col_str = ", ".join(cols)
 
-        clean_target = target.replace("TOI", "").replace("toi", "").replace("-", "").replace(" ", "").lstrip("0").split(".")[0].strip()
+        clean_target = query_target.replace("TOI", "").replace("toi", "").replace("-", "").replace(" ", "").lstrip("0").split(".")[0].strip()
         target_lit = _adql_literal(clean_target)
-        target_like = _adql_literal(f"%{target}%")
+        target_like = _adql_literal(f"%{query_target}%")
         clean_like = _adql_literal(f"%{clean_target}%")
 
         # ``clean_target`` deliberately drops the ".NN" so the host number can
         # drive the LIKE fallbacks, but a query naming one candidate must not be
         # answerable by a sibling planet of the same star.  Rebuild the canonical
         # designation and both narrow the query and harden the scoring with it.
-        toi_host, toi_sub = split_toi(target)
+        toi_host, toi_sub = split_toi(query_target)
         exact_toi = f"{toi_host}.{toi_sub:02d}" if toi_host is not None and toi_sub is not None else ""
 
         if exact_toi:
@@ -2584,7 +2613,7 @@ async def transit_fit_query_archive(target: str, source: str = "nasa", inst: str
                             score = 3
                     elif r_toi == clean_target:
                         score = 3
-                    elif target.lower() in r_toidisplay.lower():
+                    elif query_target.lower() in r_toidisplay.lower():
                         score = 2
                     elif clean_target in r_toi:
                         score = 1
@@ -2659,10 +2688,10 @@ async def transit_fit_query_archive(target: str, source: str = "nasa", inst: str
         ]
         col_str = ", ".join(cols)
 
-        norm_target = re.sub(r'^([A-Za-z]+)(\d)', r'\1 \2', target)
+        norm_target = re.sub(r'^([A-Za-z]+)(\d)', r'\1 \2', query_target)
 
-        target_lit = _adql_literal(target)
-        target_like = _adql_literal(f"%{target}%")
+        target_lit = _adql_literal(query_target)
+        target_like = _adql_literal(f"%{query_target}%")
         conditions = [
             f"pl_name = {target_lit}",
             f"hostname = {target_lit}",
@@ -2673,7 +2702,7 @@ async def transit_fit_query_archive(target: str, source: str = "nasa", inst: str
             f"hip_name LIKE {target_like}",
             f"hd_name LIKE {target_like}"
         ]
-        if norm_target != target:
+        if norm_target != query_target:
             norm_lit = _adql_literal(norm_target)
             conditions.extend([
                 f"hostname = {norm_lit}",

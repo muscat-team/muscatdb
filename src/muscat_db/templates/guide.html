@@ -1375,9 +1375,9 @@ erDiagram
             <span class="faq-icon">+</span>
           </div>
           <div class="faq-answer">
-            <p>The database is rebuilt automatically once per day at <strong>5:00 PM</strong> local time via a cronjob:</p>
-            <pre>30 17 * * * cd /path/to/muscat-db &amp;&amp; uv run muscat-db build-db &gt;&gt; logs/build-db.log 2&gt;&amp;1</pre>
-            <p>This re-scans all CSV observation logs under <code>$MUSCAT_OBSLOG_DIR</code> and rebuilds the <code>summaries</code> and <code>targets</code> tables to reflect any new or corrected scans. Log output is written to <code>logs/build-db.log</code> for troubleshooting.</p>
+            <p>The database is rebuilt automatically once per day at <strong>5:00 PM</strong> local time via a cronjob (see <a href="https://github.com/muscat-team/muscatdb#cron-daily" target="_blank" rel="noopener">Cron (daily)</a> in the README for the full entry):</p>
+            <pre>cd /path/to/muscat-db &amp;&amp; bash scripts/download_catalogs.sh &amp;&amp; uv run muscat-db scan-yesterday &amp;&amp; uv run muscat-db build-db</pre>
+            <p>This downloads the latest TOI/ExoFOP catalogs, scans yesterday's CSV observation logs under <code>$MUSCAT_OBSLOG_DIR</code>, then rebuilds the <code>summaries</code> and <code>targets</code> tables to reflect any new or corrected scans. Log output for each step is written under <code>logs/</code> for troubleshooting.</p>
             <p>To trigger a manual rebuild at any time, run <code>muscat-db build-db</code> from the repo root.</p>
           </div>
         </div>
