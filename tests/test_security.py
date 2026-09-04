@@ -254,3 +254,26 @@ def test_nginx_run_server_announces_actual_port(monkeypatch, capsys):
     )
 
     assert "127.0.0.1:8003" in capsys.readouterr().out
+
+
+def test_auth_gate_ignores_a_host_header_that_forges_a_public_path(monkeypatch):
+    """A malformed Host must not turn a protected route into a public one.
+
+    Starlette <= 1.0.1 builds ``request.url`` from the Host header
+    (GHSA-86qp-5c8j-p5mr), so a Host of ``evil/static/`` collapses
+    ``request.url.path`` to ``/static/`` while ASGI still routes on the real
+    path. Deriving ``protected`` from ``request.url.path`` therefore skipped
+    both the 401 gate and the CSRF gate for any route, reachable by anyone
+    who can talk to uvicorn directly. The decision must come from
+    ``scope["path"]``, which the Host header cannot reach.
+    """
+    monkeypatch.setenv("MUSCAT_REQUIRE_AUTH", "1")
+    monkeypatch.setenv("MUSCAT_PROXY_SECRET", "proxy-secret")
+    client = TestClient(app, client=("127.0.0.1", 12345))
+
+    assert client.get("/api/jobs/status").status_code == 401
+
+    for forged in ("evil/static/", "scan.local/static/?x=", "evil/healthz"):
+        assert client.get(
+            "/api/jobs/status", headers={"Host": forged}
+        ).status_code == 401, f"Host={forged!r} bypassed the auth gate"
