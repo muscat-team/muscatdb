@@ -6,6 +6,26 @@ the amendments that landed in the issue comment thread. Update this document as 
 work proceeds; each phase is host work (as `jerome` on `muscat-ut2`) unless marked
 *repo* (a tracked source change).
 
+## How deploys reach this host
+
+**Pull-based, from a cron entry on this host — not `deploy.yml`.** The original plan
+(Phase 4 below) had GitHub Actions push-triggering an SSH deploy on a merge to
+`main`/`test`. That could never have worked: `deploy.yml` ran on GitHub-hosted runners,
+and this host is not reachable by SSH from outside without the VPN. It went unnoticed
+for three reviews of PR #119 because the `DEPLOY_*` secrets were deliberately left unset
+until Gate F, so the secret check silently skipped the (unreachable) SSH step on every
+push and always looked like a clean no-op — see the correction below and
+[issue #131](https://github.com/muscat-team/muscatdb/issues/131).
+
+Instead, `deploy/pull-deploy.sh` runs from cron inside each checkout, polls
+`git ls-remote origin <branch>` for a new SHA, and on a change does what `deploy.yml`
+used to attempt over SSH: fetch, `git reset --hard`, `uv sync --dev`, then relaunch the
+app in that checkout's tmux session. Outbound only — no inbound path, no self-hosted
+runner (rejected: this repo is public, and a fork PR could run arbitrary code on one,
+not acceptable on the host holding the production database), no SSH key held by GitHub.
+`deploy.yml` itself was deleted rather than left as dead code that looks functional. See
+Gate F for the cron entries.
+
 ## Decided layout
 
 From [issue #26 comment](https://github.com/muscat-team/muscatdb/issues/26#issuecomment-5454626239)
@@ -226,6 +246,14 @@ origin/<branch>` target the right ref.
 
 ## Phase 4 — Amend `deploy.yml` (*repo*, PR to `test`) — the code change
 
+**Superseded (2026-09-01, issue #131): `deploy.yml` never worked and has been deleted.**
+GitHub-hosted runners cannot reach this host by SSH without the VPN, so every push-driven
+deploy this section describes was dead on arrival regardless of secrets. Kept below as the
+historical record of what PR #119 actually built and how review found and fixed its bugs
+(amendments 8–12 still apply conceptually to `deploy/pull-deploy.sh`'s tmux relaunch logic,
+which is the same command, just invoked from cron instead of over SSH) — see "How deploys
+reach this host" above and Gate F below for what replaced it.
+
 - **Two explicit jobs** (`deploy-production`, `deploy-staging`), not a `strategy.matrix`
   — a matrix job's `if` cannot see the `matrix` context, so it cannot gate its own
   job-level `environment:`, and both legs (and both Environments) would run on every
@@ -268,30 +296,31 @@ origin/<branch>` target the right ref.
   Phase 3 staging-refresh steps. The dev tree then becomes pure dev — free to
   branch-switch with nothing live depending on its working tree.
 
-## Phase 7 — Set Actions vars; verify staging; final gate
+## Phase 7 — Bootstrap staging; install the pull-deploy cron entries; final gate
 
-- Set `DEPLOY_*` vars (absolute), **no secrets yet**.
-- Bootstrap staging once, in tmux session `muscatdb-test` (matching what
-  `deploy.yml`'s staging job runs — **not** `restart --nginx`: that command
-  hardcoded port 8001 regardless of `--port` until it was fixed, and running
-  it from the staging checkout would have stopped whatever was actually
-  listening on 8001 — production — and brought staging up in its place. Fixed
-  now (`--port` overrides the `--nginx` default), but the direct command
-  below is what actually runs in production, so use it here too rather than
-  drift from `deploy.yml`):
+**Rewritten (2026-09-01, issue #131) — no `DEPLOY_*` Actions vars/secrets involved.**
+Push-triggered SSH deploy never worked (see "How deploys reach this host" above); the
+final gate is installing `deploy/pull-deploy.sh`'s cron entries and verifying they deploy,
+not setting secrets.
+
+- Bootstrap staging once, in tmux session `muscatdb-test` — the same direct command
+  `deploy/pull-deploy.sh` and `deploy.yml`'s old staging job used, **not**
+  `restart --nginx` (that command hardcoded port 8001 regardless of `--port` until fixed
+  in #132; run from the staging checkout it would have stopped whatever was listening on
+  8001 — production — and brought staging up in its place):
   ```bash
   cd "$HOME/deploy/test/app" && uv run uvicorn muscat_db.web:sio_app --host 127.0.0.1 --port 8003
   ```
-  Staging's `.env` already sets `MUSCAT_REQUIRE_AUTH=1`, so `--nginx`'s only
-  other effect (`_prepare_nginx_auth`) costs nothing to skip.
+  Staging's `.env` already sets `MUSCAT_REQUIRE_AUTH=1`, so `--nginx`'s only other effect
+  (`_prepare_nginx_auth`) costs nothing to skip.
   Verify: `:8003/healthz` → 200; `:8002` (nginx) → 401 (basic auth, same htpasswd);
   `:8001` untouched.
 - Smoke-test staging: a `--test_run` photometry/preview run writes only to
   `$HOME/deploy/test/*`; the production DB is unchanged; an LCO submit is refused
   (`MUSCAT_LCO_ALLOW_SUBMIT` unset).
-- **Final gate:** only after Phases 1–6 are verified, set the `DEPLOY_SSH_KEY` /
-  `DEPLOY_HOST` / `DEPLOY_USER` secrets. Pushing to `main`/`test` then triggers real
-  deploys.
+- **Final gate:** install the two cron entries (one per checkout) that run
+  `deploy/pull-deploy.sh` on a poll interval — see Gate F below for the exact lines. From
+  that point on, a push to `main`/`test` really does redeploy, on the next poll.
 
 ---
 
@@ -300,7 +329,8 @@ origin/<branch>` target the right ref.
 - `:8001` / `:8003` uvicorn refuse a direct unauthenticated `/` (401); `/healthz` → 200.
 - Staging `build-db` never touches the production `muscat.db` (separate file).
 - Cron now runs from `$HOME/deploy/main/app` (log paths under the new checkout).
-- Repo CI (`ruff`, fast `pytest`) green on the `deploy.yml` change.
+- Repo CI (`ruff`, fast `pytest`) green on `deploy/pull-deploy.sh` and its tests
+  (`tests/test_pull_deploy.py`).
 
 ## Open items to confirm at execution
 - ~~**matrix vs. explicit jobs**~~ → **resolved: two explicit jobs** (deploy.yml PR #119,
@@ -318,8 +348,11 @@ origin/<branch>` target the right ref.
   design (#71's isolation), so running `build-db` there right after a `.backup` reseed
   wipes the reseed back to 0 rows. Nightly chain drops `build-db` for staging entirely;
   `.backup` (realistic data) + `scan-yesterday` (CSV-only, harmless) is what runs.
-- Final `deploy.yml` becomes the source of truth for the exact launch commands; keep
-  `notes/DEPLOYMENT.md`'s verification one-liners in sync.
+- ~~**Final `deploy.yml` becomes the source of truth**~~ → **resolved, the other way**
+  (2026-09-01, issue #131): `deploy.yml` never worked (GitHub-hosted runners cannot reach
+  this host by SSH without the VPN) and has been deleted. `deploy/pull-deploy.sh`, run
+  from cron, is the source of truth for the exact launch commands now; keep
+  `notes/DEPLOYMENT.md`'s verification one-liners in sync with it instead.
 
 ---
 
@@ -367,8 +400,9 @@ origin/<branch>` target the right ref.
   backend on `:8003` yet — that's Gate F's bootstrap step).
 
 **Blocked / not yet done**
-- Phase 7 (vars + secrets): set `DEPLOY_*` Actions vars (org admin), bootstrap/verify the
-  staging server, and only then set the `DEPLOY_*` secrets. This is the final gate.
+- Phase 7 (pull-deploy bootstrap): bootstrap/verify the staging server, install
+  `deploy/pull-deploy.sh`'s two cron entries, and confirm a real push deploys on the next
+  poll. This is the final gate.
 
 **Correction (2026-08-31, post #125):** the hand-off checklist below originally had Gate B's
 `main` push auto-redeploying production and Gate C verifying that redeploy. It doesn't — the
@@ -379,6 +413,20 @@ every later step was skipped and production kept serving unchanged. Gate F is in
 last (see the issue's original sequencing: settle the host layout and verify everything else
 before arming secrets), so Gates C and D now do the checkout sync **by hand** instead of
 relying on CI. Gate B and C below are corrected accordingly.
+
+**Second correction (2026-09-01, issue #131): the `deploy.yml` mechanism above could never
+have worked at all, secrets or not.** Both jobs ran on GitHub-hosted runners, and this host
+is not reachable by SSH from outside without the VPN. No self-hosted runner was ever
+registered either. The `configured=false` skip above made every push look like a clean
+no-op, so this stayed invisible through three reviews of PR #119 — Gate F would have found
+it the hard way, since setting the secrets arms an SSH step that then just fails to connect.
+Decision: pull-based deploy instead — `deploy/pull-deploy.sh`, run from cron inside each
+checkout, polls `git ls-remote origin <branch>` and redeploys on a new SHA. Outbound only,
+no inbound path, no runner (rejected: public repo, a fork PR could run arbitrary code on a
+self-hosted one, unacceptable on the host holding the production database), no SSH key held
+by GitHub. `deploy.yml` is deleted; the four `DEPLOY_PATH_*`/`DEPLOY_TMUX_SESSION_*` Actions
+variables are now unused (never set — see above — so nothing to unset). Gate F below is
+rewritten accordingly: installing the cron entries and confirming a deploy, not secrets.
 
 **Findings beyond the original plan**
 - `MUSCAT_REQUIRE_AUTH` is set to 1 by `restart --nginx` (`_prepare_nginx_auth`); a bare
@@ -442,8 +490,9 @@ checkout automatically yet. Mirror by hand what deploy.yml's production job will
 do once secrets are set:
 6. `cd $HOME/deploy/main/app && git fetch origin main && git reset --hard origin/main && uv sync --dev`.
 7. **This is the actual production cutover, not a refresh — do it in a window where you can
-   watch `:8001` come back.** Relaunch uvicorn in tmux `muscatdbgui` exactly as deploy.yml
-   does (`.github/workflows/deploy.yml:62-69`): stop the old process with a `C-c` sent into
+   watch `:8001` come back.** Relaunch uvicorn in tmux `muscatdbgui` exactly as `deploy.yml`
+   used to (that file is deleted as of 2026-09-01 — see "How deploys reach this host" above
+   — the same tmux relaunch logic now lives in `deploy/pull-deploy.sh`): stop the old process with a `C-c` sent into
    the pane's own shell, then send the launch command *with its `cd`* into that same
    keystroke — `send-keys` types into the pane's existing shell, which never saw step 6's
    `cd`, so a bare launch command here would relaunch from wherever `muscatdbgui` was last
@@ -495,16 +544,46 @@ do once secrets are set:
     correctly). Full reverse-proxy-to-`:8003` verification waits for Gate F's staging
     bootstrap — nothing is listening on `:8003` yet.
 
-### Gate F — Phase 7: Actions vars + secrets (**org admin**)
-15. Set the **vars** `DEPLOY_PATH_PRODUCTION`/`DEPLOY_TMUX_SESSION_PRODUCTION` on the
-    `production` Environment and `DEPLOY_PATH_STAGING`/`DEPLOY_TMUX_SESSION_STAGING` on
-    `staging` (after Phases 1–6 verified, per issue ordering). `DEPLOY_HOST`,
-    `DEPLOY_USER`, `DEPLOY_SSH_KEY` are **secrets**, not vars — set in step 17, not here.
-16. Bootstrap staging: `git push` to `test` → staging uvicorn :8003 in tmux
-    `muscatdb-test`.
-17. Verify :8003 (via :8002) + `/healthz`, then set the `DEPLOY_SSH_KEY`/`DEPLOY_HOST`/
-    `DEPLOY_USER` **secrets** for both Environments. From this point on, a push to `main`
-    or `test` really does redeploy — Gate B/C's manual sync steps are no longer needed.
+### Gate F — Phase 7: bootstrap staging; install the pull-deploy cron entries (host, `jerome`)
+
+**Rewritten (2026-09-01, issue #131) — no Actions vars/secrets, no org admin needed;**
+everything here runs as `jerome` on the host.
+
+15. Bootstrap staging once, in tmux session `muscatdb-test` — **not** `restart --nginx`
+    (see Phase 7 above for why: it hardcoded port 8001 regardless of `--port`, which from
+    the staging checkout would have stopped production and brought staging up in its
+    place; fixed in #132, but the direct command is what `deploy/pull-deploy.sh` and
+    `deploy.yml`'s old staging job both actually ran, so use it here too):
+    ```bash
+    cd $HOME/deploy/test/app && uv run uvicorn muscat_db.web:sio_app --host 127.0.0.1 --port 8003
+    ```
+    Verify `:8003/healthz` → 200, `:8002` → 401, `:8001` untouched.
+16. Create the Slack webhook file `pull-deploy.sh` reads on failure, same convention as
+    `/etc/muscat-db/proxy-secret` (root-owned directory, file mode 600, readable only by
+    the deploy account):
+    ```bash
+    sudo install -d -m 755 -o root -g root /etc/muscat-db
+    sudo install -o jerome -g root -m 600 /dev/stdin /etc/muscat-db/slack-webhook-url \
+      <<< '<the SLACK_WEBHOOK_URL value — same webhook notify_slack.yml already uses>'
+    ```
+    Not committed, not printed into any log or doc — same handling as the proxy secret.
+    Without this file, a failed deploy still exits non-zero and logs `FAILED` (see
+    `test_missing_webhook_file_still_fails_loudly_not_silently`), it just has no Slack
+    alert, so this step is important but not blocking for the cron entries below.
+17. Install the two cron entries (one per checkout), invoking `deploy/pull-deploy.sh` **at
+    its path inside each checkout**, not a separate copy elsewhere — so what deploys and
+    what `git log` inside that checkout shows are always the same tracked file, per #131's
+    constraint. Polling every 5 minutes; adjust if that's too chatty or too slow for how
+    often `main`/`test` actually move:
+    ```
+    */5 * * * * /ut2/jerome/deploy/main/app/deploy/pull-deploy.sh main muscatdbgui 8001 >> /ut2/jerome/deploy/main/app/logs/pull-deploy.log 2>&1
+    */5 * * * * /ut2/jerome/deploy/test/app/deploy/pull-deploy.sh test muscatdb-test 8003 >> /ut2/jerome/deploy/test/app/logs/pull-deploy.log 2>&1
+    ```
+18. Verify it actually deploys: push a trivial commit to `test`, wait for the next poll,
+    confirm `$HOME/deploy/test/app`'s `HEAD` moved and `:8003/healthz` still returns 200
+    after the relaunch — not just a silent no-op. Check `logs/pull-deploy.log` for the
+    `deploying ... -> ...` / `deployed ... at ...` lines. Repeat against `main` in its own
+    window once staging is confirmed — that push is a real production redeploy.
 
 ### Final verification (from the plan)
 - `:8001` / `:8003` refuse unauthenticated `/` (401); `/healthz` → 200.

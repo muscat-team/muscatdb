@@ -134,6 +134,30 @@ cp .env.example .env   # then edit
 Each instrument resolves below it using its canonical case-sensitive directory
 name, for example `$MUSCAT_DATA_DIR/MuSCAT3/<yymmdd>/`.
 
+### HARPS/LAMOST catalog files
+
+The `/toi` and `/nexsci` pages' "has HARPS RV" / "has LAMOST RV" filters
+coordinate-match against two catalogs:
+
+- `data/HARPS_RVBank_targets.csv` (or `data/HARPS_RVBank_ver02.csv[.zip]` as a
+  fallback) — override the path with `MUSCAT_HARPS_TARGETS_CSV` /
+  `MUSCAT_HARPS_RVBANK_CSV` / `MUSCAT_HARPS_RVBANK_ZIP`.
+- `data/LAMA_stars.csv` — override with `MUSCAT_LAMOST_STARS_CSV`.
+
+Neither is fetched by `scripts/download_catalogs.sh`, both are gitignored, and
+there is no online fallback for this coordinate-match path (unlike the target
+page's live HARPS lookup) — without them, `_harps_coord_membership`/
+`_lamost_coord_membership` in `catalog.py` silently return zero matches (no
+error), so the header counts read 0 and the filter chips return nothing. A
+deploy checkout brought up via `git reset --hard` never carries gitignored
+files, so it starts out missing these two.
+
+Point the three env vars above at a checkout that already has the files
+(e.g. the dev checkout) instead of copying them into every deploy checkout —
+same reasoning as `MUSCAT_DB_PATH` pointing production at a shared DB in
+[Configuration](#configuration). A copy works too, but silently drifts stale
+with no re-sync mechanism, which is how this got missed in the first place.
+
 ## Cron (daily)
 
 The production database is rebuilt once a day from a crontab entry on the
