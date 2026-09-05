@@ -74,6 +74,119 @@ def test_sinistro_duplicate_names_the_distinguishing_fields():
     assert "lsc" in err
 
 
+def test_narrow_band_alone_is_allowed():
+    """A narrow-only run has no broadband to collide with, so it validates fine
+    (it is _write_fit_inputs' _CLARET_BAND_ALIAS that later maps it for
+    limb darkening -- see test_transit_fit_priors.py)."""
+    csvs = [
+        Path("TOI-1_muscat4_g_narrow_260101.csv"),
+        Path("TOI-1_muscat4_Na_D_260101.csv"),
+    ]
+    assert fit.validate_no_duplicate_datasets("muscat4", "260101", csvs) is None
+
+
+def test_narrow_band_with_a_different_broadband_is_allowed():
+    """g_narrow borrows from 'g', not 'r', so pairing it with an 'rp' file is
+    not a collision."""
+    csvs = [
+        Path("TOI-1_muscat4_g_narrow_260101.csv"),
+        Path("TOI-1_muscat4_rp_260101.csv"),
+    ]
+    assert fit.validate_no_duplicate_datasets("muscat4", "260101", csvs) is None
+
+
+def test_narrow_band_with_its_own_broadband_is_rejected():
+    """g_narrow and its co-located 'gp' would otherwise both silently map to
+    'g' in fit.yaml (see _write_fit_inputs' collision guard), merging two
+    physically distinct filters under one shared limb-darkening prior. This
+    must be caught here, at submit time, rather than crash deep in
+    timer-fit.log with the unmapped-band error the guard was written to avoid."""
+    csvs = [
+        Path("TOI-1_muscat4_g_narrow_260101.csv"),
+        Path("TOI-1_muscat4_gp_260101.csv"),
+    ]
+    err = fit.validate_no_duplicate_datasets("muscat4", "260101", csvs)
+    assert err is not None
+    assert "g_narrow" in err
+    assert "'g'" in err
+
+
+def test_na_d_with_its_claret_broadband_is_rejected():
+    """Na_D borrows limb darkening from 'r' (closest Sloan band by effective
+    wavelength), so pairing it with a real 'rp' file is the same collision."""
+    csvs = [
+        Path("TOI-1_muscat4_Na_D_260101.csv"),
+        Path("TOI-1_muscat4_rp_260101.csv"),
+    ]
+    err = fit.validate_no_duplicate_datasets("muscat4", "260101", csvs)
+    assert err is not None
+    assert "Na_D" in err
+    assert "'r'" in err
+
+
+# ---------------------------------------------------------------------------
+# validate_no_duplicate_datasets: narrow-band data + fixed u_star
+#
+# Regression for john-livingston's review on #138: with u_star fixed (the
+# GUI default), a narrow-band run holds a broadband Claret coefficient --
+# borrowed for a filter Claret has no entry for at all -- as exact truth
+# instead of letting it vary. Limb darkening correlates with transit depth,
+# so that bias silently propagates into the fitted planet radius. This must
+# be refused at submit time, not silently worked around by unchecking the
+# box for the user.
+# ---------------------------------------------------------------------------
+def test_narrow_band_with_fixed_u_star_is_rejected():
+    csvs = [Path("TOI-1_muscat4_g_narrow_260101.csv")]
+    err = fit.validate_no_duplicate_datasets("muscat4", "260101", csvs, fixed_params={"period", "u_star"})
+    assert err is not None
+    assert "u_star" in err
+    assert "g_narrow" in err
+
+
+def test_na_d_with_fixed_u_star_is_rejected():
+    csvs = [Path("TOI-1_muscat4_Na_D_260101.csv")]
+    err = fit.validate_no_duplicate_datasets("muscat4", "260101", csvs, fixed_params={"period", "u_star"})
+    assert err is not None
+    assert "u_star" in err
+    assert "Na_D" in err
+
+
+def test_narrow_band_with_u_star_not_fixed_is_allowed():
+    """The user explicitly unchecked 'Fix u_star', so it is free to vary --
+    the whole point of the guard is to make that the user's choice."""
+    csvs = [Path("TOI-1_muscat4_g_narrow_260101.csv")]
+    assert fit.validate_no_duplicate_datasets("muscat4", "260101", csvs, fixed_params={"period"}) is None
+
+
+def test_broadband_only_with_fixed_u_star_is_allowed():
+    """Fixing u_star on broadband-only data is the defensible case this guard
+    does not touch: the Claret coefficient is at least for the right filter."""
+    csvs = [Path("TOI-1_muscat4_gp_260101.csv")]
+    assert fit.validate_no_duplicate_datasets("muscat4", "260101", csvs, fixed_params={"period", "u_star"}) is None
+
+
+def test_fixed_params_none_skips_the_u_star_check():
+    """Callers that don't pass fixed_params (most existing call sites/tests)
+    get pure duplicate-dataset checking, unaffected by this guard."""
+    csvs = [Path("TOI-1_muscat4_g_narrow_260101.csv")]
+    assert fit.validate_no_duplicate_datasets("muscat4", "260101", csvs) is None
+
+
+# ---------------------------------------------------------------------------
+# _resolved_fixed_params
+# ---------------------------------------------------------------------------
+def test_resolved_fixed_params_defaults_when_key_absent():
+    assert fit._resolved_fixed_params({"planets": "b"}) == ["period", "u_star"]
+
+
+def test_resolved_fixed_params_preserves_explicit_empty_list():
+    assert fit._resolved_fixed_params({"planets": "b", "fixed": []}) == []
+
+
+def test_resolved_fixed_params_preserves_explicit_list():
+    assert fit._resolved_fixed_params({"planets": "b", "fixed": ["ror"]}) == ["ror"]
+
+
 # ---------------------------------------------------------------------------
 # _detect_run_type
 # ---------------------------------------------------------------------------

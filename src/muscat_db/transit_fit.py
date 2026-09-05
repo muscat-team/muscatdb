@@ -63,11 +63,22 @@ def _timer_version() -> str:
     return _TIMER_VERSION
 
 
-def _write_log_banner(logf: IO, cmd: list[str], options: dict | None = None) -> None:
+def _write_log_banner(
+    logf: IO,
+    cmd: list[str],
+    options: dict | None = None,
+    narrowband_aliases: list[tuple[str, str]] | None = None,
+) -> None:
     """Write a versioned startup header then the command line and parsed args to *logf*.
 
     This is the very first content written to every timer-fit.log so that
     each run is clearly stamped with the muscat-db version and wall-clock time.
+
+    ``narrowband_aliases``, when non-empty, is the list returned by
+    :func:`_write_fit_inputs` -- pairs of (narrow-band filter, broadband it
+    borrows limb darkening from). Surfaced here so the caveat is visible on
+    the transit-fit page's live log for every narrow-band run, not just
+    buried in fit.yaml.
     """
     separator = "=" * 60
     now_utc = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -90,6 +101,17 @@ def _write_log_banner(logf: IO, cmd: list[str], options: dict | None = None) -> 
                 logf.write(f"  {k}: {val!r}\n")
             else:
                 logf.write(f"  {k}: {v!r}\n")
+        logf.write("\n")
+
+    if narrowband_aliases:
+        logf.write("--- narrow-band limb darkening ---\n")
+        logf.write(
+            "NOTE: Claret's limb-darkening tables have no narrow-band entries, so "
+            "each narrow-band filter below is fit using its co-located broadband's "
+            "limb-darkening coefficients:\n"
+        )
+        for narrow, broad in narrowband_aliases:
+            logf.write(f"  {narrow} -> using '{broad}' broadband limb darkening\n")
         logf.write("\n")
 
 
@@ -238,13 +260,25 @@ def selected_site_mode(inst: str, csv_names: list[str]) -> tuple[str, str, str]:
     return site, telescope, mode
 
 
-def validate_no_duplicate_datasets(inst: str, date: str, csvs: list[pathlib.Path]) -> str | None:
-    """Ensure no selected lightcurves represent the same physical dataset (site, telescope, mode, band)."""
+def validate_no_duplicate_datasets(
+    inst: str,
+    date: str,
+    csvs: list[pathlib.Path],
+    fixed_params: set[str] | None = None,
+) -> str | None:
+    """Ensure no selected lightcurves represent the same physical dataset (site, telescope, mode, band).
+
+    ``fixed_params``, when given, is also checked against narrow-band data:
+    see the narrow-band/u_star block below. Callers that only care about
+    duplicate detection (most existing tests) can omit it.
+    """
     seen_keys = set()
+    mapped_bands = []
     for c in csvs:
         parts = c.name.split(f"_{inst}_")
         raw_band = parts[1].split(f"_{date}")[0] if len(parts) > 1 else "gp"
         mapped_band = _normalize_band(raw_band)
+        mapped_bands.append(mapped_band)
         site, telescope, mode = csv_site_mode(c.name, inst)
         key = (site or "", telescope or "", mode or "", mapped_band)
         if key in seen_keys:
@@ -256,6 +290,51 @@ def validate_no_duplicate_datasets(inst: str, date: str, csvs: list[pathlib.Path
             else:
                 return f"Multiple lightcurves selected for the same band '{mapped_band}'. Please select only one run."
         seen_keys.add(key)
+
+    # A narrow-band filter borrows its Claret limb-darkening coefficients from
+    # its co-located broadband (see _CLARET_BAND_ALIAS / _claret_band). If that
+    # broadband is *also* selected in this run, _write_fit_inputs' collision
+    # guard leaves the narrow band unmapped rather than silently merging two
+    # physically distinct filters under one shared prior -- which reproduces
+    # the original "band must be one of: ..." crash this function exists to
+    # prevent, except now buried in timer-fit.log with no explanation. Reject
+    # the combination here instead, at submit time, with a message that names
+    # the real problem.
+    present_broadbands = {b for b in mapped_bands if b in ("g", "r", "i", "z")}
+    for narrow in mapped_bands:
+        broad = _claret_band(narrow)
+        if broad != narrow and broad in present_broadbands:
+            return (
+                f"Cannot fit '{narrow}' and '{broad}' in the same run: narrow-band limb "
+                f"darkening is borrowed from the broadband, so both would share one prior. "
+                f"Select one."
+            )
+
+    # A broadband Claret coefficient held exactly fixed is a defensible
+    # approximation: one ground-based transit rarely constrains limb darkening
+    # on its own, so theory beats what the data can say. That argument breaks
+    # for narrow-band data, because the theory value is for a different
+    # filter -- the borrowed coefficient is not measured for this band at all.
+    # With 'u_star' fixed, timer holds it at that borrowed value as exact
+    # truth rather than letting it vary, and limb darkening correlates with
+    # transit depth, so the error silently propagates into Rp/R*. Refuse at
+    # submit instead of letting it through quietly: silently unchecking the
+    # box would override what the user explicitly asked for. (A uniform prior
+    # over u_star, seeded from the borrowed Claret value, would be a better
+    # long-term fix than either extreme -- timer's get_priors already supports
+    # u_star_prior='uniform' -- but muscat-db does not expose that control yet;
+    # that is future work, not this guard's job.) Per john-livingston's review
+    # on #138 (https://github.com/muscat-team/muscatdb/pull/138#pullrequestreview-5096974803).
+    if fixed_params is not None and "u_star" in fixed_params:
+        narrow_bands = sorted({b for b in mapped_bands if _claret_band(b) != b})
+        if narrow_bands:
+            return (
+                f"Cannot fix 'u_star' with narrow-band data selected ({', '.join(narrow_bands)}): "
+                "Claret has no narrow-band limb-darkening entries, so the fit would hold a "
+                "coefficient borrowed from a different (broadband) filter as exact truth instead "
+                "of letting it vary, biasing the fitted planet radius. Uncheck 'Fix u_star' "
+                "before submitting."
+            )
     return None
 
 
@@ -406,6 +485,25 @@ def get_target_parameters(target_name: str) -> dict:
 # Parameters the user may hold fixed during the fit (the "Fixed Parameters"
 # checkboxes in the fitting configuration form).
 _FIXABLE_PARAMS = {"t0", "period", "dur", "u_star", "b", "ror"}
+# muscat-db's own default when the form sends no "fixed" list at all (fresh
+# page load, or a client that omits the key). Matches the checkboxes that
+# ship pre-checked in transit_fit.html.
+_DEFAULT_FIXED_PARAMS: tuple[str, ...] = ("period", "u_star")
+
+
+def _resolved_fixed_params(options: dict) -> list:
+    """The 'fixed' parameter list timer will actually fit with.
+
+    ``options.get("fixed")`` is ``None`` when the form sends no "fixed" key at
+    all (falls back to :data:`_DEFAULT_FIXED_PARAMS`); an explicit empty list
+    means the user unchecked every box and must be preserved as "nothing
+    fixed", not treated as "no opinion" -- see
+    test_explicit_empty_fixed_list_is_preserved.
+    """
+    fixed = options.get("fixed")
+    return list(_DEFAULT_FIXED_PARAMS) if fixed is None else fixed
+
+
 # A single planet designation token, e.g. "b" or "c".
 _PLANET_TOKEN_RE = re.compile(r"^[A-Za-z]$")
 
@@ -732,6 +830,29 @@ def _band_sort_key(band: str) -> tuple:
     return order.get(band, (9, 9))
 
 
+# timer's claret_band() only Sloan-asterisks an *exact* 'g'/'r'/'i'/'z' match
+# (timer/util.py SLOAN_BANDS) before calling limbdark.claret(); it has no
+# notion of muscat's '_narrow' suffix convention, and limbdark's Claret+2011
+# tables have no narrow-band entries at all. Treating each narrow filter's
+# limb darkening as equal to its co-located broadband is muscat-db's own
+# approximation, so it is applied here rather than widening timer/limbdark.
+# This mirrors timer's own worked example for MuSCAT4 narrowband data
+# (examples/hip67522b/fit.yaml, docs/examples.md): g_narrow/i_narrow/z_narrow
+# are fit as band: g/i/z, and Na_D as band: r. Na_D (589.3nm) has no letter
+# counterpart of its own: it falls inside SDSS r' (~552-691nm, effective
+# 622nm) and is ~33nm from r vs ~114nm from g, matching timer's example.
+_CLARET_BAND_ALIAS: dict[str, str] = {
+    "g_narrow": "g", "r_narrow": "r", "i_narrow": "i", "z_narrow": "z",
+    "Na_D": "r",
+}
+
+
+def _claret_band(band: str) -> str:
+    """Map a display band (possibly narrow-band) to the band timer/limbdark
+    should use for limb-darkening lookup. See :data:`_CLARET_BAND_ALIAS`."""
+    return _CLARET_BAND_ALIAS.get(band, band)
+
+
 # timer's ``read_afphot`` maps these three to time/flux/error and treats *every*
 # remaining column as a detrending covariate (``timer/io.py`` ``read_generic``).
 _TIMER_RESERVED_COLUMNS: tuple[str, ...] = ("BJD_TDB", "Flux", "Err")
@@ -804,8 +925,14 @@ def _write_fit_inputs(
     run_id: str = "",
     run_type: str = "",
     telescope: str = "",
-) -> None:
+) -> list[tuple[str, str]]:
     """Copy light-curve CSVs into ``rdir`` and write fit.yaml / sys.yaml.
+
+    Returns the narrow-band -> broadband limb-darkening aliases actually
+    applied (see :data:`_CLARET_BAND_ALIAS`), e.g. ``[("g_narrow", "g"),
+    ("Na_D", "r")]``, so callers that log the run (:func:`start_fit`) can
+    surface the approximation to the user. Empty when no narrow-band data was
+    selected, or when the collision guard left it unmapped.
 
     Shared by :func:`start_fit` (real run directory) and :func:`compute_logp`
     (throwaway temp directory) so both build identical timer inputs from the
@@ -873,6 +1000,20 @@ def _write_fit_inputs(
     repeated = {b for b in (_csv_band(c) for c in ordered)
                 if sum(_csv_band(o) == b for o in ordered) > 1}
 
+    # validate_no_duplicate_datasets allows a genuine broadband file (e.g. "g")
+    # to be selected alongside its narrow-band counterpart ("g_narrow") in the
+    # same run, since they are different mapped_band keys. _claret_band would
+    # collapse both onto the same "g" value sent to timer, silently merging two
+    # physically distinct filters under one shared limb-darkening prior and one
+    # shared chromatic ror_g parameter. Only alias a narrow band when its target
+    # broadband letter is not itself present as a real dataset in this run.
+    present_broadbands = {b for b in (_csv_band(c) for c in ordered) if b in ("g", "r", "i", "z")}
+
+    # Collected in canonical band order (``ordered`` already sorts that way)
+    # and returned to the caller so it can tell the user their narrow-band
+    # data borrowed limb darkening from a broadband filter.
+    narrowband_aliases: list[tuple[str, str]] = []
+
     fit_data: dict = {"data": {}}
     for c in ordered:
         fname = c.name
@@ -887,9 +1028,15 @@ def _write_fit_inputs(
         while key in fit_data["data"]:
             key = f"{key}_{len(fit_data['data'])}"
 
+        claret_band = _claret_band(mapped_band)
+        if claret_band in present_broadbands and claret_band != mapped_band:
+            claret_band = mapped_band
+        elif claret_band != mapped_band and (mapped_band, claret_band) not in narrowband_aliases:
+            narrowband_aliases.append((mapped_band, claret_band))
+
         fit_data["data"][key] = {
             "file": fname,
-            "band": mapped_band,
+            "band": claret_band,
             "trend": trend_val,
             "binsize": 0.00139,
             "format": "afphot",
@@ -1124,8 +1271,7 @@ def _write_fit_inputs(
             "ampl_prior": ampl_prior,
         }
 
-    fixed = options.get("fixed")
-    fit_data["fixed"] = ["period", "u_star"] if fixed is None else fixed
+    fit_data["fixed"] = _resolved_fixed_params(options)
 
     # Prior shapes. The GUI sends each parameter as two keys (``ror`` /
     # ``ror_unc``); for Gaussian they are [value, unc] (written to sys.yaml), for
@@ -1209,6 +1355,8 @@ def _write_fit_inputs(
     with open(rdir / "meta.yaml", "w") as f:
         yaml.safe_dump(meta_data, f, default_flow_style=False, sort_keys=False)
 
+    return narrowband_aliases
+
 
 # Path to the standalone helper run inside the `timer` conda env.
 _LOGP_HELPER = pathlib.Path(__file__).parent / "_logp_helper.py"
@@ -1248,7 +1396,7 @@ def compute_logp(inst: str, date: str, target: str, options: dict, selected_csvs
         if not csvs:
             return {"ok": False, "error": "No lightcurves selected for logP computation."}
 
-    err = validate_no_duplicate_datasets(inst, date, csvs)
+    err = validate_no_duplicate_datasets(inst, date, csvs, fixed_params=set(_resolved_fixed_params(options)))
     if err:
         return {"ok": False, "error": err}
 
@@ -1342,7 +1490,7 @@ def start_fit(
         if not csvs:
             return {"ok": False, "error": "No lightcurves selected for fitting."}
 
-    err = validate_no_duplicate_datasets(inst, date, csvs)
+    err = validate_no_duplicate_datasets(inst, date, csvs, fixed_params=set(_resolved_fixed_params(options)))
     if err:
         return {"ok": False, "error": err}
 
@@ -1442,9 +1590,10 @@ def start_fit(
     # Full fits always clobber — otherwise timer reuses the cached test-run
     # trace (20 draws) and exits immediately, misleading the user into thinking
     # their full-fit request was silently ignored.
-    _write_fit_inputs(rdir, inst, date, target, csvs, options,
-                      site=site, telescope=telescope, mode=mode, run_name=run_name, run_id=run_id,
-                      run_type=run_type)
+    narrowband_aliases = _write_fit_inputs(
+        rdir, inst, date, target, csvs, options,
+        site=site, telescope=telescope, mode=mode, run_name=run_name, run_id=run_id,
+        run_type=run_type)
 
     # Clear cached outputs so the next page load reads fresh results from disk.
     _fit_outputs_cache.clear()
@@ -1455,7 +1604,7 @@ def start_fit(
     cmd = [*_timer_prefix(), "-v", str(rdir)]
     log_path = rdir / "timer-fit.log"
     logf = open(log_path, "w")
-    _write_log_banner(logf, cmd, options)
+    _write_log_banner(logf, cmd, options, narrowband_aliases)
     logf.flush()
 
     try:
@@ -2349,9 +2498,10 @@ def sync_jobs() -> None:
                 if selected_csvs is not None:
                     selected = set(str(p) for p in selected_csvs)
                     csvs = [c for c in csvs if str(c) in selected]
-                _write_fit_inputs(rdir, inst, date, target, csvs, opts,
-                                  site=site, telescope=telescope, mode=mode, run_name=run_name, run_id=run_id,
-                                  run_type=run_type)
+                narrowband_aliases = _write_fit_inputs(
+                    rdir, inst, date, target, csvs, opts,
+                    site=site, telescope=telescope, mode=mode, run_name=run_name, run_id=run_id,
+                    run_type=run_type)
                 _fit_outputs_cache.clear()
                 # Sampler size for a test run is already in fit.yaml (see
                 # _write_fit_inputs); no --test_run flag needed (#77).
@@ -2359,7 +2509,7 @@ def sync_jobs() -> None:
                 log_path = rdir / "timer-fit.log"
                 try:
                     logf = open(log_path, "w")
-                    _write_log_banner(logf, cmd, opts)
+                    _write_log_banner(logf, cmd, opts, narrowband_aliases)
                     logf.flush()
                     proc = subprocess.Popen(cmd, cwd=str(rdir), stdout=logf, stderr=subprocess.STDOUT, text=True, start_new_session=True)
                     try:
