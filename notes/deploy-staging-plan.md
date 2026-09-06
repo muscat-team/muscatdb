@@ -585,6 +585,15 @@ everything here runs as `jerome` on the host.
     `deploying ... -> ...` / `deployed ... at ...` lines. Repeat against `main` in its own
     window once staging is confirmed — that push is a real production redeploy.
 
+    **2026-09-06:** both cron entries installed on ut2 (`*/5 * * * *`, one per
+    checkout). Both checkouts were manually synced first (staging was 69 commits
+    behind), then each bootstrapped its `logs/pull-deploy-last-good-sha` marker
+    from the next real poll rather than a hand-run — staging's from a manual
+    trigger, production's from cron firing on its own, confirming the mechanism
+    works unattended. This commit is the trivial push exercising the actual
+    deploy path end to end. The Slack webhook file (`/etc/muscat-db/slack-webhook-url`)
+    is still not installed, so a failure here would log `FAILED` but not alert.
+
 ### Final verification (from the plan)
 - `:8001` / `:8003` refuse unauthenticated `/` (401); `/healthz` → 200.
 - Staging `build-db` never touches prod `muscat.db`.
