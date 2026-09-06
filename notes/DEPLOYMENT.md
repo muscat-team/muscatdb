@@ -22,7 +22,7 @@ muscat-db runs behind nginx (HTTP Basic Auth) reverse-proxying to uvicorn, insid
 | **`MUSCAT_LCO_MONITOR_ENABLED`** | `1` | `0` |
 | **`MUSCAT_LCO_ALLOW_SUBMIT`** | set | unset — can never book telescope time |
 
-`deploy.yml` deploys each branch to its own checkout on push to `main`/`test`, keyed off the `DEPLOY_PATH_PRODUCTION`/`DEPLOY_PATH_STAGING` and `DEPLOY_TMUX_SESSION_PRODUCTION`/`DEPLOY_TMUX_SESSION_STAGING` actions variables. Each checkout's `.env` pins the absolute paths above. Both launch uvicorn **without `--reload`** (dropped as part of the #26 host split — see the "Authentication boundary" note below for why `--reload` was harmful). `deploy/setup-nginx.sh` handles first-time nginx setup for production; staging's block lives at `/etc/nginx/sites-available/muscat-db-staging` (`:8002` → `:8003`).
+`deploy/pull-deploy.sh` deploys each branch to its own checkout, intended to run from a cron entry per checkout (branch, tmux session and port are its three arguments). Those entries are not installed yet (#26 Gate F), so deploys are currently a manual `git reset --hard` plus relaunch in the checkout. The script polls `git ls-remote` for a new SHA, resets to it, relaunches, then verifies `/healthz` before recording the deploy as good. The earlier `deploy.yml` push deploy was deleted in #133: GitHub-hosted runners cannot reach this host without the VPN, so it never worked, and the `DEPLOY_PATH_*`/`DEPLOY_TMUX_SESSION_*` actions variables it would have used are unused. Each checkout's `.env` pins the absolute paths above. Both launch uvicorn **without `--reload`** (dropped as part of the #26 host split — see the "Authentication boundary" note below for why `--reload` was harmful). `deploy/setup-nginx.sh` handles first-time nginx setup for production; staging's block lives at `/etc/nginx/sites-available/muscat-db-staging` (`:8002` → `:8003`).
 
 The README "Multi-User Deployment" section has the full walkthrough; the essentials:
 
@@ -83,9 +83,9 @@ checking for active photometry/transit jobs. `--reload` is **not** used in
 production or staging: the deployment launches uvicorn without it (see issue
 #26), because a reload mid-`ingest_date` rolls back a whole night's ingest and
 because it lets a dev-tree branch switch restart the live server. Deploys are
-driven by `deploy.yml`, which restarts the matching session after a `git reset
---hard` in the dedicated checkout; since `--reload` is gone, HTML/JavaScript
-changes require that deploy restart before they are live.
+driven by `deploy/pull-deploy.sh` from cron, which restarts the matching session
+after a `git reset --hard` in the dedicated checkout; since `--reload` is gone,
+HTML/JavaScript changes require that deploy restart before they are live.
 
 ---
 

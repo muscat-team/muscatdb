@@ -57,9 +57,9 @@ one approving review and up-to-date status checks (see below).
   issue in another muscat-team repo (`prose2`, `timer`, `harmonic`) as
   `owner/repo#N`.
 - `Closes #N` in a feature PR closes the issue when that PR merges into
-  `test` — before the fix actually reaches production, since `deploy.yml`
-  only runs on a push to `main`. If the issue should stay open until release,
-  write `Refs #N` instead and close it by hand at release time.
+  `test` — before the fix actually reaches production, which only happens once
+  the deploy host picks up the released commit. If the issue should stay open
+  until release, write `Refs #N` instead and close it by hand at release time.
 
 ## Full policy
 
