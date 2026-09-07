@@ -594,6 +594,33 @@ everything here runs as `jerome` on the host.
     deploy path end to end. The Slack webhook file (`/etc/muscat-db/slack-webhook-url`)
     is still not installed, so a failure here would log `FAILED` but not alert.
 
+    **2026-09-06, same day — real outage:** staging's next real target (this
+    file's own "Gate F cron install" commit, `1e38edf`) hit the exact failure
+    mode #131 had flagged as a risk: three consecutive ticks (09:45, 09:50,
+    09:55 UTC) each ran `git reset --hard` to `1e38edf` cleanly, then the old
+    `send-keys` relaunch sent `Ctrl-C` into a pane whose sole process was
+    `uv run uvicorn` (not a wrapping shell), killing the pane itself; the
+    `|| new-session` fallback never fired because tmux reports success for a
+    further `send-keys` to an already-dead pane. All three ticks logged
+    `FAILED` after `wait_for_healthy` timed out. Production has the identical
+    pane shape, so the same tick against `main` would have taken it down the
+    same way, unrecoverably, on every subsequent poll. Both cron entries were
+    pulled from crontab by hand once this was noticed, before production's
+    poll could hit it. Fixed in #146 (`tmux respawn-pane -k`, merged to
+    `test` as `257173d`) — see that PR for the full root cause.
+
+    **2026-09-07 — staging cron reinstalled and reverified:** with the fix on
+    `test`, the staging entry alone was reinstalled (production's stays out
+    deliberately — `main/app` has not received the fix yet, since it only
+    lives on `test` pending a release PR). The next real, unattended tick
+    (`05:40:03 UTC`) deployed `9064ac6 -> 257173d` — the identical target
+    branch/commit shape as the incident above, this time via
+    `respawn-pane -k` — and logged `deployed test at 257173d...` at
+    `05:40:15 UTC`; `:8003/healthz` confirmed 200 immediately after. The
+    Slack webhook file is still not installed. Production's cron entry goes
+    back in only after `test` is released to `main` (merge commit, per
+    CLAUDE.md) and this same verification is repeated against `main`.
+
 ### Final verification (from the plan)
 - `:8001` / `:8003` refuse unauthenticated `/` (401); `/healthz` → 200.
 - Staging `build-db` never touches prod `muscat.db`.
