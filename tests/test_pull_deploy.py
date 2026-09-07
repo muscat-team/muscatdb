@@ -109,12 +109,12 @@ def deploy_env(tmp_path):
     uv_marker = tmp_path / "uv-calls.log"
     tmux_marker = tmp_path / "tmux-calls.log"
     _write_stub(bin_dir / "uv", uv_marker)
-    # send-keys always fails (no session exists yet in this test environment,
-    # same as the real first deploy to a fresh checkout), forcing every call
-    # through the new-session fallback, which succeeds.
+    # respawn-pane always fails (no session exists yet in this test
+    # environment, same as the real first deploy to a fresh checkout),
+    # forcing every call through the new-session fallback, which succeeds.
     _write_stub(
         bin_dir / "tmux", tmux_marker,
-        body='if [ "$1" = "send-keys" ]; then exit 1; fi\n',
+        body='if [ "$1" = "respawn-pane" ]; then exit 1; fi\n',
     )
 
     return {
@@ -172,7 +172,7 @@ def test_deploys_and_relaunches_on_new_remote_commit(deploy_env):
     tmux_calls = deploy_env["tmux_marker"].read_text()
     assert "test-session" in tmux_calls
     assert str(port_num) in tmux_calls
-    # Both the failed send-keys attempt and the new-session fallback ran.
+    # Both the failed respawn-pane attempt and the new-session fallback ran.
     assert tmux_calls.count("test-session") >= 2
     # The marker only advances past a deploy the health check actually
     # verified -- see the failed-health-check tests below for the other side
@@ -295,6 +295,48 @@ def test_health_check_failure_after_relaunch_alerts_and_exits_nonzero(deploy_env
     # for some earlier, unrelated reason.
     assert deploy_env["uv_marker"].exists()
     assert deploy_env["tmux_marker"].exists()
+
+
+def test_relaunch_prefers_respawn_pane_over_new_session_when_session_exists(deploy_env):
+    """Regression for a real staging outage: the old relaunch sent Ctrl-C
+    then a launch line via two `tmux send-keys` calls. When the pane's sole
+    process is the previously deployed uvicorn (not a wrapping shell), the
+    Ctrl-C kills the pane itself -- and tmux still reports success for a
+    further send-keys to that now-dead pane, without running anything, so
+    the `|| new-session` fallback never fired. Confirmed against a real tmux
+    session on the host: three consecutive cron ticks all "relaunched"
+    successfully while the pane stayed dead and every health check failed.
+
+    respawn-pane -k must be tried first and, when the session already
+    exists, must be the call that actually relaunches -- never falling
+    through to new-session just because a session happens to be present.
+    """
+    tmux_marker = deploy_env["tmux_marker"]
+    stub = deploy_env["bin_dir"] / "tmux"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        f'echo "$@" >> "{tmux_marker}"\n'
+        'if [ "$1" = "respawn-pane" ]; then exit 0; fi\n'
+        'if [ "$1" = "new-session" ]; then\n'
+        '  echo "new-session must not run when respawn-pane already succeeded" >&2\n'
+        "  exit 1\n"
+        "fi\n"
+    )
+    stub.chmod(0o755)
+
+    (deploy_env["seed"] / "app.txt").write_text("v2\n")
+    _git("add", "app.txt", cwd=deploy_env["seed"])
+    _git("commit", "-m", "v2", cwd=deploy_env["seed"])
+    _git("push", "origin", "main", cwd=deploy_env["seed"])
+
+    with _healthy_server() as port_num:
+        result = _run(deploy_env, session="test-session", port=str(port_num))
+
+    assert result.returncode == 0, result.stderr
+    tmux_calls = tmux_marker.read_text()
+    assert "respawn-pane" in tmux_calls
+    assert "-k" in tmux_calls
+    assert "new-session" not in tmux_calls
 
 
 def test_failed_health_check_does_not_advance_marker_so_next_poll_retries(deploy_env):

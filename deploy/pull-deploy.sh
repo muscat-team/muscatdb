@@ -126,13 +126,25 @@ fi
 
 "$UV" sync --dev
 
-tmux send-keys -t "$TMUX_SESSION" "" C-c || true
-sleep 2
-# send-keys targets an existing pane's own shell, which never saw this
-# script's cd above, so the launch command carries its own cd (same reason
-# the deploy.yml block it replaces did the same thing).
-tmux send-keys -t "$TMUX_SESSION" "cd '$DEPLOY_PATH' && $UV run uvicorn muscat_db.web:sio_app --host 127.0.0.1 --port $PORT" Enter || \
-  tmux new-session -d -s "$TMUX_SESSION" -c "$DEPLOY_PATH" "$UV run uvicorn muscat_db.web:sio_app --host 127.0.0.1 --port $PORT"
+# The launch command carries its own cd, since it runs inside the pane, not
+# this script's shell.
+LAUNCH_CMD="cd '$DEPLOY_PATH' && $UV run uvicorn muscat_db.web:sio_app --host 127.0.0.1 --port $PORT"
+# send-keys only confirms the pane accepted keystrokes, not that anything
+# runs -- and when the pane's sole process *is* the previous uvicorn (the
+# shape every real deploy leaves it in, not a wrapping shell), a Ctrl-C to it
+# kills the pane itself, not just uvicorn. tmux then accepts a further
+# send-keys to that now-dead pane and reports success without running
+# anything, so the old two-step "Ctrl-C, then send-keys || new-session"
+# never reached its own fallback -- verified against the real deploy of this
+# script to staging: the relaunch step "succeeded" while the pane stayed
+# dead and the health check failed every retry. respawn-pane -k kills
+# whatever is in the pane -- alive, already dead, or the previous process --
+# and starts the new command in the same pane in one atomic step, correct in
+# all three states. Only a session that does not exist at all (the very
+# first deploy, before Gate F's manual bootstrap ever created it) needs the
+# new-session fallback below.
+tmux respawn-pane -k -t "$TMUX_SESSION" "$LAUNCH_CMD" || \
+  tmux new-session -d -s "$TMUX_SESSION" -c "$DEPLOY_PATH" "$LAUNCH_CMD"
 
 if ! wait_for_healthy; then
   echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') health check failed for $BRANCH on 127.0.0.1:$PORT/healthz after relaunch" >&2
