@@ -520,13 +520,25 @@
             </div>
             <div class="opt">
               <label for="opt-exclude_after_jd">Exclude after JD <span class="help-tooltip" title="Drop frames with header JD greater than this value (corresponds to --exclude_after_jd). Comma-separated for multiple cuts. Pairs positionally with 'Exclude before JD' when both are set (equal count required) to form closed excluded window(s); given alone, each value is an open-ended tail cut. Compares against the raw header JD, not the barycentric-corrected BJD_TDB the light curve is plotted against -- the two can differ by up to ~8 min near a window boundary.">?</span></label>
+              {% if jd_range %}
+              <div style="display:flex; align-items:center; gap:0.5rem;">
+                <input type="range" id="jdslider-exclude_after_jd" min="{{ jd_range.min }}" max="{{ jd_range.max }}" step="0.0001" value="{{ jd_range.max }}" style="flex:1;" title="drag to set a single cutoff; edit the field below directly for multiple ranges">
+                <span class="hint" id="jdslider-exclude_after_jd-label" style="white-space:nowrap;">{{ jd_range.max_utc }}</span>
+              </div>
+              {% endif %}
               <input type="text" id="opt-exclude_after_jd" placeholder="none" value="{{ run_defaults.exclude_after_jd }}" style="width: 100%;">
-              <span class="hint">--exclude_after_jd; comma-separated, empty → none</span>
+              <span class="hint">--exclude_after_jd; comma-separated, empty → none{% if jd_range %}; data spans {{ jd_range.min_utc }}–{{ jd_range.max_utc }}{% endif %}</span>
             </div>
             <div class="opt">
               <label for="opt-exclude_before_jd">Exclude before JD <span class="help-tooltip" title="Drop frames with header JD less than this value (corresponds to --exclude_before_jd). Comma-separated for multiple cuts. Pairs positionally with 'Exclude after JD' when both are set (equal count required) to form closed excluded window(s); given alone, each value is an open-ended head cut.">?</span></label>
+              {% if jd_range %}
+              <div style="display:flex; align-items:center; gap:0.5rem;">
+                <input type="range" id="jdslider-exclude_before_jd" min="{{ jd_range.min }}" max="{{ jd_range.max }}" step="0.0001" value="{{ jd_range.min }}" style="flex:1;" title="drag to set a single cutoff; edit the field below directly for multiple ranges">
+                <span class="hint" id="jdslider-exclude_before_jd-label" style="white-space:nowrap;">{{ jd_range.min_utc }}</span>
+              </div>
+              {% endif %}
               <input type="text" id="opt-exclude_before_jd" placeholder="none" value="{{ run_defaults.exclude_before_jd }}" style="width: 100%;">
-              <span class="hint">--exclude_before_jd; comma-separated, empty → none</span>
+              <span class="hint">--exclude_before_jd; comma-separated, empty → none{% if jd_range %}; data spans {{ jd_range.min_utc }}–{{ jd_range.max_utc }}{% endif %}</span>
             </div>
           </div>
         </details>
@@ -948,6 +960,70 @@
 
   updateApertureHints();
 
+  // JD-exclusion range sliders: pure UI helpers mirroring opt-exclude_after_jd/
+  // opt-exclude_before_jd (only rendered when the server found a data span for
+  // this run), so they are deliberately not 'opt-'-prefixed and carry no state
+  // of their own -- collectOptions() still only ever reads the text fields
+  // (which always hold the raw JD, matching --exclude_after_jd/
+  // --exclude_before_jd's actual units; only the live label is UTC).
+  function jdToUtcMinuteLabel(jd) {
+    // JD 2440587.5 = 1970-01-01T00:00:00 UTC (the Unix epoch); mirrors
+    // web.py's _jd_to_utc_minute() so the slider label and the server-
+    // rendered 'data spans' hint agree.
+    var unixMs = (jd - 2440587.5) * 86400000;
+    var d = new Date(Math.round(unixMs / 60000) * 60000);
+    function pad(n) { return (n < 10 ? '0' : '') + n; }
+    return d.getUTCFullYear() + '-' + pad(d.getUTCMonth() + 1) + '-' + pad(d.getUTCDate()) +
+      ' ' + pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes()) + ' UTC';
+  }
+  function jdSliderEls(mode) {
+    var key = mode === 'after' ? 'exclude_after_jd' : 'exclude_before_jd';
+    return {
+      slider: document.getElementById('jdslider-' + key),
+      field: document.getElementById('opt-' + key),
+      label: document.getElementById('jdslider-' + key + '-label'),
+    };
+  }
+  function syncJdSliderFromField(mode) {
+    var els = jdSliderEls(mode);
+    if (!els.slider || !els.field) return;
+    var lo = parseFloat(els.slider.min), hi = parseFloat(els.slider.max);
+    var neutral = mode === 'after' ? hi : lo;
+    var raw = (els.field.value || '').trim();
+    var isMulti = raw.indexOf(',') !== -1;
+    // A single-thumb slider can't represent a comma-separated list, and
+    // dragging it would silently overwrite (destroy) whatever the user
+    // typed -- disable it outright rather than leave it interactive and
+    // misleading. Native `disabled` also blocks all pointer/keyboard
+    // interaction, so this is the actual safeguard, not just a visual one.
+    els.slider.disabled = isMulti;
+    els.slider.style.opacity = isMulti ? '0.4' : '1';
+    els.slider.title = isMulti
+      ? 'disabled: the field holds multiple comma-separated values; clear it to a single value to use the slider again'
+      : 'drag to set a single cutoff; edit the field below directly for multiple ranges';
+    if (isMulti) {
+      if (els.label) els.label.textContent = 'multiple values';
+      return;
+    }
+    var v = parseFloat(raw);
+    var pos = (raw !== '' && isFinite(v) && v >= lo && v <= hi) ? v : neutral;
+    els.slider.value = pos;
+    if (els.label) els.label.textContent = jdToUtcMinuteLabel(pos);
+  }
+  function initJdSlider(mode) {
+    var els = jdSliderEls(mode);
+    if (!els.slider || !els.field) return;
+    els.slider.addEventListener('input', function () {
+      var v = parseFloat(els.slider.value);
+      els.field.value = v.toFixed(4);
+      if (els.label) els.label.textContent = jdToUtcMinuteLabel(v);
+    });
+    els.field.addEventListener('input', function () { syncJdSliderFromField(mode); });
+    syncJdSliderFromField(mode);
+  }
+  initJdSlider('after');
+  initJdSlider('before');
+
   function updateWcsMethod() {
     var el = document.getElementById('opt-wcs_method');
     if (!el) return;
@@ -990,6 +1066,8 @@
       });
       saveOptions();
       updateApertureHints();
+      syncJdSliderFromField('after');
+      syncJdSliderFromField('before');
       refreshCmd();
     });
   }

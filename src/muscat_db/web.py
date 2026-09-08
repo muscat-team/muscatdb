@@ -20,6 +20,29 @@ sio = socketio.AsyncServer(async_mode="asgi")
 
 _DB_LOCK = threading.Lock()
 
+# frames.jd_start is stored as truncated JD ("JD - 2450000"; see scanner.py's
+# jd = mjd - 49999.5, i.e. MJD + 2400000.5 - 2450000). Add this back to get
+# the full JD run_photometry.py's --exclude_after_jd/--exclude_before_jd
+# (and header_jd()) actually compare against.
+_JD_START_TO_FULL_JD = 2_450_000.0
+
+# JD 2440587.5 = 1970-01-01T00:00:00 UTC (the Unix epoch), so this offset
+# converts a full JD straight to a Unix timestamp without pulling in astropy
+# just for display formatting.
+_JD_UNIX_EPOCH = 2_440_587.5
+
+
+def _jd_to_utc_minute(jd: float) -> str:
+    """Format a full JD as a UTC calendar timestamp, rounded to the nearest
+    minute (e.g. '2026-08-11 00:58 UTC') -- for human-readable display only,
+    never for anything that round-trips back into --exclude_after_jd/
+    --exclude_before_jd (those stay full JD)."""
+    unix_seconds = (jd - _JD_UNIX_EPOCH) * 86400.0
+    dt = datetime.datetime.fromtimestamp(
+        round(unix_seconds / 60.0) * 60.0, tz=datetime.timezone.utc
+    )
+    return dt.strftime("%Y-%m-%d %H:%M %Z")
+
 import csv
 import io
 from contextlib import asynccontextmanager
@@ -1793,6 +1816,7 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
     obs_type = ""
     is_narrowband = False
     available_bands: list[str] = []
+    jd_range: dict[str, float] | None = None
     if inst and date and target:
         runs, run_outputs = phot.list_photometry_runs(inst, date, target)
         if inst in phot.MULTISITE_INSTRUMENTS:
@@ -1858,6 +1882,28 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
                 total_frames = cur.fetchone()[0]
                 if obs_type and total_frames < 100:
                     obs_type += " (test)"
+
+                # frames.jd_start is stored truncated ("JD - 2450000", see
+                # scanner.py's jd = mjd - 49999.5) for compactness; convert
+                # back to full JD here so it lines up with what
+                # --exclude_after_jd/--exclude_before_jd actually compare
+                # against (run_photometry.py's header_jd(), full JD).
+                cur = conn.execute(
+                    "SELECT MIN(jd_start), MAX(jd_start) FROM frames "
+                    "WHERE instrument = ? AND obsdate = ? AND object = ? "
+                    "AND jd_start IS NOT NULL AND jd_start > 0",
+                    (inst, date, target),
+                )
+                jd_min, jd_max = cur.fetchone()
+                if jd_min is not None and jd_max is not None and jd_max > jd_min:
+                    full_min = round(jd_min + _JD_START_TO_FULL_JD, 6)
+                    full_max = round(jd_max + _JD_START_TO_FULL_JD, 6)
+                    jd_range = {
+                        "min": full_min,
+                        "max": full_max,
+                        "min_utc": _jd_to_utc_minute(full_min),
+                        "max_utc": _jd_to_utc_minute(full_max),
+                    }
         except Exception:
             logger.debug("failed to load obs metadata for photometry page %s/%s/%s", inst, date, target, exc_info=True)
 
@@ -1928,6 +1974,7 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
         available_sites=available_sites,
         available_telescopes=available_telescopes,
         available_modes=available_modes,
+        jd_range=jd_range,
     )
     # The run buttons' enabled/disabled state is JavaScript-driven and reflects
     # the live job state. A cached or back/forward-restored snapshot can show
