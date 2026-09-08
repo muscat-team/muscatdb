@@ -20,6 +20,16 @@ two-flag design decided in rev 2. Implementation notes from build-out:
   for the boundary caveat; that constant is `compute_bjd_tdb`'s own 2x-margin
   sanity-check threshold, not the expected drift. Fixed to the correct ~8.4
   min (light travel time across 1 AU, i.e. `MAX_TIME_OFFSET_MIN / 2`).
+- Original build silently no-op'd when a JD window didn't overlap any frame
+  (the "excluded N of M" line was only logged when N > 0) -- a mistyped JD,
+  wrong night, or a BJD_TDB value pasted in where raw header JD was expected
+  would run the reduction with zero signal that the exclusion had no effect.
+  Fixed: the count is now always logged, and `N == 0` additionally logs a
+  WARNING naming the likely cause. Verified this reaches the muscat-db GUI
+  with no changes needed there: the live log tail shows the raw log
+  unfiltered, and `_get_error_desc` (used only for failed-job summaries)
+  won't misclassify it, since the warning text contains none of
+  "Error"/"Exception"/"failed".
 
 ## The ask
 
