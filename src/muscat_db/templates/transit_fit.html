@@ -2258,7 +2258,7 @@
     var savedLog = MuscatStorage.get(logKey(), null);
     if (savedLog) {
       logEl.style.display = 'block';
-      logEl.textContent = savedLog;
+      logEl.innerHTML = MuscatDom.ansiToHtml(savedLog);
       logEl.scrollTop = logEl.scrollHeight;
     }
   })();
@@ -2394,7 +2394,7 @@
     if (runId) qs += '&run=' + encodeURIComponent(runId);
     fetch('/api/transit-fit/status?' + qs).then(function (r) { return r.json(); }).then(function (s) {
       if (s.log) {
-        logEl.textContent = s.log;
+        logEl.innerHTML = MuscatDom.ansiToHtml(s.log);
         logEl.scrollTop = logEl.scrollHeight;
         MuscatStorage.set(logKey(), s.log);
       }
@@ -2404,7 +2404,7 @@
       }
       if (s.state === 'done') {
         stopPolling(); clearJob();
-        logEl.textContent += '\n\n✓ done — reloading…';
+        logEl.innerHTML += MuscatDom.ansiToHtml('\n\n✓ done — reloading…');
         MuscatStorage.set(logKey(), logEl.textContent);
         if (typeof window.showLoading === 'function') {
           window.showLoading('Reloading…');
@@ -2419,11 +2419,11 @@
         setTimeout(function () { window.location.href = reloadUrl.toString(); }, reloadDelay);
       } else if (s.state === 'error') {
         stopPolling(); setRunning(false); clearJob();
-        logEl.textContent += '\n\n✗ fit run exited with code ' + s.returncode;
+        logEl.innerHTML += MuscatDom.ansiToHtml('\n\n✗ fit run exited with code ' + s.returncode);
         MuscatStorage.set(logKey(), logEl.textContent);
       } else if (s.state === 'cancelled') {
         stopPolling(); setRunning(false); clearJob();
-        logEl.textContent += '\n\n■ cancelled';
+        logEl.innerHTML += MuscatDom.ansiToHtml('\n\n■ cancelled');
         MuscatStorage.set(logKey(), logEl.textContent);
       } else if (s.state === 'pending') {
         // Queued behind the running full job; keep the Cancel button and poll
@@ -2544,7 +2544,7 @@
   });
   if (cancelBtn) cancelBtn.addEventListener('click', function () {
     cancelBtn.disabled = true;
-    logEl.textContent += '\n\n■ cancelling…';
+    logEl.innerHTML += MuscatDom.ansiToHtml('\n\n■ cancelling…');
     MuscatStorage.set(logKey(), logEl.textContent);
     fetch('/api/transit-fit/cancel', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
