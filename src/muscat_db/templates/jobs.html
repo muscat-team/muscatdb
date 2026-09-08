@@ -849,7 +849,7 @@
     }
     fetch(url)
       .then(function(r) { if (!r.ok) throw new Error('Log not found'); return r.text(); })
-      .then(function(text) { pre.textContent = text; })
+      .then(function(text) { pre.innerHTML = MuscatDom.ansiToHtml(text); })
       .catch(function(err) { pre.textContent = 'Error: ' + err.message; });
   };
 

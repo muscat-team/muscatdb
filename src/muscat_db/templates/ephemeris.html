@@ -3803,7 +3803,7 @@
         
         cancelBtn.disabled = true;
         const logEl = document.getElementById('run-log');
-        logEl.textContent += '\n\n■ cancelling…';
+        logEl.innerHTML += MuscatDom.ansiToHtml('\n\n■ cancelling…');
         
         fetch('/api/ttv-fit/cancel', {
           method: 'POST',
@@ -3996,7 +3996,7 @@
       .then(s => {
         if (s.log) {
           logEl.style.display = 'block';
-          logEl.textContent = s.log;
+          logEl.innerHTML = MuscatDom.ansiToHtml(s.log);
           logEl.scrollTop = logEl.scrollHeight;
         }
         
@@ -4012,7 +4012,7 @@
           if (runBtn) runBtn.disabled = false;
           if (cancelBtn) cancelBtn.style.display = 'none';
           if (deleteBtn) deleteBtn.style.display = 'inline-block';
-          logEl.textContent += '\n\n✓ done — reloading…';
+          logEl.innerHTML += MuscatDom.ansiToHtml('\n\n✓ done — reloading…');
           if (typeof window.showLoading === 'function') window.showLoading('Reloading…');
           // Point the URL at the run that just finished before reloading, so the
           // reload lands on its results instead of whatever ?run= was already
@@ -4025,7 +4025,7 @@
           if (runBtn) runBtn.disabled = false;
           if (cancelBtn) cancelBtn.style.display = 'none';
           if (deleteBtn) deleteBtn.style.display = 'inline-block';
-          logEl.textContent += '\n\n✗ fit run exited with code ' + s.returncode;
+          logEl.innerHTML += MuscatDom.ansiToHtml('\n\n✗ fit run exited with code ' + s.returncode);
           if (window.MuscatJobIndicator) window.MuscatJobIndicator.refresh();
         } else if (s.state === 'cancelled') {
           poller.stop();
@@ -4033,7 +4033,7 @@
           if (runBtn) runBtn.disabled = false;
           if (cancelBtn) cancelBtn.style.display = 'none';
           if (deleteBtn) deleteBtn.style.display = 'none';
-          logEl.textContent += '\n\n■ cancelled';
+          logEl.innerHTML += MuscatDom.ansiToHtml('\n\n■ cancelled');
           if (window.MuscatJobIndicator) window.MuscatJobIndicator.refresh();
         } else if (s.state === 'pending') {
           if (runBtn) runBtn.disabled = true;
