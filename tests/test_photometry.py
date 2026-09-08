@@ -767,6 +767,27 @@ class TestRunOptions:
                                  {"avoid_comparison_ids": ""}, test_run=False)
         assert "--avoid_cids" not in cmd
 
+    def test_exclude_after_jd_passed_through(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("MUSCAT_PROSE_DIR", str(tmp_path))
+        cmd = phot.build_command(INST, DATE, TARGET,
+                                 {"exclude_after_jd": "2460423.10,2460423.60"}, test_run=False)
+        s = " ".join(cmd)
+        assert "--exclude_after_jd 2460423.10 2460423.60" in s
+
+    def test_exclude_before_jd_passed_through(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("MUSCAT_PROSE_DIR", str(tmp_path))
+        cmd = phot.build_command(INST, DATE, TARGET,
+                                 {"exclude_before_jd": "2460423.20"}, test_run=False)
+        s = " ".join(cmd)
+        assert "--exclude_before_jd 2460423.20" in s
+
+    def test_empty_exclude_jd_emits_nothing(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("MUSCAT_PROSE_DIR", str(tmp_path))
+        cmd = phot.build_command(INST, DATE, TARGET,
+                                 {"exclude_after_jd": "", "exclude_before_jd": ""}, test_run=False)
+        assert "--exclude_after_jd" not in cmd
+        assert "--exclude_before_jd" not in cmd
+
     def test_avoid_nearby_star_blank_uses_auto_flag(self, monkeypatch, tmp_path):
         monkeypatch.setenv("MUSCAT_PROSE_DIR", str(tmp_path))
         cmd = phot.build_command(

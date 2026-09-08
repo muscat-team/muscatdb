@@ -518,6 +518,16 @@
               <label for="opt-display_stack_nframes">Display stack frames <span class="help-tooltip" title="For non-reference bands under a chosen reference band, number of the band's own frames aligned onto the shared reference grid and median-combined into the display image for the reference/apertures/cutouts/stacks plots. 1 = single representative frame; larger = higher-SNR aligned median stack (corresponds to --display_stack_nframes).">?</span></label>
               <input type="number" id="opt-display_stack_nframes" value="{{ run_defaults.display_stack_nframes }}" min="1" style="width: 100%;">
             </div>
+            <div class="opt">
+              <label for="opt-exclude_after_jd">Exclude after JD <span class="help-tooltip" title="Drop frames with header JD greater than this value (corresponds to --exclude_after_jd). Comma-separated for multiple cuts. Pairs positionally with 'Exclude before JD' when both are set (equal count required) to form closed excluded window(s); given alone, each value is an open-ended tail cut. Compares against the raw header JD, not the barycentric-corrected BJD_TDB the light curve is plotted against -- the two can differ by up to ~8 min near a window boundary.">?</span></label>
+              <input type="text" id="opt-exclude_after_jd" placeholder="none" value="{{ run_defaults.exclude_after_jd }}" style="width: 100%;">
+              <span class="hint">--exclude_after_jd; comma-separated, empty → none</span>
+            </div>
+            <div class="opt">
+              <label for="opt-exclude_before_jd">Exclude before JD <span class="help-tooltip" title="Drop frames with header JD less than this value (corresponds to --exclude_before_jd). Comma-separated for multiple cuts. Pairs positionally with 'Exclude after JD' when both are set (equal count required) to form closed excluded window(s); given alone, each value is an open-ended head cut.">?</span></label>
+              <input type="text" id="opt-exclude_before_jd" placeholder="none" value="{{ run_defaults.exclude_before_jd }}" style="width: 100%;">
+              <span class="hint">--exclude_before_jd; comma-separated, empty → none</span>
+            </div>
           </div>
         </details>
         <details class="opt-collapse">
@@ -870,7 +880,9 @@
       cmap: val('opt-cmap'),
       site: val('opt-site'),
       telescope: val('opt-telescope'),
-      mode: val('opt-mode')
+      mode: val('opt-mode'),
+      exclude_after_jd: val('opt-exclude_after_jd'),
+      exclude_before_jd: val('opt-exclude_before_jd')
     };
   }
   function saveOptions() {
@@ -891,7 +903,7 @@
     });
     ['run_name','ref_band','refid','ref_select','ref_select_top_k','aper_unit','aper_radii','annulus',
      'target_id','comparison_ids','avoid_comparison_ids','avoid_nearby_star_mode','avoid_nearby_star','target_coord','test_run_frames','min_star_separation','max_num_stars',
-       'n_stars_align','cutout_size','display_stack_nframes','ccd_trim','edge_margin','bin_size_minutes','nan_imputation_method','sig_bkg','sig_fwhm','sig_dx','sig_dy','min_star_area','wcs_method','centroid_method','cmap','site','telescope','mode'].forEach(function (id) {
+       'n_stars_align','cutout_size','display_stack_nframes','ccd_trim','edge_margin','bin_size_minutes','nan_imputation_method','sig_bkg','sig_fwhm','sig_dx','sig_dy','min_star_area','wcs_method','centroid_method','cmap','site','telescope','mode','exclude_after_jd','exclude_before_jd'].forEach(function (id) {
       var el = document.getElementById('opt-'+id);
       if (el && saved[id] !== undefined) el.value = saved[id];
     });
@@ -968,7 +980,7 @@
       });
       ['run_name','ref_band','refid','ref_select','ref_select_top_k','aper_unit','aper_radii','annulus',
        'target_id','comparison_ids','avoid_comparison_ids','avoid_nearby_star_mode','avoid_nearby_star','target_coord','test_run_frames','min_star_separation','max_num_stars',
-     'n_stars_align','cutout_size','display_stack_nframes','ccd_trim','edge_margin','bin_size_minutes','nan_imputation_method','sig_bkg','sig_fwhm','sig_dx','sig_dy','min_star_area','wcs_method','centroid_method','cmap','site','telescope','mode'].forEach(function (id) {
+     'n_stars_align','cutout_size','display_stack_nframes','ccd_trim','edge_margin','bin_size_minutes','nan_imputation_method','sig_bkg','sig_fwhm','sig_dx','sig_dy','min_star_area','wcs_method','centroid_method','cmap','site','telescope','mode','exclude_after_jd','exclude_before_jd'].forEach(function (id) {
         var el = document.getElementById('opt-'+id);
         if (el) el.value = DEFAULTS[id] !== undefined ? DEFAULTS[id] : '';
       });
