@@ -688,7 +688,7 @@
           // the Jobs page was the only place the error was ever visible.
           if (logEl && (s.state === 'error' || s.state === 'cancelled')) {
             logEl.style.display = 'block';
-            logEl.innerHTML = MuscatDom.ansiToHtml(terminalLogText(s));
+            logEl.textContent = terminalLogText(s);
             MuscatStorage.set(logKey(), logEl.textContent);
           }
         }
@@ -1046,7 +1046,7 @@
     var savedLog = MuscatStorage.get(logKey(), null);
     if (savedLog) {
       logEl.style.display = 'block';
-      logEl.innerHTML = MuscatDom.ansiToHtml(savedLog);
+      logEl.textContent = savedLog;
       logEl.scrollTop = logEl.scrollHeight;
     }
   })();
@@ -1305,7 +1305,7 @@
     if (jobSpec.inst === inst && jobSpec.date === date && jobSpec.target === target && (jobSpec.run || '') === (runId || '')) {
       renderRunStatus(s.state, s.error_desc);
       if (s.log) {
-        logEl.innerHTML = MuscatDom.ansiToHtml(s.log);
+        logEl.textContent = s.log;
         logEl.scrollTop = logEl.scrollHeight;
         MuscatStorage.set(logKey(), s.log);
       }
@@ -1314,7 +1314,7 @@
         nextPollDelay = Math.min(nextPollDelay || 2000, 2000);
       } else if (s.state === 'done') {
         setRunning(false);
-        logEl.innerHTML = MuscatDom.ansiToHtml((s.log || '') + '\n\n✓ done (' + s.elapsed + 's) — reloading…');
+        logEl.textContent = (s.log || '') + '\n\n✓ done (' + s.elapsed + 's) — reloading…';
         MuscatStorage.set(logKey(), logEl.textContent);
         if (typeof window.showLoading === 'function') {
           window.showLoading('Reloading…');
@@ -1331,7 +1331,7 @@
         }, reloadDelay);
       } else if (s.state === 'error') {
         setRunning(false);
-        logEl.innerHTML = MuscatDom.ansiToHtml(terminalLogText(s));
+        logEl.textContent = terminalLogText(s);
         MuscatStorage.set(logKey(), logEl.textContent);
         if (typeof window.showLoading === 'function') {
           window.showLoading('Reloading…');
@@ -1347,7 +1347,7 @@
         }, 1200);
       } else if (s.state === 'cancelled') {
         setRunning(false); clearJob();
-        logEl.innerHTML = MuscatDom.ansiToHtml(terminalLogText(s));
+        logEl.textContent = terminalLogText(s);
         MuscatStorage.set(logKey(), logEl.textContent);
         if (typeof window.showLoading === 'function') {
           window.showLoading('Reloading…');
@@ -1462,7 +1462,7 @@
   if (fullBtn) fullBtn.addEventListener('click', function () { launch(false); });
   if (cancelBtn) cancelBtn.addEventListener('click', function () {
     cancelBtn.disabled = true;
-    logEl.innerHTML += MuscatDom.ansiToHtml('\n\n■ cancelling…');
+    logEl.textContent += '\n\n■ cancelling…';
     MuscatStorage.set(logKey(), logEl.textContent);
     fetch('/api/photometry/cancel', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
