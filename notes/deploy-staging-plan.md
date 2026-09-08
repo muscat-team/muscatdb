@@ -627,6 +627,13 @@ everything here runs as `jerome` on the host.
 - Prod `:8001` and prod cron both healthy on the new checkout.
 - Close issue #26 by hand.
 
+**Not yet true as of 2026-09-07:** production's cron entry is out (pulled by
+hand during the 2026-09-06 outage above) and is not reinstalled until `test`
+releases to `main` and the `respawn-pane` fix is reverified there the same way
+staging's was. Do not close #26 until that prod reinstall + reverification
+actually happens — right now only staging's cron entry and healthz check are
+confirmed.
+
 **Live-verification reminders:** after deploy the server runs via bare `uvicorn`
 (no `--reload`); HTML/JS changes need a server restart to show. Server runs in tmux
 `muscatdbgui` (prod) / `muscatdb-test` (staging).
