@@ -4,6 +4,7 @@ import csv
 import logging
 import os
 import pathlib
+import time
 from concurrent.futures import ProcessPoolExecutor
 from datetime import date, timedelta
 
@@ -13,6 +14,20 @@ logger = logging.getLogger(__name__)
 
 # FITS header blocks are 2880 bytes; almost all real headers fit in <=8 blocks.
 _FITS_HEADER_MAX_BYTES = 2880 * 16
+
+# A single-CCD instrument (sinistro, sbig, qhy600) has no sibling CCD to prove
+# a date directory is genuinely readable, so an existing CSV's own mtime is
+# used as "the last time this CCD/date was confirmed non-empty" (see
+# _maybe_remove_stale_single_ccd_csv). 72h is evidence-based, not borrowed by
+# analogy from MUSCAT_PHOT_FINALIZE_GRACE_S: the longest real per-night
+# archive-delivery span observed on production data for these three
+# instruments (checked directly against /data, excluding a handful of
+# multi-month gaps traced to later bulk BANZAI re-reduction touching
+# already-delivered nights, which is a different mechanism and never makes
+# scan_date see zero matches) is ~62h -- itself one of #81's own
+# still-unresolved misfile dates (sinistro 260730). 72h keeps ~10h of
+# headroom over that worst observed case; see #115.
+_DEFAULT_STALE_CSV_GRACE_S = 72 * 60 * 60
 
 
 def _normalize_numeric(val: str) -> str:
@@ -180,6 +195,39 @@ def _find_fits_files(
     return [str(p) for p in matches]
 
 
+def _stale_csv_grace_seconds() -> float:
+    return float(os.environ.get("MUSCAT_SCAN_STALE_CSV_GRACE_S", _DEFAULT_STALE_CSV_GRACE_S))
+
+
+def _maybe_remove_stale_single_ccd_csv(inst_name: str, obsdate: str) -> None:
+    """Remove a single-CCD instrument's obslog CSV once it is confirmed stale.
+
+    Only called when this scan found zero matches for a single-CCD instrument
+    (inst.nccd == 1) -- multi-CCD instruments are already covered by the
+    sibling-CCD proof in scan_date's main loop.
+    """
+    csv_path = f"{OBSLOG_BASE}/{inst_name}/{obsdate}/obslog-{inst_name}-{obsdate}-ccd0.csv"
+    if not os.path.isfile(csv_path):
+        return
+    try:
+        age_s = time.time() - os.path.getmtime(csv_path)
+    except OSError as e:
+        print(f"[warn] cannot stat {csv_path}: {e}")
+        return
+    grace_s = _stale_csv_grace_seconds()
+    if age_s < grace_s:
+        return
+    try:
+        os.remove(csv_path)
+    except OSError as e:
+        print(f"[warn] cannot remove stale {csv_path}: {e}")
+        return
+    print(
+        f"[info] removed stale obslog CSV for {inst_name} {obsdate}: "
+        f"no matches for {age_s / 3600:.1f}h, past the {grace_s / 3600:.1f}h grace window"
+    )
+
+
 def scan_date(
     inst_name: str,
     obsdate: str,
@@ -199,6 +247,12 @@ def scan_date(
             file_ccd_pairs.append((fp, ccd))
 
     if not file_ccd_pairs:
+        # Returned falsy either way, even when a stale CSV is removed below:
+        # scan_date_for_all_inst/scan_yesterday treat any truthy result as
+        # "this instrument had real data," and a removal here is cleanup, not
+        # data -- see _maybe_remove_stale_single_ccd_csv and #115.
+        if inst.nccd == 1:
+            _maybe_remove_stale_single_ccd_csv(inst_name, obsdate)
         return {}
 
     # Created only once there is something to write. scan_missing_dates()

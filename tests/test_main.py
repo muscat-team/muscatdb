@@ -5,6 +5,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
+import time
 
 import pytest
 from astropy.io import fits
@@ -326,6 +327,100 @@ class TestScanner:
         )
 
         result = scan_date("muscat", obsdate, max_workers=1)
+        assert not result
+        assert os.path.isfile(stale_csv)
+
+    def test_scan_date_single_ccd_keeps_recent_stale_csv(
+        self, tmp_obslog, tmp_data,
+    ):
+        """A single-CCD instrument (no sibling CCD to prove readability) must
+        not remove a CSV whose last confirmed-non-empty scan is still within
+        the grace window -- it may just be a transient read failure or
+        in-flight archive delivery, not a genuine gap. See #115.
+        """
+        from muscat_db.scanner import scan_date
+        inst = INSTRUMENTS["sinistro"]
+        obsdate = "260101"
+
+        stale_csv = _make_csv(
+            f"{tmp_obslog}/{inst.name}/{obsdate}/obslog-{inst.name}-{obsdate}-ccd0.csv",
+            inst.csv_header.split(","),
+            [{"FRAME": "stale-frame"}],
+        )
+
+        result = scan_date(inst.name, obsdate, max_workers=1)
+        assert not result
+        assert os.path.isfile(stale_csv)
+
+    def test_scan_date_single_ccd_removes_csv_past_grace_window(
+        self, tmp_obslog, tmp_data,
+    ):
+        """Once a single-CCD instrument's CSV has gone unconfirmed for longer
+        than the grace window, scan_date must treat it as genuinely stale and
+        remove it -- otherwise #81's duplication mechanism can recur for
+        sinistro/sbig/qhy600 forever, since they never get the sibling-CCD
+        proof multi-CCD instruments use. See #115.
+        """
+        from muscat_db.scanner import scan_date
+        inst = INSTRUMENTS["sinistro"]
+        obsdate = "260101"
+
+        stale_csv = _make_csv(
+            f"{tmp_obslog}/{inst.name}/{obsdate}/obslog-{inst.name}-{obsdate}-ccd0.csv",
+            inst.csv_header.split(","),
+            [{"FRAME": "stale-frame"}],
+        )
+        past_grace = time.time() - 73 * 60 * 60
+        os.utime(stale_csv, (past_grace, past_grace))
+
+        result = scan_date(inst.name, obsdate, max_workers=1)
+        assert not result
+        assert not os.path.isfile(stale_csv)
+
+    def test_scan_date_single_ccd_grace_window_is_configurable(
+        self, tmp_obslog, tmp_data, monkeypatch,
+    ):
+        """MUSCAT_SCAN_STALE_CSV_GRACE_S overrides the default so operators
+        can tune the window without a code change.
+        """
+        from muscat_db.scanner import scan_date
+        inst = INSTRUMENTS["qhy600"]
+        obsdate = "260101"
+
+        stale_csv = _make_csv(
+            f"{tmp_obslog}/{inst.name}/{obsdate}/obslog-{inst.name}-{obsdate}-ccd0.csv",
+            inst.csv_header.split(","),
+            [{"FRAME": "stale-frame"}],
+        )
+        one_hour_ago = time.time() - 60 * 60
+        os.utime(stale_csv, (one_hour_ago, one_hour_ago))
+        monkeypatch.setenv("MUSCAT_SCAN_STALE_CSV_GRACE_S", "1800")
+
+        result = scan_date(inst.name, obsdate, max_workers=1)
+        assert not result
+        assert not os.path.isfile(stale_csv)
+
+    def test_scan_date_multi_ccd_instrument_ignores_single_ccd_grace_window(
+        self, tmp_obslog, tmp_data,
+    ):
+        """The single-CCD staleness gate must never fire for a multi-CCD
+        instrument, even past the grace window -- that path stays covered
+        exclusively by the sibling-CCD proof (test_scan_date_leaves_stale_csv_
+        when_every_ccd_is_empty), which requires no threshold at all.
+        """
+        from muscat_db.scanner import scan_date
+        inst = INSTRUMENTS["muscat"]
+        obsdate = "260101"
+
+        stale_csv = _make_csv(
+            f"{tmp_obslog}/{inst.name}/{obsdate}/obslog-{inst.name}-{obsdate}-ccd0.csv",
+            inst.csv_header.split(","),
+            [{"FRAME": "stale-frame"}],
+        )
+        long_ago = time.time() - 365 * 24 * 60 * 60
+        os.utime(stale_csv, (long_ago, long_ago))
+
+        result = scan_date(inst.name, obsdate, max_workers=1)
         assert not result
         assert os.path.isfile(stale_csv)
 

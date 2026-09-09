@@ -96,6 +96,12 @@ ENV_VARS: tuple[EnvVar, ...] = (
     EnvVar("MUSCAT_PHOT_STALL_LIMIT_S", "1500", "Photometry job stall timeout (seconds)"),
     EnvVar("MUSCAT_PHOT_MAX_RUNTIME_S", "10800", "Photometry job max runtime (seconds)"),
     EnvVar("MUSCAT_PHOT_FINALIZE_GRACE_S", "8", "Log-quiescence grace window (seconds)"),
+    EnvVar(
+        "MUSCAT_SCAN_STALE_CSV_GRACE_S",
+        "259200",
+        "Single-CCD instrument (sinistro, sbig, qhy600) obslog CSV staleness grace "
+        "window before scan_date removes a CSV with no current matches (seconds)",
+    ),
     EnvVar("MUSCAT_JOB_RECONCILE_INTERVAL_S", "2", "Server-side job reconciliation cadence (seconds)"),
     EnvVar("MUSCAT_EXPOSURE_CALIBRATION_WORKERS", "2", "Global exposure-calibration workers"),
     EnvVar("MUSCAT_EXPOSURE_CALIBRATION_STALE_S", "21600", "Abandoned calibration claim timeout (seconds)"),
