@@ -424,6 +424,91 @@ class TestScanner:
         assert not result
         assert os.path.isfile(stale_csv)
 
+    def test_scan_date_single_ccd_ignores_grace_window_for_non_canonical_data_root(
+        self, tmp_obslog, tmp_data,
+    ):
+        """The staleness gate must only fire for the canonical MUSCAT_DATA_DIR
+        scan (data_root=None). lco_monitor.py/lco.py's archive-download scans
+        pass data_root=lco.download_root(), which resolves to MUSCAT_LCO_DIR
+        when configured -- a directory that can legitimately differ from
+        MUSCAT_DATA_DIR. A zero-match result from that *other* tree must not
+        remove the canonical CSV, which may still correctly describe real
+        files under MUSCAT_DATA_DIR. See #115.
+        """
+        from muscat_db.scanner import scan_date
+        inst = INSTRUMENTS["sinistro"]
+        obsdate = "260101"
+
+        stale_csv = _make_csv(
+            f"{tmp_obslog}/{inst.name}/{obsdate}/obslog-{inst.name}-{obsdate}-ccd0.csv",
+            inst.csv_header.split(","),
+            [{"FRAME": "stale-frame"}],
+        )
+        past_grace = time.time() - 73 * 60 * 60
+        os.utime(stale_csv, (past_grace, past_grace))
+
+        other_root = tempfile.mkdtemp()
+        try:
+            result = scan_date(inst.name, obsdate, max_workers=1, data_root=other_root)
+            assert not result
+            assert os.path.isfile(stale_csv)
+        finally:
+            shutil.rmtree(other_root)
+
+    def test_scan_date_single_ccd_survives_getmtime_error(
+        self, tmp_obslog, tmp_data, monkeypatch,
+    ):
+        """A stat failure on the CSV must not crash scan_date or remove the
+        CSV -- treat "can't tell how old this is" the same as "not stale
+        enough to remove."
+        """
+        from muscat_db.scanner import scan_date
+        inst = INSTRUMENTS["sinistro"]
+        obsdate = "260101"
+
+        stale_csv = _make_csv(
+            f"{tmp_obslog}/{inst.name}/{obsdate}/obslog-{inst.name}-{obsdate}-ccd0.csv",
+            inst.csv_header.split(","),
+            [{"FRAME": "stale-frame"}],
+        )
+
+        def _raise(_path):
+            raise OSError("simulated stat failure")
+
+        monkeypatch.setattr(os.path, "getmtime", _raise)
+
+        result = scan_date(inst.name, obsdate, max_workers=1)
+        assert not result
+        assert os.path.isfile(stale_csv)
+
+    def test_scan_date_single_ccd_survives_remove_error(
+        self, tmp_obslog, tmp_data, monkeypatch,
+    ):
+        """A failed os.remove (e.g. permission denied) must not crash
+        scan_date -- it should still return falsy, leaving the CSV in place
+        for the next attempt.
+        """
+        from muscat_db.scanner import scan_date
+        inst = INSTRUMENTS["sinistro"]
+        obsdate = "260101"
+
+        stale_csv = _make_csv(
+            f"{tmp_obslog}/{inst.name}/{obsdate}/obslog-{inst.name}-{obsdate}-ccd0.csv",
+            inst.csv_header.split(","),
+            [{"FRAME": "stale-frame"}],
+        )
+        past_grace = time.time() - 73 * 60 * 60
+        os.utime(stale_csv, (past_grace, past_grace))
+
+        def _raise(_path):
+            raise OSError("simulated permission error")
+
+        monkeypatch.setattr(os, "remove", _raise)
+
+        result = scan_date(inst.name, obsdate, max_workers=1)
+        assert not result
+        assert os.path.isfile(stale_csv)
+
     def test_scan_missing_dates(self, tmp_obslog, tmp_data):
         from muscat_db.scanner import scan_missing_dates
         obsdate = tmp_data

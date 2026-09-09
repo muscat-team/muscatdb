@@ -251,7 +251,17 @@ def scan_date(
         # scan_date_for_all_inst/scan_yesterday treat any truthy result as
         # "this instrument had real data," and a removal here is cleanup, not
         # data -- see _maybe_remove_stale_single_ccd_csv and #115.
-        if inst.nccd == 1:
+        #
+        # Gated to data_root is None (the canonical MUSCAT_DATA_DIR scan path):
+        # the removal always targets the one canonical OBSLOG_BASE CSV, but the
+        # zero-match proof above is scoped to whichever data_root this call
+        # searched. lco_monitor.py/lco.py's archive-download scans pass
+        # data_root=lco.download_root(), which resolves to MUSCAT_LCO_DIR when
+        # configured -- a directory .env.example documents as legitimately
+        # different from MUSCAT_DATA_DIR. Removing the canonical CSV on a
+        # zero-match result from that *other* tree would delete a CSV that
+        # still correctly describes real files under MUSCAT_DATA_DIR.
+        if inst.nccd == 1 and data_root is None:
             _maybe_remove_stale_single_ccd_csv(inst_name, obsdate)
         return {}
 

@@ -332,11 +332,18 @@ every affected date. `lco.py` `frame_destination()` now derives the download
 directory from the same filename token, so new downloads do not re-create splits.
 
 Clearing the invalidated CSVs is the step that silently undoes everything if
-skipped. `scan_date` writes CSVs only for CCDs that produced rows and **never
-deletes a stale CSV**, returning early when a directory holds no FITS. Move every
-frame of a CCD out of a directory and its old CSV survives, `_discover_csv_jobs`
-still finds it, and `build-db` re-ingests the pre-move split — the frames moved
-but the database looks untouched.
+skipped. `scan_date` writes CSVs only for CCDs that produced rows, and only
+removes a stale one on its own in two narrower cases: a multi-CCD instrument
+whose sibling CCD proves the date directory is genuinely readable this same
+call (#108), or a single-CCD instrument (sinistro/sbig/qhy600) whose CSV has
+gone unconfirmed for longer than `MUSCAT_SCAN_STALE_CSV_GRACE_S` (72h default,
+#115) — and only when scanning the canonical `MUSCAT_DATA_DIR` root. Move
+every frame of a CCD out of a directory and its old CSV can survive well past
+that (indefinitely, if nothing ever rescans that exact date again),
+`_discover_csv_jobs` still finds it, and `build-db` re-ingests the pre-move
+split — the frames moved but the database looks untouched. `normalize-obsdates
+--apply`'s own unconditional clearing (below) is the reliable, immediate path;
+don't rely on either passive mechanism above to catch a consolidation.
 
 The normalizer only considers files the instrument's own scanner would ingest,
 reusing `scanner._find_fits_files` rather than re-deriving the glob. This matters:
@@ -350,7 +357,7 @@ What can erase a consolidation:
 | Eraser | Mechanism | Prevention |
 |---|---|---|
 | `build-db` | drops and rebuilds from CSVs | consolidate in the FITS tree, never in `muscat.db` |
-| stale obslog CSV | never deleted by a rescan; still ingested | delete it, or rename its dir to a non-YYMMDD name |
+| stale obslog CSV | usually survives a rescan (removed only by #108's same-call multi-CCD proof, or a single-CCD instrument's 72h grace window, #115); still ingested until then | delete it, or rename its dir to a non-YYMMDD name |
 | `scan-missing` / `scan-all` | regenerates any raw dir whose name is not an existing obslog dir | keep raw and obslog dir names consistent; remove emptied raw dirs |
 | `scan-yesterday` (cron) | scans yesterday only | historical consolidation is never revisited — this is why a one-off move survives |
 | LCO re-download | `frame_destination()` uses `DATE_OBS` | fix it, or every consolidation is temporary |
