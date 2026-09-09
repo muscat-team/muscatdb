@@ -5,6 +5,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
+import time
 
 import pytest
 from astropy.io import fits
@@ -326,6 +327,185 @@ class TestScanner:
         )
 
         result = scan_date("muscat", obsdate, max_workers=1)
+        assert not result
+        assert os.path.isfile(stale_csv)
+
+    def test_scan_date_single_ccd_keeps_recent_stale_csv(
+        self, tmp_obslog, tmp_data,
+    ):
+        """A single-CCD instrument (no sibling CCD to prove readability) must
+        not remove a CSV whose last confirmed-non-empty scan is still within
+        the grace window -- it may just be a transient read failure or
+        in-flight archive delivery, not a genuine gap. See #115.
+        """
+        from muscat_db.scanner import scan_date
+        inst = INSTRUMENTS["sinistro"]
+        obsdate = "260101"
+
+        stale_csv = _make_csv(
+            f"{tmp_obslog}/{inst.name}/{obsdate}/obslog-{inst.name}-{obsdate}-ccd0.csv",
+            inst.csv_header.split(","),
+            [{"FRAME": "stale-frame"}],
+        )
+
+        result = scan_date(inst.name, obsdate, max_workers=1)
+        assert not result
+        assert os.path.isfile(stale_csv)
+
+    def test_scan_date_single_ccd_removes_csv_past_grace_window(
+        self, tmp_obslog, tmp_data,
+    ):
+        """Once a single-CCD instrument's CSV has gone unconfirmed for longer
+        than the grace window, scan_date must treat it as genuinely stale and
+        remove it -- otherwise #81's duplication mechanism can recur for
+        sinistro/sbig/qhy600 forever, since they never get the sibling-CCD
+        proof multi-CCD instruments use. See #115.
+        """
+        from muscat_db.scanner import scan_date
+        inst = INSTRUMENTS["sinistro"]
+        obsdate = "260101"
+
+        stale_csv = _make_csv(
+            f"{tmp_obslog}/{inst.name}/{obsdate}/obslog-{inst.name}-{obsdate}-ccd0.csv",
+            inst.csv_header.split(","),
+            [{"FRAME": "stale-frame"}],
+        )
+        past_grace = time.time() - 73 * 60 * 60
+        os.utime(stale_csv, (past_grace, past_grace))
+
+        result = scan_date(inst.name, obsdate, max_workers=1)
+        assert not result
+        assert not os.path.isfile(stale_csv)
+
+    def test_scan_date_single_ccd_grace_window_is_configurable(
+        self, tmp_obslog, tmp_data, monkeypatch,
+    ):
+        """MUSCAT_SCAN_STALE_CSV_GRACE_S overrides the default so operators
+        can tune the window without a code change.
+        """
+        from muscat_db.scanner import scan_date
+        inst = INSTRUMENTS["qhy600"]
+        obsdate = "260101"
+
+        stale_csv = _make_csv(
+            f"{tmp_obslog}/{inst.name}/{obsdate}/obslog-{inst.name}-{obsdate}-ccd0.csv",
+            inst.csv_header.split(","),
+            [{"FRAME": "stale-frame"}],
+        )
+        one_hour_ago = time.time() - 60 * 60
+        os.utime(stale_csv, (one_hour_ago, one_hour_ago))
+        monkeypatch.setenv("MUSCAT_SCAN_STALE_CSV_GRACE_S", "1800")
+
+        result = scan_date(inst.name, obsdate, max_workers=1)
+        assert not result
+        assert not os.path.isfile(stale_csv)
+
+    def test_scan_date_multi_ccd_instrument_ignores_single_ccd_grace_window(
+        self, tmp_obslog, tmp_data,
+    ):
+        """The single-CCD staleness gate must never fire for a multi-CCD
+        instrument, even past the grace window -- that path stays covered
+        exclusively by the sibling-CCD proof (test_scan_date_leaves_stale_csv_
+        when_every_ccd_is_empty), which requires no threshold at all.
+        """
+        from muscat_db.scanner import scan_date
+        inst = INSTRUMENTS["muscat"]
+        obsdate = "260101"
+
+        stale_csv = _make_csv(
+            f"{tmp_obslog}/{inst.name}/{obsdate}/obslog-{inst.name}-{obsdate}-ccd0.csv",
+            inst.csv_header.split(","),
+            [{"FRAME": "stale-frame"}],
+        )
+        long_ago = time.time() - 365 * 24 * 60 * 60
+        os.utime(stale_csv, (long_ago, long_ago))
+
+        result = scan_date(inst.name, obsdate, max_workers=1)
+        assert not result
+        assert os.path.isfile(stale_csv)
+
+    def test_scan_date_single_ccd_ignores_grace_window_for_non_canonical_data_root(
+        self, tmp_obslog, tmp_data,
+    ):
+        """The staleness gate must only fire for the canonical MUSCAT_DATA_DIR
+        scan (data_root=None). lco_monitor.py/lco.py's archive-download scans
+        pass data_root=lco.download_root(), which resolves to MUSCAT_LCO_DIR
+        when configured -- a directory that can legitimately differ from
+        MUSCAT_DATA_DIR. A zero-match result from that *other* tree must not
+        remove the canonical CSV, which may still correctly describe real
+        files under MUSCAT_DATA_DIR. See #115.
+        """
+        from muscat_db.scanner import scan_date
+        inst = INSTRUMENTS["sinistro"]
+        obsdate = "260101"
+
+        stale_csv = _make_csv(
+            f"{tmp_obslog}/{inst.name}/{obsdate}/obslog-{inst.name}-{obsdate}-ccd0.csv",
+            inst.csv_header.split(","),
+            [{"FRAME": "stale-frame"}],
+        )
+        past_grace = time.time() - 73 * 60 * 60
+        os.utime(stale_csv, (past_grace, past_grace))
+
+        other_root = tempfile.mkdtemp()
+        try:
+            result = scan_date(inst.name, obsdate, max_workers=1, data_root=other_root)
+            assert not result
+            assert os.path.isfile(stale_csv)
+        finally:
+            shutil.rmtree(other_root)
+
+    def test_scan_date_single_ccd_survives_getmtime_error(
+        self, tmp_obslog, tmp_data, monkeypatch,
+    ):
+        """A stat failure on the CSV must not crash scan_date or remove the
+        CSV -- treat "can't tell how old this is" the same as "not stale
+        enough to remove."
+        """
+        from muscat_db.scanner import scan_date
+        inst = INSTRUMENTS["sinistro"]
+        obsdate = "260101"
+
+        stale_csv = _make_csv(
+            f"{tmp_obslog}/{inst.name}/{obsdate}/obslog-{inst.name}-{obsdate}-ccd0.csv",
+            inst.csv_header.split(","),
+            [{"FRAME": "stale-frame"}],
+        )
+
+        def _raise(_path):
+            raise OSError("simulated stat failure")
+
+        monkeypatch.setattr(os.path, "getmtime", _raise)
+
+        result = scan_date(inst.name, obsdate, max_workers=1)
+        assert not result
+        assert os.path.isfile(stale_csv)
+
+    def test_scan_date_single_ccd_survives_remove_error(
+        self, tmp_obslog, tmp_data, monkeypatch,
+    ):
+        """A failed os.remove (e.g. permission denied) must not crash
+        scan_date -- it should still return falsy, leaving the CSV in place
+        for the next attempt.
+        """
+        from muscat_db.scanner import scan_date
+        inst = INSTRUMENTS["sinistro"]
+        obsdate = "260101"
+
+        stale_csv = _make_csv(
+            f"{tmp_obslog}/{inst.name}/{obsdate}/obslog-{inst.name}-{obsdate}-ccd0.csv",
+            inst.csv_header.split(","),
+            [{"FRAME": "stale-frame"}],
+        )
+        past_grace = time.time() - 73 * 60 * 60
+        os.utime(stale_csv, (past_grace, past_grace))
+
+        def _raise(_path):
+            raise OSError("simulated permission error")
+
+        monkeypatch.setattr(os, "remove", _raise)
+
+        result = scan_date(inst.name, obsdate, max_workers=1)
         assert not result
         assert os.path.isfile(stale_csv)
 
