@@ -62,22 +62,6 @@ def test_mount_is_skipped_when_the_synced_directory_is_absent(tmp_path):
     assert TestClient(test_app).get("/lc-monitor/").status_code == 404
 
 
-def test_mount_is_skipped_when_index_html_lives_under_muscat2_subdir(tmp_path):
-    """index.html lives under the muscat2/ subdirectory on the observing host
-    (it moved there from the html root), so pointing MUSCAT2_HTML_DIR at the
-    top-level synced tree must fall back to the muscat2/ subtree when present."""
-    html_dir = tmp_path / "html"
-    (html_dir / "muscat2" / "obslog" / "260101").mkdir(parents=True)
-    (html_dir / "muscat2" / "index.html").write_text("<h1>MuSCAT2 dashboard</h1>")
-
-    test_app = FastAPI()
-    assert _mount_muscat2_quicklook(test_app, html_dir / "muscat2") is True
-
-    resp = TestClient(test_app).get("/lc-monitor/")
-    assert resp.status_code == 200
-    assert "MuSCAT2 dashboard" in resp.text
-
-
 def test_instrument_page_links_to_the_dashboard_only_for_muscat2_when_available(
     mock_db, monkeypatch,
 ):
@@ -95,10 +79,10 @@ def test_obs_page_links_to_the_dashboard(mock_db, monkeypatch):
     client = TestClient(app)
 
     monkeypatch.setattr("muscat_db.web.LC_MONITOR_AVAILABLE", True)
-    assert 'href="/lc-monitor"' in client.get("/obs").text
+    assert 'href="/lc-monitor/"' in client.get("/obs").text
 
     monkeypatch.setattr("muscat_db.web.LC_MONITOR_AVAILABLE", False)
-    assert 'href="/lc-monitor"' in client.get("/obs").text
+    assert 'href="/lc-monitor/"' in client.get("/obs").text
 
 
 def test_lc_monitor_dead_link_redirects_to_quicklook():

@@ -201,8 +201,7 @@ STATIC_DIR = HERE / "static"
 # Externally-synced MuSCAT2 live-observation dashboard (obslog, quicklook,
 # airmass plot). Generated on the observing host and synced here by a job
 # outside muscat-db; not present on hosts without that mount (e.g. dev boxes).
-# index.html lives under the muscat2/ subdirectory on the observing host.
-MUSCAT2_HTML_DIR = pathlib.Path(os.environ.get("MUSCAT2_HTML_DIR", "/ut2/muscat/html/muscat2"))
+MUSCAT2_HTML_DIR = pathlib.Path(os.environ.get("MUSCAT2_HTML_DIR", "/ut2/muscat/html"))
 
 
 def _reconcile_all_jobs() -> None:
