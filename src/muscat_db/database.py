@@ -136,7 +136,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     run_id       TEXT NOT NULL DEFAULT '',
     run_name     TEXT NOT NULL DEFAULT '',
     user_name    TEXT NOT NULL DEFAULT '',
-    owner        TEXT NOT NULL DEFAULT ''
+    owner        TEXT NOT NULL DEFAULT '',
+    instance_id  TEXT NOT NULL DEFAULT '',
+    heartbeat_at REAL NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_state_started
@@ -1897,6 +1899,8 @@ _JOBS_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
     ("run_name", "TEXT NOT NULL DEFAULT ''"),
     ("user_name", "TEXT NOT NULL DEFAULT ''"),
     ("owner", "TEXT NOT NULL DEFAULT ''"),
+    ("instance_id", "TEXT NOT NULL DEFAULT ''"),
+    ("heartbeat_at", "REAL NOT NULL DEFAULT 0"),
 ]
 
 
@@ -1976,6 +1980,7 @@ def save_job(
     run_name: str = "",
     user_name: str | None = None,
     owner: str = "",
+    instance_id: str = "",
 ) -> None:
     # The "user" is the nginx-authenticated account (X-Forwarded-User), set at
     # job creation from request.state.user. State-transition callers (sync_jobs,
@@ -1991,24 +1996,33 @@ def save_job(
     key = f"{type_}:{inst}/{date}/{target.replace(' ', '')}"
     if run_id:
         key = f"{key}/{run_id}"
+    # heartbeat_at is stamped on every write (not just running-state ones): it
+    # means "last time some process touched this row", which any save() call
+    # trivially satisfies. Only the launch-time save (which also passes
+    # instance_id) and the dedicated lightweight heartbeat() UPDATE (see
+    # job_store.py) matter for orphan-reconciliation's staleness check --
+    # stamping it here too is harmless and means a launch needs no separate
+    # follow-up heartbeat() call to establish its first fresh timestamp.
     with get_conn(path) as conn:
         _ensure_jobs_migrated(conn, path)
         conn.execute(
-            """INSERT INTO jobs(key, type, instrument, obsdate, target, state, returncode, elapsed, started_at, error_desc, run_type, params, run_id, run_name, user_name, owner)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """INSERT INTO jobs(key, type, instrument, obsdate, target, state, returncode, elapsed, started_at, error_desc, run_type, params, run_id, run_name, user_name, owner, instance_id, heartbeat_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(key) DO UPDATE SET
-                 state      = excluded.state,
-                 returncode = excluded.returncode,
-                 elapsed    = excluded.elapsed,
-                 started_at = excluded.started_at,
-                 error_desc = excluded.error_desc,
-                 run_type   = CASE WHEN excluded.run_type != '' THEN excluded.run_type ELSE run_type END,
-                 params     = CASE WHEN excluded.params != '' THEN excluded.params ELSE params END,
-                 run_id     = excluded.run_id,
-                 run_name   = CASE WHEN excluded.run_name != '' THEN excluded.run_name ELSE run_name END,
-                 user_name  = CASE WHEN excluded.user_name != '' THEN excluded.user_name ELSE user_name END,
-                 owner      = CASE WHEN excluded.owner != '' THEN excluded.owner ELSE owner END""",
-            (key, type_, inst, date, target, state, returncode, elapsed, started_at, error_desc, run_type, params, run_id, run_name, user_name, owner)
+                 state        = excluded.state,
+                 returncode   = excluded.returncode,
+                 elapsed      = excluded.elapsed,
+                 started_at   = excluded.started_at,
+                 error_desc   = excluded.error_desc,
+                 run_type     = CASE WHEN excluded.run_type != '' THEN excluded.run_type ELSE run_type END,
+                 params       = CASE WHEN excluded.params != '' THEN excluded.params ELSE params END,
+                 run_id       = excluded.run_id,
+                 run_name     = CASE WHEN excluded.run_name != '' THEN excluded.run_name ELSE run_name END,
+                 user_name    = CASE WHEN excluded.user_name != '' THEN excluded.user_name ELSE user_name END,
+                 owner        = CASE WHEN excluded.owner != '' THEN excluded.owner ELSE owner END,
+                 instance_id  = CASE WHEN excluded.instance_id != '' THEN excluded.instance_id ELSE instance_id END,
+                 heartbeat_at = excluded.heartbeat_at""",
+            (key, type_, inst, date, target, state, returncode, elapsed, started_at, error_desc, run_type, params, run_id, run_name, user_name, owner, instance_id, time.time())
         )
         conn.commit()
     clear_all_caches()

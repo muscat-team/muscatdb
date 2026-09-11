@@ -225,3 +225,46 @@ class TestCountRunningFull:
         running_test.run_type = "test"
         registry = {"a": running_full, "b": done_full, "c": running_test}
         assert jobs.count_running_full(registry) == 1
+
+
+# --------------------------- orphan reconciliation ---------------------------
+
+
+class TestIsOrphanReconcilable:
+    def test_no_instance_id_is_reconcilable(self):
+        """A row written before instance_id existed (or by a caller that
+        never passed one) keeps the pre-existing behaviour: reconcilable."""
+        assert jobs.is_orphan_reconcilable("", 0, "host:1:abc") is True
+        assert jobs.is_orphan_reconcilable(None, None, "host:1:abc") is True
+
+    def test_own_instance_id_is_reconcilable(self):
+        """A row this exact process claims to hold, but that its own
+        registry no longer tracks, is genuinely orphaned."""
+        assert jobs.is_orphan_reconcilable("host:1:abc", time.time(), "host:1:abc") is True
+
+    def test_other_instance_with_fresh_heartbeat_is_not_reconcilable(self):
+        now = time.time()
+        assert jobs.is_orphan_reconcilable("host:2:xyz", now, "host:1:abc", now=now) is False
+
+    def test_other_instance_with_stale_heartbeat_is_reconcilable(self):
+        now = time.time()
+        stale = now - jobs._HEARTBEAT_STALE_S - 1
+        assert jobs.is_orphan_reconcilable("host:2:xyz", stale, "host:1:abc", now=now) is True
+
+    def test_other_instance_right_at_the_threshold_is_reconcilable(self):
+        """>= the threshold, not >, so the window's own boundary is
+        inclusive rather than requiring one extra tick past it."""
+        now = time.time()
+        boundary = now - jobs._HEARTBEAT_STALE_S
+        assert jobs.is_orphan_reconcilable("host:2:xyz", boundary, "host:1:abc", now=now) is True
+
+    def test_heartbeat_stale_s_env_override(self, monkeypatch):
+        monkeypatch.setenv("MUSCAT_JOB_HEARTBEAT_STALE_S", "60")
+        import importlib
+
+        reloaded = importlib.reload(jobs)
+        try:
+            assert reloaded._HEARTBEAT_STALE_S == 60.0
+        finally:
+            monkeypatch.delenv("MUSCAT_JOB_HEARTBEAT_STALE_S", raising=False)
+            importlib.reload(jobs)

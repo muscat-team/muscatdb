@@ -103,6 +103,12 @@ ENV_VARS: tuple[EnvVar, ...] = (
         "window before scan_date removes a CSV with no current matches (seconds)",
     ),
     EnvVar("MUSCAT_JOB_RECONCILE_INTERVAL_S", "2", "Server-side job reconciliation cadence (seconds)"),
+    EnvVar(
+        "MUSCAT_JOB_HEARTBEAT_STALE_S", "30",
+        "Staleness window before a running job with no in-memory tracker in this "
+        "process, but a fresh heartbeat from another instance, is left alone "
+        "(architecture issue #51 step 3)",
+    ),
     EnvVar("MUSCAT_EXPOSURE_CALIBRATION_WORKERS", "2", "Global exposure-calibration workers"),
     EnvVar("MUSCAT_EXPOSURE_CALIBRATION_STALE_S", "21600", "Abandoned calibration claim timeout (seconds)"),
     EnvVar("MUSCAT_CATALOG_GLOBAL_WORKERS", "8", "Process-wide outbound catalog concurrency"),
