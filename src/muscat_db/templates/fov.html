@@ -626,9 +626,7 @@
   }
 
   // ---- Observed-pointing overlay (what FOV a previous run actually used) ----
-  function observedOptionValue(d) {
-    return [d.instrument, d.date, d.object].join('');
-  }
+  let observedDates = [];
 
   function clearObservedFootprint() {
     if (observedFootprintOverlay) observedFootprintOverlay.removeAll();
@@ -680,25 +678,32 @@
     return lines.join('<br>');
   }
 
+  function observedKey(d) {
+    return [d.instrument, d.date, d.object].join('\x1f');
+  }
+
   function populateObservedDatesSelect(dates) {
     const select = $('fov-observed-date');
     const field = $('fov-observed-field');
-    const current = select.value;
+    const prev = select.selectedIndex > 0
+      ? observedKey(observedDates[select.selectedIndex - 1])
+      : '';
+    observedDates = dates;
     select.innerHTML = '';
     const noneOpt = document.createElement('option');
-    noneOpt.value = '';
+    noneOpt.value = '0';
     noneOpt.textContent = dates.length ? '— none —' : '(no previous observations found)';
     select.appendChild(noneOpt);
-    dates.forEach((d) => {
+    dates.forEach((d, i) => {
       const opt = document.createElement('option');
-      opt.value = observedOptionValue(d);
+      opt.value = String(i + 1);
       opt.textContent = `${d.instrument} · ${d.date} (${d.object}, ${d.n_frames} frames)`;
       select.appendChild(opt);
     });
-    const stillPresent = dates.some((d) => observedOptionValue(d) === current);
-    select.value = stillPresent ? current : '';
+    const idx = dates.findIndex((d) => observedKey(d) === prev);
+    select.selectedIndex = idx >= 0 ? idx + 1 : 0;
     field.style.display = dates.length ? '' : 'none';
-    if (!stillPresent) clearObservedFootprint();
+    if (idx < 0) clearObservedFootprint();
   }
 
   async function refreshObservedDates(target) {
@@ -717,10 +722,13 @@
   }
 
   async function loadObservedFootprint() {
-    const val = $('fov-observed-date').value;
+    const select = $('fov-observed-date');
     clearObservedFootprint();
-    if (!val || !aladin) return;
-    const [inst, obsdate, obj] = val.split('');
+    if (!select.selectedIndex || !aladin) return;
+    const d = observedDates[select.selectedIndex - 1];
+    const inst = d.instrument;
+    const obsdate = d.date;
+    const obj = d.object;
     setMsg('Loading observed pointing…');
     try {
       const resp = await fetch(
