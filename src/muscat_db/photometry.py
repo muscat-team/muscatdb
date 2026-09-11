@@ -115,6 +115,11 @@ RUN_DEFAULTS: dict = {
                                # a TELESCOP header value, e.g. "1m0-05"/"0m4-06"
                                # (open-ended: LCO's fleet changes over time, unlike the
                                # fixed site lists).
+    "exclude_after_jd": "",    # "" -> none; comma-separated JD value(s) -> --exclude_after_jd
+    "exclude_before_jd": "",   # "" -> none; comma-separated JD value(s) -> --exclude_before_jd
+                               # Pairs positionally with exclude_after_jd when both are set
+                               # (equal-length lists required; validated by run_photometry.py,
+                               # not here -- see normalize_run_options).
 }
 
 # LCO instruments deployed across multiple sites/telescope units, needing
@@ -1133,7 +1138,7 @@ def normalize_run_options(raw: dict | None) -> dict:
     if "bands" in raw:  # present-but-empty must surface as an error, not default
         o["bands"] = [str(b).strip() for b in (bands or []) if str(b).strip()]
 
-    for key in ("run_name", "ref_band", "ref_select", "aper_radii", "annulus", "aper_unit", "ccd_trim", "target_id", "comparison_ids", "avoid_comparison_ids", "avoid_nearby_star_mode", "avoid_nearby_star", "target_coord", "wcs_method", "centroid_method", "calib_dir", "site", "telescope", "mode", "cmap", "nan_imputation_method"):
+    for key in ("run_name", "ref_band", "ref_select", "aper_radii", "annulus", "aper_unit", "ccd_trim", "target_id", "comparison_ids", "avoid_comparison_ids", "avoid_nearby_star_mode", "avoid_nearby_star", "target_coord", "wcs_method", "centroid_method", "calib_dir", "site", "telescope", "mode", "cmap", "nan_imputation_method", "exclude_after_jd", "exclude_before_jd"):
         if raw.get(key) is not None:
             o[key] = str(raw[key]).strip()
 
@@ -1326,6 +1331,14 @@ def build_command(
         aids = [a.strip() for a in o["avoid_comparison_ids"].split(",") if a.strip()]
         if aids:
             args += ["--avoid_cids", *aids]
+    if o.get("exclude_after_jd") not in (None, ""):
+        vals = [v.strip() for v in o["exclude_after_jd"].split(",") if v.strip()]
+        if vals:
+            args += ["--exclude_after_jd", *vals]
+    if o.get("exclude_before_jd") not in (None, ""):
+        vals = [v.strip() for v in o["exclude_before_jd"].split(",") if v.strip()]
+        if vals:
+            args += ["--exclude_before_jd", *vals]
     if o.get("avoid_nearby_star_mode") != "off":
         nearby = o.get("avoid_nearby_star")
         if o.get("avoid_nearby_star_mode") == "auto" or nearby in (None, ""):
