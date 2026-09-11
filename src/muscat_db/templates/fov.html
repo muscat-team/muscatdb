@@ -39,7 +39,7 @@
   .fov-msg.err { color: var(--red); }
   .fov-msg.ok { color: var(--green); }
 
-  #fov-observed-note { font-size: 0.8rem; color: var(--text-dim); line-height: 1.5; margin-top: -0.3rem; margin-bottom: 0.7rem; }
+  #fov-observed-note { font-size: 0.8rem; color: var(--text-dim); line-height: 1.5; margin-top: 0.3rem; margin-bottom: 0.7rem; padding: 0.4rem 0.5rem; background: var(--bg-subtle, rgba(255,255,255,0.03)); border-radius: 4px; }
   #fov-observed-note .warn { color: var(--amber, #f59e0b); font-weight: 600; }
 
   .fov-summary { display: grid; gap: 0.6rem 1rem; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
@@ -665,32 +665,17 @@
     aladin.setFoV(Math.max(raSpanDeg, decSpanDeg, 0.01) * 1.6);
   }
 
-  function escapeHtml(s) {
-    const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
-    return String(s).replace(/[&<>"']/g, (c) => map[c]);
-  }
-
-  function buildObservedNote(data, inst, obsdate, separationArcsec) {
-    inst = escapeHtml(inst);
-    obsdate = escapeHtml(obsdate);
-    const paNote = data.pa_available
-      ? `PA ${data.pa_deg.toFixed(1)}°`
-      : 'PA not recorded (drawn unrotated)';
-    const lines = [
-      `Observed pointing (${inst}, ${obsdate}): RA ${data.ra.toFixed(5)}°, Dec ${data.dec.toFixed(5)}° · `
-      + `${paNote} · ${data.n_frames} frame(s) on CCD ${data.ccd}.`,
-    ];
+  function buildObservedNote(data, separationArcsec) {
+    const bits = [`RA ${data.ra.toFixed(5)}°, Dec ${data.dec.toFixed(5)}°`];
+    if (data.pa_available) bits.push(`PA ${data.pa_deg.toFixed(1)}°`);
     if (separationArcsec !== null) {
       const farFromTarget = separationArcsec > data.fov_arcsec / 2;
-      const text = `${fmtSeparation(separationArcsec)} from the current target position`
-        + (farFromTarget ? ' — well outside this footprint.' : '.');
-      lines.push(farFromTarget ? `<span class="warn">⚠ ${text}</span>` : text);
+      const text = `${fmtSeparation(separationArcsec)} from target`;
+      bits.push(farFromTarget ? `<span class="warn">⚠ ${text} — outside footprint</span>` : text);
     }
+    const lines = [bits.join(' · ')];
     if (data.has_native_wcs === false) {
-      lines.push(
-        `<span class="warn">⚠ ${inst} frames carry no native WCS — this header pointing was `
-        + `never independently plate-solved, so it can be unreliable.</span>`
-      );
+      lines.push('<span class="warn">⚠ no native WCS — pointing unverified</span>');
     }
     return lines.join('<br>');
   }
@@ -768,7 +753,7 @@
       }
 
       const note = $('fov-observed-note');
-      note.innerHTML = buildObservedNote(data, inst, obsdate, separationArcsec);
+      note.innerHTML = buildObservedNote(data, separationArcsec);
       note.style.display = '';
 
       fitViewToPoints(fitPoints.length ? fitPoints : [[data.ra, data.dec]]);
