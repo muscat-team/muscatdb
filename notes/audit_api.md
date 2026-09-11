@@ -21,7 +21,7 @@ Even within `/api/`, pluralization is inconsistent: `/api/target/` (singular) vs
 ```
 /                           index
 /target                     target detail
-/logs                       observation logs
+/obs                        observation logs
 /guide                      guide
 /workflow                   redirect
 /photometry                 photometry page

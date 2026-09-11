@@ -89,7 +89,7 @@ def test_builds_core_pages_and_scaffolding(tiny_db, tmp_path):
     assert stats.pages > 0
     # Root landing + a nav page + a drill-down all materialized as index.html.
     assert (out / "index.html").is_file()
-    assert (out / "logs" / "index.html").is_file()
+    assert (out / "obs" / "index.html").is_file()
     assert (out / "muscat" / "index.html").is_file()
     assert (out / "muscat" / "260101" / "index.html").is_file()
     # Pages-required scaffolding.
@@ -133,7 +133,7 @@ def test_static_site_flag_does_not_leak_after_a_build(tiny_db, tmp_path, monkeyp
 
     from muscat_db.web import app
 
-    html = TestClient(app).get("/logs").text
+    html = TestClient(app).get("/obs").text
     assert 'id="chat-window"' in html, "chat missing from the live app after a build"
     assert "js/chat.js" in html
 
@@ -165,7 +165,7 @@ def test_static_cache_buster_stripped_and_depth_relative(tiny_db, tmp_path):
     assert 'href="static/styles.css"' in root_html
 
     # A one-level-deep page links back up with a relative prefix.
-    logs_html = _read(out / "logs" / "index.html")
+    logs_html = _read(out / "obs" / "index.html")
     assert "../static/styles.css" in logs_html
 
 
@@ -175,7 +175,7 @@ def test_snapshot_banner_on_ui_pages_but_not_the_guide(tiny_db, tmp_path):
     # Every captured UI page still warns that it is a frozen snapshot,
     # including the home landing page ...
     assert "snapshot-banner" in _read(out / "index.html")
-    assert "snapshot-banner" in _read(out / "logs" / "index.html")
+    assert "snapshot-banner" in _read(out / "obs" / "index.html")
     assert "snapshot-banner" in _read(out / "targets" / "index.html")
     # ... but the guide is the written pipeline guide, which documents the
     # pipeline rather than showing live data, so the caveat does not apply.
@@ -207,13 +207,13 @@ def test_navbar_links_resolve_after_the_root_swap(tiny_db, tmp_path):
     out = tmp_path / "site"
     build_site(out, db_path=tiny_db, n_examples=1, include_figures=False, log=lambda _m: None)
 
-    logs = _read(out / "logs" / "index.html")
-    assert 'href="../"' in logs, "site root unreachable from a nested page"
-    assert 'href="../targets/"' in logs, "Targets link should be present in navbar"
-    assert 'href="../logs/"' in logs or 'href="./"' in logs
+    obs = _read(out / "obs" / "index.html")
+    assert 'href="../"' in obs, "site root unreachable from a nested page"
+    assert 'href="../targets/"' in obs, "Targets link should be present in navbar"
+    assert 'href="../obs/"' in obs or 'href="./"' in obs
 
     root = _read(out / "index.html")
-    assert 'href="logs/"' in root
+    assert 'href="obs/"' in root
     # On the root page the relative path to the root is empty, which browsers
     # resolve as the current document only by convention. Emit "./" instead.
     assert 'href="./"' in root
@@ -303,7 +303,7 @@ def test_no_live_data_notice_only_on_live_api_pages(tiny_db, tmp_path):
     assert "muscat-static-nolivedata" in ephemeris
     # Ordinary server-rendered pages must NOT get it (they show real content).
     assert notice not in _read(out / "index.html")
-    assert notice not in _read(out / "logs" / "index.html")
+    assert notice not in _read(out / "obs" / "index.html")
 
 
 def test_scrub_notes_removes_note_text(tiny_db, tmp_path):
@@ -332,7 +332,7 @@ def test_base_path_makes_links_root_absolute(tiny_db, tmp_path):
         out, db_path=tiny_db, base_path="/muscat-db", n_examples=1,
         include_figures=False, log=lambda _m: None,
     )
-    logs_html = _read(out / "logs" / "index.html")
+    logs_html = _read(out / "obs" / "index.html")
     assert "/muscat-db/static/styles.css" in logs_html
 
 

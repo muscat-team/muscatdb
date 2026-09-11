@@ -2094,9 +2094,9 @@ class TestRoutes:
         assert "MuSCAT + LCO database (Last updated on" in r.text
 
     def test_logs_page(self, client):
-        r = client.get("/logs")
+        r = client.get("/obs")
         assert r.status_code == 200
-        assert "Logs" in r.text
+        assert "Observations" in r.text
         assert "Instruments" in r.text
         assert "Data Summary" in r.text
 

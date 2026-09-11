@@ -50,7 +50,7 @@ ENV_VARS: tuple[EnvVar, ...] = (
     ),
     EnvVar(
         "MUSCAT2_HTML_DIR",
-        "/ut2/muscat/html",
+        "/ut2/muscat/html/muscat2",
         "Externally-synced MuSCAT2 live-observation dashboard (obslog, quicklook, airmass plot)",
     ),
     EnvVar(

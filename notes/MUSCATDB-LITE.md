@@ -166,7 +166,7 @@ src/muscatdb/
       monitor.py     restart-safe DB-lease polling + ingest
       scheduling.py  window generation, requestgroup build/validate/submit (ALLOW_SUBMIT gate)
     routers/
-      pages.py       /  ·  /logs  ·  /{inst}[/{date}[/ccd{n}]]  ·  /guide
+      pages.py       /  ·  /obs  ·  /{inst}[/{date}[/ccd{n}]]  ·  /guide
       target.py      /target  + /api/targets/*  + /api/ads/*
       photometry.py  /photometry  + /api/photometry/*
       transit_fit.py /transit-fit + /api/transit-fit/*
@@ -579,7 +579,7 @@ Every current page/route → its home in the redesign. **Core** pages work on `[
 | Feature / page | Today | New home | Install |
 |---|---|---|---|
 | Home / targets table / search | `web.py` `/` | `web/routers/pages.py` | `[web]` |
-| ObsLog → dates → CCD → frames | `/logs`, `/{inst}[/{date}[/ccd{n}]]` | `pages.py` | `[web]` |
+| ObsLog → dates → CCD → frames | `/obs`, `/{inst}[/{date}[/ccd{n}]]` | `pages.py` | `[web]` |
 | Target page (aliases, TIC, HARPS/JWST/spectra, ADS) | `/target` + `/api/targets/*` + `/api/ads/*` | `routers/target.py` + `web/resolve.py` | `[web]` |
 | Photometry (run/status/cancel/delete/download) | `/photometry` + `/api/photometry/*` | `routers/photometry.py` + `pipelines/prose.py` + `JobRunner` | `[web]` |
 | Transit fit (new/continue/secondary eclipse) | `/transit-fit` + `/api/transit-fit/*` | `routers/transit_fit.py` + `pipelines/timer.py` | `[web]` |
