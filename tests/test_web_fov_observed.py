@@ -113,6 +113,7 @@ def test_observed_pointing_returns_footprint_polygon(mock_db):
     # No PA on record -> footprint is drawn unrotated (PA=0), not omitted.
     assert len(data["footprint"]) == 4
     assert data["fov_arcsec"] > 0
+    assert data["has_native_wcs"] is True  # muscat3 has WCS
 
 
 def test_observed_pointing_uses_frames_read_mode_for_footprint_size(mock_db):
@@ -128,3 +129,12 @@ def test_observed_pointing_uses_frames_read_mode_for_footprint_size(mock_db):
         "/api/fov/observed-pointing?inst=sinistro&obsdate=260102&obj=WASP-12"
     ).json()
     assert full["fov_arcsec"] > central["fov_arcsec"]
+
+
+def test_observed_pointing_flags_instruments_without_native_wcs(mock_db):
+    _insert_frame(mock_db, instrument="muscat2", obsdate="260101", object="WASP-12")
+
+    r = TestClient(app).get(
+        "/api/fov/observed-pointing?inst=muscat2&obsdate=260101&obj=WASP-12"
+    )
+    assert r.json()["has_native_wcs"] is False

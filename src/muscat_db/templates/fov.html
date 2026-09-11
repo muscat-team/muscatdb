@@ -39,6 +39,9 @@
   .fov-msg.err { color: var(--red); }
   .fov-msg.ok { color: var(--green); }
 
+  #fov-observed-note { font-size: 0.8rem; color: var(--text-dim); line-height: 1.5; margin-top: -0.3rem; margin-bottom: 0.7rem; }
+  #fov-observed-note .warn { color: var(--amber, #f59e0b); font-weight: 600; }
+
   .fov-summary { display: grid; gap: 0.6rem 1rem; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
   .fov-stat { display: flex; flex-direction: column; gap: 0.15rem; }
   .fov-stat .k { font-size: 0.68rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; }
@@ -112,12 +115,6 @@
             {% endfor %}
           </select>
         </div>
-        <div class="fov-field" id="fov-observed-field" style="display: none;">
-          <label for="fov-observed-date">Overlay observed pointing <span class="help-tooltip" title="Show the actual telescope pointing (RA/Dec/PA) used on a previously observed night for this target, overlaid on the sky view for comparison with the proposed footprint above.">?</span></label>
-          <select id="fov-observed-date">
-            <option value="">— none —</option>
-          </select>
-        </div>
         <div class="fov-field"><label for="fov-ra">RA (deg) <span class="help-tooltip" title="Right Ascension of the target in degrees. Can be looked up by resolving the target name.">?</span></label><input id="fov-ra" type="text" inputmode="decimal" placeholder="optional"></div>
         <div class="fov-field"><label for="fov-dec">Dec (deg) <span class="help-tooltip" title="Declination of the target in degrees. Can be looked up by resolving the target name.">?</span></label><input id="fov-dec" type="text" inputmode="decimal" placeholder="optional"></div>
         <div class="fov-field"><label for="fov-margin">Target margin (″) <span class="help-tooltip" title="Keep the target at least this far from any field edge.">?</span></label><input id="fov-margin" type="number" step="any" value="60"></div>
@@ -141,7 +138,14 @@
           <label for="fov-avoid-mag">Avoid brighter than (Gmag) <span class="help-tooltip" title="Reject any pointing whose footprint contains a star brighter than this Gmag (saturation, bleeding, scattered light). The science target is exempt. Leave empty to disable.">?</span></label>
           <input id="fov-avoid-mag" type="number" step="any" placeholder="(off)">
         </div>
+        <div class="fov-field" id="fov-observed-field" style="display: none;">
+          <label for="fov-observed-date">Overlay observed pointing <span class="help-tooltip" title="Show the actual telescope pointing (RA/Dec/PA) used on a previously observed night for this target, overlaid on the sky view for comparison with the proposed footprint above.">?</span></label>
+          <select id="fov-observed-date">
+            <option value="">— none —</option>
+          </select>
+        </div>
       </div>
+      <div id="fov-observed-note" style="display: none;"></div>
       <div style="margin-top: 0.7rem; display: flex; align-items: center; gap: 0.6rem;">
         <input id="fov-allow-rotation" type="checkbox" style="width: 1.1rem; height: 1.1rem; cursor: pointer;">
         <label for="fov-allow-rotation" style="cursor: pointer; font-size: 0.85rem; margin: 0;">Allow field rotation (optimize position angle)</label>
@@ -344,7 +348,19 @@
       orientation reflects the recorded position angle where the instrument
       logs one (muscat/muscat2) and is drawn unrotated (PA=0&deg;) otherwise,
       since muscat3/muscat4/sinistro/sbig/qhy600 frames don't currently record
-      a PA.
+      a PA. The view re-centers to fit both the target and the observed
+      footprint, so an oddly offset night doesn't end up silently
+      off-screen.
+    </p>
+    <p>
+      A note under the field lists the separation between the observed
+      pointing and the current target position, flagged when it puts the
+      target outside that night's footprint entirely &mdash; a real telescope
+      pointing error, not a display bug. <strong>MuSCAT and MuSCAT2 frames
+      carry no native WCS</strong>: their header RA/Dec is only the TCS's own
+      belief about where it was pointed, never independently plate-solved, so
+      it can be unreliable &mdash; the note flags this for every muscat/muscat2
+      overlay.
     </p>
   </div>
 </details>
@@ -617,6 +633,66 @@
   function clearObservedFootprint() {
     if (observedFootprintOverlay) observedFootprintOverlay.removeAll();
     $('fov-observed-legend').style.display = 'none';
+    $('fov-observed-note').style.display = 'none';
+  }
+
+  // Flat-sky (cos-dec-scaled) separation -- fine at these FOV/arcmin scales.
+  function angularSeparationArcsec(ra1, dec1, ra2, dec2) {
+    const rad = Math.PI / 180;
+    const dRa = (ra2 - ra1) * Math.cos(((dec1 + dec2) / 2) * rad);
+    const dDec = dec2 - dec1;
+    return Math.hypot(dRa, dDec) * 3600;
+  }
+
+  function fmtSeparation(arcsec) {
+    if (arcsec < 60) return arcsec.toFixed(0) + '″';
+    if (arcsec < 3600) return (arcsec / 60).toFixed(1) + '′';
+    return (arcsec / 3600).toFixed(2) + '°';
+  }
+
+  // Re-centers/zooms so the observed footprint is never silently off-screen
+  // -- a night whose recorded pointing is well off the target would
+  // otherwise sit outside the view the optimizer result left us in.
+  function fitViewToPoints(points) {
+    if (!aladin || !points.length) return;
+    const ras = points.map((p) => p[0]);
+    const decs = points.map((p) => p[1]);
+    const centerDec = (Math.min(...decs) + Math.max(...decs)) / 2;
+    const cosDec = Math.cos(centerDec * Math.PI / 180) || 1e-6;
+    const raSpanDeg = (Math.max(...ras) - Math.min(...ras)) * cosDec;
+    const decSpanDeg = Math.max(...decs) - Math.min(...decs);
+    aladin.gotoRaDec((Math.min(...ras) + Math.max(...ras)) / 2, centerDec);
+    aladin.setFoV(Math.max(raSpanDeg, decSpanDeg, 0.01) * 1.6);
+  }
+
+  function escapeHtml(s) {
+    const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+    return String(s).replace(/[&<>"']/g, (c) => map[c]);
+  }
+
+  function buildObservedNote(data, inst, obsdate, separationArcsec) {
+    inst = escapeHtml(inst);
+    obsdate = escapeHtml(obsdate);
+    const paNote = data.pa_available
+      ? `PA ${data.pa_deg.toFixed(1)}°`
+      : 'PA not recorded (drawn unrotated)';
+    const lines = [
+      `Observed pointing (${inst}, ${obsdate}): RA ${data.ra.toFixed(5)}°, Dec ${data.dec.toFixed(5)}° · `
+      + `${paNote} · ${data.n_frames} frame(s) on CCD ${data.ccd}.`,
+    ];
+    if (separationArcsec !== null) {
+      const farFromTarget = separationArcsec > data.fov_arcsec / 2;
+      const text = `${fmtSeparation(separationArcsec)} from the current target position`
+        + (farFromTarget ? ' — well outside this footprint.' : '.');
+      lines.push(farFromTarget ? `<span class="warn">⚠ ${text}</span>` : text);
+    }
+    if (data.has_native_wcs === false) {
+      lines.push(
+        `<span class="warn">⚠ ${inst} frames carry no native WCS — this header pointing was `
+        + `never independently plate-solved, so it can be unreliable.</span>`
+      );
+    }
+    return lines.join('<br>');
   }
 
   function populateObservedDatesSelect(dates) {
@@ -671,20 +747,31 @@
         setMsg(data.error || 'Could not load the observed pointing.', 'err');
         return;
       }
+      setMsg('');
+
+      const fitPoints = [];
       if (Array.isArray(data.footprint) && data.footprint.length) {
         const poly = data.footprint.map((p) => [p[0], p[1]]);
         poly.push(poly[0]);
         observedFootprintOverlay.add(A.polygon(poly));
         $('fov-observed-legend').style.display = '';
+        fitPoints.push(...data.footprint);
       }
-      const paNote = data.pa_available
-        ? `PA ${data.pa_deg.toFixed(1)}°`
-        : 'PA not recorded (drawn unrotated)';
-      setMsg(
-        `Observed pointing (${inst}, ${obsdate}): RA ${data.ra.toFixed(5)}°, Dec ${data.dec.toFixed(5)}° · `
-        + `${paNote} · ${data.n_frames} frame(s) on CCD ${data.ccd}.`,
-        'ok',
-      );
+
+      const targetRa = parseFloat($('fov-ra').value);
+      const targetDec = parseFloat($('fov-dec').value);
+      const hasTarget = Number.isFinite(targetRa) && Number.isFinite(targetDec);
+      let separationArcsec = null;
+      if (hasTarget) {
+        separationArcsec = angularSeparationArcsec(targetRa, targetDec, data.ra, data.dec);
+        fitPoints.push([targetRa, targetDec]);
+      }
+
+      const note = $('fov-observed-note');
+      note.innerHTML = buildObservedNote(data, inst, obsdate, separationArcsec);
+      note.style.display = '';
+
+      fitViewToPoints(fitPoints.length ? fitPoints : [[data.ra, data.dec]]);
     } catch (e) {
       setMsg('Request failed: ' + e, 'err');
     }

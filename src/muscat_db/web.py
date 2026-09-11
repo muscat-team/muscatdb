@@ -3582,6 +3582,7 @@ def api_fov_observed_pointing(inst: str = "", obsdate: str = "", obj: str = ""):
         "fov_arcsec": half * 2.0,
         "footprint": footprint,
         "n_frames": pointing["n_frames"],
+        "has_native_wcs": INSTRUMENTS[inst].has_wcs,
     })
 
 
