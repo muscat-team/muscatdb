@@ -49,6 +49,11 @@ ENV_VARS: tuple[EnvVar, ...] = (
         "Obslog CSV base shared by muscat-db and prose2",
     ),
     EnvVar(
+        "MUSCAT2_HTML_DIR",
+        "/ut2/muscat/html",
+        "Externally-synced MuSCAT2 live-observation dashboard (obslog, quicklook, airmass plot)",
+    ),
+    EnvVar(
         "MUSCAT_PROSE_DIR",
         str(Path.home() / "ql" / "prose"),
         "Pipeline output base directory",

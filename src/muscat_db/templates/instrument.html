@@ -2,6 +2,9 @@
 {% block title %}{{ instrument }} — MuSCAT ObsLog{% endblock %}
 {% block content %}
 <h1><a href="/logs" class="crumb">Instruments</a> / {{ instrument }}</h1>
+{% if instrument == "muscat2" and muscat2_quicklook_available %}
+<p><a href="/muscat2-quicklook/" target="_blank" rel="noopener">Live Quicklook ↗</a></p>
+{% endif %}
 <table>
 <thead>
   <tr><th>Date</th><th>CCDs</th><th>Frames</th></tr>
