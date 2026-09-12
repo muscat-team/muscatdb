@@ -13,6 +13,44 @@ from muscat_db.instruments import INSTRUMENTS, OBSLOG_BASE, InstrumentConfig
 logger = logging.getLogger(__name__)
 
 
+def _csv_has_valid_data(csv_path: str) -> bool:
+    """False for a CSV an interrupted scan could plausibly have produced.
+
+    A killed/crashed scan_date() can leave a CSV with a header but zero rows
+    (killed before any file finished processing), or with rows whose OBJECT
+    is blank (_read_fits_header_raw's corrupt/truncated-header fallback
+    returns blank values for every requested key) -- so a data row that
+    exists is not itself proof the file behind it was read successfully.
+    """
+    try:
+        with open(csv_path, newline="") as f:
+            rows = list(csv.DictReader(f))
+    except (OSError, csv.Error):
+        return False
+    if not rows:
+        return False
+    return all((row.get("OBJECT") or "").strip() for row in rows)
+
+
+def _obsdate_dir_is_complete(obslog_dir: str, d: str) -> bool:
+    """True only if every CSV already written for this date looks complete.
+
+    A CCD with zero FITS files that night legitimately has no CSV at all (see
+    scan_date's per-CCD write loop), so requiring every *possible* CCD's CSV
+    to exist would misflag genuinely-done dates. Requiring at least one CSV,
+    and every CSV present to pass _csv_has_valid_data, catches an interrupted
+    scan without that false positive.
+    """
+    date_dir = f"{obslog_dir}/{d}"
+    try:
+        csv_names = [f for f in os.listdir(date_dir) if f.endswith(".csv")]
+    except (PermissionError, OSError):
+        return False
+    if not csv_names:
+        return False
+    return all(_csv_has_valid_data(f"{date_dir}/{f}") for f in csv_names)
+
+
 def _is_obsdate_dir(name: str) -> bool:
     """True only for a canonical YYMMDD directory name."""
     if len(name) != 6 or not name.isdigit():
@@ -384,9 +422,13 @@ def scan_missing_dates(
     Pass ``"all"`` (case-insensitive) to scan every date directory under the
     instrument's data dir.
 
-    By default, only dates without an existing obslog CSV are scanned.
-    With ``force=True``, every date with FITS data is rescanned, overwriting
-    any existing CSVs — useful for fixing legacy malformed obslogs.
+    By default, only dates without a complete obslog CSV are scanned -- a
+    marker directory with no CSV, an empty CSV, or a CSV holding a
+    blank-OBJECT row (see _obsdate_dir_is_complete) counts as incomplete and
+    is retried, since any of those can be left behind by a killed/crashed
+    scan. With ``force=True``, every date with FITS data is rescanned,
+    overwriting any existing CSVs — useful for fixing legacy malformed
+    obslogs.
     """
     prefix = "" if year_prefix.lower() == "all" else year_prefix
     inst = INSTRUMENTS[inst_name]
@@ -400,7 +442,10 @@ def scan_missing_dates(
             print(f"[warn] cannot list {obslog_dir}: {e}")
             entries = []
         for d in entries:
-            if os.path.isdir(f"{obslog_dir}/{d}") and d.startswith(prefix):
+            if (
+                os.path.isdir(f"{obslog_dir}/{d}") and d.startswith(prefix)
+                and _obsdate_dir_is_complete(obslog_dir, d)
+            ):
                 existing.add(d)
     scanned: list[str] = []
     if not os.path.isdir(data_dir):
