@@ -103,6 +103,10 @@ RUN_DEFAULTS: dict = {
     "sig_fwhm": None,          # None -> sigma clipping disabled for fwhm axis
     "sig_dx": None,            # None -> sigma clipping disabled for dx axis
     "sig_dy": None,            # None -> sigma clipping disabled for dy axis
+    "sig_flux": None,          # None -> flux-residual sigma clipping disabled
+                               # (a poly is fit to the raw target flux; see flux_poly_deg)
+    "flux_poly_deg": 2,        # degree of the polynomial fitted to the raw target
+                               # flux before residual sigma clipping (used with sig_flux)
     "min_star_area": 10,
     "wcs_method": "astrometry.net",
     "centroid_method": "auto",  # auto | quad | com (mirrors prose2's --centroid_method)
@@ -1147,13 +1151,13 @@ def normalize_run_options(raw: dict | None) -> dict:
             val = str(raw.get(key, "")).strip()
             o[key] = "" if val == "" else (_to_int(val) if _to_int(val) is not None else "")
 
-    for key in ("test_run_frames", "max_num_stars", "cutout_size", "display_stack_nframes", "gif_stride", "min_star_area", "edge_margin", "ref_select_top_k"):
+    for key in ("test_run_frames", "max_num_stars", "cutout_size", "display_stack_nframes", "gif_stride", "min_star_area", "edge_margin", "ref_select_top_k", "flux_poly_deg"):
         if str(raw.get(key, "")).strip() != "":
             iv = _to_int(raw[key])
             if iv is not None:
                 o[key] = iv
 
-    for key in ("min_star_separation", "avoid_nearby_star", "bin_size_minutes", "sig_bkg", "sig_fwhm", "sig_dx", "sig_dy"):
+    for key in ("min_star_separation", "avoid_nearby_star", "bin_size_minutes", "sig_bkg", "sig_fwhm", "sig_dx", "sig_dy", "sig_flux"):
         if str(raw.get(key, "")).strip() != "":
             fv = _to_float(raw[key])
             if fv is not None:
@@ -1252,6 +1256,14 @@ def validate_run_options(o: dict, inst: str | None = None) -> str | None:
         return "WCS method must be 'twirl' or 'astrometry.net'"
     if o.get("centroid_method", "auto") not in CENTROID_METHODS:
         return f"centroid method must be one of {', '.join(CENTROID_METHODS)}"
+    poly_deg = o.get("flux_poly_deg")
+    if poly_deg not in (None, ""):
+        try:
+            poly_deg = int(poly_deg)
+        except (TypeError, ValueError):
+            return "flux polynomial degree must be a non-negative integer"
+        if poly_deg < 0:
+            return "flux polynomial degree must be >= 0"
     # Colormap validation: default is "gray" (black=low, white=high).
     # Note: prose2's run_photometry has a bug where gray and gray_r render
     # identically; this is a prose2 issue and needs to be fixed there.
@@ -1358,6 +1370,8 @@ def build_command(
         ("--sig_fwhm", "sig_fwhm"),
         ("--sig_dx", "sig_dx"),
         ("--sig_dy", "sig_dy"),
+        ("--sig_flux", "sig_flux"),
+        ("--flux_poly_deg", "flux_poly_deg"),
         ("--min_star_area", "min_star_area"),
     ):
         val = o.get(key)
