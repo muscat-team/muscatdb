@@ -58,6 +58,7 @@ from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader
 
 from muscat_db import photometry as phot
+from muscat_db import postprocess as postproc
 from muscat_db import exposure as exp_calc
 from muscat_db.auth import (
     PROXY_SECRET_HEADER,
@@ -2018,6 +2019,7 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
         command=command, raw_missing=raw_missing,
         default_bands=phot.DEFAULT_BANDS,
         run_defaults=merged_defaults,
+        postproc_defaults=phot.POSTPROCESS_DEFAULTS,
         cmap_choices=phot.CMAP_CHOICES,
         nan_imputation_methods=phot.NAN_IMPUTATION_METHODS,
         wiki_url=_wiki_url(inst, target),
@@ -6389,6 +6391,40 @@ def photometry_command(payload: dict = Body(...)):
         error = _telescope_required_error(_db_path(), inst, date, target, options)
     command = phot.command_str(inst, date, target, options=options, test_run=test_run)
     return JSONResponse({"command": command, "error": error})
+
+
+@photometry_router.post("/postprocess")
+def photometry_postprocess(payload: dict = Body(...)):
+    """Synchronously sigma-clip a finished run's band lightcurves.
+
+    ``apply=false`` returns a dry-run report plus a base64 outlier preview;
+    ``apply=true`` overwrites the band CSVs in place and regenerates the run's
+    summary ``*_lightcurves.png`` so transit fit sees exactly one version.
+    """
+    inst = (payload.get("inst") or "").strip()
+    date = (payload.get("date") or "").strip()
+    target = (payload.get("target") or "").strip()
+    run = (payload.get("run") or "").strip()
+    if inst not in INSTRUMENTS or not phot.valid_date(date) or not target:
+        return JSONResponse(
+            {"ok": False, "error": "invalid instrument, date or target"},
+            status_code=400,
+        )
+    if not run:
+        return JSONResponse({"ok": False, "error": "a run is required"}, status_code=400)
+    result = postproc.postprocess(
+        inst,
+        date,
+        target,
+        run,
+        payload.get("sigma", 5.0),
+        payload.get("degree", 2),
+        payload.get("iterations", 5),
+        apply=bool(payload.get("apply", False)),
+    )
+    if not result.get("ok"):
+        return JSONResponse(result, status_code=400)
+    return JSONResponse(result)
 
 
 @photometry_router.get("/status")
