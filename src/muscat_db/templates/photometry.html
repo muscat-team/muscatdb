@@ -518,11 +518,33 @@
               <label for="opt-display_stack_nframes">Display stack frames <span class="help-tooltip" title="For non-reference bands under a chosen reference band, number of the band's own frames aligned onto the shared reference grid and median-combined into the display image for the reference/apertures/cutouts/stacks plots. 1 = single representative frame; larger = higher-SNR aligned median stack (corresponds to --display_stack_nframes).">?</span></label>
               <input type="number" id="opt-display_stack_nframes" value="{{ run_defaults.display_stack_nframes }}" min="1" style="width: 100%;">
             </div>
+            <div class="opt">
+              <label for="opt-exclude_after_jd">Exclude after JD <span class="help-tooltip" title="Drop frames with header JD greater than this value (corresponds to --exclude_after_jd). Comma-separated for multiple cuts. Pairs positionally with 'Exclude before JD' when both are set (equal count required) to form closed excluded window(s); given alone, each value is an open-ended tail cut. Compares against the raw header JD, not the barycentric-corrected BJD_TDB the light curve is plotted against -- the two can differ by up to ~8 min near a window boundary.">?</span></label>
+              {% if jd_range %}
+              <div style="display:flex; align-items:center; gap:0.5rem;">
+                <input type="range" id="jdslider-exclude_after_jd" min="{{ jd_range.min }}" max="{{ jd_range.max }}" step="0.0001" value="{{ jd_range.max }}" style="flex:1;" title="drag to set a single cutoff; edit the field below directly for multiple ranges">
+                <span class="hint" id="jdslider-exclude_after_jd-label" style="white-space:nowrap;">{{ jd_range.max_utc }}</span>
+              </div>
+              {% endif %}
+              <input type="text" id="opt-exclude_after_jd" placeholder="none" value="{{ run_defaults.exclude_after_jd }}" style="width: 100%;">
+              <span class="hint">--exclude_after_jd; comma-separated, empty → none{% if jd_range %}; data spans {{ jd_range.min_utc }}–{{ jd_range.max_utc }}{% endif %}</span>
+            </div>
+            <div class="opt">
+              <label for="opt-exclude_before_jd">Exclude before JD <span class="help-tooltip" title="Drop frames with header JD less than this value (corresponds to --exclude_before_jd). Comma-separated for multiple cuts. Pairs positionally with 'Exclude after JD' when both are set (equal count required) to form closed excluded window(s); given alone, each value is an open-ended head cut.">?</span></label>
+              {% if jd_range %}
+              <div style="display:flex; align-items:center; gap:0.5rem;">
+                <input type="range" id="jdslider-exclude_before_jd" min="{{ jd_range.min }}" max="{{ jd_range.max }}" step="0.0001" value="{{ jd_range.min }}" style="flex:1;" title="drag to set a single cutoff; edit the field below directly for multiple ranges">
+                <span class="hint" id="jdslider-exclude_before_jd-label" style="white-space:nowrap;">{{ jd_range.min_utc }}</span>
+              </div>
+              {% endif %}
+              <input type="text" id="opt-exclude_before_jd" placeholder="none" value="{{ run_defaults.exclude_before_jd }}" style="width: 100%;">
+              <span class="hint">--exclude_before_jd; comma-separated, empty → none{% if jd_range %}; data spans {{ jd_range.min_utc }}–{{ jd_range.max_utc }}{% endif %}</span>
+            </div>
           </div>
         </details>
         <details class="opt-collapse">
-          <summary>Sigma Clipping <span class="help-tooltip" title="Sigma threshold parameters for sky background, FWHM, and X/Y target drift outlier clipping.">?</span></summary>
-          <div style="grid-column: 1 / -1; display: grid; grid-template-columns: repeat(4, 1fr); gap: 1.25rem;">
+          <summary>Sigma Clipping <span class="help-tooltip" title="Sigma threshold parameters for sky background, FWHM, X/Y target drift, and raw-target-flux outlier clipping. Clipped frames are removed before autodiff(), so they change which comparison stars (cIDs) and aperture autodiff() picks as optimal. To sigma-clip the final differential flux after autodiff() instead, run full photometry first and use the Post-processing card below.">?</span></summary>
+          <div style="grid-column: 1 / -1; display: grid; grid-template-columns: repeat(6, 1fr); gap: 1.25rem;">
             <div class="opt">
               <label for="opt-sig_bkg">SIGMA_BKG <span class="help-tooltip" title="Sigma threshold for sky background outlier clipping (corresponds to --sig_bkg).">?</span></label>
               <input type="number" id="opt-sig_bkg" value="{{ run_defaults.sig_bkg }}" step="0.1" min="0" style="width: 100%;">
@@ -538,6 +560,14 @@
             <div class="opt">
               <label for="opt-sig_dy">SIGMA_DY <span class="help-tooltip" title="Sigma threshold for drift Y outlier clipping (corresponds to --sig_dy).">?</span></label>
               <input type="number" id="opt-sig_dy" value="{{ run_defaults.sig_dy }}" step="0.1" min="0" style="width: 100%;">
+            </div>
+            <div class="opt">
+              <label for="opt-sig_flux">SIGMA_FLUX <span class="help-tooltip" title="Sigma threshold for outlier clipping of the raw target flux time series (corresponds to --sig_flux): a polynomial (see FLUX_POLY_DEG) is fitted to flux vs time, and frames whose residual deviates by more than this many standard deviations are rejected. This runs on the raw target flux before autodiff() selects comparison stars and aperture, so it affects that selection. The Post-processing card's sigma-clip uses the same method but runs on the finished differential flux after a full reduction, without changing cIDs/aperture.">?</span></label>
+              <input type="number" id="opt-sig_flux" value="{{ run_defaults.sig_flux }}" step="0.1" min="0" style="width: 100%;">
+            </div>
+            <div class="opt">
+              <label for="opt-flux_poly_deg">FLUX_POLY_DEG <span class="help-tooltip" title="Degree of the polynomial fitted to the raw target flux before residual sigma clipping (corresponds to --flux_poly_deg; only used when SIGMA_FLUX is set).">?</span></label>
+              <input type="number" id="opt-flux_poly_deg" value="{{ run_defaults.flux_poly_deg }}" step="1" min="0" style="width: 100%;">
             </div>
           </div>
         </details>
@@ -594,6 +624,46 @@
     <div id="run-status" style="display:none; margin: 0.75rem 0 0.35rem;"></div>
     <pre id="run-log"></pre>
   </div>
+
+  {% if outputs and outputs.has_any %}
+  <h2 style="display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; color: var(--text); margin: 1rem 0 0.75rem;">
+    <span>Configure &amp; Run Post-processing</span>
+    <span style="font-size: 0.78rem; color: var(--text-dim); font-weight: 400;">
+      Run post-processing on optimized relative light-curves
+    </span>
+  </h2>
+  <details class="phot-section phot-fold" id="postproc-section" open style="margin: 0 0 1rem; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 1rem 1.25rem;">
+    <summary>
+      <span style="font-size: 0.9rem; color: var(--text-dim);">Post-processing options</span>
+    </summary>
+    {% if not sel_run %}
+    <p class="warn">⚠ This is a legacy run with no run id — post-processing needs a named run and is disabled here.</p>
+    {% endif %}
+    <details class="opt-collapse" open>
+      <summary>Sigma Clipping <span class="help-tooltip" title="Sigma threshold parameters applied to the finished differential flux CSV, after autodiff() has already picked comparison stars and aperture. Unlike the Sigma Clipping options in Configure &amp; Run Photometry (which run before autodiff() and can change that selection), this pass only rejects outlier frames from the final light curve and never changes cIDs or aperture.">?</span></summary>
+      <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 1.25rem; margin: 0.75rem 0 0.5rem; max-width: 420px;">
+        <div class="opt">
+          <label for="opt-post_sigma">SIGMA FLUX <span class="help-tooltip" title="Reject frames whose residual from the fitted flux-vs-time polynomial deviates by more than this many standard deviations. Applied after photometry finishes, directly to the saved CSV rows.">?</span></label>
+          <input type="number" id="opt-post_sigma" value="{{ postproc_defaults['post_sigma'] }}" step="0.1" min="0" max="100" style="width: 100%;" {% if not sel_run %}disabled{% endif %}>
+        </div>
+        <div class="opt">
+          <label for="opt-post_poly_deg">POLY DEG <span class="help-tooltip" title="Degree of the polynomial fitted to flux vs time before residual sigma clipping.">?</span></label>
+          <input type="number" id="opt-post_poly_deg" value="{{ postproc_defaults['post_poly_deg'] }}" step="1" min="0" max="6" style="width: 100%;" {% if not sel_run %}disabled{% endif %}>
+        </div>
+      </div>
+    </details>
+    <div class="run-actions">
+      <button class="btn primary" type="button" id="postproc-test-btn" {% if not sel_run %}disabled{% endif %}>Test post-process</button>
+      <button class="btn primary" type="button" id="postproc-apply-btn" {% if not sel_run %}disabled{% endif %}>Apply post-process</button>
+    </div>
+    <p style="color: var(--text-dim); font-size: 0.78rem; margin: 0.4rem 0 0;">
+      Test only previews rejected frames and writes nothing. Apply overwrites the selected run's band CSVs in place and regenerates its summary <code>*_lightcurves.png</code> so transit fit sees exactly one version. Raw-flux &amp; covariate figures are <em>not</em> regenerated.
+      {% if runs and runs | length > 1 %} Works on the active run chip above.
+      {% endif %}
+    </p>
+    <div id="postproc-result" style="display:none; margin-top: 0.75rem; font-size: 0.85rem;"></div>
+  </details>
+  {% endif %}
 
   <div id="delete-confirm-overlay">
     <div class="modal-box">
@@ -864,13 +934,19 @@
       sig_fwhm: val('opt-sig_fwhm'),
       sig_dx: val('opt-sig_dx'),
       sig_dy: val('opt-sig_dy'),
+      sig_flux: val('opt-sig_flux'),
+      flux_poly_deg: val('opt-flux_poly_deg'),
       min_star_area: val('opt-min_star_area'),
       wcs_method: val('opt-wcs_method'),
       centroid_method: val('opt-centroid_method'),
       cmap: val('opt-cmap'),
       site: val('opt-site'),
       telescope: val('opt-telescope'),
-      mode: val('opt-mode')
+      mode: val('opt-mode'),
+      exclude_after_jd: val('opt-exclude_after_jd'),
+      exclude_before_jd: val('opt-exclude_before_jd'),
+      post_sigma: val('opt-post_sigma'),
+      post_poly_deg: val('opt-post_poly_deg')
     };
   }
   function saveOptions() {
@@ -891,7 +967,7 @@
     });
     ['run_name','ref_band','refid','ref_select','ref_select_top_k','aper_unit','aper_radii','annulus',
      'target_id','comparison_ids','avoid_comparison_ids','avoid_nearby_star_mode','avoid_nearby_star','target_coord','test_run_frames','min_star_separation','max_num_stars',
-       'n_stars_align','cutout_size','display_stack_nframes','ccd_trim','edge_margin','bin_size_minutes','nan_imputation_method','sig_bkg','sig_fwhm','sig_dx','sig_dy','min_star_area','wcs_method','centroid_method','cmap','site','telescope','mode'].forEach(function (id) {
+       'n_stars_align','cutout_size','display_stack_nframes','ccd_trim','edge_margin','bin_size_minutes','nan_imputation_method','sig_bkg','sig_fwhm','sig_dx','sig_dy','sig_flux','flux_poly_deg','min_star_area','wcs_method','centroid_method','cmap','site','telescope','mode','exclude_after_jd','exclude_before_jd','post_sigma','post_poly_deg'].forEach(function (id) {
       var el = document.getElementById('opt-'+id);
       if (el && saved[id] !== undefined) el.value = saved[id];
     });
@@ -936,6 +1012,70 @@
 
   updateApertureHints();
 
+  // JD-exclusion range sliders: pure UI helpers mirroring opt-exclude_after_jd/
+  // opt-exclude_before_jd (only rendered when the server found a data span for
+  // this run), so they are deliberately not 'opt-'-prefixed and carry no state
+  // of their own -- collectOptions() still only ever reads the text fields
+  // (which always hold the raw JD, matching --exclude_after_jd/
+  // --exclude_before_jd's actual units; only the live label is UTC).
+  function jdToUtcMinuteLabel(jd) {
+    // JD 2440587.5 = 1970-01-01T00:00:00 UTC (the Unix epoch); mirrors
+    // web.py's _jd_to_utc_minute() so the slider label and the server-
+    // rendered 'data spans' hint agree.
+    var unixMs = (jd - 2440587.5) * 86400000;
+    var d = new Date(Math.round(unixMs / 60000) * 60000);
+    function pad(n) { return (n < 10 ? '0' : '') + n; }
+    return d.getUTCFullYear() + '-' + pad(d.getUTCMonth() + 1) + '-' + pad(d.getUTCDate()) +
+      ' ' + pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes()) + ' UTC';
+  }
+  function jdSliderEls(mode) {
+    var key = mode === 'after' ? 'exclude_after_jd' : 'exclude_before_jd';
+    return {
+      slider: document.getElementById('jdslider-' + key),
+      field: document.getElementById('opt-' + key),
+      label: document.getElementById('jdslider-' + key + '-label'),
+    };
+  }
+  function syncJdSliderFromField(mode) {
+    var els = jdSliderEls(mode);
+    if (!els.slider || !els.field) return;
+    var lo = parseFloat(els.slider.min), hi = parseFloat(els.slider.max);
+    var neutral = mode === 'after' ? hi : lo;
+    var raw = (els.field.value || '').trim();
+    var isMulti = raw.indexOf(',') !== -1;
+    // A single-thumb slider can't represent a comma-separated list, and
+    // dragging it would silently overwrite (destroy) whatever the user
+    // typed -- disable it outright rather than leave it interactive and
+    // misleading. Native `disabled` also blocks all pointer/keyboard
+    // interaction, so this is the actual safeguard, not just a visual one.
+    els.slider.disabled = isMulti;
+    els.slider.style.opacity = isMulti ? '0.4' : '1';
+    els.slider.title = isMulti
+      ? 'disabled: the field holds multiple comma-separated values; clear it to a single value to use the slider again'
+      : 'drag to set a single cutoff; edit the field below directly for multiple ranges';
+    if (isMulti) {
+      if (els.label) els.label.textContent = 'multiple values';
+      return;
+    }
+    var v = parseFloat(raw);
+    var pos = (raw !== '' && isFinite(v) && v >= lo && v <= hi) ? v : neutral;
+    els.slider.value = pos;
+    if (els.label) els.label.textContent = jdToUtcMinuteLabel(pos);
+  }
+  function initJdSlider(mode) {
+    var els = jdSliderEls(mode);
+    if (!els.slider || !els.field) return;
+    els.slider.addEventListener('input', function () {
+      var v = parseFloat(els.slider.value);
+      els.field.value = v.toFixed(4);
+      if (els.label) els.label.textContent = jdToUtcMinuteLabel(v);
+    });
+    els.field.addEventListener('input', function () { syncJdSliderFromField(mode); });
+    syncJdSliderFromField(mode);
+  }
+  initJdSlider('after');
+  initJdSlider('before');
+
   function updateWcsMethod() {
     var el = document.getElementById('opt-wcs_method');
     if (!el) return;
@@ -960,6 +1100,7 @@
   }
 
   var DEFAULTS = {{ run_defaults | tojson }};
+  var POSTPROC_DEFAULTS = {{ postproc_defaults | tojson }};
   var defaultsBtn = document.getElementById('defaults-btn');
   if (defaultsBtn) {
     defaultsBtn.addEventListener('click', function () {
@@ -968,9 +1109,12 @@
       });
       ['run_name','ref_band','refid','ref_select','ref_select_top_k','aper_unit','aper_radii','annulus',
        'target_id','comparison_ids','avoid_comparison_ids','avoid_nearby_star_mode','avoid_nearby_star','target_coord','test_run_frames','min_star_separation','max_num_stars',
-     'n_stars_align','cutout_size','display_stack_nframes','ccd_trim','edge_margin','bin_size_minutes','nan_imputation_method','sig_bkg','sig_fwhm','sig_dx','sig_dy','min_star_area','wcs_method','centroid_method','cmap','site','telescope','mode'].forEach(function (id) {
+     'n_stars_align','cutout_size','display_stack_nframes','ccd_trim','edge_margin','bin_size_minutes','nan_imputation_method','sig_bkg','sig_fwhm','sig_dx','sig_dy','sig_flux','flux_poly_deg','min_star_area','wcs_method','centroid_method','cmap','site','telescope','mode','exclude_after_jd','exclude_before_jd','post_sigma','post_poly_deg'].forEach(function (id) {
         var el = document.getElementById('opt-'+id);
-        if (el) el.value = DEFAULTS[id] !== undefined ? DEFAULTS[id] : '';
+        if (el) {
+          var d = POSTPROC_DEFAULTS[id] !== undefined ? POSTPROC_DEFAULTS[id] : DEFAULTS[id];
+          el.value = d !== undefined ? d : '';
+        }
       });
       ['make_gif','plot_gaia_sources','use_barycorrpy','overwrite'].forEach(function (id) {
         var el = document.getElementById('opt-'+id);
@@ -978,6 +1122,8 @@
       });
       saveOptions();
       updateApertureHints();
+      syncJdSliderFromField('after');
+      syncJdSliderFromField('before');
       refreshCmd();
     });
   }
@@ -1504,6 +1650,81 @@
   if (deleteBtn) deleteBtn.addEventListener('click', function () {
     deleteOverlay.classList.add('visible');
   });
+
+  // ----- post-process card: test / apply sigma-clip on the selected run -----
+  var postprocTestBtn = document.getElementById('postproc-test-btn');
+  var postprocApplyBtn = document.getElementById('postproc-apply-btn');
+  var postprocResult = document.getElementById('postproc-result');
+  // #postproc-section sits outside .run-panel, so it's not covered by that
+  // panel's own input/change listener (which persists via refreshCmd) --
+  // persist its fields directly so an edit survives a refresh even before
+  // Test/Apply is clicked.
+  var postprocSection = document.getElementById('postproc-section');
+  if (postprocSection) {
+    postprocSection.addEventListener('input', debounce(saveOptions, 400));
+    postprocSection.addEventListener('change', debounce(saveOptions, 150));
+  }
+  function postprocPayload(apply) {
+    return {
+      inst: inst, date: date, target: target,
+      run: runId || '',
+      sigma: val('opt-post_sigma'),
+      degree: val('opt-post_poly_deg'),
+      iterations: 5,
+      apply: apply
+    };
+  }
+  function postprocReport(d) {
+    var rows = (d.files || []).map(function (f) {
+      return f.file + ': ' + f.n_clipped + ' clipped / ' + f.n_kept + ' kept';
+    });
+    var html = '<div>';
+    if (d.applied) {
+      html += '<p style="font-weight:600;color:var(--green);margin:0 0 0.4rem;">Applied — ' + d.n_files + ' band CSV(s) clipped in place into ' + (d.summary_png || 'summary figure') + '.</p>';
+    } else {
+      html += '<p style="font-weight:600;margin:0 0 0.4rem;">Outlier preview (sigma=' + d.sigma + ', deg=' + d.degree + '):</p>';
+    }
+    html += '<ul style="margin:0 0 0.5rem;padding-left:1.25rem;line-height:1.6;">';
+    rows.forEach(function (r) { html += '<li class="mono">' + r + '</li>'; });
+    html += '</ul>';
+    if (d.preview_png) {
+      html += '<img src="' + d.preview_png + '" alt="outlier preview" style="max-width:100%; border:1px solid var(--border); border-radius:6px;">';
+    }
+    return html + '</div>';
+  }
+  function runPostprocess(apply) {
+    if (!runId) {
+      window.showMessageModal('Post-process', 'This legacy run has no run id, so it cannot be post-processed.', 'notice');
+      return;
+    }
+    saveOptions();
+    var btn = apply ? postprocApplyBtn : postprocTestBtn;
+    var prevText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = apply ? 'Applying…' : 'Testing…';
+    function done() { btn.disabled = false; btn.textContent = prevText; }
+    fetch('/api/photometry/postprocess', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(postprocPayload(apply))
+    }).then(function (r) { return r.json(); }).then(function (res) {
+      done();
+      if (!res.ok) {
+        window.showMessageModal('Post-process', res.error || 'post-process failed', 'error');
+        return;
+      }
+      postprocResult.style.display = 'block';
+      postprocResult.innerHTML = postprocReport(res);
+      if (apply) {
+        window.showMessageModal('Success', 'Post-process applied — ' + (res.n_files || 0) + ' band CSV(s) clipped and summary light-curve regenerated.', 'success');
+        setTimeout(function () { window.location.reload(); }, 900);
+      }
+    }).catch(function (err) {
+      done();
+      window.showMessageModal('Post-process', err.message, 'error');
+    });
+  }
+  if (postprocTestBtn) postprocTestBtn.addEventListener('click', function () { runPostprocess(false); });
+  if (postprocApplyBtn) postprocApplyBtn.addEventListener('click', function () { runPostprocess(true); });
 
   // ----- download all CSV links -----
   var dlAll = document.getElementById('dl-all-csv');

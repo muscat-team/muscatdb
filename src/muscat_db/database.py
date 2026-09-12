@@ -11,6 +11,7 @@ import datetime
 import sqlite3
 import threading
 import time
+from collections import Counter
 from collections.abc import Iterator
 from contextlib import contextmanager
 
@@ -18,7 +19,12 @@ from cryptography.fernet import Fernet, InvalidToken
 
 from muscat_db.instruments import INSTRUMENTS, OBSLOG_BASE
 from muscat_db.cache import clear_all_caches
-from muscat_db.coord import CoordRepr, unpack as _unpack_coord
+from muscat_db.coord import (
+    CoordRepr,
+    pick_representative,
+    sexagesimal_to_deg,
+    unpack as _unpack_coord,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1543,6 +1549,73 @@ def get_frames(db_path: str, instrument: str, obsdate: str, ccd: int) -> list[di
         )
         columns = [d[0] for d in cur.description]
         return [dict(zip(columns, r)) for r in cur.fetchall()]
+
+
+def get_observed_pointing(
+    db_path: str, instrument: str, obsdate: str, object_name: str
+) -> dict | None:
+    """Actual telescope pointing (RA/Dec/PA) for one previously observed night.
+
+    Built from the ``frames`` obslog rather than the catalog-matched target
+    coordinate, so it reflects wherever the telescope was actually pointed
+    that night -- for overlaying on the FOV planner's sky view alongside a
+    freshly proposed pointing.
+
+    Multi-CCD instruments point every CCD at the same field via dichroics, so
+    only the lowest-numbered CCD present that night is used (any one is
+    representative). RA/Dec are the median-by-declination pair from
+    :func:`muscat_db.coord.pick_representative`, robust to the occasional
+    corrupt header value; PA is the median of that CCD's non-null ``pa``
+    values, or ``None`` when the instrument doesn't record it (currently
+    muscat3, muscat4, sinistro, sbig, qhy600 all leave it null).
+
+    Returns ``None`` if no frame matches, or if no frame on the chosen CCD has
+    a well-formed RA/Dec pair.
+    """
+    with get_conn(db_path) as conn:
+        cur = conn.execute(
+            """SELECT ccd, ra, declination, pa, read_mode
+               FROM frames
+               WHERE instrument = ? AND obsdate = ? AND object = ?
+               ORDER BY ccd""",
+            (instrument, obsdate, object_name),
+        )
+        rows = cur.fetchall()
+    if not rows:
+        return None
+
+    lowest_ccd = rows[0][0]
+    pairs: list[tuple[str | None, str | None]] = []
+    pa_values: list[float] = []
+    read_modes: list[str] = []
+    for ccd, ra, dec, pa, read_mode in rows:
+        if ccd != lowest_ccd:
+            continue
+        pairs.append((ra, dec))
+        if pa is not None:
+            pa_values.append(pa)
+        if read_mode:
+            read_modes.append(read_mode)
+
+    deg = sexagesimal_to_deg(*pick_representative(pairs))
+    if deg is None:
+        return None
+
+    pa_values.sort()
+    pa_deg = pa_values[len(pa_values) // 2] if pa_values else None
+    read_mode = Counter(read_modes).most_common(1)[0][0] if read_modes else None
+
+    return {
+        "instrument": instrument,
+        "obsdate": obsdate,
+        "object": object_name,
+        "ccd": lowest_ccd,
+        "ra_deg": deg[0],
+        "dec_deg": deg[1],
+        "pa_deg": pa_deg,
+        "read_mode": read_mode,
+        "n_frames": len(pairs),
+    }
 
 
 def get_frame_objects(db_path: str) -> list[str]:

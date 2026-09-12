@@ -49,6 +49,11 @@ ENV_VARS: tuple[EnvVar, ...] = (
         "Obslog CSV base shared by muscat-db and prose2",
     ),
     EnvVar(
+        "MUSCAT2_HTML_DIR",
+        "/ut2/muscat/html",
+        "Externally-synced MuSCAT2 live-observation dashboard (obslog, quicklook, airmass plot)",
+    ),
+    EnvVar(
         "MUSCAT_PROSE_DIR",
         str(Path.home() / "ql" / "prose"),
         "Pipeline output base directory",
@@ -96,6 +101,11 @@ ENV_VARS: tuple[EnvVar, ...] = (
     EnvVar("MUSCAT_PHOT_STALL_LIMIT_S", "1500", "Photometry job stall timeout (seconds)"),
     EnvVar("MUSCAT_PHOT_MAX_RUNTIME_S", "10800", "Photometry job max runtime (seconds)"),
     EnvVar("MUSCAT_PHOT_FINALIZE_GRACE_S", "8", "Log-quiescence grace window (seconds)"),
+    EnvVar(
+        "MUSCAT_POSTPROCESS_TIMEOUT_S",
+        "120",
+        "Synchronous post-process subprocess timeout (seconds)",
+    ),
     EnvVar(
         "MUSCAT_SCAN_STALE_CSV_GRACE_S",
         "259200",

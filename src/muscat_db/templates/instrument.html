@@ -1,7 +1,10 @@
 {% extends "base.html" %}
 {% block title %}{{ instrument }} — MuSCAT ObsLog{% endblock %}
 {% block content %}
-<h1><a href="/logs" class="crumb">Instruments</a> / {{ instrument }}</h1>
+<h1><a href="/obs" class="crumb">Instruments</a> / {{ instrument }}</h1>
+{% if instrument == "muscat2" and lc_monitor_available %}
+<p><a href="/lc-monitor/" target="_blank" rel="noopener">Live LC Monitor ↗</a></p>
+{% endif %}
 <table>
 <thead>
   <tr><th>Date</th><th>CCDs</th><th>Frames</th></tr>

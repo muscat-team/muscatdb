@@ -22,7 +22,7 @@ from muscat_db.web import app
 BLOCKING_PATHS = {
     "/",
     "/target",
-    "/logs",
+    "/obs",
     "/projects",
     "/tag",
     "/{instrument}",
