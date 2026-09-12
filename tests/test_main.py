@@ -515,8 +515,14 @@ class TestScanner:
         # Create data dirs for two dates
         for d in ["260101", "260102"]:
             os.makedirs(f"{obsdate}/muscat/{d}", exist_ok=True)
-        # Pre-create obslog for 260101 so it's "not missing"
-        os.makedirs(f"{tmp_obslog}/muscat/260101", exist_ok=True)
+        # Pre-create a *complete* obslog CSV for 260101 so it's "not missing".
+        # An empty marker directory would not qualify -- see
+        # _obsdate_dir_is_complete and tests/test_scanner.py.
+        _make_csv(
+            f"{tmp_obslog}/muscat/260101/obslog-muscat-260101-ccd0.csv",
+            INSTRUMENTS["muscat"].csv_header.split(","),
+            [{"FRAME": "MSCT2601010001", "OBJECT": "TOI-1234"}],
+        )
         dates = scan_missing_dates("muscat", "26", max_workers=1)
         assert dates == ["260102"]
 
