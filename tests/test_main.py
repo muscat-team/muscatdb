@@ -772,6 +772,41 @@ class TestSummarizer:
         rows = summarize_csv("muscat", "000000", 0)
         assert rows == []
 
+    def test_summarize_csv_muscat4_ccd3_parses_both_epoch_names(self, tmp_obslog):
+        """Regression test: CCD3 FRAME values from before the ep10->ep09
+        rename must still have their frame number parsed, not blanked out.
+
+        _delim_for() built its split delimiter from the current epoch token
+        (ep09) only, duplicating instruments.py's now-fixed ep_names list.
+        A FRAME recorded under the old token (ep10) never matched that
+        delimiter, so its frame number silently came out empty -- breaking
+        run-grouping for any night, old or straddling the rename, that has
+        old-epoch rows in its CCD3 CSV.
+        """
+        from muscat_db.summarizer import summarize_csv
+        inst, obsdate, ccd = "muscat4", "241114", 3
+        d = f"{tmp_obslog}/{inst}/{obsdate}"
+        os.makedirs(d, exist_ok=True)
+        fieldnames = ["FRAME", "OBJECT", "JD-STRT", "UT-STRT", "EXPTIME (s)",
+                      "READ_MODE", "FILTER", "RA", "DEC", "AIRMASS", "FOCUS (mm)"]
+        _make_csv(f"{d}/obslog-{inst}-{obsdate}-ccd{ccd}.csv", fieldnames, [
+            {"FRAME": f"coj2m002-ep10-20{obsdate}-0001-e91", "OBJECT": "TOI-1",
+             "JD-STRT": "60000.1", "UT-STRT": "01:00:00", "EXPTIME (s)": "5",
+             "READ_MODE": "high", "FILTER": "zs", "RA": "", "DEC": "",
+             "AIRMASS": "1.2", "FOCUS (mm)": ""},
+            {"FRAME": f"coj2m002-ep09-20{obsdate}-0002-e91", "OBJECT": "TOI-1",
+             "JD-STRT": "60000.2", "UT-STRT": "01:01:00", "EXPTIME (s)": "5",
+             "READ_MODE": "high", "FILTER": "zs", "RA": "", "DEC": "",
+             "AIRMASS": "1.2", "FOCUS (mm)": ""},
+        ])
+
+        rows = summarize_csv(inst, obsdate, ccd)
+
+        assert len(rows) == 1
+        assert rows[0].frame_start == "0001"
+        assert rows[0].frame_end == "0002"
+        assert rows[0].nframes == 2
+
 
 # ── Tests: database ──────────────────────────────────────────────────────────
 
