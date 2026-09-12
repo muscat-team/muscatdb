@@ -1272,6 +1272,12 @@ def logs_page(min_frames: int = 1000):
     )
 
 
+# Legacy redirect for backward compatibility
+@app.get("/logs", response_class=RedirectResponse)
+def logs_redirect():
+    return RedirectResponse(url="/obs", status_code=301)
+
+
 @app.get("/guide", response_class=HTMLResponse)
 def guide_page():
     return _render("guide.html")

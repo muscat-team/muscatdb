@@ -465,6 +465,16 @@ def test_target_without_name_redirects_to_targets_table(mock_db):
     assert response.headers["location"] == "/targets"
 
 
+def test_legacy_logs_route_redirects_to_obs(mock_db):
+    response = TestClient(app).get("/logs", follow_redirects=False)
+
+    assert response.status_code == 301
+    assert response.headers["location"] == "/obs"
+    follow = TestClient(app).get("/logs")
+    assert follow.status_code == 200
+    assert "Live LC Monitor" in follow.text or "Instruments" in follow.text
+
+
 def test_index_exposes_normalized_target_direct_link(mock_db, monkeypatch):
     monkeypatch.setattr(
         "muscat_db.web._get_targets",
