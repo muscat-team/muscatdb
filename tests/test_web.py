@@ -465,6 +465,16 @@ def test_target_without_name_redirects_to_targets_table(mock_db):
     assert response.headers["location"] == "/targets"
 
 
+def test_legacy_logs_route_redirects_to_obs(mock_db):
+    response = TestClient(app).get("/logs", follow_redirects=False)
+
+    assert response.status_code == 301
+    assert response.headers["location"] == "/obs"
+    follow = TestClient(app).get("/logs")
+    assert follow.status_code == 200
+    assert "Live LC Monitor" in follow.text or "Instruments" in follow.text
+
+
 def test_index_exposes_normalized_target_direct_link(mock_db, monkeypatch):
     monkeypatch.setattr(
         "muscat_db.web._get_targets",
@@ -1371,7 +1381,7 @@ def test_lco_pages_render_and_nav_links_it(mock_db):
     assert "<summary><h3>Target &amp; Transit Windows</h3></summary>" in page.text
     assert "<summary><h3>Results</h3></summary>" in archive.text
     # Nav (from base.html) links to /lco/schedule on every page.
-    assert 'href="/lco/schedule"' in client.get("/logs").text
+    assert 'href="/lco/schedule"' in client.get("/obs").text
 
 
 def test_lco_config_reports_booleans_and_hides_token(monkeypatch):
@@ -2882,7 +2892,7 @@ def test_nexsci_page_renders_with_payload_and_archive_link(mock_db, monkeypatch)
 
 
 def test_nexsci_nav_link_present_on_other_pages(mock_db):
-    body = TestClient(app).get("/logs").text
+    body = TestClient(app).get("/obs").text
     assert 'href="/nexsci"' in body
     assert "NExScI" in body
 
