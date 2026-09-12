@@ -42,7 +42,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from muscat_db import jobs, database
-from muscat_db.job_store import current_owner, get_job_store
+from muscat_db.job_store import current_instance_id, current_owner, get_job_store
 from muscat_db.instruments import INSTRUMENTS
 from muscat_db.cache import register_cache
 from muscat_db.band_utils import DEFAULT_BANDS, NARROW_BANDS, _FILTER_BAND_ALIAS, bands_from_filters  # noqa: F401
@@ -1769,6 +1769,7 @@ def start_run(
                 run_name=run_name,
                 user_name=user_name,
                 owner=current_owner(),
+                instance_id=current_instance_id(),
             )
         except sqlite3.OperationalError as exc:
             # DB write failed (e.g. read-only database). Roll back the launched
@@ -2158,6 +2159,8 @@ def sync_jobs() -> None:
             )
             running_keys.discard(db_key)
             if unchanged:
+                if persist_state == "running":
+                    store.heartbeat(db_key, current_instance_id())
                 continue
 
             error_desc = ""
@@ -2205,11 +2208,15 @@ def sync_jobs() -> None:
             started_at = time.time()
             elapsed = 0
             owner = ""
+            instance_id = ""
+            heartbeat_at = 0.0
             for j in db_jobs:
                 if j["key"] == db_key:
                     started_at = j["started_at"]
                     elapsed = j["elapsed"]
                     owner = j.get("owner") or ""
+                    instance_id = j.get("instance_id") or ""
+                    heartbeat_at = j.get("heartbeat_at") or 0
                     break
             if owner and owner != current_owner():
                 # Another role's process (e.g. the web process, if this is the
@@ -2217,6 +2224,14 @@ def sync_jobs() -> None:
                 # the only one whose own registry can tell whether it is truly
                 # orphaned. Reconciling it here would be a false "Process
                 # lost" verdict for a job that is not actually lost.
+                continue
+            if not jobs.is_orphan_reconcilable(instance_id, heartbeat_at, current_instance_id()):
+                # A different *instance* of this same role (e.g. a sibling
+                # `worker` process) holds this job and is still heartbeating --
+                # only that instance's own sync_jobs() pass may judge it lost.
+                # See job_store.py's _INSTANCE_ID docstring for the full
+                # rationale; this closes the gap the owner check above cannot
+                # (two same-role processes share one owner tag).
                 continue
             # The tracked parent is gone (server --reload / restart lost _JOBS),
             # but prose's detached workers run independently and may well have
@@ -2308,7 +2323,7 @@ def sync_jobs() -> None:
                     continue
                 _JOBS[key] = Job(key=key, inst=inst, date=date, target=target, cmd=cmd, proc=proc, logf=logf, log_path=pending_log_path, run_type=run_type, run_id=run_id, site=site, telescope=telescope, mode=mode, run_name=run_name)
                 try:
-                    store.save(type_="photometry", inst=inst, date=date, target=target, state="running", returncode=None, elapsed=0, started_at=_JOBS[key].started_at, run_type=run_type, params=entry.get("params", ""), run_id=run_id, run_name=run_name, owner=current_owner())
+                    store.save(type_="photometry", inst=inst, date=date, target=target, state="running", returncode=None, elapsed=0, started_at=_JOBS[key].started_at, run_type=run_type, params=entry.get("params", ""), run_id=run_id, run_name=run_name, owner=current_owner(), instance_id=current_instance_id())
                 except sqlite3.OperationalError as exc:
                     try: proc.terminate()
                     except OSError: pass
