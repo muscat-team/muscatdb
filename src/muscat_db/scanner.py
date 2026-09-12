@@ -6,11 +6,22 @@ import os
 import pathlib
 import time
 from concurrent.futures import ProcessPoolExecutor
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from muscat_db.instruments import INSTRUMENTS, OBSLOG_BASE, InstrumentConfig
 
 logger = logging.getLogger(__name__)
+
+
+def _is_obsdate_dir(name: str) -> bool:
+    """True only for a canonical YYMMDD directory name."""
+    if len(name) != 6 or not name.isdigit():
+        return False
+    try:
+        datetime.strptime(name, "%y%m%d")
+    except ValueError:
+        return False
+    return True
 
 # FITS header blocks are 2880 bytes; almost all real headers fit in <=8 blocks.
 _FITS_HEADER_MAX_BYTES = 2880 * 16
@@ -401,7 +412,8 @@ def scan_missing_dates(
         return scanned
     missing = [
         d for d in data_entries
-        if os.path.isdir(f"{data_dir}/{d}") and d.startswith(prefix) and d not in existing
+        if _is_obsdate_dir(d)
+        and os.path.isdir(f"{data_dir}/{d}") and d.startswith(prefix) and d not in existing
     ]
     if not missing:
         return scanned
