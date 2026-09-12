@@ -9,7 +9,7 @@ class InstrumentConfig:
     nccd: int
     data_subdir: str
     prefix: str
-    ep_names: list[str] | None = None
+    ep_names: list[str | tuple[str, ...]] | None = None
     keys: list[str] = field(default_factory=list)
     csv_header: str = ""
     has_pa: bool = False
@@ -73,15 +73,19 @@ MUSCAT3 = InstrumentConfig(
     use_alt_ut_key=True,
 )
 
-_MUSCAT4_EP_OLD = ["ep06", "ep07", "ep08", "ep10"]
-_MUSCAT4_EP_NEW = ["ep06", "ep07", "ep08", "ep09"]
+# CCD3 was renamed ep10 -> ep09 partway through muscat4's history (see #157).
+# Matching both keeps a plain scan finding pre-rename dates' existing files,
+# instead of a --force rescan seeing zero matches and overwriting a correct
+# CSV with an empty one.
+_MUSCAT4_CCD3_EP_NEW = "ep09"
+_MUSCAT4_CCD3_EP_OLD = "ep10"
 
 MUSCAT4 = InstrumentConfig(
     name="muscat4",
     nccd=4,
     data_subdir="MuSCAT4",
     prefix="coj2m002-",
-    ep_names=_MUSCAT4_EP_NEW,
+    ep_names=["ep06", "ep07", "ep08", (_MUSCAT4_CCD3_EP_NEW, _MUSCAT4_CCD3_EP_OLD)],
     keys=["OBJECT", "MJD-OBS", "UTSTART", "EXPTIME", "CONFMODE", "FILTER", "RA", "DEC", "AIRMASS", "FOCPOSN"],
     csv_header="FRAME,OBJECT,JD-STRT,UT-STRT,EXPTIME (s),READ_MODE,FILTER,RA,DEC,AIRMASS,FOCUS (mm)",
     has_pa=False,
