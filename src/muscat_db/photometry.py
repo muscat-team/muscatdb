@@ -126,6 +126,15 @@ RUN_DEFAULTS: dict = {
                                # not here -- see normalize_run_options).
 }
 
+# Defaults for the synchronous post-processing pass exposed on the photometry
+# page (templates/photometry.html post-process card). Unlike RUN_DEFAULTS these
+# never reach run_photometry; they are consumed only by /api/photometry/postprocess
+# via muscat_db.postprocess. Iterations is fixed at the prose2 pipeline default.
+POSTPROCESS_DEFAULTS: dict = {
+    "post_sigma": 5.0,
+    "post_poly_deg": 2,
+}
+
 # LCO instruments deployed across multiple sites/telescope units, needing
 # --site/--telescope disambiguation (unlike the single-site muscat/muscat2/
 # muscat3/muscat4). Mirrored from prose2's run_photometry.py.
@@ -194,6 +203,7 @@ _RUNS_DIR_NAME = "_runs"
 _RUN_META_NAME = "_webrun_meta.json"
 _CONDA_ENV_DEFAULT = "prose"   # prose deps live in a conda env named "prose"
 _MODULE = "prose.scripts.run_photometry"
+_POSTPROCESS_MODULE = "prose.scripts.postprocess_lightcurves"
 
 _DATE_RE = re.compile(r"^\d{6}$")
 # A served filename is a single path segment of safe characters only.
@@ -298,8 +308,8 @@ def _conda_env_python(env: str) -> str | None:
     return None
 
 
-def _prose_prefix() -> list[str]:
-    """Resolve how to invoke the prose pipeline, most robust first.
+def _prose_prefix(module: str = _MODULE, console_script: str | None = "photometry") -> list[str]:
+    """Resolve how to invoke a prose pipeline entrypoint, most robust first.
 
     Prefers the ``photometry`` console script installed into the prose conda
     env (``prose.scripts.run_photometry:main`` per prose2's ``pyproject.toml``)
@@ -309,23 +319,28 @@ def _prose_prefix() -> list[str]:
     ``pip install git+...@<sha>`` for #101) rather than a checkout pointed at
     by cwd, so the launch path no longer needs cwd for ``sys.path`` injection
     (see ``start_run``, which now runs with the job's own output dir as cwd).
+
+    ``console_script`` may be ``None`` for entrypoints with no console script
+    (e.g. ``prose.scripts.postprocess_lightcurves``), forcing module
+    invocation.
     """
     explicit = prose_python()
     if explicit:
-        return [explicit, "-m", _MODULE]
+        return [explicit, "-m", module]
     env = prose_conda_env()
     conda_py = _conda_env_python(env)
     if conda_py:
-        photometry_path = Path(conda_py).parent / "photometry"
-        if photometry_path.is_file():
-            return [str(photometry_path)]
-        return [conda_py, "-m", _MODULE]
+        if console_script:
+            script_path = Path(conda_py).parent / console_script
+            if script_path.is_file():
+                return [str(script_path)]
+        return [conda_py, "-m", module]
     if shutil.which("conda"):
         return ["conda", "run", "-n", env, "--no-capture-output",
-                "python", "-m", _MODULE]
+                "python", "-m", module]
     # Last resort: let uv resolve an interpreter from the project directory.
     return ["uv", "run", "--project", str(prose_project_dir()),
-            "python", "-m", _MODULE]
+            "python", "-m", module]
 
 
 def valid_date(date: str) -> bool:
