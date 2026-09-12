@@ -124,6 +124,11 @@ def deploy_env(tmp_path):
         "bin_dir": bin_dir,
         "uv_marker": uv_marker,
         "tmux_marker": tmux_marker,
+        # A nonexistent path so every test is isolated from whatever webhook
+        # file the host it runs on actually has installed (see issue #162) --
+        # tests that want a present or unreadable webhook file override this
+        # via env_extra.
+        "default_env": {"SLACK_WEBHOOK_FILE": str(tmp_path / "no-such-slack-webhook")},
     }
 
 
@@ -136,6 +141,7 @@ def _run(env, branch="main", session="test-session", port="9999", env_extra=None
     # the script) untouched.
     full_env["PULL_DEPLOY_HEALTH_TIMEOUT_S"] = "2"
     full_env["PULL_DEPLOY_HEALTH_INTERVAL_S"] = "0.2"
+    full_env.update(env["default_env"])
     if env_extra:
         full_env.update(env_extra)
     return subprocess.run(
