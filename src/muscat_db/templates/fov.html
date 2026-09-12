@@ -39,6 +39,9 @@
   .fov-msg.err { color: var(--red); }
   .fov-msg.ok { color: var(--green); }
 
+  #fov-observed-note { font-size: 0.8rem; color: var(--text-dim); line-height: 1.5; margin-top: 0.3rem; margin-bottom: 0.7rem; padding: 0.4rem 0.5rem; background: var(--bg-subtle, rgba(255,255,255,0.03)); border-radius: 4px; }
+  #fov-observed-note .warn { color: var(--amber, #f59e0b); font-weight: 600; }
+
   .fov-summary { display: grid; gap: 0.6rem 1rem; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
   .fov-stat { display: flex; flex-direction: column; gap: 0.15rem; }
   .fov-stat .k { font-size: 0.68rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; }
@@ -135,7 +138,14 @@
           <label for="fov-avoid-mag">Avoid brighter than (Gmag) <span class="help-tooltip" title="Reject any pointing whose footprint contains a star brighter than this Gmag (saturation, bleeding, scattered light). The science target is exempt. Leave empty to disable.">?</span></label>
           <input id="fov-avoid-mag" type="number" step="any" placeholder="(off)">
         </div>
+        <div class="fov-field" id="fov-observed-field" style="display: none;">
+          <label for="fov-observed-date">Overlay observed pointing <span class="help-tooltip" title="Show the actual telescope pointing (RA/Dec/PA) used on a previously observed night for this target, overlaid on the sky view for comparison with the proposed footprint above.">?</span></label>
+          <select id="fov-observed-date">
+            <option value="">— none —</option>
+          </select>
+        </div>
       </div>
+      <div id="fov-observed-note" style="display: none;"></div>
       <div style="margin-top: 0.7rem; display: flex; align-items: center; gap: 0.6rem;">
         <input id="fov-allow-rotation" type="checkbox" style="width: 1.1rem; height: 1.1rem; cursor: pointer;">
         <label for="fov-allow-rotation" style="cursor: pointer; font-size: 0.85rem; margin: 0;">Allow field rotation (optimize position angle)</label>
@@ -184,6 +194,7 @@
         <span><span class="swatch" style="background:#45d6b5;"></span> Comparison stars (size ∝ usefulness)</span>
         <span><span class="swatch" style="background:#f5a623;"></span> Avoided stars (too bright)</span>
         <span><span class="swatch" style="background:#6c8cff; border-radius:2px;"></span> Optimized footprint</span>
+        <span id="fov-observed-legend" style="display:none;"><span class="swatch" style="background:#c04cfd; border-radius:2px;"></span> Observed footprint (previous run)</span>
         <span class="fov-pm-legend" style="display:none;"><span style="color:#ff5470; font-weight:bold; font-size:1.1rem; line-height:1; margin-right:0.15rem;">➔</span> Target proper motion</span>
         <span class="fov-pm-legend" style="display:none;"><span style="color:#45d6b5; font-weight:bold; font-size:1.1rem; line-height:1; margin-right:0.15rem;">➔</span> Comparison proper motion</span>
       </div>
@@ -323,6 +334,34 @@
       comparison star with an arrow parallel to, and about as long as, the
       target's suggests a common proper-motion (co-moving) companion.
     </p>
+
+    <h4>6. Compare against a previously observed pointing</h4>
+    <p>
+      The <strong>"Overlay observed pointing"</strong> dropdown (shown once a
+      previous observation of this target is found) lists every night this
+      target was actually observed, across all instruments. Picking one draws
+      its real footprint (magenta) alongside the optimized one, from the
+      pointing actually used that night &mdash; not a proposal &mdash; read
+      straight from the frames obslog rather than the Gaia-driven optimizer
+      above. The
+      footprint size reflects the read mode that night actually used; the
+      orientation reflects the recorded position angle where the instrument
+      logs one (muscat/muscat2) and is drawn unrotated (PA=0&deg;) otherwise,
+      since muscat3/muscat4/sinistro/sbig/qhy600 frames don't currently record
+      a PA. The view re-centers to fit both the target and the observed
+      footprint, so an oddly offset night doesn't end up silently
+      off-screen.
+    </p>
+    <p>
+      A note under the field lists the separation between the observed
+      pointing and the current target position, flagged when it puts the
+      target outside that night's footprint entirely &mdash; a real telescope
+      pointing error, not a display bug. <strong>MuSCAT and MuSCAT2 frames
+      carry no native WCS</strong>: their header RA/Dec is only the TCS's own
+      belief about where it was pointed, never independently plate-solved, so
+      it can be unreliable &mdash; the note flags this for every muscat/muscat2
+      overlay.
+    </p>
   </div>
 </details>
 
@@ -336,6 +375,7 @@
 
   let aladin = null;
   let footprintOverlay = null;
+  let observedFootprintOverlay = null;
   let compCatalog = null;
   let avoidCatalog = null;
   let targetCatalog = null;
@@ -356,6 +396,8 @@
     });
     footprintOverlay = A.graphicOverlay({ color: '#6c8cff', lineWidth: 2 });
     aladin.addOverlay(footprintOverlay);
+    observedFootprintOverlay = A.graphicOverlay({ color: '#c04cfd', lineWidth: 2 });
+    aladin.addOverlay(observedFootprintOverlay);
     highlightOverlay = A.graphicOverlay({ color: '#ffff00', lineWidth: 3 });
     aladin.addOverlay(highlightOverlay);
     pmOverlay = A.graphicOverlay({ color: '#45d6b5', lineWidth: 2 });
@@ -441,6 +483,7 @@
 
     overplot(result);
     renderPmArrows(result);
+    refreshObservedDates(result.target || $('fov-target').value);
   }
 
   function overplot(result) {
@@ -580,6 +623,151 @@
   function clearHighlightCompStar() {
     if (!highlightOverlay) return;
     highlightOverlay.removeAll();
+  }
+
+  // ---- Observed-pointing overlay (what FOV a previous run actually used) ----
+  let observedDates = [];
+
+  function clearObservedFootprint() {
+    if (observedFootprintOverlay) observedFootprintOverlay.removeAll();
+    $('fov-observed-legend').style.display = 'none';
+    $('fov-observed-note').style.display = 'none';
+  }
+
+  // Flat-sky (cos-dec-scaled) separation -- fine at these FOV/arcmin scales.
+  function angularSeparationArcsec(ra1, dec1, ra2, dec2) {
+    const rad = Math.PI / 180;
+    const dRa = (ra2 - ra1) * Math.cos(((dec1 + dec2) / 2) * rad);
+    const dDec = dec2 - dec1;
+    return Math.hypot(dRa, dDec) * 3600;
+  }
+
+  function fmtSeparation(arcsec) {
+    if (arcsec < 60) return arcsec.toFixed(0) + '″';
+    if (arcsec < 3600) return (arcsec / 60).toFixed(1) + '′';
+    return (arcsec / 3600).toFixed(2) + '°';
+  }
+
+  // Re-centers/zooms so the observed footprint is never silently off-screen
+  // -- a night whose recorded pointing is well off the target would
+  // otherwise sit outside the view the optimizer result left us in.
+  function fitViewToPoints(points) {
+    if (!aladin || !points.length) return;
+    const ras = points.map((p) => p[0]);
+    const decs = points.map((p) => p[1]);
+    const centerDec = (Math.min(...decs) + Math.max(...decs)) / 2;
+    const cosDec = Math.cos(centerDec * Math.PI / 180) || 1e-6;
+    const raSpanDeg = (Math.max(...ras) - Math.min(...ras)) * cosDec;
+    const decSpanDeg = Math.max(...decs) - Math.min(...decs);
+    aladin.gotoRaDec((Math.min(...ras) + Math.max(...ras)) / 2, centerDec);
+    aladin.setFoV(Math.max(raSpanDeg, decSpanDeg, 0.01) * 1.6);
+  }
+
+  function buildObservedNote(data, separationArcsec) {
+    const bits = [`RA ${data.ra.toFixed(5)}°, Dec ${data.dec.toFixed(5)}°`];
+    if (data.pa_available) bits.push(`PA ${data.pa_deg.toFixed(1)}°`);
+    if (separationArcsec !== null) {
+      const farFromTarget = separationArcsec > data.fov_arcsec / 2;
+      const text = `${fmtSeparation(separationArcsec)} from target`;
+      bits.push(farFromTarget ? `<span class="warn">⚠ ${text} — outside footprint</span>` : text);
+    }
+    const lines = [bits.join(' · ')];
+    if (data.has_native_wcs === false) {
+      lines.push('<span class="warn">⚠ no native WCS — pointing unverified</span>');
+    }
+    return lines.join('<br>');
+  }
+
+  function observedKey(d) {
+    return [d.instrument, d.date, d.object].join('\x1f');
+  }
+
+  function populateObservedDatesSelect(dates) {
+    const select = $('fov-observed-date');
+    const field = $('fov-observed-field');
+    const prev = select.selectedIndex > 0
+      ? observedKey(observedDates[select.selectedIndex - 1])
+      : '';
+    observedDates = dates;
+    select.innerHTML = '';
+    const noneOpt = document.createElement('option');
+    noneOpt.value = '0';
+    noneOpt.textContent = dates.length ? '— none —' : '(no previous observations found)';
+    select.appendChild(noneOpt);
+    dates.forEach((d, i) => {
+      const opt = document.createElement('option');
+      opt.value = String(i + 1);
+      opt.textContent = `${d.instrument} · ${d.date} (${d.object}, ${d.n_frames} frames)`;
+      select.appendChild(opt);
+    });
+    const idx = dates.findIndex((d) => observedKey(d) === prev);
+    select.selectedIndex = idx >= 0 ? idx + 1 : 0;
+    field.style.display = dates.length ? '' : 'none';
+    if (idx < 0) clearObservedFootprint();
+  }
+
+  async function refreshObservedDates(target) {
+    target = (target || '').trim();
+    if (!target) {
+      populateObservedDatesSelect([]);
+      return;
+    }
+    try {
+      const resp = await fetch('/api/fov/observed-dates?target=' + encodeURIComponent(target));
+      const data = await resp.json();
+      populateObservedDatesSelect((data.ok && data.dates) ? data.dates : []);
+    } catch (e) {
+      populateObservedDatesSelect([]);
+    }
+  }
+
+  async function loadObservedFootprint() {
+    const select = $('fov-observed-date');
+    clearObservedFootprint();
+    if (!select.selectedIndex || !aladin) return;
+    const d = observedDates[select.selectedIndex - 1];
+    const inst = d.instrument;
+    const obsdate = d.date;
+    const obj = d.object;
+    setMsg('Loading observed pointing…');
+    try {
+      const resp = await fetch(
+        '/api/fov/observed-pointing?inst=' + encodeURIComponent(inst) +
+        '&obsdate=' + encodeURIComponent(obsdate) + '&obj=' + encodeURIComponent(obj)
+      );
+      const data = await resp.json();
+      if (!data.ok) {
+        setMsg(data.error || 'Could not load the observed pointing.', 'err');
+        return;
+      }
+      setMsg('');
+
+      const fitPoints = [];
+      if (Array.isArray(data.footprint) && data.footprint.length) {
+        const poly = data.footprint.map((p) => [p[0], p[1]]);
+        poly.push(poly[0]);
+        observedFootprintOverlay.add(A.polygon(poly));
+        $('fov-observed-legend').style.display = '';
+        fitPoints.push(...data.footprint);
+      }
+
+      const targetRa = parseFloat($('fov-ra').value);
+      const targetDec = parseFloat($('fov-dec').value);
+      const hasTarget = Number.isFinite(targetRa) && Number.isFinite(targetDec);
+      let separationArcsec = null;
+      if (hasTarget) {
+        separationArcsec = angularSeparationArcsec(targetRa, targetDec, data.ra, data.dec);
+        fitPoints.push([targetRa, targetDec]);
+      }
+
+      const note = $('fov-observed-note');
+      note.innerHTML = buildObservedNote(data, separationArcsec);
+      note.style.display = '';
+
+      fitViewToPoints(fitPoints.length ? fitPoints : [[data.ra, data.dec]]);
+    } catch (e) {
+      setMsg('Request failed: ' + e, 'err');
+    }
   }
 
   function getParams() {
@@ -754,6 +942,7 @@
       allowRotation: !sp.has('fixpa') && (stored?.allowRotation === true),
     };
     setParams(p);
+    refreshObservedDates(p.target);
   }
 
   async function run() {
@@ -828,6 +1017,7 @@
       setMsg(`Resolved to RA ${data.ra}°, Dec ${data.dec}°`, 'ok');
       setTimeout(() => setMsg(''), 3000);
       if (aladin) aladin.gotoRaDec(parseFloat(data.ra), parseFloat(data.dec));
+      refreshObservedDates(target);
     } catch (e) {
       setMsg('Request failed: ' + e, 'err');
     } finally {
@@ -925,6 +1115,8 @@
   $('fov-inst').addEventListener('change', () => updateReadoutModeOptions($('fov-inst').value));
   $('fov-dec').addEventListener('change', updateInstrumentAvailability);
   $('fov-target').addEventListener('keydown', (e) => { if (e.key === 'Enter') resolveTarget(); });
+  $('fov-target').addEventListener('blur', () => refreshObservedDates($('fov-target').value));
+  $('fov-observed-date').addEventListener('change', loadObservedFootprint);
   $('fov-mag-mode').addEventListener('change', function () {
     const mode = this.value;
     if (mode === 'absolute') {

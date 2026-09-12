@@ -136,6 +136,7 @@ from muscat_db.database import (
     get_dates as _get_dates,
     get_frames as _get_frames,
     get_frame_objects as _get_frame_objects,
+    get_observed_pointing as _get_observed_pointing,
     get_exposure_log_for_objects as _get_exposure_log_for_objects,
     get_instruments as _get_instruments,
     get_instruments_summary as _get_instruments_summary,
@@ -3590,6 +3591,101 @@ def api_fov_observable():
             "latitude": fov_opt.OBSERVATORY_LOCATIONS.get(inst, 0.0),
         }
     return JSONResponse({"ok": True, "observable": observable})
+
+
+def _fov_half_arcsec_for_mode(inst: str, read_mode: str | None) -> float:
+    """Field half-width for the specific read_mode a past frame was taken in.
+
+    Falls back to the instrument's default footprint when the mode is
+    unknown/unrecorded, mirroring the mode-aware sizing in fov.optimize().
+    """
+    inst_modes = fov_opt.MULTISITE_MODE_HALFSIZES.get(inst)
+    if inst_modes and read_mode in inst_modes:
+        return inst_modes[read_mode]
+    return fov_opt.load_fov_halfsize_arcsec(inst)
+
+
+@fov_router.get("/observed-dates", response_class=JSONResponse)
+def api_fov_observed_dates(target: str = ""):
+    """List previously observed (instrument, date, object) datasets for a target.
+
+    Feeds the FOV page's "overlay an observed pointing" dropdown -- every
+    night this target was actually observed, across all instruments, newest
+    first (not scoped to the instrument currently selected in the planner:
+    seeing where a *different* instrument pointed is often exactly the point).
+    """
+    target = (target or "").strip()
+    if not target:
+        return JSONResponse({"ok": False, "error": "Target name is required."}, status_code=400)
+
+    norm_name = _normalize_target_name(target)
+    datasets, _last_updated = _get_datasets_for_normalized_target(_db_path(), norm_name)
+
+    seen: set[tuple[str, str, str]] = set()
+    dates = []
+    for d in datasets:
+        key = (d["instrument"], d["date"], d["object"])
+        if key in seen:
+            continue
+        seen.add(key)
+        dates.append({
+            "instrument": d["instrument"],
+            "date": d["date"],
+            "object": d["object"],
+            "n_frames": d["n_frames"],
+        })
+    return JSONResponse({"ok": True, "target": norm_name, "dates": dates})
+
+
+@fov_router.get("/observed-pointing", response_class=JSONResponse)
+def api_fov_observed_pointing(inst: str = "", obsdate: str = "", obj: str = ""):
+    """Actual RA/Dec/PA footprint used on one previously observed night.
+
+    Unlike /fov/optimize (which proposes a *new* pointing from Gaia), this
+    reads back what the telescope was actually pointed at, so it can be
+    overlaid on the same sky view for comparison.
+    """
+    inst = (inst or "").strip()
+    obsdate = (obsdate or "").strip()
+    obj = (obj or "").strip()
+    if inst not in _FOV_INSTRUMENTS or not obsdate or not obj:
+        return JSONResponse(
+            {"ok": False, "error": "inst, obsdate, and obj are all required."},
+            status_code=400,
+        )
+
+    pointing = _get_observed_pointing(_db_path(), inst, obsdate, obj)
+    if pointing is None:
+        return JSONResponse(
+            {"ok": False, "error": f"No usable pointing found for {obj!r} on {inst}/{obsdate}."},
+        )
+
+    try:
+        half = _fov_half_arcsec_for_mode(inst, pointing.get("read_mode"))
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+
+    pa_available = pointing["pa_deg"] is not None
+    pa_deg = pointing["pa_deg"] if pa_available else 0.0
+    footprint = fov_opt.footprint_corners_radec(
+        0.0, 0.0, half, pa_deg, pointing["ra_deg"], pointing["dec_deg"]
+    )
+    return JSONResponse({
+        "ok": True,
+        "instrument": inst,
+        "obsdate": obsdate,
+        "object": obj,
+        "ccd": pointing["ccd"],
+        "ra": pointing["ra_deg"],
+        "dec": pointing["dec_deg"],
+        "pa_deg": pointing["pa_deg"],
+        "pa_available": pa_available,
+        "read_mode": pointing.get("read_mode"),
+        "fov_arcsec": half * 2.0,
+        "footprint": footprint,
+        "n_frames": pointing["n_frames"],
+        "has_native_wcs": INSTRUMENTS[inst].has_wcs,
+    })
 
 
 @app.get("/ephemeris", response_class=HTMLResponse)

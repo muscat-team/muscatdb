@@ -16,6 +16,10 @@ class InstrumentConfig:
     focus_label: str = "FOCUS (mm)"
     airmass_key: str = "SECZ"
     use_alt_ut_key: bool = False
+    # Whether frames from this instrument carry a plate-solved WCS. False for
+    # muscat/muscat2: their header RA/Dec is only the TCS's own belief about
+    # where it was pointed, never independently verified against the sky.
+    has_wcs: bool = True
 
     @property
     def data_dir(self) -> str:
@@ -38,6 +42,7 @@ MUSCAT = InstrumentConfig(
     focus_label="FOCUS (mm)",
     airmass_key="SECZ",
     use_alt_ut_key=False,
+    has_wcs=False,
 )
 
 MUSCAT2 = InstrumentConfig(
@@ -51,6 +56,7 @@ MUSCAT2 = InstrumentConfig(
     focus_label="FOCUS (um)",
     airmass_key="AIRMASS",
     use_alt_ut_key=False,
+    has_wcs=False,
 )
 
 MUSCAT3 = InstrumentConfig(

@@ -65,6 +65,26 @@ def clean_dec(value: str | None) -> str | None:
     return _clean(value, _DEC_RE)
 
 
+def sexagesimal_to_deg(ra: str | None, dec: str | None) -> tuple[float, float] | None:
+    """Convert a sexagesimal ``(ra, dec)`` header pair to decimal degrees.
+
+    Runs the values through :func:`clean_ra`/:func:`clean_dec` first (which
+    also recovers the dropped-decimal-seconds TCS bug), so this accepts raw
+    header strings directly -- including the output of
+    :func:`pick_representative`. Returns ``None`` if either coordinate is not
+    a well-formed sexagesimal string.
+    """
+    cra, cdec = clean_ra(ra), clean_dec(dec)
+    if cra is None or cdec is None:
+        return None
+    rh, rm, rs = cra.split(":")
+    ra_deg = (float(rh) + float(rm) / 60.0 + float(rs) / 3600.0) * 15.0
+    sign = -1.0 if cdec.startswith("-") else 1.0
+    dd, dm, ds = cdec.lstrip("+-").split(":")
+    dec_deg = sign * (float(dd) + float(dm) / 60.0 + float(ds) / 3600.0)
+    return ra_deg, dec_deg
+
+
 def _dec_to_arcsec(dec: str) -> float:
     """Signed declination in arcseconds, for ordering."""
     s = dec.strip()
