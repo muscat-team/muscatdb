@@ -547,6 +547,12 @@ ut2 (web host)                          ut3 / ut6 / … (worker hosts)
   store.
 - **Cluster-wide concurrency cap** enforced in SQL — correct across hosts, replacing the
   per-process `_MAX_FULL_JOBS` integer.
+- **Per-host concurrency cap** (opt-in, `MUSCAT_WORKER_MAX_SLOTS`): a second, orthogonal
+  `claim_slot` predicate capping total full runs per host across every pipeline combined, so a
+  small host doesn't accept as many heavy jobs as the cluster-wide cap alone would let it
+  attempt. Unset (default) applies no host limit. Replaces an earlier `os.getloadavg()`-sampling
+  proposal (never implemented, rejected): sampled load lags an actual claim and can wedge the
+  whole cluster when a host's ambient, non-muscat load already sits above threshold.
 - **Backpressure**: excess jobs wait durably in the queue; nothing is dropped on a worker
   outage.
 

@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import time
 
+from muscat_db import job_store
+
 
 def save(store, *, target, state, started_at, type_="photometry", run_id="", **kw):
     store.save(
@@ -144,6 +146,45 @@ class JobStoreContractTests:
 
     def test_reconcile_on_empty_pipeline_is_noop(self, store):
         assert store.reconcile_slots("photometry") == 0
+
+    # --- per-host concurrency cap (architecture issue #51's rejected
+    # os.getloadavg() replacement) --------------------------------------
+    #
+    # MUSCAT_WORKER_MAX_SLOTS (job_store._WORKER_MAX_SLOTS) is an opt-in
+    # second predicate on claim_slot: it caps total concurrent slots on
+    # *this host* (job_store._HOST), summed across every pipeline combined
+    # -- orthogonal to the per-pipeline cluster-wide cap tested above. Unset
+    # (the default, and every other test in this file) must not change
+    # claim_slot's behavior at all.
+
+    def test_claim_slot_has_no_host_cap_by_default(self, store):
+        for i in range(5):
+            assert store.claim_slot("photometry", f"inst/date/P{i}", 10) is True
+        for i in range(5):
+            assert store.claim_slot("transit_fit", f"inst/date/T{i}", 10) is True
+
+    def test_claim_slot_respects_host_cap_across_pipelines(self, store, monkeypatch):
+        """The host cap is one shared budget across ALL pipelines, not a
+        separate budget per pipeline: a claim for a different pipeline on the
+        same host must still be denied once the host budget is spent, even
+        though that pipeline's own max_slots has plenty of room."""
+        monkeypatch.setattr(job_store, "_WORKER_MAX_SLOTS", 1)
+        assert store.claim_slot("photometry", "inst/date/A", 10) is True
+        assert store.claim_slot("transit_fit", "inst/date/B", 10) is False
+
+    def test_claim_slot_host_cap_ignores_other_hosts_claims(self, store, monkeypatch):
+        """A claim made under a different _HOST must not count against this
+        host's budget -- proven here by spending this host's own budget (1)
+        on a *second* claim after the other host's, then requiring a third
+        claim to be denied. A no-op host predicate would let all three
+        through (the pipeline cap alone is 10), so this fails loudly if the
+        host-scoping is ever accidentally dropped."""
+        monkeypatch.setattr(job_store, "_WORKER_MAX_SLOTS", 1)
+        monkeypatch.setattr(job_store, "_HOST", "other-host")
+        assert store.claim_slot("photometry", "inst/date/A", 10) is True
+        monkeypatch.setattr(job_store, "_HOST", "this-host")
+        assert store.claim_slot("photometry", "inst/date/B", 10) is True
+        assert store.claim_slot("photometry", "inst/date/C", 10) is False
 
     # --- owner tagging (architecture issue #51 step 1 follow-up) ------
     #
