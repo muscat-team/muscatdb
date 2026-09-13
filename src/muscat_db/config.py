@@ -253,6 +253,18 @@ ENV_VARS: tuple[EnvVar, ...] = (
     ),
     EnvVar("MUSCAT_MAX_FULL_JOBS", "1", "Concurrent full runs allowed per pipeline across all processes sharing the database; 0 disables full runs (use on a staging instance so it cannot compete with production)"),
     EnvVar("MUSCAT_MAX_TEST_JOBS", "4", "Concurrent test runs allowed per pipeline (full runs use durable slots)"),
+    EnvVar(
+        "MUSCAT_WORKER_MAX_SLOTS",
+        None,
+        "Per-host cap on concurrent full runs across ALL pipelines combined on "
+        "this host (one shared budget, not per-pipeline); unset (default) means "
+        "no host-level cap -- only the cluster-wide MUSCAT_MAX_FULL_JOBS cap "
+        "applies. Set on a host whose hardware can't handle as many concurrent "
+        "heavy jobs as the cluster cap alone would let it attempt. Note: slots "
+        "already claimed before this was set are not attributed to any host, "
+        "so the cap is not exact until those pre-existing jobs finish and "
+        "release their slots.",
+    ),
     EnvVar("MUSCAT_PHOT_FINALIZE_GRACE_TERMINAL_S", "2", "Photometry finalizing grace once a terminal log marker is seen (seconds)"),
     EnvVar("MUSCAT_FIT_FINALIZE_GRACE_S", "8", "Transit-fit finalizing grace after parent exit (seconds)"),
     EnvVar("MUSCAT_FIT_FINALIZE_GRACE_TERMINAL_S", "2", "Transit-fit finalizing grace once a terminal log marker is seen (seconds)"),

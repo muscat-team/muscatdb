@@ -159,7 +159,13 @@ class JobConcurrency(Protocol):
         Returns True only if this call newly claimed the slot; False if
         *holder_key* is already claimed (by this or another caller) or all
         slots are taken. Never silently double-claims the same key, so two
-        processes racing to launch the same job never both proceed."""
+        processes racing to launch the same job never both proceed.
+
+        When ``MUSCAT_WORKER_MAX_SLOTS`` is set, also enforces a second,
+        orthogonal cap: total slots held by :func:`current_host` across every
+        pipeline combined. Unset (the default), this call is unaffected --
+        only the cluster-wide *pipeline* cap above applies. See
+        :data:`_WORKER_MAX_SLOTS`."""
         ...
 
     def release_slot(self, pipeline: str, holder_key: str) -> None:
@@ -309,22 +315,42 @@ class DatabaseJobStore(JobRepository, JobQueue, JobConcurrency):
         # single claim that actually won, so two racing launches for the same
         # key never both proceed.
         with database.get_conn() as conn:
-            conn.executescript(database.SCHEMA)
-            cur = conn.execute(
-                """
-                INSERT OR IGNORE INTO job_concurrency_slots (pipeline, holder_key, claimed_at)
-                SELECT ?, ?, ?
-                WHERE (SELECT COUNT(*) FROM job_concurrency_slots WHERE pipeline = ?) < ?
-                """,
-                (pipeline, holder_key, time.time(), pipeline, max_slots),
-            )
+            database._ensure_job_concurrency_slots_schema(conn)
+            if _WORKER_MAX_SLOTS is None:
+                # No host cap configured: run the exact query this method has
+                # always run, so an unconfigured host's behavior (and SQL) is
+                # byte-for-byte unchanged by this feature's existence.
+                cur = conn.execute(
+                    """
+                    INSERT OR IGNORE INTO job_concurrency_slots (pipeline, holder_key, claimed_at)
+                    SELECT ?, ?, ?
+                    WHERE (SELECT COUNT(*) FROM job_concurrency_slots WHERE pipeline = ?) < ?
+                    """,
+                    (pipeline, holder_key, time.time(), pipeline, max_slots),
+                )
+            else:
+                # Second predicate: total slots held by this host across ALL
+                # pipelines combined must also be under _WORKER_MAX_SLOTS.
+                # Still one atomic INSERT ... SELECT ... WHERE -- SQLite's
+                # writer serialization covers both counts the same way it
+                # covers the single count above.
+                cur = conn.execute(
+                    """
+                    INSERT OR IGNORE INTO job_concurrency_slots (pipeline, holder_key, claimed_at, host)
+                    SELECT ?, ?, ?, ?
+                    WHERE (SELECT COUNT(*) FROM job_concurrency_slots WHERE pipeline = ?) < ?
+                      AND (SELECT COUNT(*) FROM job_concurrency_slots WHERE host = ?) < ?
+                    """,
+                    (pipeline, holder_key, time.time(), _HOST,
+                     pipeline, max_slots, _HOST, _WORKER_MAX_SLOTS),
+                )
             conn.commit()
         return cur.rowcount > 0
 
     def release_slot(self, pipeline: str, holder_key: str) -> None:
         try:
             with database.get_conn() as conn:
-                conn.executescript(database.SCHEMA)
+                database._ensure_job_concurrency_slots_schema(conn)
                 conn.execute(
                     "DELETE FROM job_concurrency_slots WHERE pipeline = ? AND holder_key = ?",
                     (pipeline, holder_key),
@@ -338,7 +364,7 @@ class DatabaseJobStore(JobRepository, JobQueue, JobConcurrency):
 
     def count_claimed(self, pipeline: str) -> int:
         with database.get_conn() as conn:
-            conn.executescript(database.SCHEMA)
+            database._ensure_job_concurrency_slots_schema(conn)
             row = conn.execute(
                 "SELECT COUNT(*) FROM job_concurrency_slots WHERE pipeline = ?",
                 (pipeline,),
@@ -347,7 +373,7 @@ class DatabaseJobStore(JobRepository, JobQueue, JobConcurrency):
 
     def reconcile_slots(self, pipeline: str) -> int:
         with database.get_conn() as conn:
-            conn.executescript(database.SCHEMA)
+            database._ensure_job_concurrency_slots_schema(conn)
             holder_keys = [
                 r[0] for r in conn.execute(
                     "SELECT holder_key FROM job_concurrency_slots WHERE pipeline = ?",
@@ -407,6 +433,7 @@ CREATE TABLE IF NOT EXISTS job_concurrency_slots (
     pipeline    TEXT NOT NULL,
     holder_key  TEXT NOT NULL,
     claimed_at  DOUBLE PRECISION NOT NULL,
+    host        TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (pipeline, holder_key)
 );
 """
@@ -433,12 +460,21 @@ _PG_JOBS_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
 ]
 
 
+_PG_JOB_CONCURRENCY_SLOTS_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
+    ("host", "TEXT NOT NULL DEFAULT ''"),
+]
+
+
 def _ensure_pg_jobs_schema(conn) -> None:
-    """Create the control-plane tables if absent, then add any `jobs` column
-    a pre-existing table predates (see _PG_JOBS_COLUMN_MIGRATIONS above)."""
+    """Create the control-plane tables if absent, then add any `jobs` /
+    `job_concurrency_slots` column a pre-existing table predates (see
+    _PG_JOBS_COLUMN_MIGRATIONS / _PG_JOB_CONCURRENCY_SLOTS_COLUMN_MIGRATIONS
+    above)."""
     conn.execute(_PG_SCHEMA)
     for col, col_type in _PG_JOBS_COLUMN_MIGRATIONS:
         conn.execute(f"ALTER TABLE jobs ADD COLUMN IF NOT EXISTS {col} {col_type}")
+    for col, col_type in _PG_JOB_CONCURRENCY_SLOTS_COLUMN_MIGRATIONS:
+        conn.execute(f"ALTER TABLE job_concurrency_slots ADD COLUMN IF NOT EXISTS {col} {col_type}")
 
 
 def _pg_rows_to_dicts(columns: list[str], rows: list[tuple]) -> list[dict]:
@@ -637,16 +673,49 @@ class PostgresJobStore(JobRepository, JobQueue, JobConcurrency):
             # the pipeline name, serializes claims for that pipeline across
             # every connection/host and releases automatically at this
             # transaction's COMMIT/ROLLBACK, so it never needs an explicit
-            # unlock or leaks past a crash.
+            # unlock or leaks past a crash. Deliberately left in this
+            # single-argument form (not switched to the two-argument form used
+            # by the host lock below): Postgres's advisory-lock keyspaces for
+            # the one-arg and two-arg overloads are disjoint by construction,
+            # regardless of the values passed, so changing this call's form
+            # would silently stop it from serializing against an old-code
+            # process's identical call during a rolling deploy -- reopening
+            # the very race this lock exists to close, even when the new host
+            # cap below is never configured. The two-arg form is only used for
+            # the *new* host lock, which needs no such backward compatibility
+            # (no prior call to be compatible with) and gets its collision
+            # safety from being in an already-disjoint keyspace instead.
             conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (pipeline,))
+            if _WORKER_MAX_SLOTS is None:
+                cur = conn.execute(
+                    """
+                    INSERT INTO job_concurrency_slots (pipeline, holder_key, claimed_at)
+                    SELECT %s, %s, %s
+                    WHERE (SELECT COUNT(*) FROM job_concurrency_slots WHERE pipeline = %s) < %s
+                    ON CONFLICT (pipeline, holder_key) DO NOTHING
+                    """,
+                    (pipeline, holder_key, time.time(), pipeline, max_slots),
+                )
+                return cur.rowcount > 0
+            # The host cap spans ALL pipelines combined, so a claim for a
+            # *different* pipeline on the same host would take a different
+            # pipeline-keyed lock above and not be mutually exclusive with
+            # this one -- both could read the same pre-commit host COUNT and
+            # over-grant. A second lock, keyed on host (not pipeline), closes
+            # that gap. Always acquired after the pipeline lock, at every call
+            # site, so two claims can never wait on each other in reverse
+            # order (no ABBA deadlock).
+            conn.execute("SELECT pg_advisory_xact_lock(1, hashtext(%s))", (_HOST,))
             cur = conn.execute(
                 """
-                INSERT INTO job_concurrency_slots (pipeline, holder_key, claimed_at)
-                SELECT %s, %s, %s
+                INSERT INTO job_concurrency_slots (pipeline, holder_key, claimed_at, host)
+                SELECT %s, %s, %s, %s
                 WHERE (SELECT COUNT(*) FROM job_concurrency_slots WHERE pipeline = %s) < %s
+                  AND (SELECT COUNT(*) FROM job_concurrency_slots WHERE host = %s) < %s
                 ON CONFLICT (pipeline, holder_key) DO NOTHING
                 """,
-                (pipeline, holder_key, time.time(), pipeline, max_slots),
+                (pipeline, holder_key, time.time(), _HOST,
+                 pipeline, max_slots, _HOST, _WORKER_MAX_SLOTS),
             )
             return cur.rowcount > 0
 
@@ -797,3 +866,40 @@ _INSTANCE_ID = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
 def current_instance_id() -> str:
     """This process's unique instance identity -- see :data:`_INSTANCE_ID`."""
     return _INSTANCE_ID
+
+
+# Per-*host* concurrency cap (architecture issue #51), distinct from both
+# _OWNER (per-role) and _INSTANCE_ID (per-process) above. issue #51 originally
+# proposed gating job pickup on a sampled os.getloadavg() reading -- never
+# implemented, and rejected here: sampled load lags an actual claim (a host
+# that just started a heavy job still looks idle for a while), and it can
+# wedge the whole cluster if every host's *ambient* load -- including
+# unrelated non-muscat activity -- already sits above threshold, so nothing
+# ever gets claimed anywhere even when real capacity exists.
+#
+# Replacement: a second, opt-in predicate on claim_slot, keyed on hostname,
+# capping total slots held by *this host* across ALL pipelines combined (one
+# shared budget, not per-pipeline) -- deterministic and race-free, unlike a
+# sampled OS metric. Unset (MUSCAT_WORKER_MAX_SLOTS absent/blank, the
+# default) disables it entirely: claim_slot's SQL is then byte-for-byte
+# identical to before this existed, so every existing single-host deployment
+# and the web process on the gateway host see no behavior change at all.
+_HOST = socket.gethostname()
+
+
+def current_host() -> str:
+    """This process's hostname -- scopes claim_slot's optional per-host cap.
+    Mirrors :func:`current_instance_id`. See :data:`_WORKER_MAX_SLOTS`."""
+    return _HOST
+
+
+def _parse_worker_max_slots(raw: str | None) -> int | None:
+    """None (unset/blank) disables the host cap entirely -- today's exact
+    behavior. Any parseable non-negative integer (including 0, meaning "no
+    full jobs on this host") enables it."""
+    if raw is None or not raw.strip():
+        return None
+    return max(0, int(raw))
+
+
+_WORKER_MAX_SLOTS: int | None = _parse_worker_max_slots(os.environ.get("MUSCAT_WORKER_MAX_SLOTS"))

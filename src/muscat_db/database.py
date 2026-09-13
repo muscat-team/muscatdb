@@ -287,11 +287,14 @@ CREATE TABLE IF NOT EXISTS exofop_cache (
 -- cap (architecture audit finding: _MAX_FULL_JOBS was an in-memory-only
 -- per-process dict, already wrong under --workers N>1). One row per
 -- currently-claimed slot; a pipeline holds at most max_slots rows at once,
--- enforced by job_store.DatabaseJobStore.claim_slot's atomic INSERT.
+-- enforced by job_store.DatabaseJobStore.claim_slot's atomic INSERT. `host`
+-- (architecture issue #51) backs an orthogonal, opt-in second cap: total
+-- slots on one host across ALL pipelines combined, see MUSCAT_WORKER_MAX_SLOTS.
 CREATE TABLE IF NOT EXISTS job_concurrency_slots (
     pipeline    TEXT NOT NULL,
     holder_key  TEXT NOT NULL,
     claimed_at  REAL NOT NULL,
+    host        TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (pipeline, holder_key)
 );
 
@@ -1983,6 +1986,30 @@ def _ensure_jobs_schema(conn: sqlite3.Connection) -> None:
     for col, col_type in _JOBS_COLUMN_MIGRATIONS:
         try:
             conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} {col_type}")
+        except sqlite3.OperationalError:
+            pass
+
+
+# Columns added to `job_concurrency_slots` after its initial release. Same
+# role as _JOBS_COLUMN_MIGRATIONS above, for the same reason -- see
+# tests/test_job_store.py's TestJobConcurrencySlotsColumnMigrations. Keep in
+# sync with SCHEMA and with job_store._PG_SCHEMA / _PG_JOB_CONCURRENCY_SLOTS_COLUMN_MIGRATIONS.
+_JOB_CONCURRENCY_SLOTS_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
+    ("host", "TEXT NOT NULL DEFAULT ''"),
+]
+
+
+def _ensure_job_concurrency_slots_schema(conn: sqlite3.Connection) -> None:
+    # Deliberately not _apply_schema(conn): job_store.py's callers have always
+    # ensured this table with a bare `executescript(SCHEMA)`, never the general
+    # _migrate_schema()/_MIGRATIONS pass that _apply_schema also runs (that
+    # pass belongs to _ensure_jobs_schema's `jobs`-table-specific caller in
+    # save_job/get_persisted_jobs). Keep this table's schema-ensure scoped to
+    # exactly what it touches, unchanged from before this migration existed.
+    conn.executescript(SCHEMA)
+    for col, col_type in _JOB_CONCURRENCY_SLOTS_COLUMN_MIGRATIONS:
+        try:
+            conn.execute(f"ALTER TABLE job_concurrency_slots ADD COLUMN {col} {col_type}")
         except sqlite3.OperationalError:
             pass
 

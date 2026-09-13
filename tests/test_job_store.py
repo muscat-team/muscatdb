@@ -151,3 +151,28 @@ class TestJobsColumnMigrations:
         assert [col for col, _ in database._JOBS_COLUMN_MIGRATIONS] == [
             col for col, _ in job_store._PG_JOBS_COLUMN_MIGRATIONS
         ]
+
+
+# `job_concurrency_slots`'s columns at initial release, before the per-host
+# cap (architecture issue #51) added `host`. Same role as _ORIGINAL_JOBS_COLUMNS
+# above, for the same reason (issue #118).
+_ORIGINAL_JOB_CONCURRENCY_SLOTS_COLUMNS = {"pipeline", "holder_key", "claimed_at"}
+
+
+class TestJobConcurrencySlotsColumnMigrations:
+    """Same rationale as TestJobsColumnMigrations, for `job_concurrency_slots`."""
+
+    def test_sqlite_migrations_cover_every_post_release_column(self):
+        declared = _table_columns(database.SCHEMA, "job_concurrency_slots")
+        migrated = {col for col, _ in database._JOB_CONCURRENCY_SLOTS_COLUMN_MIGRATIONS}
+        assert declared - _ORIGINAL_JOB_CONCURRENCY_SLOTS_COLUMNS == migrated
+
+    def test_pg_migrations_cover_every_post_release_column(self):
+        declared = _table_columns(job_store._PG_SCHEMA, "job_concurrency_slots")
+        migrated = {col for col, _ in job_store._PG_JOB_CONCURRENCY_SLOTS_COLUMN_MIGRATIONS}
+        assert declared - _ORIGINAL_JOB_CONCURRENCY_SLOTS_COLUMNS == migrated
+
+    def test_migration_lists_match_between_backends(self):
+        assert [col for col, _ in database._JOB_CONCURRENCY_SLOTS_COLUMN_MIGRATIONS] == [
+            col for col, _ in job_store._PG_JOB_CONCURRENCY_SLOTS_COLUMN_MIGRATIONS
+        ]
