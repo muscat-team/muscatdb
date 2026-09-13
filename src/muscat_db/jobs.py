@@ -314,6 +314,41 @@ def resolve_job_state(
     return terminal_job_state(rc, job.cancelled, job.log_path, cfg), rc, True
 
 
+# --------------------------- orphan reconciliation ---------------------------
+#
+# Shared by all three sync_jobs() implementations' "is this running row truly
+# orphaned, or does a live process elsewhere still hold it" check -- see
+# job_store.py's _INSTANCE_ID docstring for the full rationale. Kept here
+# (not job_store.py) since it is a pure lifecycle decision with no
+# persistence of its own, same reasoning as resolve_job_state above.
+
+_HEARTBEAT_STALE_S = max(10.0, float(os.environ.get("MUSCAT_JOB_HEARTBEAT_STALE_S", "30")))
+
+
+def is_orphan_reconcilable(
+    row_instance_id: str | None,
+    row_heartbeat_at: float | None,
+    this_instance_id: str,
+    *,
+    now: float | None = None,
+) -> bool:
+    """True if a ``state="running"`` row not tracked in this process's own
+    in-memory registry may be declared lost by this process.
+
+    A row stamped with a *different* instance_id is left alone as long as its
+    heartbeat is still fresh (within ``MUSCAT_JOB_HEARTBEAT_STALE_S``) --
+    proof some other process is actively driving it, even though it is
+    invisible to this process's registry. A row with no instance_id (written
+    before this existed) or one whose heartbeat has gone stale is fair game,
+    matching the pre-existing single-owner-per-role behaviour's backward
+    compatibility default.
+    """
+    if not row_instance_id or row_instance_id == this_instance_id:
+        return True
+    now = time.time() if now is None else now
+    return (now - float(row_heartbeat_at or 0)) >= _HEARTBEAT_STALE_S
+
+
 # --------------------------- process-group control ---------------------------
 
 

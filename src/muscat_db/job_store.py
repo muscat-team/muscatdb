@@ -33,7 +33,9 @@ from __future__ import annotations
 
 import logging
 import os
+import socket
 import time
+import uuid
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 # Imported as a module (not by name) so the concrete store sees monkeypatched
@@ -81,14 +83,33 @@ class JobRepository(Protocol):
         run_name: str = "",
         user_name: str | None = None,
         owner: str = "",
+        instance_id: str = "",
     ) -> None:
         """Upsert one job record (same fields as the legacy ``save_job``).
 
         *owner* identifies which role (``"web"``, ``"worker"``) launched the
-        job -- see :func:`current_owner`. Pass it only at the moment a job
-        transitions to ``state="running"``; every other caller omits it (the
-        row keeps whatever owner it already had, same preserve-on-empty
-        pattern as *run_name*/*user_name*)."""
+        job -- see :func:`current_owner`. *instance_id* identifies which
+        *process* did -- see :func:`current_instance_id`. Pass both only at
+        the moment a job transitions to ``state="running"``; every other
+        caller omits them (the row keeps whatever it already had, same
+        preserve-on-empty pattern as *run_name*/*user_name*). Every call,
+        regardless of state, stamps the row's heartbeat to now -- see
+        :meth:`heartbeat` for the lightweight alternative that does the same
+        without rewriting the rest of the row."""
+        ...
+
+    def heartbeat(self, key: str, instance_id: str) -> None:
+        """Stamp the running row at *key* as alive right now, iff it is still
+        held by *instance_id*. No-op (never raises) if the row is absent, no
+        longer ``state="running"``, or held by a different instance -- so a
+        caller racing a reconciliation pass that already reclaimed the row
+        can never resurrect a heartbeat another instance has taken over.
+
+        Deliberately cheaper than a full :meth:`save`: a steadily-running job
+        needs its liveness refreshed every reconciliation pass without
+        rewriting (and cache-invalidating) the rest of the row -- see the
+        "only persist when the row actually changed" comment in each
+        pipeline's ``sync_jobs()``."""
         ...
 
     def delete(self, key: str) -> None:
@@ -193,6 +214,7 @@ class DatabaseJobStore(JobRepository, JobQueue, JobConcurrency):
         run_name: str = "",
         user_name: str | None = None,
         owner: str = "",
+        instance_id: str = "",
     ) -> None:
         database.save_job(
             type_=type_,
@@ -210,7 +232,20 @@ class DatabaseJobStore(JobRepository, JobQueue, JobConcurrency):
             run_name=run_name,
             user_name=user_name,
             owner=owner,
+            instance_id=instance_id,
         )
+
+    def heartbeat(self, key: str, instance_id: str) -> None:
+        try:
+            with database.get_conn() as conn:
+                conn.execute(
+                    "UPDATE jobs SET heartbeat_at = ? "
+                    "WHERE key = ? AND state = 'running' AND instance_id = ?",
+                    (time.time(), key, instance_id),
+                )
+                conn.commit()
+        except Exception:
+            logger.debug("failed to update heartbeat for job %s", key, exc_info=True)
 
     def delete(self, key: str) -> None:
         # Best-effort, matching the prior inline behaviour: a failed delete must
@@ -362,7 +397,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     run_id       TEXT NOT NULL DEFAULT '',
     run_name     TEXT NOT NULL DEFAULT '',
     user_name    TEXT NOT NULL DEFAULT '',
-    owner        TEXT NOT NULL DEFAULT ''
+    owner        TEXT NOT NULL DEFAULT '',
+    instance_id  TEXT NOT NULL DEFAULT '',
+    heartbeat_at DOUBLE PRECISION NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_state_started ON jobs(state, started_at DESC);
 
@@ -391,6 +428,8 @@ _PG_JOBS_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
     ("run_name", "TEXT NOT NULL DEFAULT ''"),
     ("user_name", "TEXT NOT NULL DEFAULT ''"),
     ("owner", "TEXT NOT NULL DEFAULT ''"),
+    ("instance_id", "TEXT NOT NULL DEFAULT ''"),
+    ("heartbeat_at", "DOUBLE PRECISION NOT NULL DEFAULT 0"),
 ]
 
 
@@ -501,6 +540,7 @@ class PostgresJobStore(JobRepository, JobQueue, JobConcurrency):
         run_name: str = "",
         user_name: str | None = None,
         owner: str = "",
+        instance_id: str = "",
     ) -> None:
         if user_name is None:
             user_name = ""
@@ -512,24 +552,38 @@ class PostgresJobStore(JobRepository, JobQueue, JobConcurrency):
                 """
                 INSERT INTO jobs(key, type, instrument, obsdate, target, state, returncode,
                                   elapsed, started_at, error_desc, run_type, params, run_id,
-                                  run_name, user_name, owner)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                  run_name, user_name, owner, instance_id, heartbeat_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (key) DO UPDATE SET
-                    state      = EXCLUDED.state,
-                    returncode = EXCLUDED.returncode,
-                    elapsed    = EXCLUDED.elapsed,
-                    started_at = EXCLUDED.started_at,
-                    error_desc = EXCLUDED.error_desc,
-                    run_type   = CASE WHEN EXCLUDED.run_type  != '' THEN EXCLUDED.run_type  ELSE jobs.run_type  END,
-                    params     = CASE WHEN EXCLUDED.params    != '' THEN EXCLUDED.params    ELSE jobs.params    END,
-                    run_id     = EXCLUDED.run_id,
-                    run_name   = CASE WHEN EXCLUDED.run_name  != '' THEN EXCLUDED.run_name  ELSE jobs.run_name  END,
-                    user_name  = CASE WHEN EXCLUDED.user_name != '' THEN EXCLUDED.user_name ELSE jobs.user_name END,
-                    owner      = CASE WHEN EXCLUDED.owner     != '' THEN EXCLUDED.owner     ELSE jobs.owner     END
+                    state        = EXCLUDED.state,
+                    returncode   = EXCLUDED.returncode,
+                    elapsed      = EXCLUDED.elapsed,
+                    started_at   = EXCLUDED.started_at,
+                    error_desc   = EXCLUDED.error_desc,
+                    run_type     = CASE WHEN EXCLUDED.run_type    != '' THEN EXCLUDED.run_type    ELSE jobs.run_type    END,
+                    params       = CASE WHEN EXCLUDED.params      != '' THEN EXCLUDED.params      ELSE jobs.params      END,
+                    run_id       = EXCLUDED.run_id,
+                    run_name     = CASE WHEN EXCLUDED.run_name    != '' THEN EXCLUDED.run_name    ELSE jobs.run_name    END,
+                    user_name    = CASE WHEN EXCLUDED.user_name   != '' THEN EXCLUDED.user_name   ELSE jobs.user_name   END,
+                    owner        = CASE WHEN EXCLUDED.owner       != '' THEN EXCLUDED.owner       ELSE jobs.owner       END,
+                    instance_id  = CASE WHEN EXCLUDED.instance_id != '' THEN EXCLUDED.instance_id ELSE jobs.instance_id END,
+                    heartbeat_at = EXCLUDED.heartbeat_at
                 """,
                 (key, type_, inst, date, target, state, returncode, elapsed, started_at,
-                 error_desc, run_type, params, run_id, run_name, user_name, owner),
+                 error_desc, run_type, params, run_id, run_name, user_name, owner,
+                 instance_id, time.time()),
             )
+
+    def heartbeat(self, key: str, instance_id: str) -> None:
+        try:
+            with self._pool.connection() as conn:
+                conn.execute(
+                    "UPDATE jobs SET heartbeat_at = %s "
+                    "WHERE key = %s AND state = 'running' AND instance_id = %s",
+                    (time.time(), key, instance_id),
+                )
+        except Exception:
+            logger.debug("failed to update heartbeat for job %s", key, exc_info=True)
 
     def delete(self, key: str) -> None:
         try:
@@ -691,10 +745,10 @@ def set_job_store(store) -> None:
 # A row with no owner (written before this existed, or by a caller that never
 # passed one) is always treated as this process's own -- the pre-existing,
 # single-owner behaviour -- so upgrading a database with old rows in flight
-# never left them stuck. This does not need a lease/heartbeat: it only ever
-# widens who is *exempt* from reconciliation, never who forcibly reclaims a
-# slot, so the existing self-healing-on-restart behaviour for genuinely
-# orphaned rows is unchanged.
+# never left them stuck. This owner check alone needs no lease/heartbeat: it
+# only ever widens who is *exempt* from reconciliation, never who forcibly
+# reclaims a slot, so the existing self-healing-on-restart behaviour for
+# genuinely orphaned rows is unchanged.
 _OWNER = "web"
 
 
@@ -709,3 +763,37 @@ def set_owner(owner: str) -> None:
 def current_owner() -> str:
     """This process's job-row ownership tag -- see :data:`_OWNER`."""
     return _OWNER
+
+
+# Per-*process* identity (architecture issue #51 step 3), distinct from the
+# per-*role* _OWNER above. Two `muscatdb worker` processes for the same
+# pipeline share owner="worker", so the owner check by itself cannot tell
+# "a live sibling worker holds this job" from "the worker that held it is
+# gone" -- either would be an unrecognized running row to the other process's
+# in-memory registry, and worker.py's module docstring documents this as a
+# known limitation of step 1. instance_id closes that gap: each launch site
+# tags its row with current_instance_id() the same moment it tags `owner`,
+# and each sync_jobs() pass refreshes state='running' rows it still tracks in
+# memory via store.heartbeat() (see each pipeline's "unchanged" branch).
+#
+# A running row stamped with someone else's instance_id is left alone only
+# while its heartbeat is still fresh (within MUSCAT_JOB_HEARTBEAT_STALE_S,
+# see jobs.is_orphan_reconcilable) -- proof some other process is actively
+# driving it even though this process's registry has never heard of it. Once
+# that heartbeat goes stale, the owning instance is presumed dead and the row
+# reconciles exactly as before (single terminal write, no retry -- see
+# jobs.py's module docstring). This check runs *in addition to* the owner
+# check above, never instead of it: a legacy row with an owner but no
+# instance_id (written before this existed) still relies on the owner check
+# alone, unchanged.
+#
+# Follows the same hostname:pid:uuid shape as lco_monitor.py's per-instance
+# lease owner, for the same reason: pid alone can be reused across a process
+# restart, so the uuid suffix is what actually guarantees two process
+# lifetimes never collide.
+_INSTANCE_ID = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+
+
+def current_instance_id() -> str:
+    """This process's unique instance identity -- see :data:`_INSTANCE_ID`."""
+    return _INSTANCE_ID
