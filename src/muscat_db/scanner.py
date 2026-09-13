@@ -216,6 +216,8 @@ def _process_single_file(filepath: str, inst: InstrumentConfig) -> dict[str, str
     }
     if inst.has_pa:
         row["PA (deg)"] = kv.get("INST-PA", "")
+    if "PROPID" in inst.keys:
+        row["PROPID"] = kv.get("PROPID", "")
     return row
 
 
