@@ -119,6 +119,11 @@ ENV_VARS: tuple[EnvVar, ...] = (
         "process, but a fresh heartbeat from another instance, is left alone "
         "(architecture issue #51 step 3)",
     ),
+    EnvVar(
+        "MUSCAT_SSE_POLL_INTERVAL_S", "1.0",
+        "Server-side job_status() poll cadence (seconds) behind each pipeline's "
+        "/log-stream SSE endpoint (architecture issue #51 step 4)",
+    ),
     EnvVar("MUSCAT_EXPOSURE_CALIBRATION_WORKERS", "2", "Global exposure-calibration workers"),
     EnvVar("MUSCAT_EXPOSURE_CALIBRATION_STALE_S", "21600", "Abandoned calibration claim timeout (seconds)"),
     EnvVar("MUSCAT_CATALOG_GLOBAL_WORKERS", "8", "Process-wide outbound catalog concurrency"),

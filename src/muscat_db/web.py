@@ -51,9 +51,18 @@ from urllib.parse import quote, urlencode
 import httpx
 import markdown
 import nh3
+from collections.abc import AsyncIterator, Callable
+
 from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader
 
@@ -304,6 +313,78 @@ ads_router = APIRouter(prefix="/api/ads", tags=["ads"])
 
 _MAX_STATUS_BATCH = 100
 _MAX_STATUS_FIELD_LEN = 256
+
+
+# --------------------------- SSE log streaming (architecture issue #51, step 4) ---------------------------
+#
+# Wraps each pipeline's existing job_status()/sync_jobs() pair -- the same pair
+# the polling /status and /status-batch endpoints below already use -- so the
+# finalizing grace-window state machine, ANSI log tails, and pending/persisted
+# DB fallbacks (muscat_db.jobs) stay the single source of truth. This only
+# changes the transport from repeated client-initiated fetches to one
+# held-open, server-pushed connection; nothing here reads the process or the
+# log file directly. Per the architecture doc (issue #51), pipeline logs live
+# on the NFS mount every host shares, so this streams correctly whether the
+# job ran on this host or (once workers exist) a remote compute node.
+_SSE_POLL_INTERVAL_S = float(os.environ.get("MUSCAT_SSE_POLL_INTERVAL_S", 1.0))
+# Sent whenever the payload hasn't changed for this long, so a proxy's idle
+# read timeout (nginx default 60s) never fires while a job sits queued/silent.
+_SSE_HEARTBEAT_S = 15.0
+_SSE_ACTIVE_STATES = frozenset({"running", "cancelling", "finalizing", "pending"})
+
+
+async def _sse_job_stream(
+    request: Request,
+    status_fn: Callable[[], dict],
+    sync_fn: Callable[[], None] | None = None,
+) -> AsyncIterator[bytes]:
+    """Yield one SSE ``data:`` event per status change until the job is terminal.
+
+    Ends the stream outright (rather than yielding a final event and idling)
+    once ``status_fn()`` reports a state outside :data:`_SSE_ACTIVE_STATES`, or
+    as soon as the client disconnects -- an open tab per job would otherwise
+    leak one polling loop per tab for the life of the server process. A closed
+    stream is not itself a signal to stop reconnecting (a browser's
+    ``EventSource`` retries by default), so the frontend must close its side on
+    the first terminal event rather than rely on the server not restarting it.
+    """
+    last_payload: str | None = None
+    last_sent = time.monotonic()
+    while True:
+        if await request.is_disconnected():
+            return
+        if sync_fn is not None:
+            sync_fn()
+        status = status_fn()
+        payload = json.dumps(status, separators=(",", ":"))
+        now = time.monotonic()
+        if payload != last_payload:
+            yield f"data: {payload}\n\n".encode()
+            last_payload = payload
+            last_sent = now
+        elif now - last_sent >= _SSE_HEARTBEAT_S:
+            yield b": keep-alive\n\n"
+            last_sent = now
+        if status.get("state") not in _SSE_ACTIVE_STATES:
+            return
+        await asyncio.sleep(_SSE_POLL_INTERVAL_S)
+
+
+def _sse_response(generator: AsyncIterator[bytes]) -> StreamingResponse:
+    return StreamingResponse(
+        generator,
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            # Disable nginx response buffering for this route specifically, in
+            # case a future proxy layer (e.g. issue #51's multi-host review
+            # comment) omits the blanket `proxy_buffering off` deploy/*.conf
+            # already sets -- without it a buffered SSE response arrives all
+            # at once at job end instead of streaming.
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 # Middleware: extract the authenticated user from the nginx reverse proxy.
 # The trust rule (only honor X-Forwarded-User from a loopback proxy peer) lives
@@ -2902,6 +2983,17 @@ async def transit_fit_query_archive(target: str, source: str = "nasa", inst: str
 def transit_fit_status(inst: str, date: str, target: str, run: str = ""):
     fit.sync_jobs()
     return JSONResponse(fit.job_status(inst, date, target, run_id=(run or "").strip()))
+
+
+@transit_fit_router.get("/log-stream")
+async def transit_fit_log_stream(request: Request, inst: str, date: str, target: str, run: str = ""):
+    """SSE counterpart to ``/status`` (architecture issue #51, step 4)."""
+    run_id = (run or "").strip()
+    return _sse_response(_sse_job_stream(
+        request,
+        lambda: fit.job_status(inst, date, target, run_id=run_id),
+        sync_fn=fit.sync_jobs,
+    ))
 
 
 @transit_fit_router.post("/run")
@@ -6531,6 +6623,19 @@ def photometry_status(inst: str, date: str, target: str, run: str = ""):
     return JSONResponse(phot.job_status(inst, date, target, run_id=(run or "").strip()))
 
 
+@photometry_router.get("/log-stream")
+async def photometry_log_stream(request: Request, inst: str, date: str, target: str, run: str = ""):
+    """SSE counterpart to ``/status`` -- pushes the same payload on every
+    change instead of waiting for the client's next poll (architecture issue
+    #51, step 4)."""
+    run_id = (run or "").strip()
+    return _sse_response(_sse_job_stream(
+        request,
+        lambda: phot.job_status(inst, date, target, run_id=run_id),
+        sync_fn=phot.sync_jobs,
+    ))
+
+
 @photometry_router.post("/status-batch")
 def photometry_status_batch(payload: dict = Body(...)):
     """Poll multiple jobs in a single request. Reduces polling overhead when monitoring many jobs.
@@ -6861,6 +6966,15 @@ def ttv_fit_status(target: str = "", run_name: str = ""):
         return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
     status = ttv.job_status(target.strip(), run_name)
     return JSONResponse(status)
+
+
+@ttv_fit_router.get("/log-stream")
+async def ttv_fit_log_stream(request: Request, target: str = "", run_name: str = ""):
+    """SSE counterpart to ``/status`` (architecture issue #51, step 4)."""
+    if not target:
+        raise HTTPException(status_code=400, detail="target is required")
+    target = target.strip()
+    return _sse_response(_sse_job_stream(request, lambda: ttv.job_status(target, run_name)))
 
 
 # Text-like TTV output extensions the browser should render in a new tab
