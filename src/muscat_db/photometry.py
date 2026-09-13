@@ -46,6 +46,7 @@ from muscat_db.job_store import current_instance_id, current_owner, get_job_stor
 from muscat_db.instruments import INSTRUMENTS
 from muscat_db.cache import register_cache
 from muscat_db.band_utils import DEFAULT_BANDS, NARROW_BANDS, _FILTER_BAND_ALIAS, bands_from_filters  # noqa: F401
+from muscat_db.catalog import _resolve_archive_coords, resolve_lco_key_project_name
 
 logger = logging.getLogger(__name__)
 
@@ -1339,8 +1340,25 @@ def build_command(
     if ar and o.get("aper_unit", "pix") != "pix":
         args += ["--aper_unit", o["aper_unit"]]
 
-    if o.get("target_coord") not in (None, ""):
-        parts = o["target_coord"].split(None, 1)
+    target_coord = (o.get("target_coord") or "").strip()
+    if not target_coord and resolve_lco_key_project_name(target) != target.strip():
+        # An LCO key-project OBJECT name decorates a primary designation with
+        # a parenthesized alias (e.g. "TIC245728942.01(TOI5012.01)"). Neither
+        # MAST nor Simbad -- prose2's own name resolvers -- can resolve that
+        # compound string, so every run for such a target aborted with an
+        # uncaught ResolverError. prose2 has no way to know about this
+        # LCO/muscat-db-specific convention, so resolve coordinates here
+        # instead (the same offline-catalog-first path used elsewhere) and
+        # pass them explicitly, bypassing name resolution rather than
+        # widening prose2 to understand it. Falls through to --target_name
+        # only, unchanged from before, when even that resolution fails.
+        resolved = _resolve_archive_coords(target)
+        if resolved is not None:
+            ra_deg, dec_deg, _source = resolved
+            target_coord = f"{ra_deg} {dec_deg}"
+
+    if target_coord:
+        parts = target_coord.split(None, 1)
         if len(parts) == 2:
             ra, dec = parts[0].strip(), parts[1].strip()
             if dec.startswith("-"):

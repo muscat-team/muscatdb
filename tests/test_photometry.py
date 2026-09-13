@@ -3403,3 +3403,59 @@ class TestTargetCoordFlag:
         )
         i = cmd.index("--target_coord")
         assert cmd[i + 2] == " -45.01"
+
+
+class TestKeyProjectDecoratedTargetCoord:
+    """An LCO key-project OBJECT name decorates a primary designation with a
+    parenthesized alias, e.g. "TIC460950389.01(TOI6715.01)" -- neither MAST
+    nor Simbad (inside prose2) can resolve that compound string to a sky
+    position, so every real run for such a target aborted with an uncaught
+    ResolverError (see /photometry?inst=sinistro&date=240417&target=...).
+
+    build_command() must not hand prose2 a name it cannot resolve on its
+    own; it should resolve coordinates itself (the same offline-catalog-first
+    path already used elsewhere) and pass them via --target_coord, bypassing
+    prose2's name resolution rather than widening it to understand an
+    LCO/muscat-db-specific convention.
+    """
+
+    DECORATED = "TIC460950389.01(TOI6715.01)"
+
+    def test_auto_resolves_coord_for_decorated_name(self, monkeypatch):
+        monkeypatch.setattr(
+            phot, "_resolve_archive_coords",
+            lambda name: (159.157968, -64.798231, "toi"),
+        )
+        cmd = phot.build_command("sinistro", "240417", self.DECORATED)
+        assert "--target_name" in cmd
+        assert cmd[cmd.index("--target_name") + 1] == self.DECORATED
+        i = cmd.index("--target_coord")
+        assert cmd[i + 1] == "159.157968"
+        # Space-prefixed per the existing negative-declination argparse guard.
+        assert cmd[i + 2] == " -64.798231"
+
+    def test_explicit_target_coord_option_wins_over_auto_resolve(self, monkeypatch):
+        def _boom(name):
+            raise AssertionError("must not auto-resolve when target_coord is given")
+
+        monkeypatch.setattr(phot, "_resolve_archive_coords", _boom)
+        cmd = phot.build_command(
+            "sinistro", "240417", self.DECORATED,
+            options={"target_coord": "159.157968 -64.798231"},
+        )
+        i = cmd.index("--target_coord")
+        assert cmd[i + 1] == "159.157968"
+
+    def test_plain_name_never_triggers_auto_resolve(self, monkeypatch):
+        def _boom(name):
+            raise AssertionError("must not auto-resolve a plain (undecorated) name")
+
+        monkeypatch.setattr(phot, "_resolve_archive_coords", _boom)
+        cmd = phot.build_command("muscat3", "260101", "TOI-1")
+        assert "--target_coord" not in cmd
+
+    def test_unresolvable_decorated_name_falls_back_to_name_only(self, monkeypatch):
+        monkeypatch.setattr(phot, "_resolve_archive_coords", lambda name: None)
+        cmd = phot.build_command("sinistro", "240417", self.DECORATED)
+        assert "--target_coord" not in cmd
+        assert cmd[cmd.index("--target_name") + 1] == self.DECORATED
