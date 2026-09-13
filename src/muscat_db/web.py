@@ -632,7 +632,8 @@ def _get_datasets_for_normalized_target(db: str, normalized_name: str) -> tuple[
                        SUM(nframes)              AS n_frames,
                        GROUP_CONCAT(DISTINCT filter) AS filters,
                        MIN(NULLIF(airmass_min, 0))   AS airmass_min,
-                       MAX(NULLIF(airmass_max, 0))   AS airmass_max
+                       MAX(NULLIF(airmass_max, 0))   AS airmass_max,
+                       MAX(NULLIF(proposal_id, ''))  AS proposal_id
                 FROM summaries
                 WHERE object IN ({placeholders})
                 GROUP BY instrument, obsdate, object""",
@@ -646,6 +647,7 @@ def _get_datasets_for_normalized_target(db: str, normalized_name: str) -> tuple[
                 "filter_chips": _normalize_filters(raw_filters),
                 "airmass_min": row[5],
                 "airmass_max": row[6],
+                "proposal_id": row[7] or "",
             }
         # Fetch notes: per-dataset (obsdate+instrument set) and per-object (both empty)
         cur = conn.execute(
@@ -696,6 +698,7 @@ def _get_datasets_for_normalized_target(db: str, normalized_name: str) -> tuple[
                 "phot": phot_status,
                 "fit": fit_status,
                 "note": note,
+                "proposal_id": stats.get("proposal_id", ""),
             }
             datasets.append(dataset)
 

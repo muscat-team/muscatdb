@@ -63,7 +63,8 @@ CREATE TABLE IF NOT EXISTS frames (
     declination TEXT,
     airmass     REAL,
     focus       REAL,
-    pa          REAL
+    pa          REAL,
+    proposal_id TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_frames_inst_date ON frames(instrument, obsdate);
@@ -87,7 +88,8 @@ CREATE TABLE IF NOT EXISTS summaries (
     ra          TEXT,
     declination TEXT,
     airmass_min REAL,
-    airmass_max REAL
+    airmass_max REAL,
+    proposal_id TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_summaries_inst_date ON summaries(instrument, obsdate);
@@ -339,6 +341,26 @@ CREATE TABLE IF NOT EXISTS target_tags (
 );
 CREATE INDEX IF NOT EXISTS idx_target_tags_tag       ON target_tags(tag);
 CREATE INDEX IF NOT EXISTS idx_target_tags_norm_name ON target_tags(norm_name);
+
+-- Issue #144, PR1 (schema only -- nothing reads or gates on these yet).
+-- A proposal only gates access once an admin opts it in here; everything
+-- else (including '' for muscat/muscat2, which carry no PROPID) stays
+-- visible to everyone. App-owned: kept outside the daily frames/summaries/
+-- targets rebuild set (see _APP_OWNED_TABLES) so restrictions/grants survive
+-- a rebuild, the same as target_tags above.
+CREATE TABLE IF NOT EXISTS restricted_proposals (
+    proposal_id TEXT PRIMARY KEY COLLATE NOCASE,
+    description TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS user_proposal_access (
+    username    TEXT NOT NULL,
+    proposal_id TEXT NOT NULL COLLATE NOCASE,
+    granted_by  TEXT NOT NULL DEFAULT '',
+    granted_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (username, proposal_id)
+);
 """
 
 # Idempotent schema migrations for columns added after initial deployment.
@@ -354,6 +376,13 @@ _MIGRATIONS = [
     # 2026-07-25: bound download retries so one unavailable frame cannot block a
     # request from ever completing
     "ALTER TABLE lco_observation_frames ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0",
+    # 2026-09-13: issue #144 PR1 -- PROPID capture, no gating yet. The index
+    # must come after the ALTER TABLE above (same list, in order) since an
+    # existing pre-migration database has no proposal_id column for SCHEMA's
+    # own CREATE TABLE IF NOT EXISTS (a no-op there) to index directly.
+    "ALTER TABLE frames ADD COLUMN proposal_id TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE summaries ADD COLUMN proposal_id TEXT NOT NULL DEFAULT ''",
+    "CREATE INDEX IF NOT EXISTS idx_frames_proposal ON frames(proposal_id)",
 ]
 
 
@@ -469,6 +498,7 @@ def _read_frame_rows(inst_name: str, obsdate: str, csv_path: str, ccd: int) -> l
                 _safe_float(row.get(airmass_key, "0")),
                 _safe_float(row.get(focus_key, "0")),
                 _safe_float(row.get(pa_key, "0")) if pa_key else None,
+                row.get("PROPID", ""),
             ))
     return rows_to_insert
 
@@ -487,8 +517,9 @@ def _ingest_csv_jobs(conn: sqlite3.Connection, csv_jobs: list[tuple[str, str, st
             conn.executemany(
                 """INSERT INTO frames
                    (instrument, obsdate, ccd, filename, object, jd_start, ut_start,
-                    exptime, read_mode, filter, ra, declination, airmass, focus, pa)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    exptime, read_mode, filter, ra, declination, airmass, focus, pa,
+                    proposal_id)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 rows_to_insert,
             )
             count += len(rows_to_insert)
@@ -551,7 +582,9 @@ def _summary_rows(conn: sqlite3.Connection, *, instrument: str | None = None, ob
                stats.filter,
                stats.coord,
                stats.airmass_min,
-               stats.airmass_max
+               stats.airmass_max,
+               stats.proposal_id,
+               stats.proposal_id_ndistinct
            FROM ranked f1
            JOIN ranked f2 ON
                f1.instrument = f2.instrument AND
@@ -570,7 +603,16 @@ def _summary_rows(conn: sqlite3.Connection, *, instrument: str | None = None, ob
                       MAX(filter) AS filter,
                       coord_repr(ra, declination) AS coord,
                       MIN(NULLIF(airmass, 0)) AS airmass_min,
-                      MAX(NULLIF(airmass, 0)) AS airmass_max
+                      MAX(NULLIF(airmass, 0)) AS airmass_max,
+                      -- An LCO "request" (one scheduled visit) belongs to
+                      -- exactly one proposal, so this should be uniform per
+                      -- group in practice; MAX() picks a representative
+                      -- value but proposal_id_ndistinct below is what the
+                      -- caller checks to decide whether to log a warning
+                      -- rather than silently coalescing a real disagreement
+                      -- (issue #144).
+                      MAX(NULLIF(proposal_id, '')) AS proposal_id,
+                      COUNT(DISTINCT NULLIF(proposal_id, '')) AS proposal_id_ndistinct
                FROM keyed
                GROUP BY instrument, obsdate, ccd, object,
                         ROUND(exptime, 1), read_mode, telescope
@@ -586,8 +628,19 @@ def _summary_rows(conn: sqlite3.Connection, *, instrument: str | None = None, ob
     ).fetchall()
     # columns: instrument, obsdate, ccd, object, exptime, read_mode,
     #          telescope, frame_start, frame_end, ut_start, ut_end,
-    #          nframes, filter, coord, airmass_min, airmass_max  (16 cols)
-    return [(*r[:13], *_unpack_coord(r[13]), r[14], r[15]) for r in raw]
+    #          nframes, filter, coord, airmass_min, airmass_max,
+    #          proposal_id, proposal_id_ndistinct  (18 cols)
+    result = []
+    for r in raw:
+        proposal_id, ndistinct = r[16] or "", r[17]
+        if ndistinct > 1:
+            logger.warning(
+                "mixed-proposal night: %s %s ccd%s object=%r has %d distinct "
+                "proposal_id values in one summary group; using %r",
+                r[0], r[1], r[2], r[3], ndistinct, proposal_id,
+            )
+        result.append((*r[:13], *_unpack_coord(r[13]), r[14], r[15], proposal_id))
+    return result
 
 
 def _insert_summary_rows(conn: sqlite3.Connection, rows: list[tuple]) -> None:
@@ -597,8 +650,8 @@ def _insert_summary_rows(conn: sqlite3.Connection, rows: list[tuple]) -> None:
         """INSERT INTO summaries
            (instrument, obsdate, ccd, object, exptime, read_mode,
             telescope, frame_start, frame_end, ut_start, ut_end, nframes,
-            filter, ra, declination, airmass_min, airmass_max)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            filter, ra, declination, airmass_min, airmass_max, proposal_id)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         rows,
     )
 
@@ -758,6 +811,8 @@ _APP_OWNED_TABLES = (
     "chat_reactions",
     "target_tags",
     "tag_descriptions",
+    "restricted_proposals",
+    "user_proposal_access",
 )
 
 
@@ -836,6 +891,7 @@ def build_db(db_path: str, progress=None) -> int:
         _apply_schema(conn)
         conn.execute("DROP INDEX IF EXISTS idx_frames_inst_date;")
         conn.execute("DROP INDEX IF EXISTS idx_frames_object;")
+        conn.execute("DROP INDEX IF EXISTS idx_frames_proposal;")
         conn.execute("DROP INDEX IF EXISTS idx_summaries_inst_date;")
 
         # Phase 2: ingest frames.
@@ -874,6 +930,7 @@ def build_db(db_path: str, progress=None) -> int:
         # Create indexes at the very end to speed up insertions
         conn.execute("CREATE INDEX IF NOT EXISTS idx_frames_inst_date ON frames(instrument, obsdate);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_frames_object ON frames(object);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_frames_proposal ON frames(proposal_id);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_summaries_inst_date ON summaries(instrument, obsdate);")
 
         conn.execute(
