@@ -44,6 +44,7 @@
             <th data-sort-attr="date">Date</th>
             <th data-sort-attr="object">Object</th>
             <th data-sort-attr="inst">Instrument</th>
+            <th data-sort-attr="propid">PROPID</th>
             <th data-sort-attr="filters">Filters</th>
             <th data-sort-attr="airmassMax" data-sort-type="number">Airmass</th>
             <th data-sort-attr="frames" data-sort-type="number"># Frames</th>
@@ -55,6 +56,7 @@
             <th><input type="text" data-col="date" placeholder="YYMMDD"></th>
             <th><input type="text" data-col="object" placeholder="V1298Tau-b…"></th>
             <th><input type="text" data-col="inst" placeholder="muscat, muscat2, …"></th>
+            <th><input type="text" data-col="propid" placeholder="KEY2026B-001"></th>
             <th><input type="text" data-col="filter" placeholder="g, r, i, z"></th>
             <th><input type="text" data-col="airmass" placeholder="&lt;1.5  1.1-2"></th>
             <th><input type="text" data-col="frames" placeholder="&lt;100  &gt;500"></th>
@@ -68,6 +70,7 @@
           <tr data-date="{{ dataset.date }}"
               data-object="{{ dataset.object }}"
               data-inst="{{ dataset.instrument }}"
+              data-propid="{{ dataset.proposal_id }}"
               data-filters="{{ dataset.filters|join(',') }}"
               data-airmass-max="{{ dataset.airmass_max if dataset.airmass_max is not none else '' }}"
               data-frames="{{ dataset.n_frames }}"
@@ -77,6 +80,7 @@
             <td class="mono"><a href="/{{ dataset.instrument }}/{{ dataset.date }}">{{ dataset.date }}</a></td>
             <td class="mono">{{ dataset.object }}</td>
             <td class="mono">{{ dataset.instrument }}</td>
+            <td class="mono">{{ dataset.proposal_id or '—' }}</td>
             <td>
               {% for c in dataset.filter_chips %}
                 <span class="badge badge-filter-{{ c.color }}{% if c.narrow %} narrow{% endif %}">{{ c.label }}</span>
@@ -170,6 +174,7 @@
             date:       { val: r => r.dataset.date,       build: makeText    },
             object:     { val: r => r.dataset.object,     build: makeText    },
             inst:       { val: r => r.dataset.inst,       build: makeToken   },
+            propid:     { val: r => r.dataset.propid,     build: makeText    },
             filter:     { val: r => r.dataset.filters,    build: makeText    },
             airmass:    { val: r => parseFloat(r.dataset.airmassMax), build: makeNumeric },
             frames:     { val: r => parseInt(r.dataset.frames, 10),   build: makeNumeric },
