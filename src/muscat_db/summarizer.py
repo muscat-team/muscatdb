@@ -7,24 +7,31 @@ from dataclasses import dataclass
 from muscat_db.instruments import INSTRUMENTS, OBSLOG_BASE
 
 
-def _ep_name_for(inst_name: str, ccd: int) -> str:
-    if inst_name == "muscat3":
-        return ["ep02", "ep03", "ep04", "ep05"][ccd]
-    if inst_name == "muscat4":
-        return ["ep06", "ep07", "ep08", "ep09"][ccd]
-    return ""
+def _ep_names_for(inst_name: str, ccd: int) -> tuple[str, ...]:
+    """Every epoch token CCD *ccd* has ever been recorded under, per
+    instruments.py's ``ep_names`` (the single source of truth -- see #157's
+    muscat4 CCD3 epoch-rename fix, which this reuses instead of duplicating)."""
+    ep_names = INSTRUMENTS[inst_name].ep_names
+    if not ep_names:
+        return ()
+    ep = ep_names[ccd]
+    return ep if isinstance(ep, tuple) else (ep,)
 
 
-def _delim_for(inst_name: str, ccd: int, obsdate: str) -> str:
+def _delims_for(inst_name: str, ccd: int, obsdate: str) -> tuple[str, ...]:
+    """Candidate FRAME-string split delimiters for *ccd*, tried in order.
+
+    More than one candidate only when the CCD has been recorded under more
+    than one epoch token (muscat4 CCD3): a FRAME's actual token depends on
+    when it was scanned, not on which token is current."""
     inst = INSTRUMENTS[inst_name]
     if inst_name == "muscat":
-        return f"MSCT{ccd}_{obsdate}"
+        return (f"MSCT{ccd}_{obsdate}",)
     if inst_name == "muscat2":
-        return f"MCT2{ccd}_{obsdate}"
+        return (f"MCT2{ccd}_{obsdate}",)
     if inst_name in ("muscat3", "muscat4"):
-        ep = _ep_name_for(inst_name, ccd)
-        return f"{inst.prefix}{ep}-20{obsdate}-"
-    return ""
+        return tuple(f"{inst.prefix}{ep}-20{obsdate}-" for ep in _ep_names_for(inst_name, ccd))
+    return ()
 
 
 @dataclass
@@ -43,7 +50,7 @@ def summarize_csv(inst_name: str, obsdate: str, ccd: int) -> list[SummaryRow]:
     csv_path = f"{OBSLOG_BASE}/{inst_name}/{obsdate}/obslog-{inst_name}-{obsdate}-ccd{ccd}.csv"
     if not os.path.isfile(csv_path):
         return []
-    delim = _delim_for(inst_name, ccd, obsdate)
+    delims = _delims_for(inst_name, ccd, obsdate)
     with open(csv_path) as f:
         reader = csv.DictReader(f)
         keys_in_order: list[str] = []
@@ -60,12 +67,14 @@ def summarize_csv(inst_name: str, obsdate: str, ccd: int) -> list[SummaryRow]:
             key1 = f"{obj}-{exptime}-{read_mode}"
             frame = row.get("FRAME", "")
             fnum = ""
-            if delim:
-                parts = frame.split(delim, 1)
-                if len(parts) > 1:
-                    fnum = parts[1]
-                    if inst_name in ("muscat3", "muscat4"):
-                        fnum = fnum.split("-e91", 1)[0] if "-e91" in fnum else fnum
+            if delims:
+                for delim in delims:
+                    parts = frame.split(delim, 1)
+                    if len(parts) > 1:
+                        fnum = parts[1]
+                        if inst_name in ("muscat3", "muscat4"):
+                            fnum = fnum.split("-e91", 1)[0] if "-e91" in fnum else fnum
+                        break
             else:
                 fnum = frame
             if key1 not in seen_keys:

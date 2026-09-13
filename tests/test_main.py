@@ -116,7 +116,7 @@ class TestInstruments:
         assert MUSCAT4.name == "muscat4"
         assert MUSCAT4.nccd == 4
         assert MUSCAT4.prefix == "coj2m002-"
-        assert MUSCAT4.ep_names == ["ep06", "ep07", "ep08", "ep09"]
+        assert MUSCAT4.ep_names == ["ep06", "ep07", "ep08", ("ep09", "ep10")]
         assert MUSCAT4.has_pa is False
         assert MUSCAT4.use_alt_ut_key is True
         assert MUSCAT4.has_wcs is True
@@ -176,6 +176,7 @@ class TestScanner:
         for i in range(1, n + 1):
             if inst.ep_names:
                 ep = inst.ep_names[ccd]
+                ep = ep[0] if isinstance(ep, tuple) else ep
                 fname = f"{inst.prefix}{ep}-20{obsdate}-{i:04d}-e91.fits"
             else:
                 fname = f"{inst.prefix}{ccd}_{obsdate}{i:04d}.fits"
@@ -230,6 +231,41 @@ class TestScanner:
             rows = list(reader)
         assert len(rows) == nfiles
         assert rows[0]["OBJECT"] == "TEST"
+
+    def test_scan_date_muscat4_ccd3_matches_pre_rename_epoch_name(
+        self, tmp_obslog, tmp_data,
+    ):
+        """Regression test for #157: CCD3 files predating the ep10->ep09
+        epoch rename must still be found by a plain (non --force) scan.
+
+        _find_fits_files() globs CCD3 with only the current epoch token
+        (ep09). Dates scanned before the rename have real files on disk
+        named with the old token (ep10) instead, so they were silently
+        invisible to a rescan -- risking exactly the data loss #157 flagged:
+        a --force rescan would have overwritten CCD3's existing correct CSV
+        with an empty one, since the glob matches nothing.
+        """
+        from muscat_db.scanner import scan_date
+        inst = INSTRUMENTS["muscat4"]
+        obsdate = "241114"
+        ddir = f"{tmp_data}/{inst.name}/{obsdate}"
+        os.makedirs(ddir, exist_ok=True)
+        path = f"{ddir}/{inst.prefix}ep10-20{obsdate}-0001-e91.fits"
+        _make_fits(path, {
+            "OBJECT": "TEST",
+            "EXPTIME": 10.0,
+            "FILTER": "g",
+            "RA": "12:00:00",
+            "DEC": "+00:00:00",
+            "MJD-OBS": 60000.0,
+            "UTSTART": "00:00:00",
+            "CONFMODE": "high",
+            "FOCPOSN": 0.0,
+        })
+
+        result = scan_date("muscat4", obsdate, max_workers=1)
+
+        assert result["per_ccd"].get(3) == 1
 
     def test_scan_date_no_files(self, tmp_obslog, tmp_data):
         from muscat_db.scanner import scan_date
@@ -615,6 +651,28 @@ class TestScanner:
         # Verify PA column is absent (muscat4 has no PA)
         assert "PA (deg)" not in rows[0]
 
+    def test_muscat4_ccd3_counts_both_epoch_names_without_duplicates(
+        self, tmp_obslog, tmp_data,
+    ):
+        """A night straddling the ep10->ep09 rename must count every file
+        exactly once, not double-count or drop either epoch's files."""
+        from muscat_db.scanner import scan_date
+        obsdate = "241114"
+        ddir = f"{tmp_data}/muscat4/{obsdate}"
+        os.makedirs(ddir, exist_ok=True)
+        header = {
+            "OBJECT": "TEST", "MJD-OBS": 60000.0, "UTSTART": "00:00:00",
+            "EXPTIME": 5.0, "CONFMODE": "high", "FILTER": "zs",
+            "RA": "00:00:00", "DEC": "+00:00:00", "AIRMASS": 1.2,
+            "FOCPOSN": 0.0,
+        }
+        _make_fits(f"{ddir}/coj2m002-ep10-20{obsdate}-0001-e91.fits", header)
+        _make_fits(f"{ddir}/coj2m002-ep09-20{obsdate}-0002-e91.fits", header)
+
+        result = scan_date("muscat4", obsdate, max_workers=1)
+
+        assert result["per_ccd"][3] == 2
+
 
 # ── Tests: summarizer ────────────────────────────────────────────────────────
 
@@ -713,6 +771,41 @@ class TestSummarizer:
         from muscat_db.summarizer import summarize_csv
         rows = summarize_csv("muscat", "000000", 0)
         assert rows == []
+
+    def test_summarize_csv_muscat4_ccd3_parses_both_epoch_names(self, tmp_obslog):
+        """Regression test: CCD3 FRAME values from before the ep10->ep09
+        rename must still have their frame number parsed, not blanked out.
+
+        _delim_for() built its split delimiter from the current epoch token
+        (ep09) only, duplicating instruments.py's now-fixed ep_names list.
+        A FRAME recorded under the old token (ep10) never matched that
+        delimiter, so its frame number silently came out empty -- breaking
+        run-grouping for any night, old or straddling the rename, that has
+        old-epoch rows in its CCD3 CSV.
+        """
+        from muscat_db.summarizer import summarize_csv
+        inst, obsdate, ccd = "muscat4", "241114", 3
+        d = f"{tmp_obslog}/{inst}/{obsdate}"
+        os.makedirs(d, exist_ok=True)
+        fieldnames = ["FRAME", "OBJECT", "JD-STRT", "UT-STRT", "EXPTIME (s)",
+                      "READ_MODE", "FILTER", "RA", "DEC", "AIRMASS", "FOCUS (mm)"]
+        _make_csv(f"{d}/obslog-{inst}-{obsdate}-ccd{ccd}.csv", fieldnames, [
+            {"FRAME": f"coj2m002-ep10-20{obsdate}-0001-e91", "OBJECT": "TOI-1",
+             "JD-STRT": "60000.1", "UT-STRT": "01:00:00", "EXPTIME (s)": "5",
+             "READ_MODE": "high", "FILTER": "zs", "RA": "", "DEC": "",
+             "AIRMASS": "1.2", "FOCUS (mm)": ""},
+            {"FRAME": f"coj2m002-ep09-20{obsdate}-0002-e91", "OBJECT": "TOI-1",
+             "JD-STRT": "60000.2", "UT-STRT": "01:01:00", "EXPTIME (s)": "5",
+             "READ_MODE": "high", "FILTER": "zs", "RA": "", "DEC": "",
+             "AIRMASS": "1.2", "FOCUS (mm)": ""},
+        ])
+
+        rows = summarize_csv(inst, obsdate, ccd)
+
+        assert len(rows) == 1
+        assert rows[0].frame_start == "0001"
+        assert rows[0].frame_end == "0002"
+        assert rows[0].nframes == 2
 
 
 # ── Tests: database ──────────────────────────────────────────────────────────

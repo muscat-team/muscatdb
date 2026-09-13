@@ -233,14 +233,20 @@ def _find_fits_files(
     if not os.path.isdir(datadir):
         return []
     if inst.ep_names:
-        ep = inst.ep_names[ccd]
-        pattern = f"{inst.prefix}{ep}*e91.fits"
+        eps = inst.ep_names[ccd]
+        eps = (eps,) if isinstance(eps, str) else eps
+        try:
+            matches = sorted(
+                {p for ep in eps for p in pathlib.Path(datadir).glob(f"{inst.prefix}{ep}*e91.fits")}
+            )
+        except (PermissionError, OSError):
+            return []
     else:
         pattern = f"{inst.prefix}{ccd}*.fits"
-    try:
-        matches = sorted(pathlib.Path(datadir).glob(pattern))
-    except (PermissionError, OSError):
-        return []
+        try:
+            matches = sorted(pathlib.Path(datadir).glob(pattern))
+        except (PermissionError, OSError):
+            return []
     return [str(p) for p in matches]
 
 
