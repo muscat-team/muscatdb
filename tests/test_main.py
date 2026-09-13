@@ -93,6 +93,7 @@ class TestInstruments:
         assert MUSCAT.ep_names is None
         assert MUSCAT.has_pa is True
         assert MUSCAT.use_alt_ut_key is False
+        assert MUSCAT.has_wcs is False
 
     def test_muscat2_config(self):
         assert MUSCAT2.name == "muscat2"
@@ -100,6 +101,7 @@ class TestInstruments:
         assert MUSCAT2.prefix == "MCT2"
         assert MUSCAT2.has_pa is True
         assert MUSCAT2.use_alt_ut_key is False
+        assert MUSCAT2.has_wcs is False
 
     def test_muscat3_config(self):
         assert MUSCAT3.name == "muscat3"
@@ -108,6 +110,7 @@ class TestInstruments:
         assert MUSCAT3.ep_names == ["ep02", "ep03", "ep04", "ep05"]
         assert MUSCAT3.has_pa is False
         assert MUSCAT3.use_alt_ut_key is True
+        assert MUSCAT3.has_wcs is True
 
     def test_muscat4_config(self):
         assert MUSCAT4.name == "muscat4"
@@ -116,6 +119,13 @@ class TestInstruments:
         assert MUSCAT4.ep_names == ["ep06", "ep07", "ep08", "ep09"]
         assert MUSCAT4.has_pa is False
         assert MUSCAT4.use_alt_ut_key is True
+        assert MUSCAT4.has_wcs is True
+
+    def test_wcs_availability_matches_project_notes(self):
+        # Per CLAUDE.md: muscat/muscat2 have no native WCS; muscat3, muscat4,
+        # sinistro, sbig, qhy600 do.
+        no_wcs = {name for name, cfg in INSTRUMENTS.items() if not cfg.has_wcs}
+        assert no_wcs == {"muscat", "muscat2"}
 
     def test_instruments_dict(self):
         assert set(INSTRUMENTS) == {"muscat", "muscat2", "muscat3", "muscat4", "sinistro", "sbig", "qhy600"}
@@ -515,8 +525,14 @@ class TestScanner:
         # Create data dirs for two dates
         for d in ["260101", "260102"]:
             os.makedirs(f"{obsdate}/muscat/{d}", exist_ok=True)
-        # Pre-create obslog for 260101 so it's "not missing"
-        os.makedirs(f"{tmp_obslog}/muscat/260101", exist_ok=True)
+        # Pre-create a *complete* obslog CSV for 260101 so it's "not missing".
+        # An empty marker directory would not qualify -- see
+        # _obsdate_dir_is_complete and tests/test_scanner.py.
+        _make_csv(
+            f"{tmp_obslog}/muscat/260101/obslog-muscat-260101-ccd0.csv",
+            INSTRUMENTS["muscat"].csv_header.split(","),
+            [{"FRAME": "MSCT2601010001", "OBJECT": "TOI-1234"}],
+        )
         dates = scan_missing_dates("muscat", "26", max_workers=1)
         assert dates == ["260102"]
 

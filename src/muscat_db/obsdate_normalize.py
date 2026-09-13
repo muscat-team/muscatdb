@@ -36,7 +36,7 @@ from pathlib import Path
 
 from muscat_db.dayobs import dayobs_from_filename
 from muscat_db.instruments import INSTRUMENTS, OBSLOG_BASE
-from muscat_db.scanner import _find_fits_files, _read_fits_header_keys
+from muscat_db.scanner import _find_fits_files, _is_obsdate_dir, _read_fits_header_keys
 
 logger = logging.getLogger(__name__)
 
@@ -121,17 +121,6 @@ class DedupeResult:
 
     deleted: tuple[Path, ...]
     kept: tuple[tuple[Path, str], ...]
-
-
-def _is_obsdate_dir(name: str) -> bool:
-    """True only for a canonical YYMMDD directory name."""
-    if len(name) != 6 or not name.isdigit():
-        return False
-    try:
-        datetime.datetime.strptime(name, "%y%m%d")
-    except ValueError:
-        return False
-    return True
 
 
 def _day_delta(a: str, b: str) -> int:

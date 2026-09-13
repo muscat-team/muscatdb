@@ -621,18 +621,28 @@ everything here runs as `jerome` on the host.
     back in only after `test` is released to `main` (merge commit, per
     CLAUDE.md) and this same verification is repeated against `main`.
 
+    **2026-09-10 — production cron reinstalled and reverified:** #146
+    released to `main` via #148 (merge commit `70de9ec`). Production's entry
+    (`main`, `muscatdbgui`, port `8001`) was reinstalled the same day. The
+    first real, unattended tick (`04:25:03 UTC`) deployed `5923c3d -> 70de9ec`
+    via `respawn-pane -k` and logged `deployed main at 70de9ec` at
+    `04:25:15 UTC`; `:8001/healthz` confirmed 200 immediately after, and the
+    `muscatdbgui` pane's PID changed cleanly (the old process was replaced in
+    place, not killed outright). The Slack webhook file
+    (`/etc/muscat-db/slack-webhook-url`) was installed on 2026-09-08, so
+    failure alerts now page Slack in addition to logging `FAILED`. Both
+    cron entries are now installed and verified end to end.
+
 ### Final verification (from the plan)
 - `:8001` / `:8003` refuse unauthenticated `/` (401); `/healthz` → 200.
 - Staging `build-db` never touches prod `muscat.db`.
 - Prod `:8001` and prod cron both healthy on the new checkout.
 - Close issue #26 by hand.
 
-**Not yet true as of 2026-09-07:** production's cron entry is out (pulled by
-hand during the 2026-09-06 outage above) and is not reinstalled until `test`
-releases to `main` and the `respawn-pane` fix is reverified there the same way
-staging's was. Do not close #26 until that prod reinstall + reverification
-actually happens — right now only staging's cron entry and healthz check are
-confirmed.
+**True as of 2026-09-10:** production's cron entry is reinstalled and
+reverified against a real unattended tick (see the 2026-09-10 entry above),
+the same way staging's was on 2026-09-07. Both checkouts now redeploy
+automatically on every push to their branch. #26 and #131 are closed.
 
 **Live-verification reminders:** after deploy the server runs via bare `uvicorn`
 (no `--reload`); HTML/JS changes need a server restart to show. Server runs in tmux

@@ -465,6 +465,16 @@ def test_target_without_name_redirects_to_targets_table(mock_db):
     assert response.headers["location"] == "/targets"
 
 
+def test_legacy_logs_route_redirects_to_obs(mock_db):
+    response = TestClient(app).get("/logs", follow_redirects=False)
+
+    assert response.status_code == 301
+    assert response.headers["location"] == "/obs"
+    follow = TestClient(app).get("/logs")
+    assert follow.status_code == 200
+    assert "Live LC Monitor" in follow.text or "Instruments" in follow.text
+
+
 def test_index_exposes_normalized_target_direct_link(mock_db, monkeypatch):
     monkeypatch.setattr(
         "muscat_db.web._get_targets",
@@ -1371,7 +1381,7 @@ def test_lco_pages_render_and_nav_links_it(mock_db):
     assert "<summary><h3>Target &amp; Transit Windows</h3></summary>" in page.text
     assert "<summary><h3>Results</h3></summary>" in archive.text
     # Nav (from base.html) links to /lco/schedule on every page.
-    assert 'href="/lco/schedule"' in client.get("/logs").text
+    assert 'href="/lco/schedule"' in client.get("/obs").text
 
 
 def test_lco_config_reports_booleans_and_hides_token(monkeypatch):
@@ -2882,7 +2892,7 @@ def test_nexsci_page_renders_with_payload_and_archive_link(mock_db, monkeypatch)
 
 
 def test_nexsci_nav_link_present_on_other_pages(mock_db):
-    body = TestClient(app).get("/logs").text
+    body = TestClient(app).get("/obs").text
     assert 'href="/nexsci"' in body
     assert "NExScI" in body
 
@@ -2943,6 +2953,85 @@ def test_photometry_page_links_to_fov_after_obslog(mock_db, monkeypatch, tmp_pat
         'href="/fov?inst=muscat3&target=TOI-488.01" '
         'target="_blank" rel="noopener"'
     ) in html
+
+
+def test_jd_to_utc_minute_rounds_and_formats():
+    from muscat_db.web import _jd_to_utc_minute
+
+    # 2461263.54 JD = 2026-08-11 00:57:36 UTC -> rounds up to :58
+    assert _jd_to_utc_minute(2461263.54) == "2026-08-11 00:58 UTC"
+    # 2461263.539 JD = 2026-08-11 00:56:10 UTC -> rounds down (stays :56)
+    assert _jd_to_utc_minute(2461263.539) == "2026-08-11 00:56 UTC"
+    # exact Unix epoch
+    assert _jd_to_utc_minute(2440587.5) == "1970-01-01 00:00 UTC"
+
+
+def test_photometry_page_jd_slider_reflects_data_span(mock_db, monkeypatch, tmp_path):
+    """The exclude_after_jd/exclude_before_jd range sliders must be bounded by
+    the target's actual frame JD span, converted from frames.jd_start's
+    truncated-JD storage ("JD - 2450000", see scanner.py) back to the full JD
+    --exclude_after_jd/--exclude_before_jd (and prose2's header_jd()) expect."""
+    from muscat_db import web
+
+    conn = sqlite3.connect(mock_db)
+    for i, jd_trunc in enumerate([781.123456, 781.400000, 781.654321]):
+        conn.execute(
+            "INSERT INTO frames (instrument, obsdate, ccd, filename, object, jd_start, ut_start, "
+            "exptime, read_mode, filter, ra, declination, airmass, focus, pa) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("muscat3", "260101", 0, f"frame{i}", "TOI-1", jd_trunc, "00:00:00",
+             30.0, "high", "gp", "", "", 1.0, 0.0, 0.0),
+        )
+    conn.commit()
+    conn.close()
+
+    empty_outputs = {
+        "has_any": False, "summary": {}, "summary_items": [], "bands": {},
+        "sites": [], "modes": [], "masters": [], "npz": None, "log": None,
+        "ref_header": None, "ref_selection": None, "site": "", "mode": "",
+    }
+    monkeypatch.setattr(web.phot, "list_photometry_runs", lambda inst, date, target: ([], {}))
+    monkeypatch.setattr(web.phot, "list_outputs", lambda *args, **kwargs: empty_outputs)
+    monkeypatch.setattr(web.phot, "command_str", lambda inst, date, target, test_run=False: "run photometry")
+    monkeypatch.setattr(web.phot, "raw_data_dir", lambda inst, date: tmp_path)
+
+    r = TestClient(app).get("/photometry?inst=muscat3&date=260101&target=TOI-1")
+
+    assert r.status_code == 200
+    html = r.text
+    assert 'id="jdslider-exclude_after_jd" min="2450781.123456" max="2450781.654321"' in html
+    assert 'id="jdslider-exclude_before_jd" min="2450781.123456" max="2450781.654321"' in html
+    # after-slider defaults to the span's max (excludes nothing until dragged
+    # inward); before-slider defaults to the span's min, symmetrically
+    assert 'id="jdslider-exclude_after_jd"' in html and 'value="2450781.654321"' in html
+    assert 'id="jdslider-exclude_before_jd"' in html and 'value="2450781.123456"' in html
+    # labels and the 'data spans' hint are UTC (to the nearest minute), not
+    # a second raw-JD readout duplicating the slider's own min/max attributes
+    assert 'id="jdslider-exclude_after_jd-label" style="white-space:nowrap;">1997-11-29 03:42 UTC<' in html
+    assert 'id="jdslider-exclude_before_jd-label" style="white-space:nowrap;">1997-11-28 14:58 UTC<' in html
+    assert "data spans 1997-11-28 14:58 UTC–1997-11-29 03:42 UTC" in html
+
+
+def test_photometry_page_no_jd_slider_without_frame_data(mock_db, monkeypatch, tmp_path):
+    """No frames scanned yet (or a degenerate single-JD span) -> no slider,
+    plain text inputs only -- must not render a broken/zero-width control."""
+    from muscat_db import web
+
+    empty_outputs = {
+        "has_any": False, "summary": {}, "summary_items": [], "bands": {},
+        "sites": [], "modes": [], "masters": [], "npz": None, "log": None,
+        "ref_header": None, "ref_selection": None, "site": "", "mode": "",
+    }
+    monkeypatch.setattr(web.phot, "list_photometry_runs", lambda inst, date, target: ([], {}))
+    monkeypatch.setattr(web.phot, "list_outputs", lambda *args, **kwargs: empty_outputs)
+    monkeypatch.setattr(web.phot, "command_str", lambda inst, date, target, test_run=False: "run photometry")
+    monkeypatch.setattr(web.phot, "raw_data_dir", lambda inst, date: tmp_path)
+
+    r = TestClient(app).get("/photometry?inst=muscat3&date=260101&target=TOI-1")
+
+    assert r.status_code == 200
+    assert "jdslider-exclude_after_jd" not in r.text
+    assert 'id="opt-exclude_after_jd"' in r.text
 
 
 def test_photometry_page_keeps_selected_run_with_no_outputs(mock_db, monkeypatch, tmp_path):

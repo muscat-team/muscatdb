@@ -9,6 +9,7 @@ from muscat_db.coord import (
     is_valid_dec,
     is_valid_ra,
     pick_representative,
+    sexagesimal_to_deg,
     unpack,
 )
 
@@ -135,3 +136,28 @@ def test_coord_repr_empty_group_returns_blank_pair():
     (packed,) = conn.execute("SELECT coord_repr(ra, dec) FROM f").fetchone()
     assert unpack(packed) == ("", "")
     conn.close()
+
+
+# ── sexagesimal -> decimal degrees ───────────────────────────────────────────
+
+def test_sexagesimal_to_deg_known_pair():
+    # 04:05:35.05 -> 61.3960...deg; +20:04:27.36 -> 20.0742...deg
+    ra_deg, dec_deg = sexagesimal_to_deg("04:05:35.05", "+20:04:27.36")
+    assert ra_deg == pytest.approx((4 + 5 / 60 + 35.05 / 3600) * 15.0, abs=1e-9)
+    assert dec_deg == pytest.approx(20 + 4 / 60 + 27.36 / 3600, abs=1e-9)
+
+
+def test_sexagesimal_to_deg_negative_declination():
+    ra_deg, dec_deg = sexagesimal_to_deg("04:05:35.05", "-04:05:06")
+    assert dec_deg == pytest.approx(-(4 + 5 / 60 + 6 / 3600), abs=1e-9)
+
+
+def test_sexagesimal_to_deg_recovers_dropped_decimal():
+    # Same TCS bug clean_dec already recovers for pick_representative.
+    ra_deg, dec_deg = sexagesimal_to_deg("4:06:37", "+20:11:121")
+    assert dec_deg == pytest.approx(20 + 11 / 60 + 12.1 / 3600, abs=1e-9)
+
+
+@pytest.mark.parametrize("ra,dec", [("q", "+20:04:27.36"), ("04:05:35.05", "OQ"), (None, None)])
+def test_sexagesimal_to_deg_returns_none_for_malformed_input(ra, dec):
+    assert sexagesimal_to_deg(ra, dec) is None

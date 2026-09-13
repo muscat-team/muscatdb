@@ -19,6 +19,7 @@ import pathlib
 import logging
 import json
 import os
+import re
 import threading
 import uuid
 from collections.abc import Callable
@@ -716,14 +717,87 @@ def lookup_magnitudes_with_fallback(
     return None, None, False
 
 
+# Matches a leading catalog-prefix token (letters, optionally followed by
+# digits -- e.g. "GJ", "K2", "HD") and separates it from the remainder.
+# Names that don't start with a letter (e.g. "2MASS J...") don't match, and
+# are left to resolve (or not) on the unmodified string only.
+_CATALOG_PREFIX_RE = re.compile(r"^([A-Za-z]+[0-9]*)[\s\-]+(.+)$")
+
+
+def _target_name_variants(name: str) -> list[str]:
+    """Alternate spellings of ``name`` to retry against the Sesame resolver.
+
+    CDS Sesame (queried by ``SkyCoord.from_name``) is inconsistently case-
+    and separator-sensitive across catalog conventions -- confirmed
+    empirically against the live service, not assumed:
+
+    - "GJ 12" resolves, "gj 12" doesn't, but "gj12"/"GJ12" (no separator,
+      either case) and "gj 1214" (same lowercase+space shape, different
+      number) both do. GJ's dictionary entry is case-sensitive only for the
+      space-separated form, and only for some running numbers.
+    - "KELT-9" and "TRAPPIST-1" resolve; "KELT 9"/"kelt9"/"KELT9" and
+      "TRAPPIST 1"/"trappist1"/"TRAPPIST1" don't. For these the hyphen is
+      mandatory and case is irrelevant.
+    - "K2-18" resolves; "K2 18"/"k218"/"K218" don't -- same hyphen-only
+      pattern.
+
+    There's no single deterministic rule, so on a resolution failure we
+    retry the leading prefix token against the plausible separator/case
+    combinations (hyphen, space, none) instead of hard-coding a per-catalog
+    table that would need updating for every new survey.
+    """
+    match = _CATALOG_PREFIX_RE.match(name)
+    if not match:
+        return []
+
+    prefix, rest = match.groups()
+    rest = rest.strip()
+    prefix_upper = prefix.upper()
+
+    candidates = [
+        f"{prefix_upper}-{rest}",
+        f"{prefix_upper} {rest}",
+        f"{prefix_upper}{rest}",
+        f"{prefix}-{rest}",
+    ]
+
+    seen = {name}
+    variants = []
+    for candidate in candidates:
+        if candidate not in seen:
+            seen.add(candidate)
+            variants.append(candidate)
+    return variants
+
+
 def resolve_target_coords(target_name: str) -> tuple[float, float] | None:
-    """Resolve a target name to (ra, dec) in degrees using SIMBAD via astropy."""
-    try:
-        coord = SkyCoord.from_name(target_name)
+    """Resolve a target name to (ra, dec) in degrees using SIMBAD via astropy.
+
+    Tries the name exactly as given first. If Sesame rejects it, retries a
+    handful of normalized spellings (see :func:`_target_name_variants`)
+    before giving up -- see that function's docstring for why a simple
+    ``.upper()`` isn't enough.
+    """
+    stripped = target_name.strip()
+    attempts = [stripped, *_target_name_variants(stripped)]
+
+    last_exc: Exception | None = None
+    for attempt in attempts:
+        try:
+            coord = SkyCoord.from_name(attempt)
+        except Exception as exc:
+            last_exc = exc
+            continue
+        if attempt != stripped:
+            logger.info(
+                "Resolved target '%s' via normalized spelling '%s'", target_name, attempt
+            )
         return (float(coord.ra.deg), float(coord.dec.deg))
-    except Exception as exc:
-        logger.warning("Could not resolve target '%s': %s", target_name, exc)
-        return None
+
+    logger.warning(
+        "Could not resolve target '%s' (tried %s): %s", target_name, attempts, last_exc
+    )
+    return None
 
 
 # ---------------------------------------------------------------------------

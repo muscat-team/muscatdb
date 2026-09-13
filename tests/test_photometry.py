@@ -713,6 +713,47 @@ class TestRunOptions:
         )
         assert "--display_stack_nframes" not in cmd_blank
 
+    def test_sig_flux_and_poly_deg_emitted_only_when_changed(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("MUSCAT_PROSE_DIR", str(tmp_path))
+        # disabled by default -> nothing emitted
+        cmd = phot.build_command(INST, DATE, TARGET, {}, test_run=False)
+        assert "--sig_flux" not in cmd and "--flux_poly_deg" not in cmd
+        # enabling flux clipping emits both sigma and the default degree
+        cmd = phot.build_command(
+            INST, DATE, TARGET, {"sig_flux": "5.0"}, test_run=False
+        )
+        assert "--sig_flux 5.0" in " ".join(cmd)
+        assert "--flux_poly_deg" not in cmd
+        # a non-default degree is emitted
+        cmd = phot.build_command(
+            INST, DATE, TARGET,
+            {"sig_flux": "5.0", "flux_poly_deg": "3"},
+            test_run=False,
+        )
+        assert "--sig_flux 5.0" in " ".join(cmd)
+        assert "--flux_poly_deg 3" in " ".join(cmd)
+        # explicit default degree is omitted (pipeline keeps its default)
+        cmd = phot.build_command(
+            INST, DATE, TARGET,
+            {"sig_flux": "5.0", "flux_poly_deg": str(phot.RUN_DEFAULTS["flux_poly_deg"])},
+            test_run=False,
+        )
+        assert "--flux_poly_deg" not in cmd
+
+    def test_normalize_run_options_accepts_sig_flux(self):
+        o = phot.normalize_run_options({"sig_flux": "5.0", "flux_poly_deg": "3"})
+        assert o["sig_flux"] == 5.0
+        assert o["flux_poly_deg"] == 3
+        o = phot.normalize_run_options({})
+        assert o["sig_flux"] is None
+        assert o["flux_poly_deg"] == 2
+
+    def test_validate_run_options_rejects_negative_poly_deg(self):
+        base = phot.normalize_run_options({"bands": ["gp"]})
+        assert phot.validate_run_options({**base, "flux_poly_deg": -1}) is not None
+        assert phot.validate_run_options({**base, "flux_poly_deg": "abc"}) is not None
+        assert phot.validate_run_options({**base, "flux_poly_deg": 2}) is None
+
     def test_ref_select_quality_default_top_k_not_echoed(self, monkeypatch, tmp_path):
         # ref_select_top_k left at the RUN_DEFAULTS value should not be echoed
         # even when ref_select=quality is (mirrors the numeric-override-only-
@@ -766,6 +807,27 @@ class TestRunOptions:
         cmd = phot.build_command(INST, DATE, TARGET,
                                  {"avoid_comparison_ids": ""}, test_run=False)
         assert "--avoid_cids" not in cmd
+
+    def test_exclude_after_jd_passed_through(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("MUSCAT_PROSE_DIR", str(tmp_path))
+        cmd = phot.build_command(INST, DATE, TARGET,
+                                 {"exclude_after_jd": "2460423.10,2460423.60"}, test_run=False)
+        s = " ".join(cmd)
+        assert "--exclude_after_jd 2460423.10 2460423.60" in s
+
+    def test_exclude_before_jd_passed_through(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("MUSCAT_PROSE_DIR", str(tmp_path))
+        cmd = phot.build_command(INST, DATE, TARGET,
+                                 {"exclude_before_jd": "2460423.20"}, test_run=False)
+        s = " ".join(cmd)
+        assert "--exclude_before_jd 2460423.20" in s
+
+    def test_empty_exclude_jd_emits_nothing(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("MUSCAT_PROSE_DIR", str(tmp_path))
+        cmd = phot.build_command(INST, DATE, TARGET,
+                                 {"exclude_after_jd": "", "exclude_before_jd": ""}, test_run=False)
+        assert "--exclude_after_jd" not in cmd
+        assert "--exclude_before_jd" not in cmd
 
     def test_avoid_nearby_star_blank_uses_auto_flag(self, monkeypatch, tmp_path):
         monkeypatch.setenv("MUSCAT_PROSE_DIR", str(tmp_path))
@@ -2073,9 +2135,9 @@ class TestRoutes:
         assert "MuSCAT + LCO database (Last updated on" in r.text
 
     def test_logs_page(self, client):
-        r = client.get("/logs")
+        r = client.get("/obs")
         assert r.status_code == 200
-        assert "Logs" in r.text
+        assert "Observations" in r.text
         assert "Instruments" in r.text
         assert "Data Summary" in r.text
 

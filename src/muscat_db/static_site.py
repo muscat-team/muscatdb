@@ -68,7 +68,7 @@ _GUIDE_SITEDIR = "guide"
 _NAV_PAGES: tuple[str, ...] = (
     "/",
     "/targets",
-    "/logs",
+    "/obs",
     "/projects",
     "/guide",
     "/jobs",
@@ -236,7 +236,7 @@ def _url_to_sitedir(path: str, query: str = "") -> str:
     """Map a captured URL to its output directory (relative, no leading slash).
 
     ``/`` → ``""`` (site root), ``/guide`` → ``guide``, ``/targets`` → ``targets``,
-    ``/logs`` → ``logs``, ``/muscat/231201/ccd0`` → ``muscat/231201/ccd0``,
+    ``/obs`` → ``obs``, ``/muscat/231201/ccd0`` → ``muscat/231201/ccd0``,
     ``/target?name=X`` → ``target/<slug>``,
     ``/photometry?inst=&date=&target=`` → ``photometry/<inst>/<date>/<slug>``.
 
