@@ -1413,6 +1413,7 @@ def compute_logp(inst: str, date: str, target: str, options: dict, selected_csvs
             proc = subprocess.run(
                 [timer_py, str(_LOGP_HELPER), str(tmpdir)],
                 capture_output=True, text=True, timeout=_LOGP_TIMEOUT,
+                env={**os.environ, **jobs.core_pinning_env()},
             )
         except subprocess.TimeoutExpired:
             return {"ok": False, "error": f"logP computation timed out after {_LOGP_TIMEOUT}s"}
@@ -1615,6 +1616,9 @@ def start_fit(
             stderr=subprocess.STDOUT,
             text=True,
             start_new_session=True,
+            # Core pinning (architecture issue #51, 2.4): no-op unless
+            # MUSCAT_JOB_MAX_THREADS is configured.
+            env={**os.environ, **jobs.core_pinning_env()},
         )
         try:
             with open(rdir / "timer-fit.pid", "w") as pidf:
@@ -2521,7 +2525,7 @@ def sync_jobs() -> None:
                     logf = open(log_path, "w")
                     _write_log_banner(logf, cmd, opts, narrowband_aliases)
                     logf.flush()
-                    proc = subprocess.Popen(cmd, cwd=str(rdir), stdout=logf, stderr=subprocess.STDOUT, text=True, start_new_session=True)
+                    proc = subprocess.Popen(cmd, cwd=str(rdir), stdout=logf, stderr=subprocess.STDOUT, text=True, start_new_session=True, env={**os.environ, **jobs.core_pinning_env()})
                     try:
                         with open(rdir / "timer-fit.pid", "w") as pidf:
                             pidf.write(str(proc.pid))

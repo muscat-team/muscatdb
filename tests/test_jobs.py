@@ -5,12 +5,90 @@ delegate to (architecture audit C1), so the finalizing state machine and the
 run-id / path-segment helpers are exercised here directly.
 """
 
+import importlib
 import os
 import time
 
 import pytest
 
 from muscat_db import jobs
+
+
+# --------------------------- core pinning (issue #51, 2.4) ------------------
+
+
+class TestParseJobMaxThreads:
+    """_parse_job_max_threads is the validating half of MUSCAT_JOB_MAX_THREADS
+    -- run once at import (see _JOB_MAX_THREADS below) so a malformed value
+    fails loudly at process start, not on every subsequent job launch."""
+
+    def test_none_disables(self):
+        assert jobs._parse_job_max_threads(None) is None
+
+    def test_blank_disables(self):
+        assert jobs._parse_job_max_threads("  ") is None
+
+    def test_parses_integer(self):
+        assert jobs._parse_job_max_threads("8") == 8
+
+    def test_floors_at_one(self):
+        """A misconfigured 0 or negative value must never produce a thread
+        count subprocess libraries would treat as 'unlimited' or reject."""
+        assert jobs._parse_job_max_threads("0") == 1
+        assert jobs._parse_job_max_threads("-5") == 1
+
+    def test_garbage_raises(self):
+        """Raising here (at import, via _JOB_MAX_THREADS below) is the point:
+        a typo must fail once at process start, not on every job launch."""
+        with pytest.raises(ValueError):
+            jobs._parse_job_max_threads("abc")
+
+    def test_garbage_env_var_fails_at_import_not_per_launch(self, monkeypatch):
+        """End-to-end proof of the actual fix: a malformed
+        MUSCAT_JOB_MAX_THREADS must blow up reimporting the module (process
+        start), never core_pinning_env() itself (every job launch)."""
+        monkeypatch.setenv("MUSCAT_JOB_MAX_THREADS", "abc")
+        try:
+            with pytest.raises(ValueError):
+                importlib.reload(jobs)
+        finally:
+            monkeypatch.delenv("MUSCAT_JOB_MAX_THREADS", raising=False)
+            importlib.reload(jobs)  # restore the default for later tests
+
+
+class TestCorePinningEnv:
+    """MUSCAT_JOB_MAX_THREADS caps OMP/MKL/OPENBLAS thread counts for every
+    spawned pipeline subprocess, to prevent BLAS libraries inside prose/timer/
+    harmonic from each assuming they own every core on a host once more than
+    one heavy job can run there at once (see MUSCAT_MAX_FULL_JOBS /
+    MUSCAT_WORKER_MAX_SLOTS). Unset (default) must be a true no-op.
+
+    _JOB_MAX_THREADS is parsed once at import, so these tests monkeypatch
+    that already-validated attribute directly rather than the env var (which
+    only matters before import) -- same pattern as job_store.py's
+    _WORKER_MAX_SLOTS."""
+
+    def test_returns_empty_dict_when_unset(self, monkeypatch):
+        monkeypatch.setattr(jobs, "_JOB_MAX_THREADS", None)
+        assert jobs.core_pinning_env() == {}
+
+    def test_sets_all_three_thread_vars_when_configured(self, monkeypatch):
+        monkeypatch.setattr(jobs, "_JOB_MAX_THREADS", 8)
+        assert jobs.core_pinning_env() == {
+            "OMP_NUM_THREADS": "8",
+            "MKL_NUM_THREADS": "8",
+            "OPENBLAS_NUM_THREADS": "8",
+        }
+
+    def test_read_fresh_every_call_not_cached(self, monkeypatch):
+        monkeypatch.setattr(jobs, "_JOB_MAX_THREADS", None)
+        assert jobs.core_pinning_env() == {}
+        monkeypatch.setattr(jobs, "_JOB_MAX_THREADS", 4)
+        assert jobs.core_pinning_env() == {
+            "OMP_NUM_THREADS": "4",
+            "MKL_NUM_THREADS": "4",
+            "OPENBLAS_NUM_THREADS": "4",
+        }
 
 
 # --------------------------- run-id / path helpers ---------------------------

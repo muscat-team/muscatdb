@@ -265,6 +265,15 @@ ENV_VARS: tuple[EnvVar, ...] = (
         "so the cap is not exact until those pre-existing jobs finish and "
         "release their slots.",
     ),
+    EnvVar(
+        "MUSCAT_JOB_MAX_THREADS",
+        None,
+        "Caps OMP_NUM_THREADS/MKL_NUM_THREADS/OPENBLAS_NUM_THREADS for every "
+        "spawned pipeline subprocess (architecture issue #51 'Core Pinning'), "
+        "so BLAS libraries inside prose2/timer/harmonic don't each assume "
+        "they own every core once more than one heavy job runs on this host "
+        "at once. Unset (default) applies no override.",
+    ),
     EnvVar("MUSCAT_PHOT_FINALIZE_GRACE_TERMINAL_S", "2", "Photometry finalizing grace once a terminal log marker is seen (seconds)"),
     EnvVar("MUSCAT_FIT_FINALIZE_GRACE_S", "8", "Transit-fit finalizing grace after parent exit (seconds)"),
     EnvVar("MUSCAT_FIT_FINALIZE_GRACE_TERMINAL_S", "2", "Transit-fit finalizing grace once a terminal log marker is seen (seconds)"),

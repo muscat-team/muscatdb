@@ -20,7 +20,7 @@ import json
 
 import pytest
 
-from muscat_db import ttv_fit as ttv
+from muscat_db import jobs, ttv_fit as ttv
 
 _COMPLETE_RUN = ("samples.csv.gz", "data.csv", "config.ini", "fit_config.json")
 
@@ -161,6 +161,38 @@ def test_recompute_parses_helper_output(tmp_path, monkeypatch):
     assert result["ok"] is True
     assert result["recomputed"] is True
     assert result["stats"]["evidence"] == "very strong"
+
+
+def test_recompute_applies_core_pinning_when_configured(tmp_path, monkeypatch):
+    """Architecture issue #51, 2.4: the env.update(jobs.core_pinning_env())
+    idiom used by all three cached TTV helpers (delta-BIC, model, ranking)
+    must actually reach the real subprocess.run call, not just build a dict
+    nobody reads -- distinct from the env={**os.environ, **...} idiom
+    already covered elsewhere for start_ttv_fit/sync_jobs."""
+    monkeypatch.setenv("MUSCAT_TTV_DIR", str(tmp_path))
+    monkeypatch.setattr(jobs, "_JOB_MAX_THREADS", 6)
+    _run_dir(tmp_path)
+    monkeypatch.setattr(ttv, "_conda_env_python", lambda env: "/fake/python")
+
+    captured = {}
+
+    class _Done:
+        returncode = 0
+        stdout = json.dumps(_STATS)
+        stderr = ""
+
+    def _fake_run(*_args, **kwargs):
+        captured.update(kwargs)
+        return _Done()
+
+    monkeypatch.setattr(ttv.subprocess, "run", _fake_run)
+    ttv._ttv_model_cache.clear()
+
+    result = ttv.compute_delta_bic("HIP 67522", "default")
+    assert result["ok"] is True
+    assert captured["env"]["OMP_NUM_THREADS"] == "6"
+    assert captured["env"]["MKL_NUM_THREADS"] == "6"
+    assert captured["env"]["OPENBLAS_NUM_THREADS"] == "6"
 
 
 def test_recompute_failure_does_not_leak_details(tmp_path, monkeypatch):

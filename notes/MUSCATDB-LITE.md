@@ -522,7 +522,10 @@ separate package: a worker host installs `muscatdb[cluster]` plus whatever capab
 executes. **Redis and Celery appear nowhere.** Web and workers run as **systemd units**
 (survive reboot, unlike the `muscatdbgui` tmux session), each pinning `OMP_NUM_THREADS` /
 `MKL_NUM_THREADS` / `OPENBLAS_NUM_THREADS` to the host's real core budget so a heavy prose run
-never oversubscribes (ut2's ambient `OMP_NUM_THREADS=100` would swamp 28 threads ~100×).
+never oversubscribes (ut2's ambient `OMP_NUM_THREADS=100` would swamp 28 threads ~100×). This
+pinning is implemented (architecture issue #51, "Core Pinning"): `MUSCAT_JOB_MAX_THREADS`, when
+set, caps all three vars for every spawned photometry/timer/harmonic subprocess via
+`jobs.core_pinning_env()`; unset (default) applies no override.
 
 ### Topology (multi-host)
 
