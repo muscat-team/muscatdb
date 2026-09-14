@@ -25,8 +25,31 @@ from muscat_db.static_site import build_site
 
 pytestmark = pytest.mark.usefixtures("mock_target_coord_resolution")
 
-_RESTRICTED_PROPOSAL = "KEY2026B-001"
-_OPEN_PROPOSAL = "OPEN2026B-002"
+# Distinctive, deliberately not a real-looking proposal ID: target.html (#169)
+# hardcodes "KEY2026B-001" as its PROPID filter box's placeholder text, which
+# every captured target page carries regardless of DB content or restriction.
+# Reusing that exact string as a test fixture's restricted proposal id would
+# make "not in html" assertions pass or fail on template UI copy instead of on
+# actual filtering.
+_RESTRICTED_PROPOSAL = "ZZZTEST-RESTRICTED-9001"
+_OPEN_PROPOSAL = "ZZZTEST-OPEN-9002"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_example_discovery_dirs(tmp_path, monkeypatch):
+    """Point photometry/transit-fit example discovery at empty, nonexistent
+    directories.
+
+    ``_photometry_examples``/``_transit_fit_examples`` walk
+    ``$MUSCAT_PROSE_DIR``/``$MUSCAT_TIMER_DIR`` on whatever host runs the
+    test. Left unset, a dev workstation with real quicklook output there
+    would have the static-site builder pick up real production targets ahead
+    of anything in this module's tiny throwaway DB -- silently changing which
+    code path (real examples vs. the DB fallback) a given test exercises
+    depending on what happens to exist on disk.
+    """
+    monkeypatch.setenv("MUSCAT_PROSE_DIR", str(tmp_path / "no-prose-output"))
+    monkeypatch.setenv("MUSCAT_TIMER_DIR", str(tmp_path / "no-timer-output"))
 
 
 def _insert_frames(conn, rows):
