@@ -1192,6 +1192,10 @@ def _get_ttv_ranking_cached(
     return result
 
 
+def _detect_process_running(rdir: pathlib.Path) -> bool:
+    return jobs.pid_file_process_alive(rdir / "harmonic.pid")
+
+
 def sync_jobs() -> None:
     store = get_job_store()
     with _TTV_LOCK:
@@ -1301,17 +1305,43 @@ def sync_jobs() -> None:
                     run_name=run_name,
                 )
                 database.refresh_target_status(target)
+            elif rdir is not None and _detect_process_running(rdir):
+                # Process is still running on the system, leave state as "running"
+                continue
             else:
-                store.save(
-                    type_="ttv_fit",
-                    inst=row.get("inst") or "_", date=row.get("date") or "_", target=target,
-                    state="error", returncode=-1,
-                    elapsed=row["elapsed"],
-                    started_at=row["started_at"],
-                    error_desc="Process lost (server restart)",
-                    run_id=row.get("run_id"),
-                    run_name=run_name,
-                )
+                # No evidence of completion and the underlying process is gone
+                # too -- reclaim-with-attempt-limit: retry by requeuing (the
+                # pending-drain loop below relaunches it with its original,
+                # preserved params) up to a limit, then give up for good.
+                next_state, new_attempts = jobs.next_reconcile_attempt(int(row.get("attempts") or 0))
+                if next_state == "pending":
+                    logger.warning(
+                        "ttv_fit job %s orphaned with no evidence of completion; "
+                        "retrying (attempt %d)", db_key, new_attempts,
+                    )
+                    store.save(
+                        type_="ttv_fit",
+                        inst=row.get("inst") or "_", date=row.get("date") or "_", target=target,
+                        state="pending", returncode=None,
+                        elapsed=0,
+                        started_at=time.time(),
+                        error_desc="",
+                        run_id=row.get("run_id"),
+                        run_name=run_name,
+                        attempts=new_attempts,
+                    )
+                else:
+                    store.save(
+                        type_="ttv_fit",
+                        inst=row.get("inst") or "_", date=row.get("date") or "_", target=target,
+                        state="error", returncode=-1,
+                        elapsed=row["elapsed"],
+                        started_at=row["started_at"],
+                        error_desc=f"Process lost (server restart); gave up after {new_attempts} attempts",
+                        run_id=row.get("run_id"),
+                        run_name=run_name,
+                        attempts=new_attempts,
+                    )
                 database.refresh_target_status(target)
 
         # Release any concurrency slot whose claimant's persisted job row is
@@ -1422,7 +1452,7 @@ def sync_jobs() -> None:
                     continue
                 _TTV_JOBS[key] = TTVFitJob(key=key, inst="_", date="_", target=target, cmd=cmd, proc=proc, logf=logf, log_path=log_path, run_type="full", run_id=run_seg, run_name=run_name)
                 try:
-                    store.save(type_="ttv_fit", inst="_", date="_", target=target, state="running", returncode=None, elapsed=0, started_at=_TTV_JOBS[key].started_at, run_type="full", params=entry.get("params", ""), run_id=run_seg, run_name=run_name, owner=current_owner(), instance_id=current_instance_id())
+                    store.save(type_="ttv_fit", inst="_", date="_", target=target, state="running", returncode=None, elapsed=0, started_at=_TTV_JOBS[key].started_at, run_type="full", params=entry.get("params", ""), run_id=run_seg, run_name=run_name, owner=current_owner(), instance_id=current_instance_id(), attempts=int(entry.get("attempts") or 0))
                 except Exception:
                     logger.debug("failed to persist queued ttv-fit launch for %s", rdir, exc_info=True)
                     try:

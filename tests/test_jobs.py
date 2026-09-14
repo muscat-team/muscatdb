@@ -346,3 +346,65 @@ class TestIsOrphanReconcilable:
         finally:
             monkeypatch.delenv("MUSCAT_JOB_HEARTBEAT_STALE_S", raising=False)
             importlib.reload(jobs)
+
+
+# --------------------------- reclaim-with-attempt-limit ---------------------------
+
+
+class TestIsPidRunning:
+    def test_own_pid_is_running(self):
+        assert jobs.is_pid_running(os.getpid()) is True
+
+    def test_implausible_pid_is_not_running(self):
+        assert jobs.is_pid_running(999_999_999) is False
+
+
+class TestPidFileProcessAlive:
+    def test_missing_file_is_not_alive(self, tmp_path):
+        assert jobs.pid_file_process_alive(tmp_path / "nope.pid") is False
+
+    def test_own_pid_in_file_is_alive(self, tmp_path):
+        pid_file = tmp_path / "run.pid"
+        pid_file.write_text(str(os.getpid()))
+        assert jobs.pid_file_process_alive(pid_file) is True
+
+    def test_dead_pid_in_file_is_not_alive(self, tmp_path):
+        pid_file = tmp_path / "run.pid"
+        pid_file.write_text("999999999")
+        assert jobs.pid_file_process_alive(pid_file) is False
+
+    def test_unreadable_content_is_not_alive(self, tmp_path):
+        pid_file = tmp_path / "run.pid"
+        pid_file.write_text("not-a-pid")
+        assert jobs.pid_file_process_alive(pid_file) is False
+
+
+class TestNextReconcileAttempt:
+    def test_first_attempt_retries(self, monkeypatch):
+        monkeypatch.setattr(jobs, "_MAX_RECONCILE_ATTEMPTS", 5)
+        assert jobs.next_reconcile_attempt(0) == ("pending", 1)
+
+    def test_attempt_below_limit_retries(self, monkeypatch):
+        monkeypatch.setattr(jobs, "_MAX_RECONCILE_ATTEMPTS", 5)
+        assert jobs.next_reconcile_attempt(3) == ("pending", 4)
+
+    def test_attempt_reaching_limit_gives_up(self, monkeypatch):
+        monkeypatch.setattr(jobs, "_MAX_RECONCILE_ATTEMPTS", 5)
+        assert jobs.next_reconcile_attempt(4) == ("error", 5)
+
+    def test_limit_of_one_gives_up_immediately(self, monkeypatch):
+        """Matches the pre-existing single-terminal-write behaviour when the
+        limit is pinned to 1, e.g. tests/test_worker_job_ownership.py."""
+        monkeypatch.setattr(jobs, "_MAX_RECONCILE_ATTEMPTS", 1)
+        assert jobs.next_reconcile_attempt(0) == ("error", 1)
+
+    def test_max_reconcile_attempts_env_override(self, monkeypatch):
+        monkeypatch.setenv("MUSCAT_JOB_MAX_RECONCILE_ATTEMPTS", "9")
+        import importlib
+
+        reloaded = importlib.reload(jobs)
+        try:
+            assert reloaded._MAX_RECONCILE_ATTEMPTS == 9
+        finally:
+            monkeypatch.delenv("MUSCAT_JOB_MAX_RECONCILE_ATTEMPTS", raising=False)
+            importlib.reload(jobs)

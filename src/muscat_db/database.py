@@ -146,7 +146,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     user_name    TEXT NOT NULL DEFAULT '',
     owner        TEXT NOT NULL DEFAULT '',
     instance_id  TEXT NOT NULL DEFAULT '',
-    heartbeat_at REAL NOT NULL DEFAULT 0
+    heartbeat_at REAL NOT NULL DEFAULT 0,
+    attempts     INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_state_started
@@ -2034,6 +2035,7 @@ _JOBS_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
     ("owner", "TEXT NOT NULL DEFAULT ''"),
     ("instance_id", "TEXT NOT NULL DEFAULT ''"),
     ("heartbeat_at", "REAL NOT NULL DEFAULT 0"),
+    ("attempts", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 
@@ -2138,6 +2140,7 @@ def save_job(
     user_name: str | None = None,
     owner: str = "",
     instance_id: str = "",
+    attempts: int = 0,
 ) -> None:
     # The "user" is the nginx-authenticated account (X-Forwarded-User), set at
     # job creation from request.state.user. State-transition callers (sync_jobs,
@@ -2163,8 +2166,8 @@ def save_job(
     with get_conn(path) as conn:
         _ensure_jobs_migrated(conn, path)
         conn.execute(
-            """INSERT INTO jobs(key, type, instrument, obsdate, target, state, returncode, elapsed, started_at, error_desc, run_type, params, run_id, run_name, user_name, owner, instance_id, heartbeat_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """INSERT INTO jobs(key, type, instrument, obsdate, target, state, returncode, elapsed, started_at, error_desc, run_type, params, run_id, run_name, user_name, owner, instance_id, heartbeat_at, attempts)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(key) DO UPDATE SET
                  state        = excluded.state,
                  returncode   = excluded.returncode,
@@ -2178,8 +2181,17 @@ def save_job(
                  user_name    = CASE WHEN excluded.user_name != '' THEN excluded.user_name ELSE user_name END,
                  owner        = CASE WHEN excluded.owner != '' THEN excluded.owner ELSE owner END,
                  instance_id  = CASE WHEN excluded.instance_id != '' THEN excluded.instance_id ELSE instance_id END,
-                 heartbeat_at = excluded.heartbeat_at""",
-            (key, type_, inst, date, target, state, returncode, elapsed, started_at, error_desc, run_type, params, run_id, run_name, user_name, owner, instance_id, time.time())
+                 heartbeat_at = excluded.heartbeat_at,
+                 attempts     = excluded.attempts""",
+            # attempts is unconditionally overwritten (like state/returncode/
+            # elapsed), never preserved-on-omit like params/run_name/owner: a
+            # caller that omits it means "this is not a reconcile-retry
+            # bookkeeping write" and the counter should read 0, exactly the
+            # reset a fresh launch needs. Only the two call sites that read a
+            # row's current attempts back (jobs.py's reconcile-retry decision,
+            # and the pending-drain relaunch that carries it forward) ever
+            # pass a nonzero value.
+            (key, type_, inst, date, target, state, returncode, elapsed, started_at, error_desc, run_type, params, run_id, run_name, user_name, owner, instance_id, time.time(), attempts)
         )
         conn.commit()
     clear_all_caches()

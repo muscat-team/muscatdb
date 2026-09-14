@@ -202,6 +202,11 @@ ALLOWED_EXTS = {".png", ".gif", ".csv", ".npz", ".log", ".txt"}
 _RUN_LOG_NAME = "_webrun.log"
 _RUNS_DIR_NAME = "_runs"
 _RUN_META_NAME = "_webrun_meta.json"
+# Written next to the run's own output, mirroring transit_fit's timer-fit.pid
+# and ttv_fit's harmonic.pid: lets orphan reconciliation tell whether the
+# detached subprocess itself is still alive after this process's own in-memory
+# tracker is gone (a --reload restart, a crash), via jobs.pid_file_process_alive.
+_PID_FILE_NAME = "photometry.pid"
 _CONDA_ENV_DEFAULT = "prose"   # prose deps live in a conda env named "prose"
 _MODULE = "prose.scripts.run_photometry"
 _POSTPROCESS_MODULE = "prose.scripts.postprocess_lightcurves"
@@ -1761,6 +1766,11 @@ def start_run(
                 start_new_session=True,
                 env=env,
             )
+            try:
+                with open(rdir / _PID_FILE_NAME, "w") as pidf:
+                    pidf.write(str(proc.pid))
+            except OSError:
+                logger.debug("failed to write %s in %s", _PID_FILE_NAME, rdir, exc_info=True)
         except (FileNotFoundError, OSError) as exc:
             if claimed_slot:
                 get_job_store().release_slot("photometry", key)
@@ -2108,6 +2118,10 @@ def _get_error_desc(log_path: Path) -> str:
         return "Failed to parse log"
 
 
+def _detect_process_running(rdir: Path) -> bool:
+    return jobs.pid_file_process_alive(rdir / _PID_FILE_NAME)
+
+
 def sync_jobs() -> None:
     store = get_job_store()
     with _LOCK:
@@ -2230,6 +2244,7 @@ def sync_jobs() -> None:
             owner = ""
             instance_id = ""
             heartbeat_at = 0.0
+            attempts = 0
             for j in db_jobs:
                 if j["key"] == db_key:
                     started_at = j["started_at"]
@@ -2237,6 +2252,7 @@ def sync_jobs() -> None:
                     owner = j.get("owner") or ""
                     instance_id = j.get("instance_id") or ""
                     heartbeat_at = j.get("heartbeat_at") or 0
+                    attempts = int(j.get("attempts") or 0)
                     break
             if owner and owner != current_owner():
                 # Another role's process (e.g. the web process, if this is the
@@ -2259,21 +2275,67 @@ def sync_jobs() -> None:
             # completed reduction is not falsely reported as "exited with code -1".
             lp = log_path(inst, date, target, run_id)
             if _log_has_success(lp) and not _log_has_partial_failure(lp):
-                lost_state, lost_rc, lost_desc = "done", 0, ""
+                store.save(
+                    type_="photometry",
+                    inst=inst,
+                    date=date,
+                    target=target,
+                    state="done",
+                    returncode=0,
+                    elapsed=elapsed,
+                    started_at=started_at,
+                    error_desc="",
+                    run_id=run_id,
+                )
+                database.refresh_target_status(target)
+                continue
+            try:
+                rdir = run_output_dir(inst, date, target, run_id or None)
+            except ValueError:
+                rdir = None
+            if rdir is not None and _detect_process_running(rdir):
+                # The launching process is gone, but prose's own driver
+                # process is still alive on the system and may yet finish --
+                # leave state as "running" rather than relaunching a second
+                # run into the same output directory.
+                continue
+            # No evidence of completion and the underlying process is gone
+            # too -- reclaim-with-attempt-limit: retry by requeuing (the
+            # pending-drain loop below relaunches it with its original,
+            # preserved params) up to a limit, then give up for good.
+            next_state, new_attempts = jobs.next_reconcile_attempt(attempts)
+            if next_state == "pending":
+                logger.warning(
+                    "photometry job %s orphaned with no evidence of completion; "
+                    "retrying (attempt %d)", db_key, new_attempts,
+                )
+                store.save(
+                    type_="photometry",
+                    inst=inst,
+                    date=date,
+                    target=target,
+                    state="pending",
+                    returncode=None,
+                    elapsed=0,
+                    started_at=time.time(),
+                    error_desc="",
+                    run_id=run_id,
+                    attempts=new_attempts,
+                )
             else:
-                lost_state, lost_rc, lost_desc = "error", -1, "Process lost (server restart)"
-            store.save(
-                type_="photometry",
-                inst=inst,
-                date=date,
-                target=target,
-                state=lost_state,
-                returncode=lost_rc,
-                elapsed=elapsed,
-                started_at=started_at,
-                error_desc=lost_desc,
-                run_id=run_id,
-            )
+                store.save(
+                    type_="photometry",
+                    inst=inst,
+                    date=date,
+                    target=target,
+                    state="error",
+                    returncode=-1,
+                    elapsed=elapsed,
+                    started_at=started_at,
+                    error_desc=f"Process lost (server restart); gave up after {new_attempts} attempts",
+                    run_id=run_id,
+                    attempts=new_attempts,
+                )
             database.refresh_target_status(target)
 
         # Release any concurrency slot whose claimant's persisted job row is
@@ -2335,6 +2397,11 @@ def sync_jobs() -> None:
                     logf.flush()
                     proc_env = _job_env()
                     proc = subprocess.Popen(cmd, cwd=str(rdir), stdout=logf, stderr=subprocess.STDOUT, text=True, start_new_session=True, env=proc_env)
+                    try:
+                        with open(rdir / _PID_FILE_NAME, "w") as pidf:
+                            pidf.write(str(proc.pid))
+                    except OSError:
+                        logger.debug("failed to write %s for queued run %s", _PID_FILE_NAME, rdir, exc_info=True)
                 except (FileNotFoundError, OSError) as exc:
                     try: logf.close()
                     except OSError: pass
@@ -2343,7 +2410,7 @@ def sync_jobs() -> None:
                     continue
                 _JOBS[key] = Job(key=key, inst=inst, date=date, target=target, cmd=cmd, proc=proc, logf=logf, log_path=pending_log_path, run_type=run_type, run_id=run_id, site=site, telescope=telescope, mode=mode, run_name=run_name)
                 try:
-                    store.save(type_="photometry", inst=inst, date=date, target=target, state="running", returncode=None, elapsed=0, started_at=_JOBS[key].started_at, run_type=run_type, params=entry.get("params", ""), run_id=run_id, run_name=run_name, owner=current_owner(), instance_id=current_instance_id())
+                    store.save(type_="photometry", inst=inst, date=date, target=target, state="running", returncode=None, elapsed=0, started_at=_JOBS[key].started_at, run_type=run_type, params=entry.get("params", ""), run_id=run_id, run_name=run_name, owner=current_owner(), instance_id=current_instance_id(), attempts=int(entry.get("attempts") or 0))
                 except sqlite3.OperationalError as exc:
                     try: proc.terminate()
                     except OSError: pass

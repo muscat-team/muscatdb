@@ -29,8 +29,19 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 from muscat_db import database, job_store, jobs as job_lifecycle
 from muscat_db import photometry as phot, transit_fit as fit, ttv_fit as ttv
+
+
+@pytest.fixture(autouse=True)
+def _single_reconcile_attempt(monkeypatch):
+    """These tests probe owner/instance gating, not reclaim-with-attempt-limit
+    (covered separately in tests/test_job_reconcile_retry.py) -- pin the limit
+    to 1 so a genuinely-orphaned row still reconciles straight to its terminal
+    state in one sync_jobs() pass, exactly as before that retry logic existed."""
+    monkeypatch.setattr(job_lifecycle, "_MAX_RECONCILE_ATTEMPTS", 1)
 
 
 def _row(store, key: str) -> dict:
@@ -85,7 +96,7 @@ class TestPhotometryOwnershipIsolation:
 
         row = _row(store, key)
         assert row["state"] == "error"
-        assert row["error_desc"] == "Process lost (server restart)"
+        assert row["error_desc"] == "Process lost (server restart); gave up after 1 attempts"
 
 
 class TestTransitFitOwnershipIsolation:
@@ -127,7 +138,7 @@ class TestTransitFitOwnershipIsolation:
 
         row = _row(store, key)
         assert row["state"] == "error"
-        assert row["error_desc"] == "Process lost (server restart)"
+        assert row["error_desc"] == "Process lost (server restart); gave up after 1 attempts"
 
 
 class TestTtvFitOwnershipIsolation:
@@ -169,7 +180,7 @@ class TestTtvFitOwnershipIsolation:
 
         row = _row(store, key)
         assert row["state"] == "error"
-        assert row["error_desc"] == "Process lost (server restart)"
+        assert row["error_desc"] == "Process lost (server restart); gave up after 1 attempts"
 
 
 class TestPhotometryInstanceIsolation:
@@ -214,7 +225,7 @@ class TestPhotometryInstanceIsolation:
 
         row = _row(store, key)
         assert row["state"] == "error"
-        assert row["error_desc"] == "Process lost (server restart)"
+        assert row["error_desc"] == "Process lost (server restart); gave up after 1 attempts"
 
 
 class TestTransitFitInstanceIsolation:
@@ -259,7 +270,7 @@ class TestTransitFitInstanceIsolation:
 
         row = _row(store, key)
         assert row["state"] == "error"
-        assert row["error_desc"] == "Process lost (server restart)"
+        assert row["error_desc"] == "Process lost (server restart); gave up after 1 attempts"
 
 
 class TestTtvFitInstanceIsolation:
@@ -306,4 +317,4 @@ class TestTtvFitInstanceIsolation:
 
         row = _row(store, key)
         assert row["state"] == "error"
-        assert row["error_desc"] == "Process lost (server restart)"
+        assert row["error_desc"] == "Process lost (server restart); gave up after 1 attempts"

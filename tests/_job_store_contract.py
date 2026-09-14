@@ -230,6 +230,29 @@ class JobStoreContractTests:
         save(store, target="HIP1", state="error", started_at=100.0)
         assert store.all()[0]["instance_id"] == "host:1:abc"
 
+    # --- attempts (reclaim-with-attempt-limit, architecture issue #51 step 3) -
+    #
+    # attempts is the orphan-reconciliation retry counter -- see
+    # jobs.next_reconcile_attempt. Unlike owner/instance_id/run_name above, it
+    # is *not* preserved on omit: a caller that omits it means "this write is
+    # not reconcile-retry bookkeeping" and 0 is the correct value (a fresh
+    # launch must not inherit a stale count from a prior run of the same key).
+    # Only the reconcile-retry write itself and the pending-drain relaunch
+    # that carries an in-flight count forward ever pass a nonzero value.
+
+    def test_save_persists_attempts(self, store):
+        save(store, target="HIP1", state="pending", started_at=100.0, attempts=3)
+        assert store.all()[0]["attempts"] == 3
+
+    def test_save_without_attempts_defaults_zero(self, store):
+        save(store, target="HIP1", state="running", started_at=100.0)
+        assert store.all()[0]["attempts"] == 0
+
+    def test_save_resets_attempts_when_later_save_omits_it(self, store):
+        save(store, target="HIP1", state="pending", started_at=100.0, attempts=3)
+        save(store, target="HIP1", state="running", started_at=100.0)
+        assert store.all()[0]["attempts"] == 0
+
     def test_save_stamps_heartbeat_at_to_now(self, store):
         before = time.time()
         save(store, target="HIP1", state="running", started_at=100.0)

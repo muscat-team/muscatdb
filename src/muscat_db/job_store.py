@@ -84,6 +84,7 @@ class JobRepository(Protocol):
         user_name: str | None = None,
         owner: str = "",
         instance_id: str = "",
+        attempts: int = 0,
     ) -> None:
         """Upsert one job record (same fields as the legacy ``save_job``).
 
@@ -95,7 +96,15 @@ class JobRepository(Protocol):
         preserve-on-empty pattern as *run_name*/*user_name*). Every call,
         regardless of state, stamps the row's heartbeat to now -- see
         :meth:`heartbeat` for the lightweight alternative that does the same
-        without rewriting the rest of the row."""
+        without rewriting the rest of the row.
+
+        *attempts* is the reclaim-with-attempt-limit retry counter (see
+        ``jobs.next_reconcile_attempt``) and is unconditionally overwritten,
+        never preserved-on-omit: omitting it (the default) resets it to 0,
+        which is correct for every caller except the two that manage the
+        counter themselves -- orphan reconciliation, and the pending-drain
+        relaunch that must carry an in-flight count forward via
+        ``entry.get("attempts", 0)``."""
         ...
 
     def heartbeat(self, key: str, instance_id: str) -> None:
@@ -221,6 +230,7 @@ class DatabaseJobStore(JobRepository, JobQueue, JobConcurrency):
         user_name: str | None = None,
         owner: str = "",
         instance_id: str = "",
+        attempts: int = 0,
     ) -> None:
         database.save_job(
             type_=type_,
@@ -239,6 +249,7 @@ class DatabaseJobStore(JobRepository, JobQueue, JobConcurrency):
             user_name=user_name,
             owner=owner,
             instance_id=instance_id,
+            attempts=attempts,
         )
 
     def heartbeat(self, key: str, instance_id: str) -> None:
@@ -425,7 +436,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     user_name    TEXT NOT NULL DEFAULT '',
     owner        TEXT NOT NULL DEFAULT '',
     instance_id  TEXT NOT NULL DEFAULT '',
-    heartbeat_at DOUBLE PRECISION NOT NULL DEFAULT 0
+    heartbeat_at DOUBLE PRECISION NOT NULL DEFAULT 0,
+    attempts     INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_state_started ON jobs(state, started_at DESC);
 
@@ -457,6 +469,7 @@ _PG_JOBS_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
     ("owner", "TEXT NOT NULL DEFAULT ''"),
     ("instance_id", "TEXT NOT NULL DEFAULT ''"),
     ("heartbeat_at", "DOUBLE PRECISION NOT NULL DEFAULT 0"),
+    ("attempts", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 
@@ -577,6 +590,7 @@ class PostgresJobStore(JobRepository, JobQueue, JobConcurrency):
         user_name: str | None = None,
         owner: str = "",
         instance_id: str = "",
+        attempts: int = 0,
     ) -> None:
         if user_name is None:
             user_name = ""
@@ -588,8 +602,8 @@ class PostgresJobStore(JobRepository, JobQueue, JobConcurrency):
                 """
                 INSERT INTO jobs(key, type, instrument, obsdate, target, state, returncode,
                                   elapsed, started_at, error_desc, run_type, params, run_id,
-                                  run_name, user_name, owner, instance_id, heartbeat_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                  run_name, user_name, owner, instance_id, heartbeat_at, attempts)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (key) DO UPDATE SET
                     state        = EXCLUDED.state,
                     returncode   = EXCLUDED.returncode,
@@ -603,11 +617,12 @@ class PostgresJobStore(JobRepository, JobQueue, JobConcurrency):
                     user_name    = CASE WHEN EXCLUDED.user_name   != '' THEN EXCLUDED.user_name   ELSE jobs.user_name   END,
                     owner        = CASE WHEN EXCLUDED.owner       != '' THEN EXCLUDED.owner       ELSE jobs.owner       END,
                     instance_id  = CASE WHEN EXCLUDED.instance_id != '' THEN EXCLUDED.instance_id ELSE jobs.instance_id END,
-                    heartbeat_at = EXCLUDED.heartbeat_at
+                    heartbeat_at = EXCLUDED.heartbeat_at,
+                    attempts     = EXCLUDED.attempts
                 """,
                 (key, type_, inst, date, target, state, returncode, elapsed, started_at,
                  error_desc, run_type, params, run_id, run_name, user_name, owner,
-                 instance_id, time.time()),
+                 instance_id, time.time(), attempts),
             )
 
     def heartbeat(self, key: str, instance_id: str) -> None:
@@ -850,8 +865,9 @@ def current_owner() -> str:
 # see jobs.is_orphan_reconcilable) -- proof some other process is actively
 # driving it even though this process's registry has never heard of it. Once
 # that heartbeat goes stale, the owning instance is presumed dead and the row
-# reconciles exactly as before (single terminal write, no retry -- see
-# jobs.py's module docstring). This check runs *in addition to* the owner
+# reconciles exactly as before -- retried (state="pending") up to a limit if
+# nothing shows it actually completed, then abandoned -- see jobs.py's
+# reclaim-with-attempt-limit section. This check runs *in addition to* the owner
 # check above, never instead of it: a legacy row with an owner but no
 # instance_id (written before this existed) still relies on the owner check
 # alone, unchanged.
