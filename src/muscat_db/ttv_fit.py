@@ -539,6 +539,9 @@ def start_ttv_fit(
             stderr=subprocess.STDOUT,
             text=True,
             start_new_session=True,
+            # Core pinning (architecture issue #51, 2.4): no-op unless
+            # MUSCAT_JOB_MAX_THREADS is configured.
+            env={**os.environ, **jobs.core_pinning_env()},
         )
         try:
             with open(rdir / "harmonic.pid", "w") as pidf:
@@ -1008,6 +1011,9 @@ def _get_ttv_model_cached(
         env.setdefault("MPLCONFIGDIR", str(matplotlib_config))
     except OSError:
         pass
+    # Core pinning (architecture issue #51, 2.4): no-op unless
+    # MUSCAT_JOB_MAX_THREADS is configured.
+    env.update(jobs.core_pinning_env())
     try:
         completed = subprocess.run(
             command,
@@ -1077,6 +1083,9 @@ def _compute_delta_bic_cached(target: str, run_name: str, _version: int) -> dict
         env.setdefault("MPLCONFIGDIR", str(matplotlib_config))
     except OSError:
         pass
+    # Core pinning (architecture issue #51, 2.4): no-op unless
+    # MUSCAT_JOB_MAX_THREADS is configured.
+    env.update(jobs.core_pinning_env())
     try:
         completed = subprocess.run(
             [harmonic_python, str(helper), str(rdir)],
@@ -1158,6 +1167,9 @@ def _get_ttv_ranking_cached(
         env.setdefault("MPLCONFIGDIR", str(matplotlib_config))
     except OSError:
         pass
+    # Core pinning (architecture issue #51, 2.4): no-op unless
+    # MUSCAT_JOB_MAX_THREADS is configured.
+    env.update(jobs.core_pinning_env())
     try:
         completed = subprocess.run(
             command, capture_output=True, text=True, timeout=300, check=False, env=env
@@ -1394,7 +1406,7 @@ def sync_jobs() -> None:
                     logf = open(log_path, "w")
                     _write_log_banner(logf, cmd, opts)
                     logf.flush()
-                    proc = subprocess.Popen(cmd, cwd=str(rdir), stdout=logf, stderr=subprocess.STDOUT, text=True, start_new_session=True)
+                    proc = subprocess.Popen(cmd, cwd=str(rdir), stdout=logf, stderr=subprocess.STDOUT, text=True, start_new_session=True, env={**os.environ, **jobs.core_pinning_env()})
                     try:
                         with open(rdir / "harmonic.pid", "w") as pidf:
                             pidf.write(str(proc.pid))

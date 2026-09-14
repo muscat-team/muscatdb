@@ -35,6 +35,45 @@ from pathlib import Path
 from typing import IO
 
 
+# --------------------------- core pinning (architecture issue #51, 2.4) ------
+
+def _parse_job_max_threads(raw: str | None) -> int | None:
+    """None (unset/blank) disables core pinning entirely -- today's exact
+    behavior. Any parseable integer (floored at 1) enables it."""
+    if raw is None or not raw.strip():
+        return None
+    return max(1, int(raw))
+
+
+# Parsed once at import, matching this codebase's convention for every other
+# numeric job-concurrency knob (_MAX_FULL_JOBS/_MAX_TEST_JOBS in each pipeline
+# module, this same module's _HEARTBEAT_STALE_S): a malformed
+# MUSCAT_JOB_MAX_THREADS must fail loudly and immediately at process start,
+# not silently break every subsequent job-launch attempt across all three
+# pipelines -- which is what re-parsing raw os.environ on every
+# core_pinning_env() call (this function's launch-time caller) would do
+# instead, with no error handling at any call site.
+_JOB_MAX_THREADS: int | None = _parse_job_max_threads(os.environ.get("MUSCAT_JOB_MAX_THREADS"))
+
+
+def core_pinning_env() -> dict[str, str]:
+    """Env var overrides applied to every spawned pipeline subprocess, so a
+    BLAS/OpenMP library inside prose2/timer/harmonic doesn't assume it owns
+    every core on the host -- a real risk once more than one heavy job can
+    run there at once (see MUSCAT_MAX_FULL_JOBS / MUSCAT_WORKER_MAX_SLOTS).
+
+    Empty (no overrides) unless MUSCAT_JOB_MAX_THREADS is set: unset is
+    today's exact behavior, each subprocess's BLAS library picks its own
+    thread count unmodified. Reads :data:`_JOB_MAX_THREADS` fresh on every
+    call (not its own cached dict), so a test can monkeypatch that one
+    already-validated attribute directly -- see job_store.py's
+    _WORKER_MAX_SLOTS for the same pattern."""
+    if _JOB_MAX_THREADS is None:
+        return {}
+    n = str(_JOB_MAX_THREADS)
+    return {"OMP_NUM_THREADS": n, "MKL_NUM_THREADS": n, "OPENBLAS_NUM_THREADS": n}
+
+
 # --------------------------- run-id / path-segment helpers ---------------------------
 
 _RUN_NAME_MAX = 40

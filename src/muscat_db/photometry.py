@@ -251,9 +251,11 @@ def _job_env() -> dict[str, str]:
     Routes all ephemeral files (TMPDIR/TMP/TEMP) to a raid-backed directory so
     jobs never trip over a full root ``/tmp``. The dir is created if missing;
     if that fails we fall back to the inherited environment rather than block
-    the launch.
+    the launch. Also applies jobs.core_pinning_env()'s optional thread-count
+    caps (architecture issue #51 "Core Pinning"), a no-op unless
+    MUSCAT_JOB_MAX_THREADS is configured.
     """
-    env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    env = {**os.environ, "PYTHONUNBUFFERED": "1", **jobs.core_pinning_env()}
     tmpdir = prose_tmpdir()
     try:
         Path(tmpdir).mkdir(parents=True, exist_ok=True)

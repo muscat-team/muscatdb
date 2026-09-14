@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from muscat_db import photometry as phot
+from muscat_db import jobs, photometry as phot
 
 # Mirrors the real example dir: TOI-6715 / muscat4 / 250512, bands gp rp ip zs.
 INST = "muscat4"
@@ -85,6 +85,23 @@ class TestPaths:
     def test_results_dir(self, monkeypatch, tmp_path):
         monkeypatch.setenv("MUSCAT_PROSE_DIR", str(tmp_path))
         assert phot.results_dir(INST, DATE) == tmp_path / INST / DATE
+
+    def test_job_env_omits_core_pinning_by_default(self, monkeypatch):
+        """Unset must add no override -- not assert a clean environment,
+        since some hosts already set an ambient OMP_NUM_THREADS themselves."""
+        monkeypatch.setattr(jobs, "_JOB_MAX_THREADS", None)
+        env = phot._job_env()
+        assert env.get("OMP_NUM_THREADS") == os.environ.get("OMP_NUM_THREADS")
+
+    def test_job_env_applies_core_pinning_when_configured(self, monkeypatch):
+        """Architecture issue #51, 2.4: every spawned pipeline subprocess must
+        see the configured thread cap, not just jobs.core_pinning_env() in
+        isolation."""
+        monkeypatch.setattr(jobs, "_JOB_MAX_THREADS", 6)
+        env = phot._job_env()
+        assert env["OMP_NUM_THREADS"] == "6"
+        assert env["MKL_NUM_THREADS"] == "6"
+        assert env["OPENBLAS_NUM_THREADS"] == "6"
 
     def test_photometry_run_id_omits_default_sinistro_mode(self):
         assert phot.build_run_id("sinistro", "lsc", "central_2k_2x2", "default") == "lsc-default"

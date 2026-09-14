@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from muscat_db import transit_fit as fit
+from muscat_db import jobs, transit_fit as fit
 
 
 class _RunningProcess:
@@ -52,6 +52,43 @@ def test_start_fit_delegates_overwrite_to_timer_without_deleting_outputs(
         assert existing_plot.read_text() == "plot"
         fit_yaml = yaml.safe_load((run_dir / "fit.yaml").read_text())
         assert fit_yaml["clobber"] is (overwrite == "true")
+    finally:
+        for job in fit._FIT_JOBS.values():
+            job.logf.close()
+
+
+def test_start_fit_applies_core_pinning_when_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Architecture issue #51, 2.4: MUSCAT_JOB_MAX_THREADS must reach the
+    actual launched subprocess's environment, not just jobs.core_pinning_env()
+    in isolation."""
+    source_csv = tmp_path / "source.csv"
+    source_csv.write_text("time,flux\n")
+    run_dir = tmp_path / "run"
+
+    monkeypatch.setattr(fit, "fit_output_dir", lambda *_args: run_dir)
+    monkeypatch.setattr(fit, "get_csv_lightcurves", lambda *_args: [source_csv])
+    monkeypatch.setattr(fit, "_timer_prefix", lambda: ["timer-fit"])
+    monkeypatch.setattr(fit, "_FIT_JOBS", {})
+    monkeypatch.setattr("muscat_db.database.save_job", lambda **_kwargs: None)
+    monkeypatch.setattr(jobs, "_JOB_MAX_THREADS", 6)
+
+    captured = {}
+
+    def fake_popen(*_args, **kwargs):
+        captured.update(kwargs)
+        return _RunningProcess()
+
+    monkeypatch.setattr(fit.subprocess, "Popen", fake_popen)
+
+    result = fit.start_fit("muscat3", "250101", "Target", {}, test_run=True)
+
+    try:
+        assert result["ok"] is True, result
+        assert captured["env"]["OMP_NUM_THREADS"] == "6"
+        assert captured["env"]["MKL_NUM_THREADS"] == "6"
+        assert captured["env"]["OPENBLAS_NUM_THREADS"] == "6"
     finally:
         for job in fit._FIT_JOBS.values():
             job.logf.close()
