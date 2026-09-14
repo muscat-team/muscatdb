@@ -102,6 +102,12 @@ def _integrity_check_ok(db_path: str) -> bool:
     try:
         row = conn.execute("PRAGMA integrity_check").fetchone()
         return bool(row) and row[0] == "ok"
+    except sqlite3.DatabaseError:
+        # On a sufficiently corrupt file, some SQLite builds raise straight out
+        # of PRAGMA integrity_check itself instead of returning a non-"ok" row
+        # (observed to vary by linked libsqlite3 version) -- either way, the
+        # database is not sound.
+        return False
     finally:
         conn.close()
 
