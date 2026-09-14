@@ -223,6 +223,51 @@ def test_date_with_no_raw_files_is_skipped_and_marked_done(
     assert calls == []
 
 
+def test_a_failed_date_is_recorded_and_retried_without_blocking_others(
+    tmp_obslog, tmp_data, tmp_home_temp, tmp_path, monkeypatch,
+):
+    """A transient failure on one date (unreadable FITS, disk hiccup) must not
+    be checkpointed as done, must not stop other dates in the same run from
+    succeeding, and must be the only date retried on the next run."""
+    db_path = str(tmp_path / "muscat.db")
+    _seed_pre_propid_frame(db_path, "sinistro", "260101", "OpenA")
+    _seed_pre_propid_frame(db_path, "sinistro", "260102", "OpenB")
+    _write_lco_frame(tmp_data, "sinistro", "260101", 1, "OpenA", "PID-A")
+    _write_lco_frame(tmp_data, "sinistro", "260102", 1, "OpenB", "PID-B")
+
+    import muscat_db.scanner as scanner_mod
+    real_scan_date = scanner_mod.scan_date
+
+    def flaky_scan_date(instrument, obsdate, **kwargs):
+        if obsdate == "260102":
+            raise OSError("simulated transient failure reading FITS")
+        return real_scan_date(instrument, obsdate, **kwargs)
+
+    monkeypatch.setattr(scanner_mod, "scan_date", flaky_scan_date)
+
+    stats = backfill_propid_for_instrument("sinistro", db_path=db_path, sleep_s=0)
+
+    assert stats.dates_done == 1
+    assert [d for d, _ in stats.dates_failed] == ["260102"]
+    assert "simulated transient failure" in stats.dates_failed[0][1]
+    # The succeeding date is ingested; the failed one is left untouched.
+    assert _proposal_ids(db_path, "sinistro", "260101") == ["PID-A"]
+    assert _proposal_ids(db_path, "sinistro", "260102") == [""]
+
+    import json
+    from muscat_db.propid_backfill import _checkpoint_path
+    checkpoint = json.loads(_checkpoint_path("sinistro").read_text(encoding="utf-8"))
+    assert checkpoint["done"] == ["260101"]
+
+    # Second run, failure resolved: only the previously-failed date is retried.
+    monkeypatch.setattr(scanner_mod, "scan_date", real_scan_date)
+    stats2 = backfill_propid_for_instrument("sinistro", db_path=db_path, sleep_s=0)
+
+    assert stats2.dates_done == 1
+    assert not stats2.dates_failed
+    assert _proposal_ids(db_path, "sinistro", "260102") == ["PID-B"]
+
+
 def test_max_dates_limits_one_run_and_resumes_next(
     tmp_obslog, tmp_data, tmp_home_temp, tmp_path,
 ):
