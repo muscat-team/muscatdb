@@ -3732,11 +3732,16 @@ def test_ttv_download_all_uses_disk_backed_archive(tmp_path, monkeypatch):
 
 
 def test_ttv_fit_stuck_job_sync_and_cancel(monkeypatch, tmp_path):
-    from muscat_db import ttv_fit as ttv
+    from muscat_db import jobs as job_lifecycle, ttv_fit as ttv
     from muscat_db.job_store import get_job_store
 
     monkeypatch.setenv("MUSCAT_TTV_DIR", str(tmp_path))
     monkeypatch.setenv("MUSCAT_DB_PATH", str(tmp_path / "muscat.db"))
+    # This test checks the terminal outcome of orphan reconciliation, not
+    # reclaim-with-attempt-limit itself (see tests/test_job_reconcile_retry.py)
+    # -- pin the limit to 1 so a single sync_jobs() pass still reconciles
+    # straight to "error", as it always has.
+    monkeypatch.setattr(job_lifecycle, "_MAX_RECONCILE_ATTEMPTS", 1)
 
     store = get_job_store()
     # Save a running TTV fit job with sinistro prefix
@@ -3766,7 +3771,7 @@ def test_ttv_fit_stuck_job_sync_and_cancel(monkeypatch, tmp_path):
     jobs_in_db = store.all()
     target_job = next(j for j in jobs_in_db if j["key"] == "ttv_fit:sinistro/250710/HIP67522/default")
     assert target_job["state"] == "error"
-    assert target_job["error_desc"] == "Process lost (server restart)"
+    assert target_job["error_desc"] == "Process lost (server restart); gave up after 1 attempts"
 
     # Now let's save another running job to test cancel
     store.save(

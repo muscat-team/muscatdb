@@ -124,6 +124,12 @@ ENV_VARS: tuple[EnvVar, ...] = (
         "Server-side job_status() poll cadence (seconds) behind each pipeline's "
         "/log-stream SSE endpoint (architecture issue #51 step 4)",
     ),
+    EnvVar(
+        "MUSCAT_JOB_MAX_RECONCILE_ATTEMPTS", "5",
+        "Reclaim attempts for an orphaned running job with no evidence of "
+        "completion and no live underlying process before it is abandoned "
+        "(architecture issue #51 step 3)",
+    ),
     EnvVar("MUSCAT_EXPOSURE_CALIBRATION_WORKERS", "2", "Global exposure-calibration workers"),
     EnvVar("MUSCAT_EXPOSURE_CALIBRATION_STALE_S", "21600", "Abandoned calibration claim timeout (seconds)"),
     EnvVar("MUSCAT_CATALOG_GLOBAL_WORKERS", "8", "Process-wide outbound catalog concurrency"),
