@@ -283,13 +283,18 @@ def _prepare_env(db_path: str) -> None:
     os.environ.pop("MUSCAT_PROXY_SECRET", None)
 
 
-# Data-layer helpers we override to scrub private text. Captured pristine once
-# so repeated builds in one process never wrap an already-wrapped function or
-# leak a previous build's scrub state.
+# Data-layer helpers we override to scrub private text and, unconditionally,
+# to drop rows touching an opt-in-restricted LCO proposal (issue #144). Captured
+# pristine once so repeated builds in one process never wrap an already-wrapped
+# function or leak a previous build's scrub state.
 _SCRUB_TARGETS: tuple[str, ...] = (
     "_get_targets",
     "_get_datasets_for_normalized_target",
     "_jobs_with_lco_archive_rows",
+    "_get_summaries",
+    "_get_frames",
+    "_get_dates",
+    "_get_objects",
 )
 
 # Keep the published Jobs snapshot compact while still illustrating each job
@@ -313,38 +318,99 @@ def _restore(web) -> None:
         web.fit._discover_orphan_fits = orphan_fits
 
 
-def _install_scrub(web) -> None:
-    """Blank user-authored notes and job usernames at the data layer.
+def _install_scrub(
+    web,
+    restricted_proposals: frozenset[str] = frozenset(),
+    restricted_object_slugs: frozenset[str] = frozenset(),
+    *,
+    scrub_notes: bool = True,
+) -> None:
+    """Blank user-authored notes/usernames (when ``scrub_notes``) and,
+    unconditionally, drop rows touching an opt-in-restricted LCO proposal
+    (issue #144) at the data layer.
+
+    Restriction filtering is unconditional -- independent of ``scrub_notes`` --
+    because it is an access-control gate an admin explicitly opted into, not a
+    text-formatting preference; a ``--keep-notes`` debug build must not become a
+    way to bypass it.
 
     Wrapping the pristine module-level helpers keeps ``web.py`` free of any
-    snapshot awareness while guaranteeing private text never reaches the rendered
-    HTML (including the ``data-note`` / ``data-search`` attributes built from it).
+    snapshot awareness while guaranteeing private/restricted data never reaches
+    the rendered HTML (including the ``data-note`` / ``data-search`` attributes
+    built from it).
     """
     orig = _pristine(web)
     if not hasattr(web, "_static_site_pristine_orphan_fits"):
         web._static_site_pristine_orphan_fits = web.fit._discover_orphan_fits
 
+    def _object_restricted(name: str) -> bool:
+        return _slug(name) in restricted_object_slugs
+
     def targets_scrubbed(db):
-        return [{**r, "note": ""} for r in orig["_get_targets"](db)]
+        rows = orig["_get_targets"](db)
+        rows = [r for r in rows if not _object_restricted(r["object"])]
+        if scrub_notes:
+            rows = [{**r, "note": ""} for r in rows]
+        return rows
 
     def datasets_scrubbed(db, normalized_name):
         datasets, last = orig["_get_datasets_for_normalized_target"](db, normalized_name)
-        return [{**d, "note": ""} for d in datasets], last
+        datasets = [d for d in datasets if d.get("proposal_id", "") not in restricted_proposals]
+        if scrub_notes:
+            datasets = [{**d, "note": ""} for d in datasets]
+        return datasets, last
 
     def jobs_scrubbed():
         selected: list[dict] = []
         counts: dict[str, int] = {}
         for job in reversed(orig["_jobs_with_lco_archive_rows"]()):
+            if _object_restricted(str(job.get("target") or "")):
+                continue
             job_type = job.get("type", "photometry")
             if counts.get(job_type, 0) >= _STATIC_JOB_EXAMPLES_PER_TYPE:
                 continue
             counts[job_type] = counts.get(job_type, 0) + 1
-            selected.append({**job, "user_name": ""})
+            selected.append({**job, "user_name": ""} if scrub_notes else job)
         return selected
+
+    def summaries_scrubbed(db, instrument, obsdate):
+        rows = orig["_get_summaries"](db, instrument, obsdate)
+        return [r for r in rows if r.get("proposal_id", "") not in restricted_proposals]
+
+    def frames_scrubbed(db, instrument, obsdate, ccd):
+        rows = orig["_get_frames"](db, instrument, obsdate, ccd)
+        return [r for r in rows if r.get("proposal_id", "") not in restricted_proposals]
+
+    def dates_scrubbed(db, instrument):
+        rows = orig["_get_dates"](db, instrument)
+        if not restricted_proposals:
+            return rows
+        # A date stays in the list as long as *something* on it is visible
+        # (row-level filtering happens one level down, in summaries/frames); it
+        # is dropped only once every summary on it is restricted. Also closes a
+        # leak the review didn't name explicitly: the photometry/transit-fit
+        # example pages' date picker is built from this same function, so an
+        # unfiltered list would surface a restricted night right next to an
+        # otherwise-safe example page.
+        return [
+            r for r in rows
+            if any(
+                s.get("proposal_id", "") not in restricted_proposals
+                for s in orig["_get_summaries"](db, instrument, r["obsdate"])
+            )
+        ]
+
+    def objects_scrubbed(db, instrument, obsdate):
+        names = orig["_get_objects"](db, instrument, obsdate)
+        return [n for n in names if not _object_restricted(n)]
 
     web._get_targets = targets_scrubbed
     web._get_datasets_for_normalized_target = datasets_scrubbed
     web._jobs_with_lco_archive_rows = jobs_scrubbed
+    web._get_summaries = summaries_scrubbed
+    web._get_frames = frames_scrubbed
+    web._get_dates = dates_scrubbed
+    web._get_objects = objects_scrubbed
     # Orphan discovery scans the live fit-output tree and can add a large,
     # non-reproducible history after the compact DB rows above are selected.
     web.fit._discover_orphan_fits = lambda _existing: []
@@ -387,32 +453,57 @@ def _clear_web_caches(web) -> None:
 # ── URL enumeration (representative subset) ───────────────────────────────────
 
 
-def _drilldown_urls(database, instruments) -> list[str]:
+def _drilldown_urls(
+    database, instruments, restricted_proposals: frozenset[str] = frozenset()
+) -> list[str]:
     """One ``/{inst}`` + newest ``/{inst}/{date}`` + first ``ccd`` per instrument
-    that has data."""
+    that has data.
+
+    ``get_dates`` returns obsdates newest-first (issue #144 PR2 fix: this used
+    to index the *last*, i.e. oldest, entry -- the opposite of what the
+    docstring promised). Restricted-proposal nights are skipped in favor of an
+    older visible date; an instrument whose entire history is restricted is
+    skipped outright rather than capturing an empty drill-down.
+    """
     db = os.environ["MUSCAT_DB_PATH"]
     urls: list[str] = []
     for inst in instruments:
         dates = database.get_dates(db, inst)
-        if not dates:
+        chosen_date = None
+        visible_summaries: list[dict] = []
+        for d in dates:
+            summaries = database.get_summaries(db, inst, d["obsdate"])
+            visible = [s for s in summaries if s.get("proposal_id", "") not in restricted_proposals]
+            if visible:
+                chosen_date = d["obsdate"]
+                visible_summaries = visible
+                break
+        if chosen_date is None:
             continue
         urls.append(f"/{inst}")
-        date = dates[-1]["obsdate"]
-        urls.append(f"/{inst}/{date}")
-        summaries = database.get_summaries(db, inst, date)
-        ccds = sorted({s["ccd"] for s in summaries})
+        urls.append(f"/{inst}/{chosen_date}")
+        ccds = sorted({s["ccd"] for s in visible_summaries})
         if ccds:
-            urls.append(f"/{inst}/{date}/ccd{ccds[0]}")
+            urls.append(f"/{inst}/{chosen_date}/ccd{ccds[0]}")
     return urls
 
 
-def _photometry_examples(phot, instruments, limit: int) -> list[tuple[str, str, str]]:
+def _photometry_examples(
+    phot, instruments, limit: int, restricted_object_slugs: frozenset[str] = frozenset()
+) -> list[tuple[str, str, str]]:
     """Find up to ``limit`` (inst, date, target) tuples with photometry products
-    already on disk, reusing prose's own discovery helpers."""
+    already on disk, reusing prose's own discovery helpers.
+
+    A target touching a restricted proposal (issue #144) is skipped rather than
+    counted against ``limit``, so a visible example further down the scan still
+    gets picked up.
+    """
     found: list[tuple[str, str, str]] = []
     for inst in instruments:
         for date in phot.output_dates(inst):
             for target in phot.discovered_targets(inst, date):
+                if _slug(target) in restricted_object_slugs:
+                    continue
                 try:
                     if phot.list_outputs(inst, date, target).get("has_any"):
                         found.append((inst, date, target))
@@ -423,9 +514,16 @@ def _photometry_examples(phot, instruments, limit: int) -> list[tuple[str, str, 
     return found
 
 
-def _transit_fit_examples(instruments, limit: int) -> list[tuple[str, str, str]]:
+def _transit_fit_examples(
+    instruments, limit: int, restricted_object_slugs: frozenset[str] = frozenset()
+) -> list[tuple[str, str, str]]:
     """Find up to ``limit`` (inst, date, target) tuples with timer outputs by
-    walking the timer root (``$MUSCAT_TIMER_DIR``)."""
+    walking the timer root (``$MUSCAT_TIMER_DIR``).
+
+    A target touching a restricted proposal (issue #144) is skipped rather than
+    counted against ``limit``, so a visible example further down the walk still
+    gets picked up.
+    """
     base = Path(
         os.environ.get("MUSCAT_TIMER_DIR", str(Path.home() / "ql" / "timer"))
     ).expanduser()
@@ -445,7 +543,7 @@ def _transit_fit_examples(instruments, limit: int) -> list[tuple[str, str, str]]
             if not date_dir.is_dir() or not _DATE_RE.match(date_dir.name):
                 continue
             for target_dir in sorted(date_dir.iterdir()):
-                if not target_dir.is_dir():
+                if not target_dir.is_dir() or _slug(target_dir.name) in restricted_object_slugs:
                     continue
                 # Legacy layout (out/ under the target) or per-run subdirs.
                 if _has_png(target_dir) or any(
@@ -463,9 +561,23 @@ class _Capture:
     sitedir: str
 
 
-def _enumerate(database, phot, instruments, n_examples: int) -> tuple[list[_Capture], dict[str, str]]:
+def _enumerate(
+    database,
+    phot,
+    instruments,
+    n_examples: int,
+    restricted_proposals: frozenset[str] = frozenset(),
+    restricted_object_slugs: frozenset[str] = frozenset(),
+) -> tuple[list[_Capture], dict[str, str]]:
     """Build the capture list and the ``path → sitedir`` route map used to
-    rewrite navbar links so they land on populated example pages."""
+    rewrite navbar links so they land on populated example pages.
+
+    ``restricted_proposals``/``restricted_object_slugs`` (issue #144) keep any
+    candidate touching an opt-in-restricted proposal out of the capture list
+    entirely -- the render-layer scrub in ``_install_scrub`` is the guarantee
+    that no restricted row is ever rendered, this just avoids wasting a capture
+    on a page (or drill-down date) that scrub would leave empty.
+    """
     captures: list[_Capture] = []
     route_map: dict[str, str] = {}
     seen: set[str] = set()
@@ -488,7 +600,7 @@ def _enumerate(database, phot, instruments, n_examples: int) -> tuple[list[_Capt
             route_map.setdefault(key, sitedir)
 
     # Instrument drill-downs (also seed the obslog nav path map).
-    for url in _drilldown_urls(database, instruments):
+    for url in _drilldown_urls(database, instruments, restricted_proposals):
         sitedir = add(url)
         route_map.setdefault(urlsplit(url).path, sitedir)
 
@@ -500,23 +612,34 @@ def _enumerate(database, phot, instruments, n_examples: int) -> tuple[list[_Capt
     # shell.
     example_targets: list[str] = []
 
-    for inst, date, target in _photometry_examples(phot, instruments, n_examples):
+    for inst, date, target in _photometry_examples(
+        phot, instruments, n_examples, restricted_object_slugs
+    ):
         q = urlencode({"inst": inst, "date": date, "target": target.replace(" ", "")})
         sitedir = add(f"/photometry?{q}")
         route_map.setdefault("/photometry", sitedir)
         example_targets.append(target)
 
-    for inst, date, target in _transit_fit_examples(instruments, n_examples):
+    for inst, date, target in _transit_fit_examples(
+        instruments, n_examples, restricted_object_slugs
+    ):
         q = urlencode({"inst": inst, "date": date, "target": target.replace(" ", "")})
         sitedir = add(f"/transit-fit?{q}")
         route_map.setdefault("/transit-fit", sitedir)
         example_targets.append(target)
 
-    # Target pages: prefer the example targets, then top rows of the DB.
+    # Target pages: prefer the example targets, then top rows of the DB. Scans
+    # (rather than slicing first, then filtering) so a run of restricted rows
+    # at the front of the alphabetically-sorted list can't starve this of
+    # visible candidates further down (issue #144).
     target_names = list(dict.fromkeys(example_targets))
     if len(target_names) < n_examples:
-        for row in database.get_targets(db)[: n_examples * 2]:
+        for row in database.get_targets(db):
+            if _slug(row["object"]) in restricted_object_slugs:
+                continue
             target_names.append(row["object"])
+            if len(target_names) >= n_examples * 2:
+                break
     for name in list(dict.fromkeys(target_names))[: max(n_examples, 1) + len(example_targets)]:
         sitedir = add(f"/target?{urlencode({'name': name})}")
         route_map.setdefault("/target", sitedir)
@@ -805,21 +928,35 @@ def build_site(
     _prior_static_site = os.environ.get("MUSCAT_STATIC_SITE")
     _prepare_env(resolved_db)
 
+    # Opt-in-restricted proposals (issue #144): computed once up front and
+    # threaded through both the capture-list enumeration and the render-layer
+    # scrub below. The static site has no per-viewer identity, so it is treated
+    # as a zero-grants viewer -- every restricted proposal is denied, with no
+    # exceptions.
+    restricted_proposals = frozenset(database.restricted_proposal_ids(resolved_db))
+    restricted_object_slugs = frozenset(
+        _slug(o)
+        for o in database.objects_with_restricted_proposal(resolved_db, restricted_proposals)
+    )
+
     # Import the app only after the environment is set so module-level config
     # (DB path, auth) is read correctly.
     from muscat_db import web
 
     _clear_web_caches(web)
     _restore(web)  # start from pristine helpers regardless of prior in-process builds
-    if scrub_notes:
-        _install_scrub(web)
+    _install_scrub(
+        web, restricted_proposals, restricted_object_slugs, scrub_notes=scrub_notes
+    )
 
     if out.exists():
         shutil.rmtree(out)
     out.mkdir(parents=True, exist_ok=True)
 
     instruments = list(INSTRUMENTS)
-    captures, route_map = _enumerate(database, phot, instruments, n_examples)
+    captures, route_map = _enumerate(
+        database, phot, instruments, n_examples, restricted_proposals, restricted_object_slugs
+    )
 
     stats = BuildStats()
     figures: dict[str, str] = {}
