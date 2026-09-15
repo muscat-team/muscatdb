@@ -517,7 +517,20 @@ not yet designed; out of scope for the single-host proof above.
   read-mostly, **rebuilt atomically each day and fully disposable.** Local to the web host,
   WAL reads. Because it now holds *only* derived data, the daily rebuild is a pure file swap
   with **no app-owned-table preservation** — the fragile "copy 9 tables across the DROP" dance
-  is gone.
+  is gone. "Ingestion only runs where there's DB write access" is an enforced runtime
+  constraint, not just this sentence:
+  `database._require_catalog_write_access()` (called at the top of `ingest_date`, the single
+  choke point every call site funnels through — `lco.py`, `lco_monitor.py`,
+  `propid_backfill.py`, `web.py`, both `cli.py` commands) raises if
+  `job_store.current_owner() == "worker"`, reusing the same role tag `muscatdb worker`
+  already stamps on every row it launches (`_OWNER`, step 1 above) rather than inventing new
+  infrastructure. Nothing wires a worker process to call `ingest_date` today, so this cannot
+  yet fire in production — it exists so the guarantee holds by construction if a future
+  pipeline ever adds such a call, instead of only by nobody having wired it up yet. (Fixed
+  alongside it: `worker.run()` used to leave `job_store._OWNER` stuck at `"worker"` forever
+  after returning — harmless in production, where the process never returns except at
+  shutdown, but a real cross-test pollution hazard once `_OWNER` gates a real write path;
+  `run()` now restores whatever it was before.)
 - **Control plane — the system of record for everything mutable/concurrent**: the job
   queue + state + leases, per-user settings/tokens, notes, overrides, `lco_observation_*`,
   `ephemeris_views`. One `ControlStore` interface, two adapters selected by
