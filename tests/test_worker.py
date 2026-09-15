@@ -16,7 +16,7 @@ import signal
 import pytest
 from typer.testing import CliRunner
 
-from muscat_db import cli, worker
+from muscat_db import cli, job_store, worker
 
 
 class TestResolvePipelines:
@@ -78,7 +78,11 @@ class TestLoop:
 
     def test_stops_after_the_pass_where_stop_becomes_true(self, monkeypatch):
         calls: list[int] = []
-        monkeypatch.setattr(worker.time, "sleep", lambda s: None)
+        # _loop's wait goes through job_store.wait_for_work_or_sleep, which
+        # (with MUSCAT_JOB_NOTIFY unset, the default here) calls
+        # job_store.time.sleep -- patch it there, not on worker itself,
+        # which no longer imports time at all.
+        monkeypatch.setattr(job_store.time, "sleep", lambda s: None)
         flags = iter([False, False, True])
         worker._loop(
             [("x", lambda: calls.append(1))],
@@ -87,6 +91,38 @@ class TestLoop:
             stop_requested=lambda: next(flags),
         )
         assert len(calls) == 3
+
+    def test_waits_through_the_job_store_helper_not_a_blind_sleep(self, monkeypatch):
+        """_loop's between-pass wait must go through
+        job_store.wait_for_work_or_sleep (instant dispatch, architecture
+        issue #51) rather than a bare time.sleep -- that helper is what
+        applies the MUSCAT_JOB_NOTIFY gate and the never-return-early-
+        without-a-signal floor."""
+        waits: list[float] = []
+        monkeypatch.setattr(
+            job_store, "wait_for_work_or_sleep", lambda t: waits.append(t) or False,
+        )
+        flags = iter([False, False, True])
+        worker._loop(
+            [("x", lambda: None)],
+            interval=1.5,
+            once=False,
+            stop_requested=lambda: next(flags),
+        )
+        assert waits == [1.5, 1.5]  # once per non-final pass, never after the last
+
+    def test_does_not_wait_when_once(self, monkeypatch):
+        waits: list[float] = []
+        monkeypatch.setattr(
+            job_store, "wait_for_work_or_sleep", lambda t: waits.append(t) or False,
+        )
+        worker._loop(
+            [("x", lambda: None)],
+            interval=1.5,
+            once=True,
+            stop_requested=lambda: False,
+        )
+        assert waits == []
 
 
 class TestRun:
@@ -143,6 +179,30 @@ def test_cli_worker_once_smoke(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert "worker started" in result.output
     assert "photometry" in result.output and "transit_fit" in result.output
+
+
+def test_cli_worker_banner_reports_notify_state(tmp_path, monkeypatch):
+    """The startup banner surfaces whether instant dispatch (architecture
+    issue #51, MUSCAT_JOB_NOTIFY) is actually live, so an operator can tell
+    from the log alone rather than having to know the env var was set."""
+    monkeypatch.setattr("muscat_db.photometry.sync_jobs", lambda: None)
+    monkeypatch.setattr("muscat_db.transit_fit.sync_jobs", lambda: None)
+    monkeypatch.setattr("muscat_db.ttv_fit.sync_jobs", lambda: None)
+
+    result_off = CliRunner().invoke(
+        cli.app,
+        ["worker", "--pipeline", "all", "--once", "--db", str(tmp_path / "muscat.db")],
+    )
+    assert result_off.exit_code == 0, result_off.output
+    assert "notify=off" in result_off.output
+
+    monkeypatch.setattr(job_store, "_NOTIFY_ENABLED", True)
+    result_on = CliRunner().invoke(
+        cli.app,
+        ["worker", "--pipeline", "all", "--once", "--db", str(tmp_path / "muscat.db")],
+    )
+    assert result_on.exit_code == 0, result_on.output
+    assert "notify=on" in result_on.output
 
 
 def test_cli_worker_unknown_pipeline_exits_nonzero(tmp_path):
