@@ -49,13 +49,23 @@ running row is left alone as long as its heartbeat is fresh, closing the gap
 where same-role instances used to reconcile each other's live jobs as lost.
 See ``job_store.py``'s ``_INSTANCE_ID`` docstring and ``jobs.is_orphan_reconcilable``
 for the mechanism.
+
+Between passes, ``_loop`` waits via :func:`job_store.wait_for_work_or_sleep`
+rather than a bare sleep -- with ``MUSCAT_JOB_NOTIFY=1`` (instant dispatch,
+architecture issue #51, "Signalling & live logs"), an enqueue elsewhere wakes
+this loop within milliseconds instead of it sitting out the rest of
+*interval*, which remains the fallback poll either way. On SQLite that
+wakeup is in-process only, so a standalone worker (a separate OS process
+from whatever enqueued) is not woken any faster than before -- see
+``job_store.DatabaseJobStore``'s docstring. On Postgres it is a real
+cross-host ``NOTIFY``, woken by an enqueue on any host sharing the control
+plane. Unset (the default), this loop's behaviour is unchanged.
 """
 
 from __future__ import annotations
 
 import logging
 import signal
-import time
 from collections.abc import Callable
 
 from muscat_db import job_store
@@ -124,7 +134,12 @@ def _loop(
         run_pass(fns)
         if once or stop_requested():
             return
-        time.sleep(interval)
+        # Instant dispatch (architecture issue #51, "Signalling & live
+        # logs"): wait_for_work_or_sleep wakes this early the moment
+        # enqueue() signals new work (MUSCAT_JOB_NOTIFY=1), and otherwise
+        # degrades to exactly time.sleep(interval) -- the fallback poll this
+        # loop has always used.
+        job_store.wait_for_work_or_sleep(interval)
 
 
 def run(pipeline: str, *, interval: float = 2.0, once: bool = False) -> None:
