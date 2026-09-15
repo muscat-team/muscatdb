@@ -2835,6 +2835,79 @@ def test_toi_decorated_db_target_uses_canonical_link_and_dataset(mock_db, monkey
     assert 'href="/target?name=TOI179"' in homepage.text
 
 
+def test_get_datasets_includes_proposal_id(mock_db):
+    """Issue #144: the per-dataset row on /target must surface which LCO
+    proposal a night was observed under, for admin visibility ahead of any
+    access gating."""
+    from muscat_db import web
+
+    with sqlite3.connect(mock_db) as conn:
+        conn.execute(
+            """INSERT INTO targets
+               (object, n_dates, n_frames, instruments, dates, inst_dates,
+                filters, total_exptime, is_identified, phot_status, fit_status)
+               VALUES ('WASP-10', 1, 100, 'muscat3', '260101', 'muscat3:260101',
+                       'gp', 1000, 1, 'none', 'none')"""
+        )
+        conn.execute(
+            """INSERT INTO summaries
+               (instrument, obsdate, ccd, object, nframes, filter, proposal_id)
+               VALUES ('muscat3', '260101', 0, 'WASP-10', 50, 'gp', 'KEY2026B-001')"""
+        )
+        conn.execute(
+            """INSERT INTO summaries
+               (instrument, obsdate, ccd, object, nframes, filter, proposal_id)
+               VALUES ('muscat3', '260101', 1, 'WASP-10', 50, 'gp', 'KEY2026B-001')"""
+        )
+
+    datasets, _ = web._get_datasets_for_normalized_target(mock_db, "WASP10")
+    assert len(datasets) == 1
+    assert datasets[0]["proposal_id"] == "KEY2026B-001"
+
+
+def test_target_page_renders_propid_column(mock_db, monkeypatch):
+    """The rendered /target page must show the PROPID column header and a
+    dataset's proposal_id, and fall back to an em dash when absent (e.g.
+    muscat/muscat2, which carry no PROPID)."""
+    from muscat_db import web
+    web._index_cache.clear()
+    monkeypatch.setattr(
+        web,
+        "_get_datasets_for_normalized_target",
+        lambda _db, norm_name: ([
+            {
+                "object": "WASP-10", "date": "260101", "instrument": "muscat3",
+                "filters": ["gp"],
+                "filter_chips": [{"label": "gp", "color": "g", "narrow": False}],
+                "airmass_min": 1.1, "airmass_max": 1.3, "n_frames": 100,
+                "ra": "23:03:10", "dec": "+31:07:32",
+                "phot": "none", "fit": "none", "note": "",
+                "proposal_id": "KEY2026B-001",
+            },
+            {
+                "object": "WASP-10", "date": "260102", "instrument": "muscat",
+                "filters": ["g"],
+                "filter_chips": [{"label": "g", "color": "g", "narrow": False}],
+                "airmass_min": 1.1, "airmass_max": 1.3, "n_frames": 50,
+                "ra": "23:03:10", "dec": "+31:07:32",
+                "phot": "none", "fit": "none", "note": "",
+                "proposal_id": "",
+            },
+        ], "2026-07-01"),
+    )
+
+    r = TestClient(app).get("/target?name=WASP10")
+
+    assert r.status_code == 200
+    html = r.text
+    assert '<th data-sort-attr="propid">PROPID</th>' in html
+    assert 'data-col="propid"' in html
+    assert 'data-propid="KEY2026B-001"' in html
+    assert '<td class="mono">KEY2026B-001</td>' in html
+    assert 'data-propid=""' in html
+    assert '<td class="mono">—</td>' in html
+
+
 def _nexsci_cat_data(names, hosts, tics):
     """Build a full nexsci column dict (all keys the loader produces) with the
     given string columns and null numerics, for monkeypatching the loader."""
@@ -3659,11 +3732,16 @@ def test_ttv_download_all_uses_disk_backed_archive(tmp_path, monkeypatch):
 
 
 def test_ttv_fit_stuck_job_sync_and_cancel(monkeypatch, tmp_path):
-    from muscat_db import ttv_fit as ttv
+    from muscat_db import jobs as job_lifecycle, ttv_fit as ttv
     from muscat_db.job_store import get_job_store
 
     monkeypatch.setenv("MUSCAT_TTV_DIR", str(tmp_path))
     monkeypatch.setenv("MUSCAT_DB_PATH", str(tmp_path / "muscat.db"))
+    # This test checks the terminal outcome of orphan reconciliation, not
+    # reclaim-with-attempt-limit itself (see tests/test_job_reconcile_retry.py)
+    # -- pin the limit to 1 so a single sync_jobs() pass still reconciles
+    # straight to "error", as it always has.
+    monkeypatch.setattr(job_lifecycle, "_MAX_RECONCILE_ATTEMPTS", 1)
 
     store = get_job_store()
     # Save a running TTV fit job with sinistro prefix
@@ -3693,7 +3771,7 @@ def test_ttv_fit_stuck_job_sync_and_cancel(monkeypatch, tmp_path):
     jobs_in_db = store.all()
     target_job = next(j for j in jobs_in_db if j["key"] == "ttv_fit:sinistro/250710/HIP67522/default")
     assert target_job["state"] == "error"
-    assert target_job["error_desc"] == "Process lost (server restart)"
+    assert target_job["error_desc"] == "Process lost (server restart); gave up after 1 attempts"
 
     # Now let's save another running job to test cancel
     store.save(

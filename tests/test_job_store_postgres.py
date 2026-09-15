@@ -109,3 +109,41 @@ class TestClaimSlotConcurrency:
 
         assert sum(results) == 1
         assert store.count_claimed("photometry") == 1
+
+
+class TestHostCapConcurrency:
+    """The per-host cap (architecture issue #51's rejected os.getloadavg()
+    replacement) spans ALL pipelines combined on one host, so claim_slot must
+    take a *second* advisory lock keyed on host, independent of the existing
+    pipeline-keyed one -- otherwise two different pipelines claiming on the
+    same host at the same instant take different locks, aren't mutually
+    exclusive, and can both read the same pre-commit host COUNT and
+    over-grant. A single-threaded test cannot exercise the race; this fires
+    real concurrent claims across three different pipeline names on one host."""
+
+    def test_concurrent_claims_across_pipelines_never_exceed_host_cap(
+        self, store, monkeypatch,
+    ):
+        from muscat_db import job_store
+
+        monkeypatch.setattr(job_store, "_WORKER_MAX_SLOTS", 3)
+        pipelines = ["photometry", "transit_fit", "ttv_fit"]
+        attempts = 30
+        results: list[bool] = []
+        lock = threading.Lock()
+
+        def attempt(i: int) -> None:
+            pipeline = pipelines[i % len(pipelines)]
+            granted = store.claim_slot(pipeline, f"inst/date/T{i}", 10)
+            with lock:
+                results.append(granted)
+
+        threads = [threading.Thread(target=attempt, args=(i,)) for i in range(attempts)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert sum(results) == 3
+        total_claimed = sum(store.count_claimed(p) for p in pipelines)
+        assert total_claimed == 3

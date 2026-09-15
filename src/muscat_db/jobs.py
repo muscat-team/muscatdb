@@ -35,6 +35,45 @@ from pathlib import Path
 from typing import IO
 
 
+# --------------------------- core pinning (architecture issue #51, 2.4) ------
+
+def _parse_job_max_threads(raw: str | None) -> int | None:
+    """None (unset/blank) disables core pinning entirely -- today's exact
+    behavior. Any parseable integer (floored at 1) enables it."""
+    if raw is None or not raw.strip():
+        return None
+    return max(1, int(raw))
+
+
+# Parsed once at import, matching this codebase's convention for every other
+# numeric job-concurrency knob (_MAX_FULL_JOBS/_MAX_TEST_JOBS in each pipeline
+# module, this same module's _HEARTBEAT_STALE_S): a malformed
+# MUSCAT_JOB_MAX_THREADS must fail loudly and immediately at process start,
+# not silently break every subsequent job-launch attempt across all three
+# pipelines -- which is what re-parsing raw os.environ on every
+# core_pinning_env() call (this function's launch-time caller) would do
+# instead, with no error handling at any call site.
+_JOB_MAX_THREADS: int | None = _parse_job_max_threads(os.environ.get("MUSCAT_JOB_MAX_THREADS"))
+
+
+def core_pinning_env() -> dict[str, str]:
+    """Env var overrides applied to every spawned pipeline subprocess, so a
+    BLAS/OpenMP library inside prose2/timer/harmonic doesn't assume it owns
+    every core on the host -- a real risk once more than one heavy job can
+    run there at once (see MUSCAT_MAX_FULL_JOBS / MUSCAT_WORKER_MAX_SLOTS).
+
+    Empty (no overrides) unless MUSCAT_JOB_MAX_THREADS is set: unset is
+    today's exact behavior, each subprocess's BLAS library picks its own
+    thread count unmodified. Reads :data:`_JOB_MAX_THREADS` fresh on every
+    call (not its own cached dict), so a test can monkeypatch that one
+    already-validated attribute directly -- see job_store.py's
+    _WORKER_MAX_SLOTS for the same pattern."""
+    if _JOB_MAX_THREADS is None:
+        return {}
+    n = str(_JOB_MAX_THREADS)
+    return {"OMP_NUM_THREADS": n, "MKL_NUM_THREADS": n, "OPENBLAS_NUM_THREADS": n}
+
+
 # --------------------------- run-id / path-segment helpers ---------------------------
 
 _RUN_NAME_MAX = 40
@@ -312,6 +351,113 @@ def resolve_job_state(
     ):
         return "finalizing", rc, False
     return terminal_job_state(rc, job.cancelled, job.log_path, cfg), rc, True
+
+
+# --------------------------- orphan reconciliation ---------------------------
+#
+# Shared by all three sync_jobs() implementations' "is this running row truly
+# orphaned, or does a live process elsewhere still hold it" check -- see
+# job_store.py's _INSTANCE_ID docstring for the full rationale. Kept here
+# (not job_store.py) since it is a pure lifecycle decision with no
+# persistence of its own, same reasoning as resolve_job_state above.
+
+_HEARTBEAT_STALE_S = max(10.0, float(os.environ.get("MUSCAT_JOB_HEARTBEAT_STALE_S", "30")))
+
+
+def is_orphan_reconcilable(
+    row_instance_id: str | None,
+    row_heartbeat_at: float | None,
+    this_instance_id: str,
+    *,
+    now: float | None = None,
+) -> bool:
+    """True if a ``state="running"`` row not tracked in this process's own
+    in-memory registry may be declared lost by this process.
+
+    A row stamped with a *different* instance_id is left alone as long as its
+    heartbeat is still fresh (within ``MUSCAT_JOB_HEARTBEAT_STALE_S``) --
+    proof some other process is actively driving it, even though it is
+    invisible to this process's registry. A row with no instance_id (written
+    before this existed) or one whose heartbeat has gone stale is fair game,
+    matching the pre-existing single-owner-per-role behaviour's backward
+    compatibility default.
+    """
+    if not row_instance_id or row_instance_id == this_instance_id:
+        return True
+    now = time.time() if now is None else now
+    return (now - float(row_heartbeat_at or 0)) >= _HEARTBEAT_STALE_S
+
+
+# --------------------------- reclaim-with-attempt-limit ---------------------------
+#
+# An orphaned running row (is_orphan_reconcilable above says True) with no
+# evidence of completion used to get a single terminal write -- "Process lost
+# (server restart)" -- with no retry (architecture issue #51 step 3, flagged
+# in review of #167). That is wrong whenever the *launching* process (web or
+# worker) restarted but the detached subprocess itself (start_new_session=True)
+# is still alive and may yet finish, and it means one crash permanently loses
+# work that a relaunch could have completed. The fix mirrors lco_monitor.py's
+# frame-download attempt/abandon pattern: count attempts, retry by requeuing
+# (state="pending", so the pipeline's own pending-drain loop relaunches it
+# with its original params) up to a limit, then give up.
+
+_MAX_RECONCILE_ATTEMPTS = max(1, int(os.environ.get("MUSCAT_JOB_MAX_RECONCILE_ATTEMPTS", "5")))
+
+
+def is_pid_running(pid: int) -> bool:
+    """True if *pid* names a still-live process. A permission or lookup
+    failure both mean "no live process visible to us" -- treated the same as
+    "not running" so a check against a foreign or already-reaped pid never
+    raises."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def pid_file_process_alive(pid_file: Path) -> bool:
+    """True if *pid_file* (one PID per line, written by a pipeline at launch)
+    names a still-running process. A missing/unreadable file, or a PID that is
+    no longer alive, both read as False -- the caller then treats the
+    underlying work as genuinely gone rather than merely between heartbeats.
+
+    Shared by all three pipelines' orphan-reconciliation checks: the process
+    that *launched* a job (and held the in-memory Popen handle) can be gone --
+    a --reload restart, a crash -- while the detached subprocess it started
+    keeps running independently. This is what stops reclaim-with-attempt-limit
+    from relaunching a second run into a directory the first one is still
+    writing.
+    """
+    if not pid_file.is_file():
+        return False
+    try:
+        with open(pid_file) as f:
+            pid = int(f.read().strip())
+        return is_pid_running(pid)
+    except Exception:
+        _logger.debug("failed to read pid file %s", pid_file, exc_info=True)
+        return False
+
+
+def next_reconcile_attempt(attempts: int) -> tuple[str, int]:
+    """Decide the outcome of one orphan-reconciliation pass over a running row
+    with no evidence of completion and no live underlying process (see
+    :func:`pid_file_process_alive`), given how many prior attempts it has
+    already burned (0 the first time a row is reconciled).
+
+    Returns ``(next_state, new_attempts)``. While attempts remain,
+    *next_state* is ``"pending"`` so the pipeline's own pending-drain loop
+    relaunches the job with its original params later in the same
+    ``sync_jobs()`` pass, exactly as if it had just been queued. Once
+    *new_attempts* reaches ``MUSCAT_JOB_MAX_RECONCILE_ATTEMPTS``, *next_state*
+    is ``"error"`` and the row is abandoned, so a job whose underlying process
+    crashes every time cannot be relaunched forever.
+    """
+    new_attempts = attempts + 1
+    if new_attempts >= _MAX_RECONCILE_ATTEMPTS:
+        return "error", new_attempts
+    return "pending", new_attempts
 
 
 # --------------------------- process-group control ---------------------------

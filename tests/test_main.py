@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import logging
 import os
 import shutil
 import sqlite3
@@ -116,7 +117,7 @@ class TestInstruments:
         assert MUSCAT4.name == "muscat4"
         assert MUSCAT4.nccd == 4
         assert MUSCAT4.prefix == "coj2m002-"
-        assert MUSCAT4.ep_names == ["ep06", "ep07", "ep08", "ep09"]
+        assert MUSCAT4.ep_names == ["ep06", "ep07", "ep08", ("ep09", "ep10")]
         assert MUSCAT4.has_pa is False
         assert MUSCAT4.use_alt_ut_key is True
         assert MUSCAT4.has_wcs is True
@@ -163,6 +164,21 @@ class TestInstruments:
         with pytest.raises(Exception):
             MUSCAT.data_dir = "/somewhere/else"
 
+    @pytest.mark.parametrize("inst_name", ["muscat3", "muscat4", "sinistro", "sbig", "qhy600"])
+    def test_lco_instrument_captures_propid(self, inst_name):
+        """PROPID (issue #144) is a standard BANZAI/LCO header card, present
+        only on the five LCO-network instruments -- absent on muscat/muscat2,
+        which are not LCO data."""
+        inst = INSTRUMENTS[inst_name]
+        assert "PROPID" in inst.keys
+        assert "PROPID" in inst.csv_header.split(",")
+
+    @pytest.mark.parametrize("inst_name", ["muscat", "muscat2"])
+    def test_non_lco_instrument_has_no_propid(self, inst_name):
+        inst = INSTRUMENTS[inst_name]
+        assert "PROPID" not in inst.keys
+        assert "PROPID" not in inst.csv_header.split(",")
+
 
 # ── Tests: scanner ───────────────────────────────────────────────────────────
 
@@ -176,6 +192,7 @@ class TestScanner:
         for i in range(1, n + 1):
             if inst.ep_names:
                 ep = inst.ep_names[ccd]
+                ep = ep[0] if isinstance(ep, tuple) else ep
                 fname = f"{inst.prefix}{ep}-20{obsdate}-{i:04d}-e91.fits"
             else:
                 fname = f"{inst.prefix}{ccd}_{obsdate}{i:04d}.fits"
@@ -230,6 +247,41 @@ class TestScanner:
             rows = list(reader)
         assert len(rows) == nfiles
         assert rows[0]["OBJECT"] == "TEST"
+
+    def test_scan_date_muscat4_ccd3_matches_pre_rename_epoch_name(
+        self, tmp_obslog, tmp_data,
+    ):
+        """Regression test for #157: CCD3 files predating the ep10->ep09
+        epoch rename must still be found by a plain (non --force) scan.
+
+        _find_fits_files() globs CCD3 with only the current epoch token
+        (ep09). Dates scanned before the rename have real files on disk
+        named with the old token (ep10) instead, so they were silently
+        invisible to a rescan -- risking exactly the data loss #157 flagged:
+        a --force rescan would have overwritten CCD3's existing correct CSV
+        with an empty one, since the glob matches nothing.
+        """
+        from muscat_db.scanner import scan_date
+        inst = INSTRUMENTS["muscat4"]
+        obsdate = "241114"
+        ddir = f"{tmp_data}/{inst.name}/{obsdate}"
+        os.makedirs(ddir, exist_ok=True)
+        path = f"{ddir}/{inst.prefix}ep10-20{obsdate}-0001-e91.fits"
+        _make_fits(path, {
+            "OBJECT": "TEST",
+            "EXPTIME": 10.0,
+            "FILTER": "g",
+            "RA": "12:00:00",
+            "DEC": "+00:00:00",
+            "MJD-OBS": 60000.0,
+            "UTSTART": "00:00:00",
+            "CONFMODE": "high",
+            "FOCPOSN": 0.0,
+        })
+
+        result = scan_date("muscat4", obsdate, max_workers=1)
+
+        assert result["per_ccd"].get(3) == 1
 
     def test_scan_date_no_files(self, tmp_obslog, tmp_data):
         from muscat_db.scanner import scan_date
@@ -615,6 +667,64 @@ class TestScanner:
         # Verify PA column is absent (muscat4 has no PA)
         assert "PA (deg)" not in rows[0]
 
+    def test_muscat4_ccd3_counts_both_epoch_names_without_duplicates(
+        self, tmp_obslog, tmp_data,
+    ):
+        """A night straddling the ep10->ep09 rename must count every file
+        exactly once, not double-count or drop either epoch's files."""
+        from muscat_db.scanner import scan_date
+        obsdate = "241114"
+        ddir = f"{tmp_data}/muscat4/{obsdate}"
+        os.makedirs(ddir, exist_ok=True)
+        header = {
+            "OBJECT": "TEST", "MJD-OBS": 60000.0, "UTSTART": "00:00:00",
+            "EXPTIME": 5.0, "CONFMODE": "high", "FILTER": "zs",
+            "RA": "00:00:00", "DEC": "+00:00:00", "AIRMASS": 1.2,
+            "FOCPOSN": 0.0,
+        }
+        _make_fits(f"{ddir}/coj2m002-ep10-20{obsdate}-0001-e91.fits", header)
+        _make_fits(f"{ddir}/coj2m002-ep09-20{obsdate}-0002-e91.fits", header)
+
+        result = scan_date("muscat4", obsdate, max_workers=1)
+
+        assert result["per_ccd"][3] == 2
+
+    def test_scan_date_captures_propid_for_lco_instrument(self, tmp_obslog, tmp_data):
+        """Issue #144: PROPID is free to capture for the 5 LCO instruments,
+        since the astropy HDU fallback already opens their full header."""
+        from muscat_db.scanner import scan_date
+        obsdate = "260101"
+        ddir = f"{tmp_data}/sinistro/{obsdate}"
+        os.makedirs(ddir, exist_ok=True)
+        _make_fits(f"{ddir}/tfn1m001-fa11-{obsdate}-0001-e91.fits", {
+            "OBJECT": "TOI-1", "MJD-OBS": 60000.0, "UTSTART": "00:00:00",
+            "EXPTIME": 5.0, "CONFMODE": "high", "FILTER": "zs",
+            "RA": "00:00:00", "DEC": "+00:00:00", "AIRMASS": 1.2,
+            "FOCPOSN": 0.0, "PROPID": "KEY2026B-001",
+        })
+
+        result = scan_date("sinistro", obsdate, max_workers=1)
+        assert result["total"] == 1
+
+        csv_path = f"{tmp_obslog}/sinistro/{obsdate}/obslog-sinistro-{obsdate}-ccd0.csv"
+        with open(csv_path) as f:
+            rows = list(csv.DictReader(f))
+        assert rows[0]["PROPID"] == "KEY2026B-001"
+
+    def test_scan_date_muscat_has_no_propid_column(self, tmp_obslog, tmp_data):
+        """muscat/muscat2 are not LCO data and carry no PROPID card."""
+        from muscat_db.scanner import scan_date
+        inst = INSTRUMENTS["muscat"]
+        obsdate = "260101"
+        self._make_fits_for_instrument(tmp_data, inst, obsdate, 0, 1)
+
+        scan_date("muscat", obsdate, max_workers=1)
+
+        csv_path = f"{tmp_obslog}/muscat/{obsdate}/obslog-muscat-{obsdate}-ccd0.csv"
+        with open(csv_path) as f:
+            fieldnames = csv.DictReader(f).fieldnames
+        assert "PROPID" not in fieldnames
+
 
 # ── Tests: summarizer ────────────────────────────────────────────────────────
 
@@ -713,6 +823,41 @@ class TestSummarizer:
         from muscat_db.summarizer import summarize_csv
         rows = summarize_csv("muscat", "000000", 0)
         assert rows == []
+
+    def test_summarize_csv_muscat4_ccd3_parses_both_epoch_names(self, tmp_obslog):
+        """Regression test: CCD3 FRAME values from before the ep10->ep09
+        rename must still have their frame number parsed, not blanked out.
+
+        _delim_for() built its split delimiter from the current epoch token
+        (ep09) only, duplicating instruments.py's now-fixed ep_names list.
+        A FRAME recorded under the old token (ep10) never matched that
+        delimiter, so its frame number silently came out empty -- breaking
+        run-grouping for any night, old or straddling the rename, that has
+        old-epoch rows in its CCD3 CSV.
+        """
+        from muscat_db.summarizer import summarize_csv
+        inst, obsdate, ccd = "muscat4", "241114", 3
+        d = f"{tmp_obslog}/{inst}/{obsdate}"
+        os.makedirs(d, exist_ok=True)
+        fieldnames = ["FRAME", "OBJECT", "JD-STRT", "UT-STRT", "EXPTIME (s)",
+                      "READ_MODE", "FILTER", "RA", "DEC", "AIRMASS", "FOCUS (mm)"]
+        _make_csv(f"{d}/obslog-{inst}-{obsdate}-ccd{ccd}.csv", fieldnames, [
+            {"FRAME": f"coj2m002-ep10-20{obsdate}-0001-e91", "OBJECT": "TOI-1",
+             "JD-STRT": "60000.1", "UT-STRT": "01:00:00", "EXPTIME (s)": "5",
+             "READ_MODE": "high", "FILTER": "zs", "RA": "", "DEC": "",
+             "AIRMASS": "1.2", "FOCUS (mm)": ""},
+            {"FRAME": f"coj2m002-ep09-20{obsdate}-0002-e91", "OBJECT": "TOI-1",
+             "JD-STRT": "60000.2", "UT-STRT": "01:01:00", "EXPTIME (s)": "5",
+             "READ_MODE": "high", "FILTER": "zs", "RA": "", "DEC": "",
+             "AIRMASS": "1.2", "FOCUS (mm)": ""},
+        ])
+
+        rows = summarize_csv(inst, obsdate, ccd)
+
+        assert len(rows) == 1
+        assert rows[0].frame_start == "0001"
+        assert rows[0].frame_end == "0002"
+        assert rows[0].nframes == 2
 
 
 # ── Tests: database ──────────────────────────────────────────────────────────
@@ -814,6 +959,58 @@ class TestDatabase:
         sinistro = sorted((row[6], row[11]) for row in rows if row[0] == "sinistro")
         assert sinistro == [("lsc1m005", 2), ("lsc1m009", 1)]
 
+    def test_summary_rows_carries_proposal_id(self):
+        """Issue #144 PR1: a summary row inherits its frames' proposal_id."""
+        from muscat_db.coord import CoordRepr
+        from muscat_db.database import SCHEMA, _summary_rows
+
+        conn = sqlite3.connect(":memory:")
+        conn.create_aggregate("coord_repr", 2, CoordRepr)
+        conn.executescript(SCHEMA)
+        conn.executemany(
+            """INSERT INTO frames
+               (instrument, obsdate, ccd, filename, object, jd_start, ut_start,
+                exptime, read_mode, filter, ra, declination, airmass, focus, pa, proposal_id)
+               VALUES (?, ?, ?, ?, ?, ?, '00:00:00', 10, 'fast', 'gp', '', '', 1, 0, 0, ?)""",
+            [
+                ("muscat3", "260101", 0, "ogg2m001-ep02-20260101-0001-e91", "WASP-12", 1.0, "KEY2026B-001"),
+                ("muscat3", "260101", 0, "ogg2m001-ep02-20260101-0002-e91", "WASP-12", 2.0, "KEY2026B-001"),
+            ],
+        )
+
+        rows = _summary_rows(conn)
+        conn.close()
+
+        assert len(rows) == 1
+        assert rows[0][-1] == "KEY2026B-001"
+
+    def test_summary_rows_logs_warning_on_mixed_proposal_night(self, caplog):
+        """A night whose frames disagree on proposal_id must be surfaced
+        loudly (per #144's review), never silently coalesced."""
+        from muscat_db.coord import CoordRepr
+        from muscat_db.database import SCHEMA, _summary_rows
+
+        conn = sqlite3.connect(":memory:")
+        conn.create_aggregate("coord_repr", 2, CoordRepr)
+        conn.executescript(SCHEMA)
+        conn.executemany(
+            """INSERT INTO frames
+               (instrument, obsdate, ccd, filename, object, jd_start, ut_start,
+                exptime, read_mode, filter, ra, declination, airmass, focus, pa, proposal_id)
+               VALUES (?, ?, ?, ?, ?, ?, '00:00:00', 10, 'fast', 'gp', '', '', 1, 0, 0, ?)""",
+            [
+                ("muscat3", "260101", 0, "ogg2m001-ep02-20260101-0001-e91", "WASP-12", 1.0, "KEY2026B-001"),
+                ("muscat3", "260101", 0, "ogg2m001-ep02-20260101-0002-e91", "WASP-12", 2.0, "CON2022A-003"),
+            ],
+        )
+
+        with caplog.at_level(logging.WARNING, logger="muscat_db.database"):
+            rows = _summary_rows(conn)
+        conn.close()
+
+        assert len(rows) == 1
+        assert any("proposal" in rec.message.lower() for rec in caplog.records)
+
     def test_remove_sqlite_tmp_clears_wal_sidecars(self):
         # A failed WAL-mode build must not leak <tmp>-wal / -shm sidecars.
         from muscat_db.database import _remove_sqlite_tmp
@@ -874,6 +1071,14 @@ class TestDatabase:
                 conn.execute(
                     "INSERT INTO target_tags (norm_name, tag) VALUES ('TIC 12345', 'young ttv')"
                 )
+                conn.execute(
+                    "INSERT INTO restricted_proposals (proposal_id, description) "
+                    "VALUES ('KEY2026B-001', 'key project')"
+                )
+                conn.execute(
+                    "INSERT INTO user_proposal_access (username, proposal_id, granted_by) "
+                    "VALUES ('collaborator', 'KEY2026B-001', 'admin')"
+                )
                 conn.commit()
 
             # Rebuild from the same obslog CSVs.
@@ -906,6 +1111,13 @@ class TestDatabase:
                 target_tag = conn.execute(
                     "SELECT 1 FROM target_tags WHERE norm_name = 'TIC 12345' AND tag = 'young ttv'"
                 ).fetchone()
+                restricted = conn.execute(
+                    "SELECT description FROM restricted_proposals WHERE proposal_id = 'KEY2026B-001'"
+                ).fetchone()
+                access_grant = conn.execute(
+                    "SELECT 1 FROM user_proposal_access "
+                    "WHERE username = 'collaborator' AND proposal_id = 'KEY2026B-001'"
+                ).fetchone()
             assert note is not None and note[0] == "keep me across rebuilds"
             assert override is not None and override[0] == 0
             assert coeff is not None and coeff[0] == 1.5
@@ -915,6 +1127,8 @@ class TestDatabase:
             assert lco_frames == 1
             assert tag_description is not None and tag_description[0] == "Young TTV follow-up targets"
             assert target_tag is not None
+            assert restricted is not None and restricted[0] == "key project"
+            assert access_grant is not None
         finally:
             os.unlink(db_path)
 
@@ -1094,6 +1308,84 @@ class TestDatabase:
             assert target == (1, 1)
         finally:
             os.unlink(db_path)
+
+    def test_ingest_date_captures_proposal_id(self, tmp_obslog):
+        """Issue #144 PR1: proposal_id flows from the obslog CSV through to
+        both frames and summaries. No behavior change yet -- nothing reads
+        it back or gates on it."""
+        from muscat_db.database import ingest_date, get_conn
+        obsdate = "260201"
+        _make_csv(
+            f"{tmp_obslog}/muscat3/{obsdate}/obslog-muscat3-{obsdate}-ccd0.csv",
+            ["FRAME", "OBJECT", "JD-STRT", "UT-STRT",
+             "EXPTIME (s)", "READ_MODE", "FILTER",
+             "RA", "DEC", "AIRMASS", "FOCUS (mm)", "PROPID"],
+            [{"FRAME": "ogg2m001-ep02-20260201-0001-e91", "OBJECT": "WASP-12",
+              "JD-STRT": "60001.5", "UT-STRT": "12:00:00", "EXPTIME (s)": "15",
+              "READ_MODE": "fast", "FILTER": "gp", "RA": "06:30:00",
+              "DEC": "+29:40:00", "AIRMASS": "1.05", "FOCUS (mm)": "0.123",
+              "PROPID": "KEY2026B-001"}],
+        )
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            db_path = f.name
+        try:
+            ingest_date(db_path, "muscat3", obsdate)
+            with get_conn(db_path) as conn:
+                frame_pid = conn.execute(
+                    "SELECT proposal_id FROM frames WHERE instrument='muscat3' AND obsdate=?",
+                    (obsdate,),
+                ).fetchone()[0]
+                summary_pid = conn.execute(
+                    "SELECT proposal_id FROM summaries WHERE instrument='muscat3' AND obsdate=?",
+                    (obsdate,),
+                ).fetchone()[0]
+            assert frame_pid == "KEY2026B-001"
+            assert summary_pid == "KEY2026B-001"
+        finally:
+            os.unlink(db_path)
+
+    def test_migration_adds_proposal_id_to_a_pre_existing_database(self):
+        """Issue #144 PR1: a real production muscat.db predates proposal_id.
+        _apply_schema()'s ALTER TABLE migration (not just the base CREATE
+        TABLE, which only matters for a brand-new file) must add it."""
+        from muscat_db.database import _apply_schema
+
+        conn = sqlite3.connect(":memory:")
+        # Pre-#144 frames/summaries tables: every column SCHEMA still expects
+        # (so its CREATE INDEX statements resolve) except proposal_id, and no
+        # restricted_proposals/user_proposal_access tables at all.
+        conn.executescript("""
+            CREATE TABLE frames (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, instrument TEXT, obsdate TEXT,
+                ccd INTEGER, filename TEXT, object TEXT, jd_start REAL, ut_start TEXT,
+                exptime REAL, read_mode TEXT, filter TEXT, ra TEXT, declination TEXT,
+                airmass REAL, focus REAL, pa REAL
+            );
+            CREATE TABLE summaries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, instrument TEXT, obsdate TEXT,
+                ccd INTEGER, object TEXT, exptime REAL, read_mode TEXT, telescope TEXT,
+                frame_start TEXT, frame_end TEXT, ut_start TEXT, ut_end TEXT,
+                nframes INTEGER, filter TEXT, ra TEXT, declination TEXT,
+                airmass_min REAL, airmass_max REAL
+            );
+        """)
+
+        _apply_schema(conn)
+        _apply_schema(conn)  # must be safe to call twice (idempotent)
+
+        frame_cols = {r[1] for r in conn.execute("PRAGMA table_info(frames)").fetchall()}
+        summary_cols = {r[1] for r in conn.execute("PRAGMA table_info(summaries)").fetchall()}
+        conn.execute("INSERT INTO frames (instrument, obsdate, ccd) VALUES ('muscat3', '260101', 0)")
+        default_value = conn.execute("SELECT proposal_id FROM frames").fetchone()[0]
+        tables = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()}
+        conn.close()
+
+        assert "proposal_id" in frame_cols
+        assert "proposal_id" in summary_cols
+        assert default_value == ""
+        assert {"restricted_proposals", "user_proposal_access"} <= tables
 
     def test_ingest_date_replaces_existing_date_and_refreshes_targets(self, tmp_obslog):
         from muscat_db.database import build_db, ingest_date

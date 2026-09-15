@@ -63,7 +63,8 @@ CREATE TABLE IF NOT EXISTS frames (
     declination TEXT,
     airmass     REAL,
     focus       REAL,
-    pa          REAL
+    pa          REAL,
+    proposal_id TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_frames_inst_date ON frames(instrument, obsdate);
@@ -87,7 +88,8 @@ CREATE TABLE IF NOT EXISTS summaries (
     ra          TEXT,
     declination TEXT,
     airmass_min REAL,
-    airmass_max REAL
+    airmass_max REAL,
+    proposal_id TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_summaries_inst_date ON summaries(instrument, obsdate);
@@ -142,7 +144,10 @@ CREATE TABLE IF NOT EXISTS jobs (
     run_id       TEXT NOT NULL DEFAULT '',
     run_name     TEXT NOT NULL DEFAULT '',
     user_name    TEXT NOT NULL DEFAULT '',
-    owner        TEXT NOT NULL DEFAULT ''
+    owner        TEXT NOT NULL DEFAULT '',
+    instance_id  TEXT NOT NULL DEFAULT '',
+    heartbeat_at REAL NOT NULL DEFAULT 0,
+    attempts     INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_state_started
@@ -285,11 +290,14 @@ CREATE TABLE IF NOT EXISTS exofop_cache (
 -- cap (architecture audit finding: _MAX_FULL_JOBS was an in-memory-only
 -- per-process dict, already wrong under --workers N>1). One row per
 -- currently-claimed slot; a pipeline holds at most max_slots rows at once,
--- enforced by job_store.DatabaseJobStore.claim_slot's atomic INSERT.
+-- enforced by job_store.DatabaseJobStore.claim_slot's atomic INSERT. `host`
+-- (architecture issue #51) backs an orthogonal, opt-in second cap: total
+-- slots on one host across ALL pipelines combined, see MUSCAT_WORKER_MAX_SLOTS.
 CREATE TABLE IF NOT EXISTS job_concurrency_slots (
     pipeline    TEXT NOT NULL,
     holder_key  TEXT NOT NULL,
     claimed_at  REAL NOT NULL,
+    host        TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (pipeline, holder_key)
 );
 
@@ -337,6 +345,26 @@ CREATE TABLE IF NOT EXISTS target_tags (
 );
 CREATE INDEX IF NOT EXISTS idx_target_tags_tag       ON target_tags(tag);
 CREATE INDEX IF NOT EXISTS idx_target_tags_norm_name ON target_tags(norm_name);
+
+-- Issue #144, PR1 (schema only -- nothing reads or gates on these yet).
+-- A proposal only gates access once an admin opts it in here; everything
+-- else (including '' for muscat/muscat2, which carry no PROPID) stays
+-- visible to everyone. App-owned: kept outside the daily frames/summaries/
+-- targets rebuild set (see _APP_OWNED_TABLES) so restrictions/grants survive
+-- a rebuild, the same as target_tags above.
+CREATE TABLE IF NOT EXISTS restricted_proposals (
+    proposal_id TEXT PRIMARY KEY COLLATE NOCASE,
+    description TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS user_proposal_access (
+    username    TEXT NOT NULL,
+    proposal_id TEXT NOT NULL COLLATE NOCASE,
+    granted_by  TEXT NOT NULL DEFAULT '',
+    granted_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (username, proposal_id)
+);
 """
 
 # Idempotent schema migrations for columns added after initial deployment.
@@ -352,6 +380,13 @@ _MIGRATIONS = [
     # 2026-07-25: bound download retries so one unavailable frame cannot block a
     # request from ever completing
     "ALTER TABLE lco_observation_frames ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0",
+    # 2026-09-13: issue #144 PR1 -- PROPID capture, no gating yet. The index
+    # must come after the ALTER TABLE above (same list, in order) since an
+    # existing pre-migration database has no proposal_id column for SCHEMA's
+    # own CREATE TABLE IF NOT EXISTS (a no-op there) to index directly.
+    "ALTER TABLE frames ADD COLUMN proposal_id TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE summaries ADD COLUMN proposal_id TEXT NOT NULL DEFAULT ''",
+    "CREATE INDEX IF NOT EXISTS idx_frames_proposal ON frames(proposal_id)",
 ]
 
 
@@ -467,6 +502,7 @@ def _read_frame_rows(inst_name: str, obsdate: str, csv_path: str, ccd: int) -> l
                 _safe_float(row.get(airmass_key, "0")),
                 _safe_float(row.get(focus_key, "0")),
                 _safe_float(row.get(pa_key, "0")) if pa_key else None,
+                row.get("PROPID", ""),
             ))
     return rows_to_insert
 
@@ -485,8 +521,9 @@ def _ingest_csv_jobs(conn: sqlite3.Connection, csv_jobs: list[tuple[str, str, st
             conn.executemany(
                 """INSERT INTO frames
                    (instrument, obsdate, ccd, filename, object, jd_start, ut_start,
-                    exptime, read_mode, filter, ra, declination, airmass, focus, pa)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    exptime, read_mode, filter, ra, declination, airmass, focus, pa,
+                    proposal_id)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 rows_to_insert,
             )
             count += len(rows_to_insert)
@@ -549,7 +586,9 @@ def _summary_rows(conn: sqlite3.Connection, *, instrument: str | None = None, ob
                stats.filter,
                stats.coord,
                stats.airmass_min,
-               stats.airmass_max
+               stats.airmass_max,
+               stats.proposal_id,
+               stats.proposal_id_ndistinct
            FROM ranked f1
            JOIN ranked f2 ON
                f1.instrument = f2.instrument AND
@@ -568,7 +607,16 @@ def _summary_rows(conn: sqlite3.Connection, *, instrument: str | None = None, ob
                       MAX(filter) AS filter,
                       coord_repr(ra, declination) AS coord,
                       MIN(NULLIF(airmass, 0)) AS airmass_min,
-                      MAX(NULLIF(airmass, 0)) AS airmass_max
+                      MAX(NULLIF(airmass, 0)) AS airmass_max,
+                      -- An LCO "request" (one scheduled visit) belongs to
+                      -- exactly one proposal, so this should be uniform per
+                      -- group in practice; MAX() picks a representative
+                      -- value but proposal_id_ndistinct below is what the
+                      -- caller checks to decide whether to log a warning
+                      -- rather than silently coalescing a real disagreement
+                      -- (issue #144).
+                      MAX(NULLIF(proposal_id, '')) AS proposal_id,
+                      COUNT(DISTINCT NULLIF(proposal_id, '')) AS proposal_id_ndistinct
                FROM keyed
                GROUP BY instrument, obsdate, ccd, object,
                         ROUND(exptime, 1), read_mode, telescope
@@ -584,8 +632,19 @@ def _summary_rows(conn: sqlite3.Connection, *, instrument: str | None = None, ob
     ).fetchall()
     # columns: instrument, obsdate, ccd, object, exptime, read_mode,
     #          telescope, frame_start, frame_end, ut_start, ut_end,
-    #          nframes, filter, coord, airmass_min, airmass_max  (16 cols)
-    return [(*r[:13], *_unpack_coord(r[13]), r[14], r[15]) for r in raw]
+    #          nframes, filter, coord, airmass_min, airmass_max,
+    #          proposal_id, proposal_id_ndistinct  (18 cols)
+    result = []
+    for r in raw:
+        proposal_id, ndistinct = r[16] or "", r[17]
+        if ndistinct > 1:
+            logger.warning(
+                "mixed-proposal night: %s %s ccd%s object=%r has %d distinct "
+                "proposal_id values in one summary group; using %r",
+                r[0], r[1], r[2], r[3], ndistinct, proposal_id,
+            )
+        result.append((*r[:13], *_unpack_coord(r[13]), r[14], r[15], proposal_id))
+    return result
 
 
 def _insert_summary_rows(conn: sqlite3.Connection, rows: list[tuple]) -> None:
@@ -595,8 +654,8 @@ def _insert_summary_rows(conn: sqlite3.Connection, rows: list[tuple]) -> None:
         """INSERT INTO summaries
            (instrument, obsdate, ccd, object, exptime, read_mode,
             telescope, frame_start, frame_end, ut_start, ut_end, nframes,
-            filter, ra, declination, airmass_min, airmass_max)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            filter, ra, declination, airmass_min, airmass_max, proposal_id)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         rows,
     )
 
@@ -756,6 +815,8 @@ _APP_OWNED_TABLES = (
     "chat_reactions",
     "target_tags",
     "tag_descriptions",
+    "restricted_proposals",
+    "user_proposal_access",
 )
 
 
@@ -834,6 +895,7 @@ def build_db(db_path: str, progress=None) -> int:
         _apply_schema(conn)
         conn.execute("DROP INDEX IF EXISTS idx_frames_inst_date;")
         conn.execute("DROP INDEX IF EXISTS idx_frames_object;")
+        conn.execute("DROP INDEX IF EXISTS idx_frames_proposal;")
         conn.execute("DROP INDEX IF EXISTS idx_summaries_inst_date;")
 
         # Phase 2: ingest frames.
@@ -872,6 +934,7 @@ def build_db(db_path: str, progress=None) -> int:
         # Create indexes at the very end to speed up insertions
         conn.execute("CREATE INDEX IF NOT EXISTS idx_frames_inst_date ON frames(instrument, obsdate);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_frames_object ON frames(object);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_frames_proposal ON frames(proposal_id);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_summaries_inst_date ON summaries(instrument, obsdate);")
 
         conn.execute(
@@ -1107,13 +1170,46 @@ def get_summaries(db_path: str, instrument: str, obsdate: str) -> list[dict]:
     with get_conn(db_path, row_factory=sqlite3.Row) as conn:
         cur = conn.execute(
             """SELECT ccd, object, exptime, read_mode,
-                      telescope, frame_start, frame_end, ut_start, ut_end, nframes
+                      telescope, frame_start, frame_end, ut_start, ut_end, nframes,
+                      proposal_id
                FROM summaries
                WHERE instrument = ? AND obsdate = ?
                ORDER BY ccd, object, telescope, ut_start""",
             (instrument, obsdate),
         )
         return [dict(r) for r in cur.fetchall()]
+
+
+def restricted_proposal_ids(db_path: str) -> set[str]:
+    """Currently opt-in-restricted LCO proposal ids (issue #144).
+
+    ``restricted_proposals`` starts empty and only an admin write
+    (``muscat-db access restrict``, PR4) adds to it, so every caller that
+    gates on this result is a no-op until then.
+    """
+    with get_conn(db_path) as conn:
+        cur = conn.execute("SELECT proposal_id FROM restricted_proposals")
+        return {r[0] for r in cur.fetchall()}
+
+
+def objects_with_restricted_proposal(
+    db_path: str, restricted: set[str] | frozenset[str]
+) -> set[str]:
+    """Target/object names with at least one ``summaries`` row under a
+    currently-restricted proposal (issue #144).
+
+    Returns the empty set without touching the database when nothing is
+    restricted.
+    """
+    if not restricted:
+        return set()
+    with get_conn(db_path) as conn:
+        placeholders = ",".join("?" * len(restricted))
+        cur = conn.execute(
+            f"SELECT DISTINCT object FROM summaries WHERE proposal_id IN ({placeholders})",
+            tuple(restricted),
+        )
+        return {r[0] for r in cur.fetchall() if r[0]}
 
 
 def get_objects(db_path: str, instrument: str, obsdate: str) -> list[str]:
@@ -1970,6 +2066,9 @@ _JOBS_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
     ("run_name", "TEXT NOT NULL DEFAULT ''"),
     ("user_name", "TEXT NOT NULL DEFAULT ''"),
     ("owner", "TEXT NOT NULL DEFAULT ''"),
+    ("instance_id", "TEXT NOT NULL DEFAULT ''"),
+    ("heartbeat_at", "REAL NOT NULL DEFAULT 0"),
+    ("attempts", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 
@@ -1979,6 +2078,30 @@ def _ensure_jobs_schema(conn: sqlite3.Connection) -> None:
     for col, col_type in _JOBS_COLUMN_MIGRATIONS:
         try:
             conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} {col_type}")
+        except sqlite3.OperationalError:
+            pass
+
+
+# Columns added to `job_concurrency_slots` after its initial release. Same
+# role as _JOBS_COLUMN_MIGRATIONS above, for the same reason -- see
+# tests/test_job_store.py's TestJobConcurrencySlotsColumnMigrations. Keep in
+# sync with SCHEMA and with job_store._PG_SCHEMA / _PG_JOB_CONCURRENCY_SLOTS_COLUMN_MIGRATIONS.
+_JOB_CONCURRENCY_SLOTS_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
+    ("host", "TEXT NOT NULL DEFAULT ''"),
+]
+
+
+def _ensure_job_concurrency_slots_schema(conn: sqlite3.Connection) -> None:
+    # Deliberately not _apply_schema(conn): job_store.py's callers have always
+    # ensured this table with a bare `executescript(SCHEMA)`, never the general
+    # _migrate_schema()/_MIGRATIONS pass that _apply_schema also runs (that
+    # pass belongs to _ensure_jobs_schema's `jobs`-table-specific caller in
+    # save_job/get_persisted_jobs). Keep this table's schema-ensure scoped to
+    # exactly what it touches, unchanged from before this migration existed.
+    conn.executescript(SCHEMA)
+    for col, col_type in _JOB_CONCURRENCY_SLOTS_COLUMN_MIGRATIONS:
+        try:
+            conn.execute(f"ALTER TABLE job_concurrency_slots ADD COLUMN {col} {col_type}")
         except sqlite3.OperationalError:
             pass
 
@@ -2049,6 +2172,8 @@ def save_job(
     run_name: str = "",
     user_name: str | None = None,
     owner: str = "",
+    instance_id: str = "",
+    attempts: int = 0,
 ) -> None:
     # The "user" is the nginx-authenticated account (X-Forwarded-User), set at
     # job creation from request.state.user. State-transition callers (sync_jobs,
@@ -2064,24 +2189,42 @@ def save_job(
     key = f"{type_}:{inst}/{date}/{target.replace(' ', '')}"
     if run_id:
         key = f"{key}/{run_id}"
+    # heartbeat_at is stamped on every write (not just running-state ones): it
+    # means "last time some process touched this row", which any save() call
+    # trivially satisfies. Only the launch-time save (which also passes
+    # instance_id) and the dedicated lightweight heartbeat() UPDATE (see
+    # job_store.py) matter for orphan-reconciliation's staleness check --
+    # stamping it here too is harmless and means a launch needs no separate
+    # follow-up heartbeat() call to establish its first fresh timestamp.
     with get_conn(path) as conn:
         _ensure_jobs_migrated(conn, path)
         conn.execute(
-            """INSERT INTO jobs(key, type, instrument, obsdate, target, state, returncode, elapsed, started_at, error_desc, run_type, params, run_id, run_name, user_name, owner)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """INSERT INTO jobs(key, type, instrument, obsdate, target, state, returncode, elapsed, started_at, error_desc, run_type, params, run_id, run_name, user_name, owner, instance_id, heartbeat_at, attempts)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(key) DO UPDATE SET
-                 state      = excluded.state,
-                 returncode = excluded.returncode,
-                 elapsed    = excluded.elapsed,
-                 started_at = excluded.started_at,
-                 error_desc = excluded.error_desc,
-                 run_type   = CASE WHEN excluded.run_type != '' THEN excluded.run_type ELSE run_type END,
-                 params     = CASE WHEN excluded.params != '' THEN excluded.params ELSE params END,
-                 run_id     = excluded.run_id,
-                 run_name   = CASE WHEN excluded.run_name != '' THEN excluded.run_name ELSE run_name END,
-                 user_name  = CASE WHEN excluded.user_name != '' THEN excluded.user_name ELSE user_name END,
-                 owner      = CASE WHEN excluded.owner != '' THEN excluded.owner ELSE owner END""",
-            (key, type_, inst, date, target, state, returncode, elapsed, started_at, error_desc, run_type, params, run_id, run_name, user_name, owner)
+                 state        = excluded.state,
+                 returncode   = excluded.returncode,
+                 elapsed      = excluded.elapsed,
+                 started_at   = excluded.started_at,
+                 error_desc   = excluded.error_desc,
+                 run_type     = CASE WHEN excluded.run_type != '' THEN excluded.run_type ELSE run_type END,
+                 params       = CASE WHEN excluded.params != '' THEN excluded.params ELSE params END,
+                 run_id       = excluded.run_id,
+                 run_name     = CASE WHEN excluded.run_name != '' THEN excluded.run_name ELSE run_name END,
+                 user_name    = CASE WHEN excluded.user_name != '' THEN excluded.user_name ELSE user_name END,
+                 owner        = CASE WHEN excluded.owner != '' THEN excluded.owner ELSE owner END,
+                 instance_id  = CASE WHEN excluded.instance_id != '' THEN excluded.instance_id ELSE instance_id END,
+                 heartbeat_at = excluded.heartbeat_at,
+                 attempts     = excluded.attempts""",
+            # attempts is unconditionally overwritten (like state/returncode/
+            # elapsed), never preserved-on-omit like params/run_name/owner: a
+            # caller that omits it means "this is not a reconcile-retry
+            # bookkeeping write" and the counter should read 0, exactly the
+            # reset a fresh launch needs. Only the two call sites that read a
+            # row's current attempts back (jobs.py's reconcile-retry decision,
+            # and the pending-drain relaunch that carries it forward) ever
+            # pass a nonzero value.
+            (key, type_, inst, date, target, state, returncode, elapsed, started_at, error_desc, run_type, params, run_id, run_name, user_name, owner, instance_id, time.time(), attempts)
         )
         conn.commit()
     clear_all_caches()

@@ -32,17 +32,23 @@ for the web process (the default), ``"worker"`` here -- and having
 See ``job_store.py``'s ``_OWNER`` docstring for why this needs no
 lease/heartbeat to be correct.
 
-Known limitation (left for step 3 -- lease/heartbeat -- rather than improvised
-here): each pipeline's in-memory job registry (e.g. ``photometry._JOBS``) is
-process-local. A job claimed and launched by *this* process is invisible to
-the web process's registry, so cancelling it from the web UI does not yet
-work -- the same gap the web process would have for a job launched by another
-web worker under ``--workers N>1``. Jobs still queued (not yet claimed) cancel
-fine either way, since that path only touches the durable ``jobs`` table.
-Likewise, running two ``worker`` processes for the *same* pipeline is not yet
-supported: both tag their rows ``"worker"``, so they can still reconcile each
-other's jobs as lost. That needs per-instance identity, not just per-role,
-and is left for the same lease/heartbeat step.
+Known limitation: each pipeline's in-memory job registry (e.g.
+``photometry._JOBS``) is process-local. A job claimed and launched by *this*
+process is invisible to the web process's registry, so cancelling it from the
+web UI does not yet work -- the same gap the web process would have for a job
+launched by another web worker under ``--workers N>1``. Jobs still queued
+(not yet claimed) cancel fine either way, since that path only touches the
+durable ``jobs`` table. Closing this needs a cross-process cancel-request
+channel, not yet built.
+
+Running two ``worker`` processes for the *same* pipeline **is** now safe
+(architecture issue #51 step 3): both still tag their rows ``owner="worker"``,
+but each also tags its own ``instance_id`` (:func:`job_store.current_instance_id`)
+and refreshes a heartbeat on every reconciliation pass. A sibling instance's
+running row is left alone as long as its heartbeat is fresh, closing the gap
+where same-role instances used to reconcile each other's live jobs as lost.
+See ``job_store.py``'s ``_INSTANCE_ID`` docstring and ``jobs.is_orphan_reconcilable``
+for the mechanism.
 """
 
 from __future__ import annotations

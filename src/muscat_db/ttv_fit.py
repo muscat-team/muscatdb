@@ -20,7 +20,7 @@ from typing import IO
 import yaml
 
 from muscat_db import jobs, database
-from muscat_db.job_store import current_owner, get_job_store
+from muscat_db.job_store import current_instance_id, current_owner, get_job_store
 from muscat_db import __meta__, __muscatdb_version__, __version__
 from muscat_db.photometry import (
     _conda_env_python,
@@ -539,6 +539,9 @@ def start_ttv_fit(
             stderr=subprocess.STDOUT,
             text=True,
             start_new_session=True,
+            # Core pinning (architecture issue #51, 2.4): no-op unless
+            # MUSCAT_JOB_MAX_THREADS is configured.
+            env={**os.environ, **jobs.core_pinning_env()},
         )
         try:
             with open(rdir / "harmonic.pid", "w") as pidf:
@@ -572,6 +575,7 @@ def start_ttv_fit(
             run_name=run_name,
             user_name=user_name,
             owner=current_owner(),
+            instance_id=current_instance_id(),
         )
 
     return {"ok": True, "key": key}
@@ -1007,6 +1011,9 @@ def _get_ttv_model_cached(
         env.setdefault("MPLCONFIGDIR", str(matplotlib_config))
     except OSError:
         pass
+    # Core pinning (architecture issue #51, 2.4): no-op unless
+    # MUSCAT_JOB_MAX_THREADS is configured.
+    env.update(jobs.core_pinning_env())
     try:
         completed = subprocess.run(
             command,
@@ -1076,6 +1083,9 @@ def _compute_delta_bic_cached(target: str, run_name: str, _version: int) -> dict
         env.setdefault("MPLCONFIGDIR", str(matplotlib_config))
     except OSError:
         pass
+    # Core pinning (architecture issue #51, 2.4): no-op unless
+    # MUSCAT_JOB_MAX_THREADS is configured.
+    env.update(jobs.core_pinning_env())
     try:
         completed = subprocess.run(
             [harmonic_python, str(helper), str(rdir)],
@@ -1157,6 +1167,9 @@ def _get_ttv_ranking_cached(
         env.setdefault("MPLCONFIGDIR", str(matplotlib_config))
     except OSError:
         pass
+    # Core pinning (architecture issue #51, 2.4): no-op unless
+    # MUSCAT_JOB_MAX_THREADS is configured.
+    env.update(jobs.core_pinning_env())
     try:
         completed = subprocess.run(
             command, capture_output=True, text=True, timeout=300, check=False, env=env
@@ -1177,6 +1190,10 @@ def _get_ttv_ranking_cached(
         return {"ok": False, "error": "TTV ranking returned invalid output"}
     result.update({"ok": True, "run_name": slugify_run_name(run_name)})
     return result
+
+
+def _detect_process_running(rdir: pathlib.Path) -> bool:
+    return jobs.pid_file_process_alive(rdir / "harmonic.pid")
 
 
 def sync_jobs() -> None:
@@ -1216,6 +1233,8 @@ def sync_jobs() -> None:
             )
             running_keys.discard(db_key)
             if unchanged:
+                if persist_state == "running":
+                    store.heartbeat(db_key, current_instance_id())
                 continue
 
             error_desc = ""
@@ -1251,6 +1270,13 @@ def sync_jobs() -> None:
                 # sync_jobs() pass may judge it lost. See photometry.py's
                 # matching guard for the full rationale.
                 continue
+            if not jobs.is_orphan_reconcilable(
+                row.get("instance_id"), row.get("heartbeat_at"), current_instance_id()
+            ):
+                # A live sibling instance of this same role still holds this
+                # job. See photometry.py's matching guard for the full
+                # rationale.
+                continue
             target = row["target"]
             run_name = row.get("run_name") or ""
             completed_ok = False
@@ -1279,17 +1305,43 @@ def sync_jobs() -> None:
                     run_name=run_name,
                 )
                 database.refresh_target_status(target)
+            elif rdir is not None and _detect_process_running(rdir):
+                # Process is still running on the system, leave state as "running"
+                continue
             else:
-                store.save(
-                    type_="ttv_fit",
-                    inst=row.get("inst") or "_", date=row.get("date") or "_", target=target,
-                    state="error", returncode=-1,
-                    elapsed=row["elapsed"],
-                    started_at=row["started_at"],
-                    error_desc="Process lost (server restart)",
-                    run_id=row.get("run_id"),
-                    run_name=run_name,
-                )
+                # No evidence of completion and the underlying process is gone
+                # too -- reclaim-with-attempt-limit: retry by requeuing (the
+                # pending-drain loop below relaunches it with its original,
+                # preserved params) up to a limit, then give up for good.
+                next_state, new_attempts = jobs.next_reconcile_attempt(int(row.get("attempts") or 0))
+                if next_state == "pending":
+                    logger.warning(
+                        "ttv_fit job %s orphaned with no evidence of completion; "
+                        "retrying (attempt %d)", db_key, new_attempts,
+                    )
+                    store.save(
+                        type_="ttv_fit",
+                        inst=row.get("inst") or "_", date=row.get("date") or "_", target=target,
+                        state="pending", returncode=None,
+                        elapsed=0,
+                        started_at=time.time(),
+                        error_desc="",
+                        run_id=row.get("run_id"),
+                        run_name=run_name,
+                        attempts=new_attempts,
+                    )
+                else:
+                    store.save(
+                        type_="ttv_fit",
+                        inst=row.get("inst") or "_", date=row.get("date") or "_", target=target,
+                        state="error", returncode=-1,
+                        elapsed=row["elapsed"],
+                        started_at=row["started_at"],
+                        error_desc=f"Process lost (server restart); gave up after {new_attempts} attempts",
+                        run_id=row.get("run_id"),
+                        run_name=run_name,
+                        attempts=new_attempts,
+                    )
                 database.refresh_target_status(target)
 
         # Release any concurrency slot whose claimant's persisted job row is
@@ -1384,7 +1436,7 @@ def sync_jobs() -> None:
                     logf = open(log_path, "w")
                     _write_log_banner(logf, cmd, opts)
                     logf.flush()
-                    proc = subprocess.Popen(cmd, cwd=str(rdir), stdout=logf, stderr=subprocess.STDOUT, text=True, start_new_session=True)
+                    proc = subprocess.Popen(cmd, cwd=str(rdir), stdout=logf, stderr=subprocess.STDOUT, text=True, start_new_session=True, env={**os.environ, **jobs.core_pinning_env()})
                     try:
                         with open(rdir / "harmonic.pid", "w") as pidf:
                             pidf.write(str(proc.pid))
@@ -1400,7 +1452,7 @@ def sync_jobs() -> None:
                     continue
                 _TTV_JOBS[key] = TTVFitJob(key=key, inst="_", date="_", target=target, cmd=cmd, proc=proc, logf=logf, log_path=log_path, run_type="full", run_id=run_seg, run_name=run_name)
                 try:
-                    store.save(type_="ttv_fit", inst="_", date="_", target=target, state="running", returncode=None, elapsed=0, started_at=_TTV_JOBS[key].started_at, run_type="full", params=entry.get("params", ""), run_id=run_seg, run_name=run_name, owner=current_owner())
+                    store.save(type_="ttv_fit", inst="_", date="_", target=target, state="running", returncode=None, elapsed=0, started_at=_TTV_JOBS[key].started_at, run_type="full", params=entry.get("params", ""), run_id=run_seg, run_name=run_name, owner=current_owner(), instance_id=current_instance_id(), attempts=int(entry.get("attempts") or 0))
                 except Exception:
                     logger.debug("failed to persist queued ttv-fit launch for %s", rdir, exc_info=True)
                     try:
