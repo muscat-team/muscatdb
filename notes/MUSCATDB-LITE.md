@@ -479,9 +479,10 @@ Every worker — co-located on ut2 or remote on ut3/ut6 — runs the **same** lo
    (exactly-one-owner), different shape. Implemented in `job_store.py`'s `JobConcurrency`
    protocol (`claim_slot`/`release_slot`/`count_claimed`); single-host operation running from
    a *separate OS process* (`muscat-db worker`, `worker.py`) is proven end-to-end in
-   `tests/test_worker_p2_proof.py`. The polling interval
-   (`MUSCAT_JOB_RECONCILE_INTERVAL_S`, default 2s) is the cost of not yet having the `NOTIFY`
-   push dispatch described below — that piece remains unbuilt.
+   `tests/test_worker_p2_proof.py`. `MUSCAT_JOB_RECONCILE_INTERVAL_S` (default 2s) sets the
+   fallback poll cadence between passes; with `MUSCAT_JOB_NOTIFY=1` an idle pass is instead
+   woken within milliseconds of an `enqueue()` elsewhere — see "Signalling & live logs" below,
+   which is now shipped, not aspirational.
 2. **Lease + heartbeat**: the claim writes a lease with an expiry and the worker heartbeats
    while running. A crashed / rebooted worker's lease expires and the job is **automatically
    reclaimed** — no stuck `running` rows, no manual retry channel. Shipped as the
@@ -535,9 +536,32 @@ touches the catalog.
 
 ### Signalling & live logs (still no Redis)
 
-- **Instant dispatch**: workers `LISTEN` on a control-plane channel; enqueue issues a `NOTIFY`
-  (Postgres) or a lightweight local wakeup (SQLite). Idle workers pick up in milliseconds
-  without polling; a slow fallback poll covers any missed signal.
+- **Instant dispatch — shipped, opt-in via `MUSCAT_JOB_NOTIFY=1`** (`job_store.py`'s
+  `wait_for_work`/`wait_for_work_or_sleep`, `notify_enabled`). Every `enqueue()` signals; every
+  reconciliation loop (`web.py`'s `_job_reconciliation_loop`, `worker.py`'s `_loop`) waits via
+  `wait_for_work_or_sleep(interval)` instead of a blind sleep, waking within milliseconds when
+  signalled and otherwise degrading to exactly the fallback poll (`interval`, unchanged either
+  way). On **Postgres**, a dedicated (never pooled — `LISTEN` is session-scoped) connection
+  issues `LISTEN muscatdb_jobs`; `enqueue()` fires `pg_notify('muscatdb_jobs', pipeline)` in a
+  separate transaction from the row insert, so a listener is only ever woken by a row already
+  committed. On **SQLite**, the wakeup is a plain `threading.Event`, deliberately in-process
+  only — a standalone `muscatdb worker` (a different OS process) is not woken any faster than
+  before; only Postgres gets real cross-host dispatch, matching the two backends' actual reach.
+  Unset (the default) is byte-for-byte today's polling: no `LISTEN` connection is ever opened
+  and no `NOTIFY` is ever issued. Two known, accepted limitations, both bounded by the fallback
+  poll rather than ever losing a job: a signal fired before any listener has armed (process
+  start) costs one interval, and Postgres LISTEN/NOTIFY delivers only to sessions listening at
+  the moment of `NOTIFY` — a connection dropped between an enqueue and the next wait misses
+  that one signal, self-heals (reconnects, re-`LISTEN`s) on the following call. See
+  `tests/_job_store_contract.py`'s wait_for_work section (both backends),
+  `tests/test_job_store_postgres.py::TestNotifyDispatch` (real cross-connection delivery,
+  server-side connection kill, dead-DSN no-hot-spin), and
+  `tests/test_job_store.py::TestInProcessWakeup`/`TestWaitForWorkOrSleep`. Deliberately out of
+  scope: signalling on `release_slot()` (the moment a *queued* job actually becomes
+  launchable, not just enqueued) — `enqueue()` alone already gives multi-host its real payoff
+  (another host may have a free slot right now); a single-host deployment's own enqueue-time
+  wakeup usually just re-loses the same capacity race it already lost once. Left for a
+  follow-up issue rather than bundled here.
 - **Live logs**: pipelines append to log files on the **shared mount**; the web host tails
   them and streams to the browser over **SSE**. No pub/sub bus, no log lines in the database.
 
@@ -588,11 +612,16 @@ ut2 (web host)                          ut3 / ut6 / … (worker hosts)
   whole cluster when a host's ambient, non-muscat load already sits above threshold.
 - **Backpressure**: excess jobs wait durably in the queue; nothing is dropped on a worker
   outage.
+- **Instant dispatch is advisory, never load-bearing** (opt-in, `MUSCAT_JOB_NOTIFY`): every
+  woken loop still re-reads `pending()` and still goes through the atomic `claim_slot` before
+  acting, so a spurious, duplicated, or entirely missed wakeup can only add latency (bounded by
+  the unchanged fallback poll), never a correctness issue.
 
 ### Performance properties
 
-- Millisecond dispatch via `NOTIFY`; status is a single indexed query; live logs are a file
-  tail → SSE (compositor-friendly, zero polling).
+- Millisecond dispatch via `NOTIFY` when `MUSCAT_JOB_NOTIFY=1` (opt-in; unset is the
+  `MUSCAT_JOB_RECONCILE_INTERVAL_S` poll cadence, unchanged); status is a single indexed query;
+  live logs are a file tail → SSE (compositor-friendly, zero polling).
 - Horizontal scale is trivial: add a host, install `muscatdb[cluster]`, point it at Postgres +
   the shared mount, start the worker unit — no broker to scale or monitor.
 - The dominant cost is the science subprocess itself; queue overhead is negligible, so the

@@ -1031,7 +1031,8 @@ def worker(
     db: str = _db_option(),
     interval: float = typer.Option(
         None, "--interval",
-        help="Seconds between claim/reconcile passes "
+        help="Seconds between claim/reconcile passes -- the fallback poll "
+             "interval when MUSCAT_JOB_NOTIFY=1, the only cadence otherwise "
              "(default: $MUSCAT_JOB_RECONCILE_INTERVAL_S, else 2.0)",
     ),
     once: bool = typer.Option(
@@ -1047,7 +1048,9 @@ def worker(
     Single-host, SQLite-backed, no new infrastructure: this validates the
     claim/lease/finalize machinery decoupled from serving HTTP, the first
     step toward eventually running it on a separate host (architecture
-    issue #51).
+    issue #51). With MUSCAT_JOB_NOTIFY=1, an idle pass is also woken early
+    by any enqueue instead of waiting out the full interval -- see
+    job_store.wait_for_work_or_sleep.
     """
     # Before the assignment below: that line sets MUSCAT_DB_PATH from `db`, so
     # a guard placed after it would always see the variable set and never fire.
@@ -1055,6 +1058,7 @@ def worker(
     os.environ["MUSCAT_DB_PATH"] = db
     if interval is None:
         interval = float(os.environ.get("MUSCAT_JOB_RECONCILE_INTERVAL_S", "2"))
+    from muscat_db import job_store
     from muscat_db.worker import resolve_pipelines
     from muscat_db.worker import run as run_worker
 
@@ -1066,7 +1070,8 @@ def worker(
 
     console.print(
         f"[green]worker started[/] pipeline={','.join(n for n, _ in fns)} "
-        f"db={db} interval={interval}s pid={os.getpid()}"
+        f"db={db} interval={interval}s "
+        f"notify={'on' if job_store.notify_enabled() else 'off'} pid={os.getpid()}"
     )
     run_worker(pipeline, interval=interval, once=once)
 

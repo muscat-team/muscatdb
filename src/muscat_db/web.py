@@ -180,7 +180,7 @@ from muscat_db.database import (
     get_targets_for_tag as _get_targets_for_tag,
     get_tags_for_targets,
 )
-from muscat_db.job_store import get_job_store, set_owner
+from muscat_db.job_store import get_job_store, notify_enabled, set_owner, wait_for_work_or_sleep
 from muscat_db.cache import LRUCache
 from muscat_db.instruments import INSTRUMENTS
 
@@ -232,7 +232,35 @@ async def _job_reconciliation_loop() -> None:
             raise
         except Exception:
             logger.exception("background job reconciliation failed")
-        await asyncio.sleep(interval)
+        # Instant dispatch (architecture issue #51, "Signalling & live
+        # logs"): with MUSCAT_JOB_NOTIFY=1, wait_for_work_or_sleep wakes this
+        # loop the moment any request handler in this same process enqueues
+        # a job (SQLite: in-process only) or, on Postgres, the moment any
+        # host sharing the control plane does (a real cross-host NOTIFY) --
+        # in either case falling back to waiting out the full interval if
+        # nothing signals. It's a blocking call, so it runs off the event
+        # loop via to_thread, same as _reconcile_all_jobs above; unlike that
+        # call, its own wait already accounts for the full interval, so no
+        # further asyncio.sleep follows it. The plain `else` branch below
+        # is what makes an unconfigured deployment run the *exact* line it
+        # always has -- swapping every process's sleep for a thread-blocking
+        # call regardless of the flag would be a real behavioral change
+        # (executor-thread occupancy, cancellation semantics) even at an
+        # identical duration.
+        if notify_enabled():
+            # A cancelled task's await returns promptly, but the executor
+            # thread this call runs on cannot be force-stopped -- it keeps
+            # running to completion regardless, bounded by roughly
+            # `interval` (PostgresJobStore.wait_for_work budgets any
+            # reconnect against the same timeout rather than adding to it).
+            # So shutdown (_lifespan's `reconcile_task.cancel()`) can be
+            # delayed by up to about one interval when this branch is live
+            # -- unlike the disabled branch's cancellable asyncio.sleep,
+            # which stops instantly. Accepted: bounded, and only relevant to
+            # process shutdown/--reload timing, never to correctness.
+            await asyncio.to_thread(wait_for_work_or_sleep, interval)
+        else:
+            await asyncio.sleep(interval)
 
 
 @asynccontextmanager

@@ -81,6 +81,73 @@ class JobStoreContractTests:
         pend = store.pending("photometry")
         assert [r["target"] for r in pend] == ["P1", "P2"]  # oldest-first, photometry only
 
+    # --- instant dispatch: wait_for_work (architecture issue #51,
+    # "Signalling & live logs") -----------------------------------------
+    #
+    # Opt-in via MUSCAT_JOB_NOTIFY (job_store._NOTIFY_ENABLED, monkeypatched
+    # directly below -- same pattern as _WORKER_MAX_SLOTS, since it is parsed
+    # once at import time and setenv alone would not be observed). Every test
+    # here arms the listener with a wait_for_work(0.0) call before enqueueing:
+    # Postgres only delivers NOTIFY to sessions that were already LISTENing
+    # when the enqueue's transaction committed, so a body that enqueues
+    # before ever waiting would only prove the SQLite in-process path.
+
+    def test_wait_for_work_returns_false_after_timeout_when_nothing_is_enqueued(
+        self, store, monkeypatch,
+    ):
+        monkeypatch.setattr(job_store, "_NOTIFY_ENABLED", True)
+        start = time.monotonic()
+        assert store.wait_for_work(0.2) is False
+        assert time.monotonic() - start >= 0.18
+
+    def test_wait_for_work_returns_immediately_for_a_zero_timeout(self, store, monkeypatch):
+        monkeypatch.setattr(job_store, "_NOTIFY_ENABLED", True)
+        start = time.monotonic()
+        store.wait_for_work(0.0)
+        assert time.monotonic() - start < 0.5
+
+    def test_wait_for_work_returns_true_after_an_enqueue(self, store, monkeypatch):
+        monkeypatch.setattr(job_store, "_NOTIFY_ENABLED", True)
+        store.wait_for_work(0.0)  # arm the listener before the signal is sent
+        store.enqueue(
+            type_="photometry", inst="muscat4", date="260101", target="HIP1",
+            started_at=time.time(),
+        )
+        start = time.monotonic()
+        assert store.wait_for_work(5.0) is True
+        assert time.monotonic() - start < 2.0
+
+    def test_wait_for_work_consumes_the_signal(self, store, monkeypatch):
+        monkeypatch.setattr(job_store, "_NOTIFY_ENABLED", True)
+        store.wait_for_work(0.0)
+        store.enqueue(
+            type_="photometry", inst="muscat4", date="260101", target="HIP1",
+            started_at=time.time(),
+        )
+        assert store.wait_for_work(5.0) is True
+        assert store.wait_for_work(0.2) is False  # already consumed, no second wake
+
+    def test_wait_for_work_does_not_signal_when_disabled(self, store, monkeypatch):
+        monkeypatch.setattr(job_store, "_NOTIFY_ENABLED", False)
+        store.wait_for_work(0.0)
+        store.enqueue(
+            type_="photometry", inst="muscat4", date="260101", target="HIP1",
+            started_at=time.time(),
+        )
+        start = time.monotonic()
+        assert store.wait_for_work(0.2) is False
+        assert time.monotonic() - start >= 0.18
+
+    def test_enqueue_still_records_pending_when_signalling(self, store, monkeypatch):
+        monkeypatch.setattr(job_store, "_NOTIFY_ENABLED", True)
+        store.enqueue(
+            type_="photometry", inst="muscat4", date="260101", target="HIP1",
+            started_at=time.time(),
+        )
+        rows = store.all()
+        assert len(rows) == 1
+        assert rows[0]["state"] == "pending"
+
     # --- JobConcurrency ------------------------------------------------
     #
     # Cross-process (and, for PostgresJobStore, cross-host) job-concurrency

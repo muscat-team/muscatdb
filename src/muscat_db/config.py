@@ -262,6 +262,17 @@ ENV_VARS: tuple[EnvVar, ...] = (
         "MUSCAT_CONTROL_PLANE=postgres, unused otherwise",
         secret=True,
     ),
+    EnvVar(
+        "MUSCAT_JOB_NOTIFY",
+        "0",
+        "Set to 1 for instant job dispatch: enqueue signals waiting "
+        "reconciliation loops (Postgres NOTIFY, cross-host; an in-process "
+        "wakeup on SQLite, same-process only) so an idle loop picks a job "
+        "up in milliseconds instead of waiting out "
+        "MUSCAT_JOB_RECONCILE_INTERVAL_S, which stays as the fallback poll. "
+        "Unset (default) is today's exact polling behaviour -- no LISTEN "
+        "connection is opened and no NOTIFY is ever issued.",
+    ),
     EnvVar("MUSCAT_MAX_FULL_JOBS", "1", "Concurrent full runs allowed per pipeline across all processes sharing the database; 0 disables full runs (use on a staging instance so it cannot compete with production)"),
     EnvVar("MUSCAT_MAX_TEST_JOBS", "4", "Concurrent test runs allowed per pipeline (full runs use durable slots)"),
     EnvVar(
