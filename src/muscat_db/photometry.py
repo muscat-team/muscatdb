@@ -134,6 +134,8 @@ RUN_DEFAULTS: dict = {
 POSTPROCESS_DEFAULTS: dict = {
     "post_sigma": 5.0,
     "post_poly_deg": 2,
+    "post_exclude_before_jd": "",
+    "post_exclude_after_jd": "",
 }
 
 # LCO instruments deployed across multiple sites/telescope units, needing

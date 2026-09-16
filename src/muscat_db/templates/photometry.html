@@ -632,7 +632,7 @@
       Run post-processing on optimized relative light-curves
     </span>
   </h2>
-  <details class="phot-section phot-fold" id="postproc-section" open style="margin: 0 0 1rem; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 1rem 1.25rem;">
+  <details class="phot-section phot-fold" id="postproc-section" style="margin: 0 0 1rem; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 1rem 1.25rem;">
     <summary>
       <span style="font-size: 0.9rem; color: var(--text-dim);">Post-processing options</span>
     </summary>
@@ -651,6 +651,20 @@
           <input type="number" id="opt-post_poly_deg" value="{{ postproc_defaults['post_poly_deg'] }}" step="1" min="0" max="6" style="width: 100%;" {% if not sel_run %}disabled{% endif %}>
         </div>
       </div>
+    </details>
+    <details class="opt-collapse" open>
+      <summary>Exclude JD Range <span class="help-tooltip" title="Drop rows outside this window from the finished differential-flux CSV before the sigma-clip trend is fitted, so a gap or a bad head/tail segment (clouds, a meridian flip, guiding loss) cannot skew the fit used to reject the rest. Compares against the light curve's own BJD_TDB column -- not the raw header JD used by the 'Exclude after/before JD' options in Configure &amp; Run Photometry above, which run before autodiff() on the raw frames.">?</span></summary>
+      <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 1.25rem; margin: 0.75rem 0 0.5rem; max-width: 420px;">
+        <div class="opt">
+          <label for="opt-post_exclude_before_jd">EXCLUDE BEFORE JD <span class="help-tooltip" title="Drop rows with BJD_TDB less than this value. Blank -> no lower cut.">?</span></label>
+          <input type="number" id="opt-post_exclude_before_jd" placeholder="none" value="{{ postproc_defaults['post_exclude_before_jd'] }}" step="0.0001" style="width: 100%;" {% if not sel_run %}disabled{% endif %}>
+        </div>
+        <div class="opt">
+          <label for="opt-post_exclude_after_jd">EXCLUDE AFTER JD <span class="help-tooltip" title="Drop rows with BJD_TDB greater than this value. Blank -> no upper cut.">?</span></label>
+          <input type="number" id="opt-post_exclude_after_jd" placeholder="none" value="{{ postproc_defaults['post_exclude_after_jd'] }}" step="0.0001" style="width: 100%;" {% if not sel_run %}disabled{% endif %}>
+        </div>
+      </div>
+      <p style="color: var(--text-dim); font-size: 0.78rem; margin: 0 0 0.5rem;">BJD_TDB, the light curve's own time column; blank means no cut. Both set requires before &lt; after.</p>
     </details>
     <div class="run-actions">
       <button class="btn primary" type="button" id="postproc-test-btn" {% if not sel_run %}disabled{% endif %}>Test post-process</button>
@@ -946,7 +960,9 @@
       exclude_after_jd: val('opt-exclude_after_jd'),
       exclude_before_jd: val('opt-exclude_before_jd'),
       post_sigma: val('opt-post_sigma'),
-      post_poly_deg: val('opt-post_poly_deg')
+      post_poly_deg: val('opt-post_poly_deg'),
+      post_exclude_before_jd: val('opt-post_exclude_before_jd'),
+      post_exclude_after_jd: val('opt-post_exclude_after_jd')
     };
   }
   function saveOptions() {
@@ -967,7 +983,7 @@
     });
     ['run_name','ref_band','refid','ref_select','ref_select_top_k','aper_unit','aper_radii','annulus',
      'target_id','comparison_ids','avoid_comparison_ids','avoid_nearby_star_mode','avoid_nearby_star','target_coord','test_run_frames','min_star_separation','max_num_stars',
-       'n_stars_align','cutout_size','display_stack_nframes','ccd_trim','edge_margin','bin_size_minutes','nan_imputation_method','sig_bkg','sig_fwhm','sig_dx','sig_dy','sig_flux','flux_poly_deg','min_star_area','wcs_method','centroid_method','cmap','site','telescope','mode','exclude_after_jd','exclude_before_jd','post_sigma','post_poly_deg'].forEach(function (id) {
+       'n_stars_align','cutout_size','display_stack_nframes','ccd_trim','edge_margin','bin_size_minutes','nan_imputation_method','sig_bkg','sig_fwhm','sig_dx','sig_dy','sig_flux','flux_poly_deg','min_star_area','wcs_method','centroid_method','cmap','site','telescope','mode','exclude_after_jd','exclude_before_jd','post_sigma','post_poly_deg','post_exclude_before_jd','post_exclude_after_jd'].forEach(function (id) {
       var el = document.getElementById('opt-'+id);
       if (el && saved[id] !== undefined) el.value = saved[id];
     });
@@ -1109,7 +1125,7 @@
       });
       ['run_name','ref_band','refid','ref_select','ref_select_top_k','aper_unit','aper_radii','annulus',
        'target_id','comparison_ids','avoid_comparison_ids','avoid_nearby_star_mode','avoid_nearby_star','target_coord','test_run_frames','min_star_separation','max_num_stars',
-     'n_stars_align','cutout_size','display_stack_nframes','ccd_trim','edge_margin','bin_size_minutes','nan_imputation_method','sig_bkg','sig_fwhm','sig_dx','sig_dy','sig_flux','flux_poly_deg','min_star_area','wcs_method','centroid_method','cmap','site','telescope','mode','exclude_after_jd','exclude_before_jd','post_sigma','post_poly_deg'].forEach(function (id) {
+     'n_stars_align','cutout_size','display_stack_nframes','ccd_trim','edge_margin','bin_size_minutes','nan_imputation_method','sig_bkg','sig_fwhm','sig_dx','sig_dy','sig_flux','flux_poly_deg','min_star_area','wcs_method','centroid_method','cmap','site','telescope','mode','exclude_after_jd','exclude_before_jd','post_sigma','post_poly_deg','post_exclude_before_jd','post_exclude_after_jd'].forEach(function (id) {
         var el = document.getElementById('opt-'+id);
         if (el) {
           var d = POSTPROC_DEFAULTS[id] !== undefined ? POSTPROC_DEFAULTS[id] : DEFAULTS[id];
@@ -1722,18 +1738,27 @@
       sigma: val('opt-post_sigma'),
       degree: val('opt-post_poly_deg'),
       iterations: 5,
+      exclude_before_jd: val('opt-post_exclude_before_jd'),
+      exclude_after_jd: val('opt-post_exclude_after_jd'),
       apply: apply
     };
   }
   function postprocReport(d) {
     var rows = (d.files || []).map(function (f) {
-      return f.file + ': ' + f.n_clipped + ' clipped / ' + f.n_kept + ' kept';
+      var row = f.file + ': ' + f.n_clipped + ' clipped / ' + f.n_kept + ' kept';
+      if (f.n_excluded_range) row += ' (' + f.n_excluded_range + ' outside JD range)';
+      return row;
     });
     var html = '<div>';
     if (d.applied) {
       html += '<p style="font-weight:600;color:var(--green);margin:0 0 0.4rem;">Applied — ' + d.n_files + ' band CSV(s) clipped in place into ' + (d.summary_png || 'summary figure') + '.</p>';
     } else {
       html += '<p style="font-weight:600;margin:0 0 0.4rem;">Outlier preview (sigma=' + d.sigma + ', deg=' + d.degree + '):</p>';
+    }
+    if (d.exclude_before_jd != null || d.exclude_after_jd != null) {
+      html += '<p style="color:var(--text-dim);margin:0 0 0.4rem;">JD range: ' +
+        (d.exclude_before_jd != null ? '≥ ' + d.exclude_before_jd : 'no lower cut') + ', ' +
+        (d.exclude_after_jd != null ? '≤ ' + d.exclude_after_jd : 'no upper cut') + '</p>';
     }
     html += '<ul style="margin:0 0 0.5rem;padding-left:1.25rem;line-height:1.6;">';
     rows.forEach(function (r) { html += '<li class="mono">' + r + '</li>'; });

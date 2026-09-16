@@ -109,6 +109,22 @@ class TestValidateParams:
     def test_rejects_out_of_range(self, sigma, degree, iterations):
         assert pp.validate_params(sigma, degree, iterations) is not None
 
+    @pytest.mark.parametrize(
+        "before,after",
+        [(None, None), ("", ""), (2460877.0, None), (None, 2460877.0), (2460870.0, 2460877.0)],
+    )
+    def test_accepts_valid_jd_exclusion(self, before, after):
+        assert pp.validate_params(5.0, 2, 5, before, after) is None
+
+    def test_rejects_non_numeric_jd_exclusion(self):
+        assert pp.validate_params(5.0, 2, 5, "not-a-number", None) is not None
+        assert pp.validate_params(5.0, 2, 5, None, "not-a-number") is not None
+
+    def test_rejects_before_not_less_than_after(self):
+        err = pp.validate_params(5.0, 2, 5, 2460877.0, 2460877.0)
+        assert err is not None and "before" in err and "after" in err
+        assert pp.validate_params(5.0, 2, 5, 2460880.0, 2460870.0) is not None
+
 
 class TestRunContext:
     def test_named_run_dir_and_meta(self, prose_dir):
@@ -137,11 +153,24 @@ class TestRunContext:
         ctx = pp._run_context(INST, DATE, TARGET, RUN)
         cmd = pp._command(ctx, sigma=3.5, degree=2, iterations=5, apply=False, preview_path="/tmp/x.png")
         assert cmd[-8:] == ["--sigma", "3.5", "--degree", "2", "--iterations", "5", "--preview", "/tmp/x.png"]
+        assert "--exclude-before-jd" not in cmd and "--exclude-after-jd" not in cmd
         apply_cmd = pp._command(ctx, sigma=3.5, degree=2, iterations=5, apply=True)
         assert "--apply" in apply_cmd
         assert "--target" in apply_cmd and "--inst" in apply_cmd and "--date" in apply_cmd
         assert "--site" in apply_cmd and "--confmode" in apply_cmd and "--telescope" in apply_cmd
         assert "--preview" not in apply_cmd
+
+    def test_command_includes_jd_exclusion_when_given(self, prose_dir):
+        _make_run_dir(prose_dir)
+        ctx = pp._run_context(INST, DATE, TARGET, RUN)
+        cmd = pp._command(
+            ctx, sigma=3.5, degree=2, iterations=5, apply=False,
+            exclude_before_jd=2460870.0, exclude_after_jd=2460877.5,
+        )
+        assert "--exclude-before-jd" in cmd
+        assert cmd[cmd.index("--exclude-before-jd") + 1] == "2460870.0"
+        assert "--exclude-after-jd" in cmd
+        assert cmd[cmd.index("--exclude-after-jd") + 1] == "2460877.5"
 
 
 class TestPostprocess:
@@ -213,6 +242,31 @@ class TestPostprocess:
         assert not res["ok"]
         assert "poly degree" in res["error"]
 
+    def test_invalid_jd_exclusion_returns_error_not_raise(self, prose_dir):
+        _make_run_dir(prose_dir)
+        res = pp.postprocess(
+            INST, DATE, TARGET, RUN, 5.0, 2, 5, apply=False,
+            exclude_before_jd=2460877.0, exclude_after_jd=2460870.0,
+        )
+        assert not res["ok"]
+        assert "before" in res["error"] and "after" in res["error"]
+
+    def test_forwards_jd_exclusion_to_command_and_blank_means_unset(self, prose_dir, monkeypatch):
+        _make_run_dir(prose_dir)
+        calls: list[list[str]] = []
+        monkeypatch.setattr(
+            pp, "_run_sync", lambda args: calls.append(args) or _ok_report()
+        )
+        monkeypatch.setattr(pp, "_read_preview", lambda path: None)
+        monkeypatch.setattr(pp, "_preview_path", lambda: "/tmp/preview.png")
+
+        pp.postprocess(
+            INST, DATE, TARGET, RUN, 5.0, 2, 5, apply=False,
+            exclude_before_jd="2460870.0", exclude_after_jd="",
+        )
+        assert "--exclude-before-jd" in calls[0]
+        assert "--exclude-after-jd" not in calls[0]
+
 
 class TestEndpoint:
     def test_postprocess_endpoint_rejects_bad_payload(self, mock_db):
@@ -237,9 +291,11 @@ class TestEndpoint:
         from muscat_db import web
 
         calls: dict = {}
-        def fake_postprocess(inst, date, target, run, sigma, degree, iterations, *, apply):
+        def fake_postprocess(inst, date, target, run, sigma, degree, iterations, *,
+                              apply, exclude_before_jd=None, exclude_after_jd=None):
             calls.update(inst=inst, date=date, target=target, run=run,
-                         sigma=sigma, degree=degree, iterations=iterations, apply=apply)
+                         sigma=sigma, degree=degree, iterations=iterations, apply=apply,
+                         exclude_before_jd=exclude_before_jd, exclude_after_jd=exclude_after_jd)
             return {
                 "ok": True,
                 "applied": False,
@@ -256,7 +312,8 @@ class TestEndpoint:
         r = client.post(
             "/api/photometry/postprocess",
             json={"inst": INST, "date": DATE, "target": TARGET, "run": RUN,
-                  "sigma": 4.0, "degree": 1, "iterations": 3, "apply": False},
+                  "sigma": 4.0, "degree": 1, "iterations": 3, "apply": False,
+                  "exclude_before_jd": 2460870.0, "exclude_after_jd": ""},
         )
         assert r.status_code == 200
         body = r.json()
@@ -264,6 +321,7 @@ class TestEndpoint:
         assert calls == {
             "inst": INST, "date": DATE, "target": TARGET, "run": RUN,
             "sigma": 4.0, "degree": 1, "iterations": 3, "apply": False,
+            "exclude_before_jd": 2460870.0, "exclude_after_jd": "",
         }
 
     def test_postprocess_endpoint_surfaces_subprocess_failure(self, mock_db, monkeypatch):

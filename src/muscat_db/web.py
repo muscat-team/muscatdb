@@ -6612,6 +6612,8 @@ def photometry_postprocess(payload: dict = Body(...)):
         payload.get("degree", 2),
         payload.get("iterations", 5),
         apply=bool(payload.get("apply", False)),
+        exclude_before_jd=payload.get("exclude_before_jd"),
+        exclude_after_jd=payload.get("exclude_after_jd"),
     )
     if not result.get("ok"):
         return JSONResponse(result, status_code=400)
