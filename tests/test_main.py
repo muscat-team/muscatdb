@@ -1438,6 +1438,46 @@ class TestDatabase:
         finally:
             os.unlink(db_path)
 
+    def test_ingest_date_refuses_to_run_under_a_worker_process(self, tmp_obslog, monkeypatch):
+        """Architecture issue #51: the catalog SQLite database is local to
+        the web/catalog host only (MUSCATDB-LITE.md §12) -- a standalone
+        `muscatdb worker` process (job_store.current_owner() == "worker")
+        must never ingest, or a future remote worker host would be writing
+        SQLite over NFS, which the whole control-plane/catalog split exists
+        to avoid. Makes that an enforced constraint instead of doc prose."""
+        from muscat_db import job_store
+        from muscat_db.database import build_db, ingest_date
+
+        monkeypatch.setattr(job_store, "_OWNER", "worker")
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            db_path = f.name
+        try:
+            build_db(db_path)
+            _make_csv(
+                f"{tmp_obslog}/muscat/260102/obslog-muscat-260102-ccd0.csv",
+                ["FRAME", "OBJECT", "JD-STRT", "UT-STRT",
+                 "EXPTIME (s)", "READ_MODE", "FILTER",
+                 "RA", "DEC", "SECZ", "FOCUS (mm)", "PA (deg)"],
+                [{"FRAME": "MSCT0_2601020001", "OBJECT": "M42",
+                  "JD-STRT": "60001.1", "UT-STRT": "02:00:00",
+                  "EXPTIME (s)": "20", "READ_MODE": "high",
+                  "FILTER": "r", "RA": "05:35:17", "DEC": "-05:23:28",
+                  "SECZ": "1.1", "FOCUS (mm)": "-38.6", "PA (deg)": "44.0"}],
+            )
+
+            with pytest.raises(RuntimeError, match="worker"):
+                ingest_date(db_path, "muscat", "260102")
+
+            conn = sqlite3.connect(db_path)
+            nframes = conn.execute(
+                "SELECT COUNT(*) FROM frames WHERE instrument = ? AND obsdate = ?",
+                ("muscat", "260102"),
+            ).fetchone()[0]
+            conn.close()
+            assert nframes == 0  # refused before touching the database
+        finally:
+            os.unlink(db_path)
+
     def test_clear_stale_date_removes_rows_and_refreshes_targets(self, tmp_obslog):
         from muscat_db.database import build_db, clear_stale_date
         with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:

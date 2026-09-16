@@ -985,8 +985,59 @@ def _populate_targets(conn: sqlite3.Connection) -> None:
         )
 
 
+def _require_catalog_write_access() -> None:
+    """Enforce architecture issue #51's catalog/control-plane split
+    (MUSCATDB-LITE.md §12: "catalog stays SQLite, local to ut2, read-only to
+    workers") as an actual runtime constraint rather than doc prose a caller
+    has to already know. A standalone `muscatdb worker` process
+    (job_store.current_owner() == "worker") must never ingest: in the
+    eventual multi-host topology a worker runs on a remote compute host
+    (ut3-ut7), where the catalog SQLite file either doesn't exist locally or,
+    if MUSCAT_DB_PATH were pointed at a shared mount to make it exist, would
+    be exactly the SQLite-over-NFS write this project's whole control-plane
+    split exists to avoid (see job_store.py's PostgresJobStore docstring).
+
+    A lazy import, not a module-level one: job_store.py already imports this
+    module (`from muscat_db import database`) to reuse save_job/
+    get_persisted_jobs, so a module-level import here would be circular.
+
+    The default owner ("web", job_store._OWNER's default) is never blocked,
+    so every existing call site -- the web process itself, any directly
+    invoked `muscat-db ingest-date`/backfill CLI command, the LCO archive
+    monitor (only ever constructed inside web.py's lifespan, never a worker
+    process) -- is unaffected. Today nothing wires a `muscatdb worker`
+    process to call ingest_date at all, so this cannot yet fire in
+    production; it exists so that guarantee holds by construction if a
+    future pipeline ever adds such a call, instead of only by nobody having
+    wired it up yet.
+
+    This gates on *role* (job_store.current_owner()), not *host*: it cannot
+    tell "a worker on a remote compute host" from "a worker co-located on
+    ut2 itself" (architecture issue #51 step 1's already-shipped, safe
+    single-host topology -- process identity/host lives in the separate
+    _INSTANCE_ID, not _OWNER). So this deliberately also blocks a
+    same-host worker from ingesting, even though that specific case has
+    local catalog write access same as the web process does. That is the
+    intended, simpler policy -- ingestion stays reachable through exactly
+    one role rather than being conditionally allowed depending on current
+    topology -- not an oversight. If a legitimate need for worker-triggered
+    ingestion ever comes up, loosen this by checking host/location instead
+    of (or in addition to) role, rather than just deleting the guard.
+    """
+    from muscat_db import job_store
+
+    if job_store.current_owner() == "worker":
+        raise RuntimeError(
+            "ingest_date() cannot run under a standalone `muscatdb worker` process: "
+            "the catalog SQLite database is local to the web/catalog host only "
+            "(architecture issue #51, MUSCATDB-LITE.md §12) -- run ingestion "
+            "from the web process or a directly invoked CLI command instead."
+        )
+
+
 def ingest_date(db_path: str, instrument: str, obsdate: str, progress=None) -> int:
     """Ingest one instrument/date from obslog CSVs into an existing database."""
+    _require_catalog_write_access()
     csv_jobs = _discover_csv_jobs(instrument, obsdate)
     if not csv_jobs:
         raise FileNotFoundError(f"No obslog CSVs found for {instrument} {obsdate}")

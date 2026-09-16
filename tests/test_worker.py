@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import signal
+import threading
 
 import pytest
 from typer.testing import CliRunner
@@ -157,6 +158,98 @@ class TestRun:
         finally:
             assert signal.getsignal(signal.SIGTERM) == prior
         assert len(calls) == 1
+
+    def test_run_restores_the_previous_owner_after_returning_once(self, monkeypatch):
+        """run() tags every row it launches owner="worker" (job_store.py's
+        _OWNER docstring), but that's process-role state, not something a
+        single run() call should own permanently: leaving it stuck as
+        "worker" after returning bit tests/test_worker_p2_proof.py enough
+        that its own fixture snapshots/restores _OWNER around worker.run()
+        calls as a workaround. Fix it at the source instead -- restore
+        whatever _OWNER was before this call, not hardcoded back to "web",
+        so this isn't just a reset-to-default in disguise. In production
+        run() never returns except at process shutdown, so this changes no
+        real behavior; it only closes the cross-test leak, which now matters
+        for real since database.ingest_date's owner guard (architecture
+        issue #51) makes _OWNER load-bearing for something other than
+        orphan reconciliation."""
+        from muscat_db import job_store
+
+        monkeypatch.setattr(job_store, "_OWNER", "pre-existing-owner")
+        monkeypatch.setattr("muscat_db.photometry.sync_jobs", lambda: None)
+        worker.run("photometry", once=True)
+        assert job_store.current_owner() == "pre-existing-owner"
+
+    def test_run_restores_the_previous_owner_after_stopping(self, monkeypatch):
+        from muscat_db import job_store
+
+        monkeypatch.setattr(job_store, "_OWNER", "pre-existing-owner")
+
+        def stub_sync_jobs() -> None:
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        monkeypatch.setattr("muscat_db.photometry.sync_jobs", stub_sync_jobs)
+        worker.run("photometry", interval=0.01, once=False)
+        assert job_store.current_owner() == "pre-existing-owner"
+
+    def test_run_restores_owner_even_when_signal_installation_fails(self, monkeypatch):
+        """set_owner("worker") and signal installation must be one unit
+        fully covered by the same try/finally: signal.signal() raises
+        ValueError when called from anything but the main thread of the
+        main interpreter, and if that happens *before* the try block
+        starts, the finally that restores _OWNER never runs, leaking
+        "worker" for the rest of the process. Exercised for real via a
+        background thread (the actual condition that triggers the
+        failure), not by mocking signal.signal."""
+        from muscat_db import job_store
+
+        monkeypatch.setattr(job_store, "_OWNER", "pre-existing-owner")
+        monkeypatch.setattr("muscat_db.photometry.sync_jobs", lambda: None)
+
+        errors: list[BaseException] = []
+
+        def call_from_thread() -> None:
+            try:
+                worker.run("photometry", once=False)
+            except BaseException as exc:
+                errors.append(exc)
+
+        t = threading.Thread(target=call_from_thread)
+        t.start()
+        t.join(timeout=5)
+
+        assert not t.is_alive()
+        assert len(errors) == 1
+        assert isinstance(errors[0], ValueError)
+        assert job_store.current_owner() == "pre-existing-owner"
+
+    def test_ingest_date_succeeds_after_a_worker_run_returns(self, monkeypatch, tmp_path):
+        """The actual consequence proven end-to-end: without the owner
+        restoration above, a worker.run() call anywhere earlier in the same
+        process would permanently poison database.ingest_date's new
+        owner-based guard (architecture issue #51) for the rest of the
+        process's life, even for the unrelated web/CLI role that should
+        always be allowed to ingest.
+
+        Points OBSLOG_BASE at an empty temp dir (rather than pulling in
+        test_main.py's tmp_obslog fixture) so "no CSVs found" is guaranteed
+        rather than risking a real obslog tree on a dev host actually having
+        data for muscat/260101; ingest_date applies its own schema
+        (_apply_schema) to a fresh sqlite3.connect, so no prior build_db()
+        call is needed either."""
+        from muscat_db import database, job_store
+
+        monkeypatch.setattr(database, "OBSLOG_BASE", str(tmp_path / "obslog"))
+        monkeypatch.setattr(job_store, "_OWNER", "web")
+        monkeypatch.setattr("muscat_db.photometry.sync_jobs", lambda: None)
+        worker.run("photometry", once=True)
+
+        db_path = str(tmp_path / "muscat.db")
+        with pytest.raises(FileNotFoundError, match="No obslog CSVs found"):
+            # Reaches the (expected, unrelated) "no CSVs" error rather than
+            # the worker-owner RuntimeError -- proof the guard sees owner
+            # "web" again, not a leaked "worker".
+            database.ingest_date(db_path, "muscat", "260101")
 
     def test_unknown_pipeline_raises_before_touching_signals(self, monkeypatch):
         installed = []
