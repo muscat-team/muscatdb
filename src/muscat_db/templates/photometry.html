@@ -643,8 +643,8 @@
       <summary>Sigma Clipping <span class="help-tooltip" title="Sigma threshold parameters applied to the finished differential flux CSV, after autodiff() has already picked comparison stars and aperture. Unlike the Sigma Clipping options in Configure &amp; Run Photometry (which run before autodiff() and can change that selection), this pass only rejects outlier frames from the final light curve and never changes cIDs or aperture.">?</span></summary>
       <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 1.25rem; margin: 0.75rem 0 0.5rem; max-width: 420px;">
         <div class="opt">
-          <label for="opt-post_sigma">SIGMA FLUX <span class="help-tooltip" title="Reject frames whose residual from the fitted flux-vs-time polynomial deviates by more than this many standard deviations. Applied after photometry finishes, directly to the saved CSV rows.">?</span></label>
-          <input type="number" id="opt-post_sigma" value="{{ postproc_defaults['post_sigma'] }}" step="0.1" min="0" max="100" style="width: 100%;" {% if not sel_run %}disabled{% endif %}>
+          <label for="opt-post_sigma">SIGMA FLUX <span class="help-tooltip" title="Reject frames whose residual from the fitted flux-vs-time polynomial deviates by more than this many standard deviations. Applied after photometry finishes, directly to the saved CSV rows. Blank -> skip sigma-clipping entirely (e.g. to only apply the Exclude JD Range cut below).">?</span></label>
+          <input type="number" id="opt-post_sigma" placeholder="none" value="{{ postproc_defaults['post_sigma'] }}" step="0.1" min="0" max="100" style="width: 100%;" {% if not sel_run %}disabled{% endif %}>
         </div>
         <div class="opt">
           <label for="opt-post_poly_deg">POLY DEG <span class="help-tooltip" title="Degree of the polynomial fitted to flux vs time before residual sigma clipping.">?</span></label>
@@ -1749,11 +1749,12 @@
       if (f.n_excluded_range) row += ' (' + f.n_excluded_range + ' outside JD range)';
       return row;
     });
+    var sigmaLabel = d.sigma == null ? 'off' : d.sigma;
     var html = '<div>';
     if (d.applied) {
       html += '<p style="font-weight:600;color:var(--green);margin:0 0 0.4rem;">Applied — ' + d.n_files + ' band CSV(s) clipped in place into ' + (d.summary_png || 'summary figure') + '.</p>';
     } else {
-      html += '<p style="font-weight:600;margin:0 0 0.4rem;">Outlier preview (sigma=' + d.sigma + ', deg=' + d.degree + '):</p>';
+      html += '<p style="font-weight:600;margin:0 0 0.4rem;">Outlier preview (sigma=' + sigmaLabel + ', deg=' + d.degree + '):</p>';
     }
     if (d.exclude_before_jd != null || d.exclude_after_jd != null) {
       html += '<p style="color:var(--text-dim);margin:0 0 0.4rem;">JD range: ' +

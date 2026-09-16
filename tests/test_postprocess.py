@@ -125,6 +125,13 @@ class TestValidateParams:
         assert err is not None and "before" in err and "after" in err
         assert pp.validate_params(5.0, 2, 5, 2460880.0, 2460870.0) is not None
 
+    @pytest.mark.parametrize("sigma", [None, "", "  "])
+    def test_blank_sigma_disables_clipping_without_error(self, sigma):
+        assert pp.validate_params(sigma, 2, 5) is None
+
+    def test_non_numeric_sigma_still_rejected(self):
+        assert pp.validate_params("abc", 2, 5) is not None
+
 
 class TestRunContext:
     def test_named_run_dir_and_meta(self, prose_dir):
@@ -171,6 +178,12 @@ class TestRunContext:
         assert cmd[cmd.index("--exclude-before-jd") + 1] == "2460870.0"
         assert "--exclude-after-jd" in cmd
         assert cmd[cmd.index("--exclude-after-jd") + 1] == "2460877.5"
+
+    def test_command_sigma_none_maps_to_sigma_none_flag(self, prose_dir):
+        _make_run_dir(prose_dir)
+        ctx = pp._run_context(INST, DATE, TARGET, RUN)
+        cmd = pp._command(ctx, sigma=None, degree=2, iterations=5, apply=False)
+        assert cmd[cmd.index("--sigma") + 1] == "none"
 
 
 class TestPostprocess:
@@ -266,6 +279,23 @@ class TestPostprocess:
         )
         assert "--exclude-before-jd" in calls[0]
         assert "--exclude-after-jd" not in calls[0]
+
+    def test_blank_sigma_forwards_sigma_none_and_succeeds(self, prose_dir, monkeypatch):
+        _make_run_dir(prose_dir)
+        calls: list[list[str]] = []
+        monkeypatch.setattr(
+            pp, "_run_sync", lambda args: calls.append(args) or _ok_report()
+        )
+        monkeypatch.setattr(pp, "_read_preview", lambda path: None)
+        monkeypatch.setattr(pp, "_preview_path", lambda: "/tmp/preview.png")
+
+        res = pp.postprocess(
+            INST, DATE, TARGET, RUN, "", 2, 5, apply=False,
+            exclude_after_jd="2460877.0",
+        )
+        assert res["ok"]
+        assert calls[0][calls[0].index("--sigma") + 1] == "none"
+        assert "--exclude-after-jd" in calls[0]
 
 
 class TestEndpoint:

@@ -60,7 +60,7 @@ def _run_context(inst: str, date: str, target: str, run_id: str) -> dict:
 def _command(
     context: dict,
     *,
-    sigma: float,
+    sigma: float | None,
     degree: int,
     iterations: int,
     apply: bool,
@@ -72,7 +72,7 @@ def _command(
         *_prose_prefix(_POSTPROCESS_MODULE, console_script=None),
         context["results_dir"],
         "--sigma",
-        str(sigma),
+        "none" if sigma is None else str(sigma),
         "--degree",
         str(degree),
         "--iterations",
@@ -187,6 +187,20 @@ def _parse_optional_jd(value, name: str) -> tuple[float | None, str | None]:
         return None, f"{name} must be a number"
 
 
+def _parse_optional_sigma(value) -> tuple[float | None, str | None]:
+    """Parse the sigma-clip threshold; ``None``/``""`` disables sigma-clipping
+    entirely (only the JD-range/invalid-Err filters still apply)."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None, None
+    try:
+        sigma_f = float(value)
+    except (TypeError, ValueError):
+        return None, "sigma must be a number"
+    if not (sigma_f > 0) or sigma_f > 100:
+        return None, "sigma must be between 0 and 100"
+    return sigma_f, None
+
+
 def validate_params(
     sigma,
     degree,
@@ -195,10 +209,9 @@ def validate_params(
     exclude_after_jd=None,
 ) -> str | None:
     """Return an error string for out-of-range post-process parameters."""
-    try:
-        sigma_f = float(sigma)
-    except (TypeError, ValueError):
-        return "sigma must be a number"
+    _, err = _parse_optional_sigma(sigma)
+    if err:
+        return err
     try:
         deg_i = int(degree)
     except (TypeError, ValueError):
@@ -207,8 +220,6 @@ def validate_params(
         iter_i = int(iterations)
     except (TypeError, ValueError):
         return "iterations must be an integer"
-    if not (sigma_f > 0) or sigma_f > 100:
-        return "sigma must be between 0 and 100"
     if not (0 <= deg_i <= 6):
         return "poly degree must be between 0 and 6"
     if not (1 <= iter_i <= 50):
@@ -245,6 +256,10 @@ def postprocess(
     summary lightcurve figure. A run with a live (running/pending/finalizing)
     job is refused for ``apply`` unless ``allow_active_job`` is set (tests).
 
+    ``sigma`` (``""``/``None`` meaning "not set") disables sigma-clipping
+    entirely, so a run can drop only the excluded JD range (and the
+    always-on invalid-Err rows) without also sigma-clipping the rest.
+
     ``exclude_before_jd``/``exclude_after_jd`` (each optional, ``""``/``None``
     meaning "not set") drop rows outside that window from the finished
     light-curve *before* the sigma-clip trend is fitted, so a gap or a bad
@@ -253,6 +268,7 @@ def postprocess(
     err = validate_params(sigma, degree, iterations, exclude_before_jd, exclude_after_jd)
     if err:
         return {"ok": False, "error": err}
+    sigma_val, _ = _parse_optional_sigma(sigma)
     before, _ = _parse_optional_jd(exclude_before_jd, "exclude before JD")
     after, _ = _parse_optional_jd(exclude_after_jd, "exclude after JD")
     try:
@@ -280,7 +296,7 @@ def postprocess(
         report = _run_sync(
             _command(
                 context,
-                sigma=sigma,
+                sigma=sigma_val,
                 degree=degree,
                 iterations=iterations,
                 apply=True,
@@ -293,7 +309,7 @@ def postprocess(
         report = _run_sync(
             _command(
                 context,
-                sigma=sigma,
+                sigma=sigma_val,
                 degree=degree,
                 iterations=iterations,
                 apply=False,
