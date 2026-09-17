@@ -16,7 +16,7 @@ import json
 import pathlib
 import shlex
 
-from muscat_db import ttv_fit
+from muscat_db import jobs, ttv_fit
 
 
 def test_write_ttv_inputs_stages_outside_rdir(tmp_path):
@@ -129,6 +129,76 @@ def test_sync_jobs_queue_drain_stages_inputs_like_start_ttv_fit(tmp_path, monkey
             "stages under _input/, not rdir directly"
         )
         assert i_path.parent != o_path
+    finally:
+        for job in fake_jobs.values():
+            job.logf.close()
+
+
+def test_sync_jobs_queue_drain_applies_core_pinning_when_configured(tmp_path, monkeypatch):
+    """Architecture issue #51, 2.4: MUSCAT_JOB_MAX_THREADS must reach the
+    actual launched subprocess's environment on ttv_fit's queue-drain launch
+    path too, not just start_ttv_fit's."""
+    monkeypatch.setenv("MUSCAT_TTV_DIR", str(tmp_path))
+    monkeypatch.setattr(jobs, "_JOB_MAX_THREADS", 6)
+    monkeypatch.setattr(ttv_fit, "_harmonic_prefix", lambda: ["harmonic"])
+    monkeypatch.setattr(ttv_fit, "_harmonic_version", lambda: "0.0.0")
+
+    fake_jobs: dict = {}
+    monkeypatch.setattr(ttv_fit, "_TTV_JOBS", fake_jobs)
+
+    captured = {}
+
+    class _Proc:
+        pid = 1234
+
+        def poll(self):
+            return None
+
+    def _fake_popen(*_args, **kwargs):
+        captured.update(kwargs)
+        return _Proc()
+
+    monkeypatch.setattr(ttv_fit.subprocess, "Popen", _fake_popen)
+
+    entry = {
+        "target": "TOI-123",
+        "run_name": "r1",
+        "started_at": 0.0,
+        "params": json.dumps({"options": {
+            "csv_content": "planet,epoch,tc,tc_unc\n",
+            "ini_content": "[INIT]\n",
+            "run_name": "r1",
+            "planet_letters": "b",
+        }}),
+    }
+
+    class _FakeStore:
+        def all(self):
+            return []
+
+        def reconcile_slots(self, pipeline):
+            return 0
+
+        def count_claimed(self, pipeline):
+            return 0
+
+        def pending(self, pipeline):
+            return [entry]
+
+        def claim_slot(self, pipeline, holder_key, max_slots):
+            return True
+
+        def save(self, **kwargs):
+            pass
+
+    monkeypatch.setattr(ttv_fit, "get_job_store", lambda: _FakeStore())
+
+    try:
+        ttv_fit.sync_jobs()
+
+        assert captured["env"]["OMP_NUM_THREADS"] == "6"
+        assert captured["env"]["MKL_NUM_THREADS"] == "6"
+        assert captured["env"]["OPENBLAS_NUM_THREADS"] == "6"
     finally:
         for job in fake_jobs.values():
             job.logf.close()

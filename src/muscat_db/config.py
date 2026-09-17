@@ -113,6 +113,23 @@ ENV_VARS: tuple[EnvVar, ...] = (
         "window before scan_date removes a CSV with no current matches (seconds)",
     ),
     EnvVar("MUSCAT_JOB_RECONCILE_INTERVAL_S", "2", "Server-side job reconciliation cadence (seconds)"),
+    EnvVar(
+        "MUSCAT_JOB_HEARTBEAT_STALE_S", "30",
+        "Staleness window before a running job with no in-memory tracker in this "
+        "process, but a fresh heartbeat from another instance, is left alone "
+        "(architecture issue #51 step 3)",
+    ),
+    EnvVar(
+        "MUSCAT_SSE_POLL_INTERVAL_S", "1.0",
+        "Server-side job_status() poll cadence (seconds) behind each pipeline's "
+        "/log-stream SSE endpoint (architecture issue #51 step 4)",
+    ),
+    EnvVar(
+        "MUSCAT_JOB_MAX_RECONCILE_ATTEMPTS", "5",
+        "Reclaim attempts for an orphaned running job with no evidence of "
+        "completion and no live underlying process before it is abandoned "
+        "(architecture issue #51 step 3)",
+    ),
     EnvVar("MUSCAT_EXPOSURE_CALIBRATION_WORKERS", "2", "Global exposure-calibration workers"),
     EnvVar("MUSCAT_EXPOSURE_CALIBRATION_STALE_S", "21600", "Abandoned calibration claim timeout (seconds)"),
     EnvVar("MUSCAT_CATALOG_GLOBAL_WORKERS", "8", "Process-wide outbound catalog concurrency"),
@@ -245,8 +262,40 @@ ENV_VARS: tuple[EnvVar, ...] = (
         "MUSCAT_CONTROL_PLANE=postgres, unused otherwise",
         secret=True,
     ),
+    EnvVar(
+        "MUSCAT_JOB_NOTIFY",
+        "0",
+        "Set to 1 for instant job dispatch: enqueue signals waiting "
+        "reconciliation loops (Postgres NOTIFY, cross-host; an in-process "
+        "wakeup on SQLite, same-process only) so an idle loop picks a job "
+        "up in milliseconds instead of waiting out "
+        "MUSCAT_JOB_RECONCILE_INTERVAL_S, which stays as the fallback poll. "
+        "Unset (default) is today's exact polling behaviour -- no LISTEN "
+        "connection is opened and no NOTIFY is ever issued.",
+    ),
     EnvVar("MUSCAT_MAX_FULL_JOBS", "1", "Concurrent full runs allowed per pipeline across all processes sharing the database; 0 disables full runs (use on a staging instance so it cannot compete with production)"),
     EnvVar("MUSCAT_MAX_TEST_JOBS", "4", "Concurrent test runs allowed per pipeline (full runs use durable slots)"),
+    EnvVar(
+        "MUSCAT_WORKER_MAX_SLOTS",
+        None,
+        "Per-host cap on concurrent full runs across ALL pipelines combined on "
+        "this host (one shared budget, not per-pipeline); unset (default) means "
+        "no host-level cap -- only the cluster-wide MUSCAT_MAX_FULL_JOBS cap "
+        "applies. Set on a host whose hardware can't handle as many concurrent "
+        "heavy jobs as the cluster cap alone would let it attempt. Note: slots "
+        "already claimed before this was set are not attributed to any host, "
+        "so the cap is not exact until those pre-existing jobs finish and "
+        "release their slots.",
+    ),
+    EnvVar(
+        "MUSCAT_JOB_MAX_THREADS",
+        None,
+        "Caps OMP_NUM_THREADS/MKL_NUM_THREADS/OPENBLAS_NUM_THREADS for every "
+        "spawned pipeline subprocess (architecture issue #51 'Core Pinning'), "
+        "so BLAS libraries inside prose2/timer/harmonic don't each assume "
+        "they own every core once more than one heavy job runs on this host "
+        "at once. Unset (default) applies no override.",
+    ),
     EnvVar("MUSCAT_PHOT_FINALIZE_GRACE_TERMINAL_S", "2", "Photometry finalizing grace once a terminal log marker is seen (seconds)"),
     EnvVar("MUSCAT_FIT_FINALIZE_GRACE_S", "8", "Transit-fit finalizing grace after parent exit (seconds)"),
     EnvVar("MUSCAT_FIT_FINALIZE_GRACE_TERMINAL_S", "2", "Transit-fit finalizing grace once a terminal log marker is seen (seconds)"),

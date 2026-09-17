@@ -42,10 +42,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from muscat_db import jobs, database
-from muscat_db.job_store import current_owner, get_job_store
+from muscat_db.job_store import current_instance_id, current_owner, get_job_store
 from muscat_db.instruments import INSTRUMENTS
 from muscat_db.cache import register_cache
 from muscat_db.band_utils import DEFAULT_BANDS, NARROW_BANDS, _FILTER_BAND_ALIAS, bands_from_filters  # noqa: F401
+from muscat_db.catalog import _resolve_archive_coords, resolve_lco_key_project_name
 
 logger = logging.getLogger(__name__)
 
@@ -201,6 +202,11 @@ ALLOWED_EXTS = {".png", ".gif", ".csv", ".npz", ".log", ".txt"}
 _RUN_LOG_NAME = "_webrun.log"
 _RUNS_DIR_NAME = "_runs"
 _RUN_META_NAME = "_webrun_meta.json"
+# Written next to the run's own output, mirroring transit_fit's timer-fit.pid
+# and ttv_fit's harmonic.pid: lets orphan reconciliation tell whether the
+# detached subprocess itself is still alive after this process's own in-memory
+# tracker is gone (a --reload restart, a crash), via jobs.pid_file_process_alive.
+_PID_FILE_NAME = "photometry.pid"
 _CONDA_ENV_DEFAULT = "prose"   # prose deps live in a conda env named "prose"
 _MODULE = "prose.scripts.run_photometry"
 _POSTPROCESS_MODULE = "prose.scripts.postprocess_lightcurves"
@@ -250,9 +256,11 @@ def _job_env() -> dict[str, str]:
     Routes all ephemeral files (TMPDIR/TMP/TEMP) to a raid-backed directory so
     jobs never trip over a full root ``/tmp``. The dir is created if missing;
     if that fails we fall back to the inherited environment rather than block
-    the launch.
+    the launch. Also applies jobs.core_pinning_env()'s optional thread-count
+    caps (architecture issue #51 "Core Pinning"), a no-op unless
+    MUSCAT_JOB_MAX_THREADS is configured.
     """
-    env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    env = {**os.environ, "PYTHONUNBUFFERED": "1", **jobs.core_pinning_env()}
     tmpdir = prose_tmpdir()
     try:
         Path(tmpdir).mkdir(parents=True, exist_ok=True)
@@ -1339,8 +1347,25 @@ def build_command(
     if ar and o.get("aper_unit", "pix") != "pix":
         args += ["--aper_unit", o["aper_unit"]]
 
-    if o.get("target_coord") not in (None, ""):
-        parts = o["target_coord"].split(None, 1)
+    target_coord = (o.get("target_coord") or "").strip()
+    if not target_coord and resolve_lco_key_project_name(target) != target.strip():
+        # An LCO key-project OBJECT name decorates a primary designation with
+        # a parenthesized alias (e.g. "TIC245728942.01(TOI5012.01)"). Neither
+        # MAST nor Simbad -- prose2's own name resolvers -- can resolve that
+        # compound string, so every run for such a target aborted with an
+        # uncaught ResolverError. prose2 has no way to know about this
+        # LCO/muscat-db-specific convention, so resolve coordinates here
+        # instead (the same offline-catalog-first path used elsewhere) and
+        # pass them explicitly, bypassing name resolution rather than
+        # widening prose2 to understand it. Falls through to --target_name
+        # only, unchanged from before, when even that resolution fails.
+        resolved = _resolve_archive_coords(target)
+        if resolved is not None:
+            ra_deg, dec_deg, _source = resolved
+            target_coord = f"{ra_deg} {dec_deg}"
+
+    if target_coord:
+        parts = target_coord.split(None, 1)
         if len(parts) == 2:
             ra, dec = parts[0].strip(), parts[1].strip()
             if dec.startswith("-"):
@@ -1741,6 +1766,11 @@ def start_run(
                 start_new_session=True,
                 env=env,
             )
+            try:
+                with open(rdir / _PID_FILE_NAME, "w") as pidf:
+                    pidf.write(str(proc.pid))
+            except OSError:
+                logger.debug("failed to write %s in %s", _PID_FILE_NAME, rdir, exc_info=True)
         except (FileNotFoundError, OSError) as exc:
             if claimed_slot:
                 get_job_store().release_slot("photometry", key)
@@ -1769,6 +1799,7 @@ def start_run(
                 run_name=run_name,
                 user_name=user_name,
                 owner=current_owner(),
+                instance_id=current_instance_id(),
             )
         except sqlite3.OperationalError as exc:
             # DB write failed (e.g. read-only database). Roll back the launched
@@ -2087,6 +2118,10 @@ def _get_error_desc(log_path: Path) -> str:
         return "Failed to parse log"
 
 
+def _detect_process_running(rdir: Path) -> bool:
+    return jobs.pid_file_process_alive(rdir / _PID_FILE_NAME)
+
+
 def sync_jobs() -> None:
     store = get_job_store()
     with _LOCK:
@@ -2158,6 +2193,8 @@ def sync_jobs() -> None:
             )
             running_keys.discard(db_key)
             if unchanged:
+                if persist_state == "running":
+                    store.heartbeat(db_key, current_instance_id())
                 continue
 
             error_desc = ""
@@ -2205,11 +2242,17 @@ def sync_jobs() -> None:
             started_at = time.time()
             elapsed = 0
             owner = ""
+            instance_id = ""
+            heartbeat_at = 0.0
+            attempts = 0
             for j in db_jobs:
                 if j["key"] == db_key:
                     started_at = j["started_at"]
                     elapsed = j["elapsed"]
                     owner = j.get("owner") or ""
+                    instance_id = j.get("instance_id") or ""
+                    heartbeat_at = j.get("heartbeat_at") or 0
+                    attempts = int(j.get("attempts") or 0)
                     break
             if owner and owner != current_owner():
                 # Another role's process (e.g. the web process, if this is the
@@ -2218,27 +2261,81 @@ def sync_jobs() -> None:
                 # orphaned. Reconciling it here would be a false "Process
                 # lost" verdict for a job that is not actually lost.
                 continue
+            if not jobs.is_orphan_reconcilable(instance_id, heartbeat_at, current_instance_id()):
+                # A different *instance* of this same role (e.g. a sibling
+                # `worker` process) holds this job and is still heartbeating --
+                # only that instance's own sync_jobs() pass may judge it lost.
+                # See job_store.py's _INSTANCE_ID docstring for the full
+                # rationale; this closes the gap the owner check above cannot
+                # (two same-role processes share one owner tag).
+                continue
             # The tracked parent is gone (server --reload / restart lost _JOBS),
             # but prose's detached workers run independently and may well have
             # finished. Trust the log's success marker over the lost parent so a
             # completed reduction is not falsely reported as "exited with code -1".
             lp = log_path(inst, date, target, run_id)
             if _log_has_success(lp) and not _log_has_partial_failure(lp):
-                lost_state, lost_rc, lost_desc = "done", 0, ""
+                store.save(
+                    type_="photometry",
+                    inst=inst,
+                    date=date,
+                    target=target,
+                    state="done",
+                    returncode=0,
+                    elapsed=elapsed,
+                    started_at=started_at,
+                    error_desc="",
+                    run_id=run_id,
+                )
+                database.refresh_target_status(target)
+                continue
+            try:
+                rdir = run_output_dir(inst, date, target, run_id or None)
+            except ValueError:
+                rdir = None
+            if rdir is not None and _detect_process_running(rdir):
+                # The launching process is gone, but prose's own driver
+                # process is still alive on the system and may yet finish --
+                # leave state as "running" rather than relaunching a second
+                # run into the same output directory.
+                continue
+            # No evidence of completion and the underlying process is gone
+            # too -- reclaim-with-attempt-limit: retry by requeuing (the
+            # pending-drain loop below relaunches it with its original,
+            # preserved params) up to a limit, then give up for good.
+            next_state, new_attempts = jobs.next_reconcile_attempt(attempts)
+            if next_state == "pending":
+                logger.warning(
+                    "photometry job %s orphaned with no evidence of completion; "
+                    "retrying (attempt %d)", db_key, new_attempts,
+                )
+                store.save(
+                    type_="photometry",
+                    inst=inst,
+                    date=date,
+                    target=target,
+                    state="pending",
+                    returncode=None,
+                    elapsed=0,
+                    started_at=time.time(),
+                    error_desc="",
+                    run_id=run_id,
+                    attempts=new_attempts,
+                )
             else:
-                lost_state, lost_rc, lost_desc = "error", -1, "Process lost (server restart)"
-            store.save(
-                type_="photometry",
-                inst=inst,
-                date=date,
-                target=target,
-                state=lost_state,
-                returncode=lost_rc,
-                elapsed=elapsed,
-                started_at=started_at,
-                error_desc=lost_desc,
-                run_id=run_id,
-            )
+                store.save(
+                    type_="photometry",
+                    inst=inst,
+                    date=date,
+                    target=target,
+                    state="error",
+                    returncode=-1,
+                    elapsed=elapsed,
+                    started_at=started_at,
+                    error_desc=f"Process lost (server restart); gave up after {new_attempts} attempts",
+                    run_id=run_id,
+                    attempts=new_attempts,
+                )
             database.refresh_target_status(target)
 
         # Release any concurrency slot whose claimant's persisted job row is
@@ -2300,6 +2397,11 @@ def sync_jobs() -> None:
                     logf.flush()
                     proc_env = _job_env()
                     proc = subprocess.Popen(cmd, cwd=str(rdir), stdout=logf, stderr=subprocess.STDOUT, text=True, start_new_session=True, env=proc_env)
+                    try:
+                        with open(rdir / _PID_FILE_NAME, "w") as pidf:
+                            pidf.write(str(proc.pid))
+                    except OSError:
+                        logger.debug("failed to write %s for queued run %s", _PID_FILE_NAME, rdir, exc_info=True)
                 except (FileNotFoundError, OSError) as exc:
                     try: logf.close()
                     except OSError: pass
@@ -2308,7 +2410,7 @@ def sync_jobs() -> None:
                     continue
                 _JOBS[key] = Job(key=key, inst=inst, date=date, target=target, cmd=cmd, proc=proc, logf=logf, log_path=pending_log_path, run_type=run_type, run_id=run_id, site=site, telescope=telescope, mode=mode, run_name=run_name)
                 try:
-                    store.save(type_="photometry", inst=inst, date=date, target=target, state="running", returncode=None, elapsed=0, started_at=_JOBS[key].started_at, run_type=run_type, params=entry.get("params", ""), run_id=run_id, run_name=run_name, owner=current_owner())
+                    store.save(type_="photometry", inst=inst, date=date, target=target, state="running", returncode=None, elapsed=0, started_at=_JOBS[key].started_at, run_type=run_type, params=entry.get("params", ""), run_id=run_id, run_name=run_name, owner=current_owner(), instance_id=current_instance_id(), attempts=int(entry.get("attempts") or 0))
                 except sqlite3.OperationalError as exc:
                     try: proc.terminate()
                     except OSError: pass

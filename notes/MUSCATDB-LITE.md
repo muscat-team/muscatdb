@@ -135,7 +135,7 @@ src/muscatdb/
       repos.py       frames / summaries / targets read repositories
     control/                             # CONTROL PLANE: durable, mutable, concurrent (§12)
       store.py       ControlStore interface + SqliteControlStore | PostgresControlStore ([cluster])
-      queue.py       durable work queue: enqueue · claim (SKIP LOCKED) · lease/heartbeat · reclaim
+      queue.py       durable work queue: enqueue · claim (atomic slot claim, §12) · lease/heartbeat · reclaim
       tables.py      jobs · settings/tokens · notes · overrides · lco_observation_* · ephemeris_views
       secrets.py     Fernet token storage behind a LAZY cryptography import seam
     jobs/
@@ -442,7 +442,7 @@ than owning shared logic.
   the norm (today's per-job polling becomes the exception).
 - **Fast cold start**: lazy imports + the app factory mean the base app never imports an
   absent extra; astropy/numpy load only when an `[obs]`/`[fov]`/`[expcalc]` path runs.
-- **Concurrency**: the per-pipeline cap is a **cluster-wide** SQL claim (`SKIP LOCKED`, §12),
+- **Concurrency**: the per-pipeline cap is a **cluster-wide** atomic SQL slot claim (§12),
   correct across hosts — not a per-process integer.
 - **Frontend**: extract shared JS (`jobPolling`, an options-registry helper) to remove the
   documented `collectOptions`/`restoreOptions` hand-sync footgun, and split the 2–3k-line
@@ -464,13 +464,32 @@ competing with the DB) while buying nothing a durable SQL queue doesn't already 
 
 Every worker — co-located on ut2 or remote on ut3/ut6 — runs the **same** loop:
 
-1. **Claim** the next job for its pipeline with an atomic skip-locked update (PostgreSQL
-   `SELECT … FOR UPDATE SKIP LOCKED`; SQLite `BEGIN IMMEDIATE` + a guarded `UPDATE`),
-   enforcing a **cluster-wide per-pipeline concurrency cap counted in the same transaction**.
-   Exactly one worker ever owns a job.
+1. **Claim** one of the pipeline's concurrency slots with an atomic per-key insert against a
+   `job_concurrency_slots` table — **accepted as the design, superseding an earlier draft of
+   this section that specified a literal dequeue** (`SELECT … FOR UPDATE SKIP LOCKED` against
+   a `jobs` queue row). SQLite: `INSERT OR IGNORE … SELECT … WHERE (SELECT COUNT(*) …) <
+   max_slots`, atomic for free from SQLite's whole-database writer serialization even in WAL
+   mode. PostgreSQL: the same `INSERT … ON CONFLICT (pipeline, holder_key) DO NOTHING` shape,
+   made atomic with `pg_advisory_xact_lock` (Postgres's READ COMMITTED isolation would
+   otherwise let two transactions see the same pre-commit count). Both enforce a
+   **cluster-wide per-pipeline concurrency cap counted in the same transaction**; exactly one
+   caller ever wins a given job's slot. This is a per-key idempotent *slot claim*, not a
+   dequeue-and-own of one specific queue row: each pipeline's own `sync_jobs()` still polls
+   `pending()` for candidates and calls `claim_slot()` per candidate — equivalent atomicity
+   (exactly-one-owner), different shape. Implemented in `job_store.py`'s `JobConcurrency`
+   protocol (`claim_slot`/`release_slot`/`count_claimed`); single-host operation running from
+   a *separate OS process* (`muscat-db worker`, `worker.py`) is proven end-to-end in
+   `tests/test_worker_p2_proof.py`. `MUSCAT_JOB_RECONCILE_INTERVAL_S` (default 2s) sets the
+   fallback poll cadence between passes; with `MUSCAT_JOB_NOTIFY=1` an idle pass is instead
+   woken within milliseconds of an `enqueue()` elsewhere — see "Signalling & live logs" below,
+   which is now shipped, not aspirational.
 2. **Lease + heartbeat**: the claim writes a lease with an expiry and the worker heartbeats
    while running. A crashed / rebooted worker's lease expires and the job is **automatically
-   reclaimed** — no stuck `running` rows, no manual retry channel.
+   reclaimed** — no stuck `running` rows, no manual retry channel. Shipped as the
+   `owner`/`instance_id`/`heartbeat_at` columns (`job_store.py`'s `_OWNER`/`_INSTANCE_ID`,
+   `jobs.is_orphan_reconcilable`) plus reclaim-with-attempt-limit
+   (`jobs._MAX_RECONCILE_ATTEMPTS`, `MUSCAT_JOB_MAX_RECONCILE_ATTEMPTS`); see
+   `tests/test_worker_job_ownership.py` and `tests/test_job_reconcile_retry.py`.
 3. **Execute**: launch the conda subprocess (prose / timer / harmonic), own its process group,
    and resolve the **`finalizing` grace window locally** (the worker holds the process and the
    log mtime).
@@ -481,13 +500,38 @@ Single-host = one worker process on ut2. Multi-host = the same worker on more ho
 **no `LocalDispatcher`/`CeleryDispatcher` fork and no `MUSCAT_CELERY_ENABLED` flag** — the only
 variable is how many workers run and where.
 
+**Known gap — cancel does not yet cross the process boundary.** A job still in the durable
+queue cancels cleanly from any process (it only touches the `jobs` table row). Once a worker
+has claimed and launched it, the running job lives solely in *that* worker's in-memory
+registry (prose/timer/harmonic subprocess handle + process group) — a different process
+(e.g. the web server handling a user's Cancel click) has no handle to signal and today gets
+back `{"ok": False, "error": "no job to cancel"}`, leaving the real subprocess running
+unsupervised. Proven (not fixed) by
+`TestCancelBoundary::test_worker_claimed_running_job_cannot_be_cancelled_from_the_web_process`
+in `tests/test_worker_p2_proof.py`. Closing it needs a cross-process cancel-request channel —
+e.g. a `cancel_requested` column the owning worker's own polling pass checks and acts on —
+not yet designed; out of scope for the single-host proof above.
+
 ### Two stores, cleanly split (a robustness win, not just scale)
 
 - **Catalog store — SQLite (`muscat.db`).** frames / summaries / targets: derived,
   read-mostly, **rebuilt atomically each day and fully disposable.** Local to the web host,
   WAL reads. Because it now holds *only* derived data, the daily rebuild is a pure file swap
   with **no app-owned-table preservation** — the fragile "copy 9 tables across the DROP" dance
-  is gone.
+  is gone. "Ingestion only runs where there's DB write access" is an enforced runtime
+  constraint, not just this sentence:
+  `database._require_catalog_write_access()` (called at the top of `ingest_date`, the single
+  choke point every call site funnels through — `lco.py`, `lco_monitor.py`,
+  `propid_backfill.py`, `web.py`, both `cli.py` commands) raises if
+  `job_store.current_owner() == "worker"`, reusing the same role tag `muscatdb worker`
+  already stamps on every row it launches (`_OWNER`, step 1 above) rather than inventing new
+  infrastructure. Nothing wires a worker process to call `ingest_date` today, so this cannot
+  yet fire in production — it exists so the guarantee holds by construction if a future
+  pipeline ever adds such a call, instead of only by nobody having wired it up yet. (Fixed
+  alongside it: `worker.run()` used to leave `job_store._OWNER` stuck at `"worker"` forever
+  after returning — harmless in production, where the process never returns except at
+  shutdown, but a real cross-test pollution hazard once `_OWNER` gates a real write path;
+  `run()` now restores whatever it was before.)
 - **Control plane — the system of record for everything mutable/concurrent**: the job
   queue + state + leases, per-user settings/tokens, notes, overrides, `lco_observation_*`,
   `ephemeris_views`. One `ControlStore` interface, two adapters selected by
@@ -505,9 +549,32 @@ touches the catalog.
 
 ### Signalling & live logs (still no Redis)
 
-- **Instant dispatch**: workers `LISTEN` on a control-plane channel; enqueue issues a `NOTIFY`
-  (Postgres) or a lightweight local wakeup (SQLite). Idle workers pick up in milliseconds
-  without polling; a slow fallback poll covers any missed signal.
+- **Instant dispatch — shipped, opt-in via `MUSCAT_JOB_NOTIFY=1`** (`job_store.py`'s
+  `wait_for_work`/`wait_for_work_or_sleep`, `notify_enabled`). Every `enqueue()` signals; every
+  reconciliation loop (`web.py`'s `_job_reconciliation_loop`, `worker.py`'s `_loop`) waits via
+  `wait_for_work_or_sleep(interval)` instead of a blind sleep, waking within milliseconds when
+  signalled and otherwise degrading to exactly the fallback poll (`interval`, unchanged either
+  way). On **Postgres**, a dedicated (never pooled — `LISTEN` is session-scoped) connection
+  issues `LISTEN muscatdb_jobs`; `enqueue()` fires `pg_notify('muscatdb_jobs', pipeline)` in a
+  separate transaction from the row insert, so a listener is only ever woken by a row already
+  committed. On **SQLite**, the wakeup is a plain `threading.Event`, deliberately in-process
+  only — a standalone `muscatdb worker` (a different OS process) is not woken any faster than
+  before; only Postgres gets real cross-host dispatch, matching the two backends' actual reach.
+  Unset (the default) is byte-for-byte today's polling: no `LISTEN` connection is ever opened
+  and no `NOTIFY` is ever issued. Two known, accepted limitations, both bounded by the fallback
+  poll rather than ever losing a job: a signal fired before any listener has armed (process
+  start) costs one interval, and Postgres LISTEN/NOTIFY delivers only to sessions listening at
+  the moment of `NOTIFY` — a connection dropped between an enqueue and the next wait misses
+  that one signal, self-heals (reconnects, re-`LISTEN`s) on the following call. See
+  `tests/_job_store_contract.py`'s wait_for_work section (both backends),
+  `tests/test_job_store_postgres.py::TestNotifyDispatch` (real cross-connection delivery,
+  server-side connection kill, dead-DSN no-hot-spin), and
+  `tests/test_job_store.py::TestInProcessWakeup`/`TestWaitForWorkOrSleep`. Deliberately out of
+  scope: signalling on `release_slot()` (the moment a *queued* job actually becomes
+  launchable, not just enqueued) — `enqueue()` alone already gives multi-host its real payoff
+  (another host may have a free slot right now); a single-host deployment's own enqueue-time
+  wakeup usually just re-loses the same capacity race it already lost once. Left for a
+  follow-up issue rather than bundled here.
 - **Live logs**: pipelines append to log files on the **shared mount**; the web host tails
   them and streams to the browser over **SSE**. No pub/sub bus, no log lines in the database.
 
@@ -522,14 +589,17 @@ separate package: a worker host installs `muscatdb[cluster]` plus whatever capab
 executes. **Redis and Celery appear nowhere.** Web and workers run as **systemd units**
 (survive reboot, unlike the `muscatdbgui` tmux session), each pinning `OMP_NUM_THREADS` /
 `MKL_NUM_THREADS` / `OPENBLAS_NUM_THREADS` to the host's real core budget so a heavy prose run
-never oversubscribes (ut2's ambient `OMP_NUM_THREADS=100` would swamp 28 threads ~100×).
+never oversubscribes (ut2's ambient `OMP_NUM_THREADS=100` would swamp 28 threads ~100×). This
+pinning is implemented (architecture issue #51, "Core Pinning"): `MUSCAT_JOB_MAX_THREADS`, when
+set, caps all three vars for every spawned photometry/timer/harmonic subprocess via
+`jobs.core_pinning_env()`; unset (default) applies no override.
 
 ### Topology (multi-host)
 
 ```
 ut2 (web host)                          ut3 / ut6 / … (worker hosts)
   FastAPI: validate → enqueue (txn)       muscatdb worker (systemd)
-  reads catalog (local SQLite)            claim (SKIP LOCKED) + lease/heartbeat
+  reads catalog (local SQLite)            claim (atomic slot claim) + lease/heartbeat
   reads logs (shared mount) → SSE         owns subprocess + finalizing
         │                                 writes state → control plane (txn)
         └──────── PostgreSQL control plane (ut2) ────────┘
@@ -547,13 +617,24 @@ ut2 (web host)                          ut3 / ut6 / … (worker hosts)
   store.
 - **Cluster-wide concurrency cap** enforced in SQL — correct across hosts, replacing the
   per-process `_MAX_FULL_JOBS` integer.
+- **Per-host concurrency cap** (opt-in, `MUSCAT_WORKER_MAX_SLOTS`): a second, orthogonal
+  `claim_slot` predicate capping total full runs per host across every pipeline combined, so a
+  small host doesn't accept as many heavy jobs as the cluster-wide cap alone would let it
+  attempt. Unset (default) applies no host limit. Replaces an earlier `os.getloadavg()`-sampling
+  proposal (never implemented, rejected): sampled load lags an actual claim and can wedge the
+  whole cluster when a host's ambient, non-muscat load already sits above threshold.
 - **Backpressure**: excess jobs wait durably in the queue; nothing is dropped on a worker
   outage.
+- **Instant dispatch is advisory, never load-bearing** (opt-in, `MUSCAT_JOB_NOTIFY`): every
+  woken loop still re-reads `pending()` and still goes through the atomic `claim_slot` before
+  acting, so a spurious, duplicated, or entirely missed wakeup can only add latency (bounded by
+  the unchanged fallback poll), never a correctness issue.
 
 ### Performance properties
 
-- Millisecond dispatch via `NOTIFY`; status is a single indexed query; live logs are a file
-  tail → SSE (compositor-friendly, zero polling).
+- Millisecond dispatch via `NOTIFY` when `MUSCAT_JOB_NOTIFY=1` (opt-in; unset is the
+  `MUSCAT_JOB_RECONCILE_INTERVAL_S` poll cadence, unchanged); status is a single indexed query;
+  live logs are a file tail → SSE (compositor-friendly, zero polling).
 - Horizontal scale is trivial: add a host, install `muscatdb[cluster]`, point it at Postgres +
   the shared mount, start the worker unit — no broker to scale or monitor.
 - The dominant cost is the science subprocess itself; queue overhead is negligible, so the

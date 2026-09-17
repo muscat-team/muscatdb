@@ -1384,8 +1384,26 @@
     var oa = document.getElementById('output-area');
     if (oa) oa.style.display = on ? 'none' : '';
   }
-  function stopPolling() { poller.stop(); }
-  function schedulePoll(delayMs) { poller.schedule(delayMs); }
+  // SSE log-stream state for whichever single job pollSingle is currently
+  // watching (architecture issue #51, step 4). Only ever one at a time: the
+  // batch path (pollBatch, multiple jobs at once) keeps polling as before --
+  // an EventSource per job would burn through a browser's per-origin
+  // connection limit fast.
+  var activeStream = null;
+  var activeStreamKey = null;
+  function jobSpecKey(jobSpec) {
+    return jobSpec.inst + '/' + jobSpec.date + '/' + jobSpec.target + '/' + (jobSpec.run || '');
+  }
+  function stopPolling() {
+    poller.stop();
+    if (activeStream) { activeStream.stop(); activeStream = null; activeStreamKey = null; }
+  }
+  function schedulePoll(delayMs) {
+    // The open log-stream already pushes every update on its own; scheduling
+    // a fetch-based re-poll on top of it would just double the traffic.
+    if (activeStream) return;
+    poller.schedule(delayMs);
+  }
 
   function poll() {
     var jobs = getActiveJobs();
@@ -1405,7 +1423,40 @@
     // (scheduling is handled in handleStatusResponse for the current job)
   }
 
+  // True once the log-stream endpoint has proven unreachable (CLOSED, not a
+  // transient drop EventSource already retries) so later ticks don't keep
+  // re-opening a connection that's already shown it won't work this session.
+  var sseUnavailable = false;
+
   function pollSingle(jobSpec) {
+    if (sseUnavailable) { pollSingleFetch(jobSpec); return; }
+    var key = jobSpecKey(jobSpec);
+    if (activeStream && activeStreamKey === key) {
+      // Already streaming this exact job; the open connection pushes its own
+      // updates, nothing to do until handleStatusResponse's terminal branch
+      // closes it via stopPolling().
+      return;
+    }
+    if (activeStream) { activeStream.stop(); activeStream = null; activeStreamKey = null; }
+
+    var qs = 'inst=' + encodeURIComponent(jobSpec.inst) + '&date=' + encodeURIComponent(jobSpec.date) + '&target=' + encodeURIComponent(jobSpec.target);
+    if (jobSpec.run) qs += '&run=' + encodeURIComponent(jobSpec.run);
+
+    activeStreamKey = key;
+    activeStream = window.MuscatJobPolling.createLogStream(
+      '/api/photometry/log-stream?' + qs,
+      function (s) { handleStatusResponse(jobSpec, s); },
+      function () {
+        sseUnavailable = true;
+        activeStream = null;
+        activeStreamKey = null;
+        pollSingleFetch(jobSpec);
+      }
+    );
+    activeStream.start();
+  }
+
+  function pollSingleFetch(jobSpec) {
     nextPollDelay = null;
     var qs = 'inst=' + encodeURIComponent(jobSpec.inst) + '&date=' + encodeURIComponent(jobSpec.date) + '&target=' + encodeURIComponent(jobSpec.target);
     if (jobSpec.run) qs += '&run=' + encodeURIComponent(jobSpec.run);

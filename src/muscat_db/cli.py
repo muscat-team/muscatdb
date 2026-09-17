@@ -30,6 +30,7 @@ from muscat_db.obsdate_normalize import (
     dedupe_conflicts,
     plan_all,
 )
+from muscat_db.propid_backfill import PROPID_INSTRUMENTS
 from muscat_db.scanner import scan_date, scan_missing_dates, scan_yesterday
 from muscat_db.summarizer import summarize_csv
 
@@ -434,6 +435,81 @@ def ingest_date(
         console.print(f"[red]Error: {e}[/]")
         raise typer.Exit(1)
     console.print(f"[green]Ingested {count} frames for {instrument} {obsdate} into {db}[/]")
+
+
+_PROPID_INST_CHOICES = click.Choice([*PROPID_INSTRUMENTS, "all"])
+
+
+@app.command(name="backfill-propid", cls=_Cmd)
+def backfill_propid_cmd(
+    ctx: typer.Context,
+    instrument: str = typer.Argument(
+        ..., help="LCO instrument to backfill, or 'all'", click_type=_PROPID_INST_CHOICES,
+    ),
+    db: str = _db_option(),
+    workers: int | None = _WORKER_OPTION,
+    sleep_s: float = typer.Option(
+        1.0, "--sleep-s", min=0.0,
+        help="Pause between dates (throttles load on the live server)",
+    ),
+    max_dates: int | None = typer.Option(
+        None, "--max-dates", min=1,
+        help="Process at most N dates this run, then stop (resumable next run)",
+    ),
+    restart: bool = typer.Option(
+        False, "--restart",
+        help="Discard this instrument's checkpoint and rescan every date from scratch",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="Report what would be rescanned without scanning, ingesting, or checkpointing",
+    ),
+):
+    """Backfill PROPID for a LCO instrument's historical frames (issue #144).
+
+    Rescans each already-ingested date's raw FITS (now capturing PROPID, per
+    issue #144 PR1) and re-ingests it -- never the full build-db rebuild. See
+    muscat_db/propid_backfill.py for why. Safe to interrupt and re-run:
+    progress is checkpointed per instrument under $MUSCAT_TMPDIR.
+    """
+    _log_startup_banner(f"backfill-propid {instrument} --db {db}")
+    _require_existing_db(ctx, db, "backfill-propid")
+    from muscat_db.propid_backfill import backfill_propid_for_instrument
+
+    instruments = list(PROPID_INSTRUMENTS) if instrument == "all" else [instrument]
+    any_integrity_failure = False
+    for inst in instruments:
+        console.print(f"[cyan]Backfilling PROPID for {inst}...[/]")
+        try:
+            stats = backfill_propid_for_instrument(
+                inst,
+                db_path=db,
+                sleep_s=sleep_s,
+                max_workers=workers,
+                max_dates=max_dates,
+                restart=restart,
+                dry_run=dry_run,
+                progress_log=lambda m: console.print(f"[dim]{m}[/]"),
+            )
+        except Exception as e:
+            console.print(f"[red]Error backfilling {inst}: {e}[/]")
+            raise typer.Exit(1)
+        console.print(
+            f"[green]{inst}: {stats.dates_done} date(s) done, "
+            f"{len(stats.dates_skipped_no_raw_files)} skipped (no raw files), "
+            f"{len(stats.dates_failed)} failed, {stats.frames_ingested} frames ingested[/]"
+        )
+        for d, err in stats.dates_failed:
+            console.print(f"  [yellow]{d}: {err}[/]")
+        if not stats.integrity_ok_after:
+            any_integrity_failure = True
+            console.print(
+                f"[red]PRAGMA integrity_check FAILED for {db} after backfilling {inst} "
+                "-- stop and investigate before running this again.[/]"
+            )
+            break
+    if any_integrity_failure:
+        raise typer.Exit(1)
 
 
 _LCO_INST_CHOICES = click.Choice([*LCO_INSTRUMENTS, "all"])
@@ -955,7 +1031,8 @@ def worker(
     db: str = _db_option(),
     interval: float = typer.Option(
         None, "--interval",
-        help="Seconds between claim/reconcile passes "
+        help="Seconds between claim/reconcile passes -- the fallback poll "
+             "interval when MUSCAT_JOB_NOTIFY=1, the only cadence otherwise "
              "(default: $MUSCAT_JOB_RECONCILE_INTERVAL_S, else 2.0)",
     ),
     once: bool = typer.Option(
@@ -971,7 +1048,9 @@ def worker(
     Single-host, SQLite-backed, no new infrastructure: this validates the
     claim/lease/finalize machinery decoupled from serving HTTP, the first
     step toward eventually running it on a separate host (architecture
-    issue #51).
+    issue #51). With MUSCAT_JOB_NOTIFY=1, an idle pass is also woken early
+    by any enqueue instead of waiting out the full interval -- see
+    job_store.wait_for_work_or_sleep.
     """
     # Before the assignment below: that line sets MUSCAT_DB_PATH from `db`, so
     # a guard placed after it would always see the variable set and never fire.
@@ -979,6 +1058,7 @@ def worker(
     os.environ["MUSCAT_DB_PATH"] = db
     if interval is None:
         interval = float(os.environ.get("MUSCAT_JOB_RECONCILE_INTERVAL_S", "2"))
+    from muscat_db import job_store
     from muscat_db.worker import resolve_pipelines
     from muscat_db.worker import run as run_worker
 
@@ -990,7 +1070,8 @@ def worker(
 
     console.print(
         f"[green]worker started[/] pipeline={','.join(n for n, _ in fns)} "
-        f"db={db} interval={interval}s pid={os.getpid()}"
+        f"db={db} interval={interval}s "
+        f"notify={'on' if job_store.notify_enabled() else 'off'} pid={os.getpid()}"
     )
     run_worker(pipeline, interval=interval, once=once)
 

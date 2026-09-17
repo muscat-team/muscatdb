@@ -32,24 +32,40 @@ for the web process (the default), ``"worker"`` here -- and having
 See ``job_store.py``'s ``_OWNER`` docstring for why this needs no
 lease/heartbeat to be correct.
 
-Known limitation (left for step 3 -- lease/heartbeat -- rather than improvised
-here): each pipeline's in-memory job registry (e.g. ``photometry._JOBS``) is
-process-local. A job claimed and launched by *this* process is invisible to
-the web process's registry, so cancelling it from the web UI does not yet
-work -- the same gap the web process would have for a job launched by another
-web worker under ``--workers N>1``. Jobs still queued (not yet claimed) cancel
-fine either way, since that path only touches the durable ``jobs`` table.
-Likewise, running two ``worker`` processes for the *same* pipeline is not yet
-supported: both tag their rows ``"worker"``, so they can still reconcile each
-other's jobs as lost. That needs per-instance identity, not just per-role,
-and is left for the same lease/heartbeat step.
+Known limitation: each pipeline's in-memory job registry (e.g.
+``photometry._JOBS``) is process-local. A job claimed and launched by *this*
+process is invisible to the web process's registry, so cancelling it from the
+web UI does not yet work -- the same gap the web process would have for a job
+launched by another web worker under ``--workers N>1``. Jobs still queued
+(not yet claimed) cancel fine either way, since that path only touches the
+durable ``jobs`` table. Closing this needs a cross-process cancel-request
+channel, not yet built.
+
+Running two ``worker`` processes for the *same* pipeline **is** now safe
+(architecture issue #51 step 3): both still tag their rows ``owner="worker"``,
+but each also tags its own ``instance_id`` (:func:`job_store.current_instance_id`)
+and refreshes a heartbeat on every reconciliation pass. A sibling instance's
+running row is left alone as long as its heartbeat is fresh, closing the gap
+where same-role instances used to reconcile each other's live jobs as lost.
+See ``job_store.py``'s ``_INSTANCE_ID`` docstring and ``jobs.is_orphan_reconcilable``
+for the mechanism.
+
+Between passes, ``_loop`` waits via :func:`job_store.wait_for_work_or_sleep`
+rather than a bare sleep -- with ``MUSCAT_JOB_NOTIFY=1`` (instant dispatch,
+architecture issue #51, "Signalling & live logs"), an enqueue elsewhere wakes
+this loop within milliseconds instead of it sitting out the rest of
+*interval*, which remains the fallback poll either way. On SQLite that
+wakeup is in-process only, so a standalone worker (a separate OS process
+from whatever enqueued) is not woken any faster than before -- see
+``job_store.DatabaseJobStore``'s docstring. On Postgres it is a real
+cross-host ``NOTIFY``, woken by an enqueue on any host sharing the control
+plane. Unset (the default), this loop's behaviour is unchanged.
 """
 
 from __future__ import annotations
 
 import logging
 import signal
-import time
 from collections.abc import Callable
 
 from muscat_db import job_store
@@ -118,7 +134,12 @@ def _loop(
         run_pass(fns)
         if once or stop_requested():
             return
-        time.sleep(interval)
+        # Instant dispatch (architecture issue #51, "Signalling & live
+        # logs"): wait_for_work_or_sleep wakes this early the moment
+        # enqueue() signals new work (MUSCAT_JOB_NOTIFY=1), and otherwise
+        # degrades to exactly time.sleep(interval) -- the fallback poll this
+        # loop has always used.
+        job_store.wait_for_work_or_sleep(interval)
 
 
 def run(pipeline: str, *, interval: float = 2.0, once: bool = False) -> None:
@@ -131,7 +152,19 @@ def run(pipeline: str, *, interval: float = 2.0, once: bool = False) -> None:
     fns = resolve_pipelines(pipeline)
     # Tag every job this process launches (and gate which running rows its
     # own sync_jobs() passes may reconcile) as "worker", distinct from the
-    # web process's "web" -- see job_store.py's _OWNER docstring.
+    # web process's "web" -- see job_store.py's _OWNER docstring. Restored
+    # in the finally below: in production this process never returns from
+    # run() except at shutdown, so restoring has no real effect there, but
+    # job_store._OWNER is process-*global* state, and leaving it stuck as
+    # "worker" after a single run() call returns is a real hazard for
+    # anything sharing this interpreter that assumes "web" -- e.g. a test
+    # suite (see tests/test_worker_p2_proof.py, which had to work around
+    # exactly this by snapshotting/restoring _OWNER itself), or
+    # database.ingest_date's owner-based write-access guard (architecture
+    # issue #51), which would otherwise stay wrongly poisoned for every
+    # caller in the same process after just one worker.run() call anywhere
+    # earlier in its life.
+    previous_owner = job_store.current_owner()
     job_store.set_owner("worker")
     stop = False
 
@@ -140,14 +173,31 @@ def run(pipeline: str, *, interval: float = 2.0, once: bool = False) -> None:
         logger.info("worker: received signal %d, stopping after this pass", signum)
         stop = True
 
+    # Signal installation lives *inside* the try below, not before it: this
+    # runs after set_owner("worker") the same as before, but now the whole
+    # mutating sequence -- owner tag, signal handlers -- is covered by one
+    # finally. signal.signal() raises ValueError when called from anything
+    # but the main thread of the main interpreter; if that happened before
+    # the try started, the finally restoring _OWNER would never run, leaking
+    # "worker" for the rest of the process -- exactly the hazard the
+    # restoration above exists to close.
     prev_handlers = None
-    if not once:
-        prev_handlers = (signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGINT))
-        signal.signal(signal.SIGTERM, _handle_signal)
-        signal.signal(signal.SIGINT, _handle_signal)
     try:
+        if not once:
+            prev_handlers = (signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGINT))
+            signal.signal(signal.SIGTERM, _handle_signal)
+            signal.signal(signal.SIGINT, _handle_signal)
         _loop(fns, interval=interval, once=once, stop_requested=lambda: stop)
     finally:
+        # Owner restoration goes first and unconditionally: signal.signal()
+        # below can itself raise ValueError off the main thread (the same
+        # condition that can land us in this finally to begin with -- see
+        # the comment above), which would otherwise abort this finally block
+        # before reaching the restore. Owner restoration is the invariant
+        # that must hold no matter what; a signal-handler restore that
+        # can't succeed here (never possible in production, where run()
+        # only ever executes on the main thread) is a lesser concern.
+        job_store.set_owner(previous_owner)
         if prev_handlers is not None:
             signal.signal(signal.SIGTERM, prev_handlers[0])
             signal.signal(signal.SIGINT, prev_handlers[1])

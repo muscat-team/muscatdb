@@ -33,7 +33,10 @@ from __future__ import annotations
 
 import logging
 import os
+import socket
+import threading
 import time
+import uuid
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 # Imported as a module (not by name) so the concrete store sees monkeypatched
@@ -81,14 +84,42 @@ class JobRepository(Protocol):
         run_name: str = "",
         user_name: str | None = None,
         owner: str = "",
+        instance_id: str = "",
+        attempts: int = 0,
     ) -> None:
         """Upsert one job record (same fields as the legacy ``save_job``).
 
         *owner* identifies which role (``"web"``, ``"worker"``) launched the
-        job -- see :func:`current_owner`. Pass it only at the moment a job
-        transitions to ``state="running"``; every other caller omits it (the
-        row keeps whatever owner it already had, same preserve-on-empty
-        pattern as *run_name*/*user_name*)."""
+        job -- see :func:`current_owner`. *instance_id* identifies which
+        *process* did -- see :func:`current_instance_id`. Pass both only at
+        the moment a job transitions to ``state="running"``; every other
+        caller omits them (the row keeps whatever it already had, same
+        preserve-on-empty pattern as *run_name*/*user_name*). Every call,
+        regardless of state, stamps the row's heartbeat to now -- see
+        :meth:`heartbeat` for the lightweight alternative that does the same
+        without rewriting the rest of the row.
+
+        *attempts* is the reclaim-with-attempt-limit retry counter (see
+        ``jobs.next_reconcile_attempt``) and is unconditionally overwritten,
+        never preserved-on-omit: omitting it (the default) resets it to 0,
+        which is correct for every caller except the two that manage the
+        counter themselves -- orphan reconciliation, and the pending-drain
+        relaunch that must carry an in-flight count forward via
+        ``entry.get("attempts", 0)``."""
+        ...
+
+    def heartbeat(self, key: str, instance_id: str) -> None:
+        """Stamp the running row at *key* as alive right now, iff it is still
+        held by *instance_id*. No-op (never raises) if the row is absent, no
+        longer ``state="running"``, or held by a different instance -- so a
+        caller racing a reconciliation pass that already reclaimed the row
+        can never resurrect a heartbeat another instance has taken over.
+
+        Deliberately cheaper than a full :meth:`save`: a steadily-running job
+        needs its liveness refreshed every reconciliation pass without
+        rewriting (and cache-invalidating) the rest of the row -- see the
+        "only persist when the row actually changed" comment in each
+        pipeline's ``sync_jobs()``."""
         ...
 
     def delete(self, key: str) -> None:
@@ -122,6 +153,23 @@ class JobQueue(Protocol):
         """Pending jobs of *type_*, oldest-first (FIFO drain order)."""
         ...
 
+    def wait_for_work(self, timeout: float) -> bool:
+        """Block up to *timeout* seconds, returning True as soon as an
+        :meth:`enqueue` is signalled, or False if *timeout* elapsed with no
+        signal. Never raises: a signalling channel that is unavailable
+        degrades to "no signal", never to a failed reconciliation pass. A
+        signal delivered while no one was waiting is not lost -- the next
+        call returns True immediately.
+
+        Only fires when :func:`notify_enabled` is True; otherwise every
+        implementation degrades to doing nothing until *timeout* elapses (so
+        the default, unconfigured deployment's polling cadence is
+        unaffected). Callers should go through the module-level
+        :func:`wait_for_work_or_sleep`, which adds that gate plus a floor
+        that guarantees this call can never shorten the poll interval on
+        failure."""
+        ...
+
 
 @runtime_checkable
 class JobConcurrency(Protocol):
@@ -138,7 +186,13 @@ class JobConcurrency(Protocol):
         Returns True only if this call newly claimed the slot; False if
         *holder_key* is already claimed (by this or another caller) or all
         slots are taken. Never silently double-claims the same key, so two
-        processes racing to launch the same job never both proceed."""
+        processes racing to launch the same job never both proceed.
+
+        When ``MUSCAT_WORKER_MAX_SLOTS`` is set, also enforces a second,
+        orthogonal cap: total slots held by :func:`current_host` across every
+        pipeline combined. Unset (the default), this call is unaffected --
+        only the cluster-wide *pipeline* cap above applies. See
+        :data:`_WORKER_MAX_SLOTS`."""
         ...
 
     def release_slot(self, pipeline: str, holder_key: str) -> None:
@@ -165,6 +219,34 @@ class DatabaseJobStore(JobRepository, JobQueue, JobConcurrency):
     :mod:`muscat_db.database` (so the daily-build and migration paths stay the
     single owner of the schema) and owns the row-delete SQL that previously lived
     inline in the pipelines."""
+
+    def __init__(self) -> None:
+        # In-process-only wakeup (architecture issue #51, "Signalling & live
+        # logs"): a threading.Event, not anything SQLite-backed. SQLite has no
+        # cross-connection push mechanism, so this only ever wakes a waiter
+        # inside *this same process* -- the web process's own background
+        # reconciliation loop when one of its own request handlers enqueues a
+        # job. A standalone `muscatdb worker` process (a different OS
+        # process, and normally a different DatabaseJobStore instance) is not
+        # woken by this and still relies on the fallback poll -- exactly what
+        # notes/MUSCATDB-LITE.md §12 promises for SQLite ("a lightweight
+        # local wakeup"), as opposed to Postgres's real cross-host NOTIFY.
+        self._wakeup = threading.Event()
+
+    def _signal_work(self, type_: str) -> None:
+        if not _NOTIFY_ENABLED:
+            return
+        self._wakeup.set()
+
+    def wait_for_work(self, timeout: float) -> bool:
+        # Clear only *after* a successful wake, never before waiting: if a
+        # signal lands between a caller checking pending() and calling this,
+        # the Event is already set and this returns instantly instead of
+        # blocking for a signal that already happened.
+        signalled = self._wakeup.wait(max(0.0, timeout))
+        if signalled:
+            self._wakeup.clear()
+        return signalled
 
     def all(self) -> list[dict]:
         return database.get_persisted_jobs()
@@ -193,6 +275,8 @@ class DatabaseJobStore(JobRepository, JobQueue, JobConcurrency):
         run_name: str = "",
         user_name: str | None = None,
         owner: str = "",
+        instance_id: str = "",
+        attempts: int = 0,
     ) -> None:
         database.save_job(
             type_=type_,
@@ -210,7 +294,21 @@ class DatabaseJobStore(JobRepository, JobQueue, JobConcurrency):
             run_name=run_name,
             user_name=user_name,
             owner=owner,
+            instance_id=instance_id,
+            attempts=attempts,
         )
+
+    def heartbeat(self, key: str, instance_id: str) -> None:
+        try:
+            with database.get_conn() as conn:
+                conn.execute(
+                    "UPDATE jobs SET heartbeat_at = ? "
+                    "WHERE key = ? AND state = 'running' AND instance_id = ?",
+                    (time.time(), key, instance_id),
+                )
+                conn.commit()
+        except Exception:
+            logger.debug("failed to update heartbeat for job %s", key, exc_info=True)
 
     def delete(self, key: str) -> None:
         # Best-effort, matching the prior inline behaviour: a failed delete must
@@ -252,6 +350,15 @@ class DatabaseJobStore(JobRepository, JobQueue, JobConcurrency):
             run_name=run_name,
             user_name=user_name,
         )
+        # The signal is strictly best-effort: enqueue's durable write above
+        # has already succeeded, and a failure to wake a waiter is fully
+        # covered by the fallback poll -- it must never surface as a failed
+        # enqueue. Guarded here (not only inside _signal_work) so that stays
+        # true even if a caller's own _signal_work override misbehaves.
+        try:
+            self._signal_work(type_)
+        except Exception:
+            logger.debug("failed to signal work for pipeline=%s", type_, exc_info=True)
 
     def pending(self, type_: str) -> list[dict]:
         rows = [
@@ -274,22 +381,42 @@ class DatabaseJobStore(JobRepository, JobQueue, JobConcurrency):
         # single claim that actually won, so two racing launches for the same
         # key never both proceed.
         with database.get_conn() as conn:
-            conn.executescript(database.SCHEMA)
-            cur = conn.execute(
-                """
-                INSERT OR IGNORE INTO job_concurrency_slots (pipeline, holder_key, claimed_at)
-                SELECT ?, ?, ?
-                WHERE (SELECT COUNT(*) FROM job_concurrency_slots WHERE pipeline = ?) < ?
-                """,
-                (pipeline, holder_key, time.time(), pipeline, max_slots),
-            )
+            database._ensure_job_concurrency_slots_schema(conn)
+            if _WORKER_MAX_SLOTS is None:
+                # No host cap configured: run the exact query this method has
+                # always run, so an unconfigured host's behavior (and SQL) is
+                # byte-for-byte unchanged by this feature's existence.
+                cur = conn.execute(
+                    """
+                    INSERT OR IGNORE INTO job_concurrency_slots (pipeline, holder_key, claimed_at)
+                    SELECT ?, ?, ?
+                    WHERE (SELECT COUNT(*) FROM job_concurrency_slots WHERE pipeline = ?) < ?
+                    """,
+                    (pipeline, holder_key, time.time(), pipeline, max_slots),
+                )
+            else:
+                # Second predicate: total slots held by this host across ALL
+                # pipelines combined must also be under _WORKER_MAX_SLOTS.
+                # Still one atomic INSERT ... SELECT ... WHERE -- SQLite's
+                # writer serialization covers both counts the same way it
+                # covers the single count above.
+                cur = conn.execute(
+                    """
+                    INSERT OR IGNORE INTO job_concurrency_slots (pipeline, holder_key, claimed_at, host)
+                    SELECT ?, ?, ?, ?
+                    WHERE (SELECT COUNT(*) FROM job_concurrency_slots WHERE pipeline = ?) < ?
+                      AND (SELECT COUNT(*) FROM job_concurrency_slots WHERE host = ?) < ?
+                    """,
+                    (pipeline, holder_key, time.time(), _HOST,
+                     pipeline, max_slots, _HOST, _WORKER_MAX_SLOTS),
+                )
             conn.commit()
         return cur.rowcount > 0
 
     def release_slot(self, pipeline: str, holder_key: str) -> None:
         try:
             with database.get_conn() as conn:
-                conn.executescript(database.SCHEMA)
+                database._ensure_job_concurrency_slots_schema(conn)
                 conn.execute(
                     "DELETE FROM job_concurrency_slots WHERE pipeline = ? AND holder_key = ?",
                     (pipeline, holder_key),
@@ -303,7 +430,7 @@ class DatabaseJobStore(JobRepository, JobQueue, JobConcurrency):
 
     def count_claimed(self, pipeline: str) -> int:
         with database.get_conn() as conn:
-            conn.executescript(database.SCHEMA)
+            database._ensure_job_concurrency_slots_schema(conn)
             row = conn.execute(
                 "SELECT COUNT(*) FROM job_concurrency_slots WHERE pipeline = ?",
                 (pipeline,),
@@ -312,7 +439,7 @@ class DatabaseJobStore(JobRepository, JobQueue, JobConcurrency):
 
     def reconcile_slots(self, pipeline: str) -> int:
         with database.get_conn() as conn:
-            conn.executescript(database.SCHEMA)
+            database._ensure_job_concurrency_slots_schema(conn)
             holder_keys = [
                 r[0] for r in conn.execute(
                     "SELECT holder_key FROM job_concurrency_slots WHERE pipeline = ?",
@@ -362,7 +489,10 @@ CREATE TABLE IF NOT EXISTS jobs (
     run_id       TEXT NOT NULL DEFAULT '',
     run_name     TEXT NOT NULL DEFAULT '',
     user_name    TEXT NOT NULL DEFAULT '',
-    owner        TEXT NOT NULL DEFAULT ''
+    owner        TEXT NOT NULL DEFAULT '',
+    instance_id  TEXT NOT NULL DEFAULT '',
+    heartbeat_at DOUBLE PRECISION NOT NULL DEFAULT 0,
+    attempts     INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_state_started ON jobs(state, started_at DESC);
 
@@ -370,6 +500,7 @@ CREATE TABLE IF NOT EXISTS job_concurrency_slots (
     pipeline    TEXT NOT NULL,
     holder_key  TEXT NOT NULL,
     claimed_at  DOUBLE PRECISION NOT NULL,
+    host        TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (pipeline, holder_key)
 );
 """
@@ -391,15 +522,27 @@ _PG_JOBS_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
     ("run_name", "TEXT NOT NULL DEFAULT ''"),
     ("user_name", "TEXT NOT NULL DEFAULT ''"),
     ("owner", "TEXT NOT NULL DEFAULT ''"),
+    ("instance_id", "TEXT NOT NULL DEFAULT ''"),
+    ("heartbeat_at", "DOUBLE PRECISION NOT NULL DEFAULT 0"),
+    ("attempts", "INTEGER NOT NULL DEFAULT 0"),
+]
+
+
+_PG_JOB_CONCURRENCY_SLOTS_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
+    ("host", "TEXT NOT NULL DEFAULT ''"),
 ]
 
 
 def _ensure_pg_jobs_schema(conn) -> None:
-    """Create the control-plane tables if absent, then add any `jobs` column
-    a pre-existing table predates (see _PG_JOBS_COLUMN_MIGRATIONS above)."""
+    """Create the control-plane tables if absent, then add any `jobs` /
+    `job_concurrency_slots` column a pre-existing table predates (see
+    _PG_JOBS_COLUMN_MIGRATIONS / _PG_JOB_CONCURRENCY_SLOTS_COLUMN_MIGRATIONS
+    above)."""
     conn.execute(_PG_SCHEMA)
     for col, col_type in _PG_JOBS_COLUMN_MIGRATIONS:
         conn.execute(f"ALTER TABLE jobs ADD COLUMN IF NOT EXISTS {col} {col_type}")
+    for col, col_type in _PG_JOB_CONCURRENCY_SLOTS_COLUMN_MIGRATIONS:
+        conn.execute(f"ALTER TABLE job_concurrency_slots ADD COLUMN IF NOT EXISTS {col} {col_type}")
 
 
 def _pg_rows_to_dicts(columns: list[str], rows: list[tuple]) -> list[dict]:
@@ -450,11 +593,24 @@ class PostgresJobStore(JobRepository, JobQueue, JobConcurrency):
         self._pool: ConnectionPool = ConnectionPool(dsn, min_size=1, max_size=5, open=True)
         with self._pool.connection() as conn:
             _ensure_pg_jobs_schema(conn)
+        self._dsn = dsn
+        # Dedicated LISTEN connection (architecture issue #51, "Signalling &
+        # live logs") -- deliberately never a pooled connection. LISTEN is
+        # scoped to the session that issued it, and pool connections get
+        # handed to other callers and reset between checkouts, so a LISTEN
+        # registered on one would be silently lost the moment it's returned.
+        # Created lazily on the first wait_for_work() call, not here, so
+        # constructing a store never opens a second connection unless
+        # something actually waits. Guarded by a lock so close() can never
+        # race a concurrent (re)connect attempt.
+        self._listen_conn = None
+        self._listen_lock = threading.Lock()
 
     def close(self) -> None:
         """Release the connection pool. Not part of the Protocol -- callers
         that install this store for a process lifetime never need it; tests
         that construct one per case do, to avoid leaking pool threads."""
+        self._close_listen_connection()
         self._pool.close()
 
     def all(self) -> list[dict]:
@@ -501,6 +657,8 @@ class PostgresJobStore(JobRepository, JobQueue, JobConcurrency):
         run_name: str = "",
         user_name: str | None = None,
         owner: str = "",
+        instance_id: str = "",
+        attempts: int = 0,
     ) -> None:
         if user_name is None:
             user_name = ""
@@ -512,24 +670,39 @@ class PostgresJobStore(JobRepository, JobQueue, JobConcurrency):
                 """
                 INSERT INTO jobs(key, type, instrument, obsdate, target, state, returncode,
                                   elapsed, started_at, error_desc, run_type, params, run_id,
-                                  run_name, user_name, owner)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                  run_name, user_name, owner, instance_id, heartbeat_at, attempts)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (key) DO UPDATE SET
-                    state      = EXCLUDED.state,
-                    returncode = EXCLUDED.returncode,
-                    elapsed    = EXCLUDED.elapsed,
-                    started_at = EXCLUDED.started_at,
-                    error_desc = EXCLUDED.error_desc,
-                    run_type   = CASE WHEN EXCLUDED.run_type  != '' THEN EXCLUDED.run_type  ELSE jobs.run_type  END,
-                    params     = CASE WHEN EXCLUDED.params    != '' THEN EXCLUDED.params    ELSE jobs.params    END,
-                    run_id     = EXCLUDED.run_id,
-                    run_name   = CASE WHEN EXCLUDED.run_name  != '' THEN EXCLUDED.run_name  ELSE jobs.run_name  END,
-                    user_name  = CASE WHEN EXCLUDED.user_name != '' THEN EXCLUDED.user_name ELSE jobs.user_name END,
-                    owner      = CASE WHEN EXCLUDED.owner     != '' THEN EXCLUDED.owner     ELSE jobs.owner     END
+                    state        = EXCLUDED.state,
+                    returncode   = EXCLUDED.returncode,
+                    elapsed      = EXCLUDED.elapsed,
+                    started_at   = EXCLUDED.started_at,
+                    error_desc   = EXCLUDED.error_desc,
+                    run_type     = CASE WHEN EXCLUDED.run_type    != '' THEN EXCLUDED.run_type    ELSE jobs.run_type    END,
+                    params       = CASE WHEN EXCLUDED.params      != '' THEN EXCLUDED.params      ELSE jobs.params      END,
+                    run_id       = EXCLUDED.run_id,
+                    run_name     = CASE WHEN EXCLUDED.run_name    != '' THEN EXCLUDED.run_name    ELSE jobs.run_name    END,
+                    user_name    = CASE WHEN EXCLUDED.user_name   != '' THEN EXCLUDED.user_name   ELSE jobs.user_name   END,
+                    owner        = CASE WHEN EXCLUDED.owner       != '' THEN EXCLUDED.owner       ELSE jobs.owner       END,
+                    instance_id  = CASE WHEN EXCLUDED.instance_id != '' THEN EXCLUDED.instance_id ELSE jobs.instance_id END,
+                    heartbeat_at = EXCLUDED.heartbeat_at,
+                    attempts     = EXCLUDED.attempts
                 """,
                 (key, type_, inst, date, target, state, returncode, elapsed, started_at,
-                 error_desc, run_type, params, run_id, run_name, user_name, owner),
+                 error_desc, run_type, params, run_id, run_name, user_name, owner,
+                 instance_id, time.time(), attempts),
             )
+
+    def heartbeat(self, key: str, instance_id: str) -> None:
+        try:
+            with self._pool.connection() as conn:
+                conn.execute(
+                    "UPDATE jobs SET heartbeat_at = %s "
+                    "WHERE key = %s AND state = 'running' AND instance_id = %s",
+                    (time.time(), key, instance_id),
+                )
+        except Exception:
+            logger.debug("failed to update heartbeat for job %s", key, exc_info=True)
 
     def delete(self, key: str) -> None:
         try:
@@ -567,11 +740,95 @@ class PostgresJobStore(JobRepository, JobQueue, JobConcurrency):
             run_name=run_name,
             user_name=user_name,
         )
+        # See DatabaseJobStore.enqueue's identical guard: best-effort by
+        # contract, never allowed to surface as a failed enqueue.
+        try:
+            self._signal_work(type_)
+        except Exception:
+            logger.debug("failed to signal work for pipeline=%s", type_, exc_info=True)
 
     def pending(self, type_: str) -> list[dict]:
         rows = [j for j in self.all() if j.get("type") == type_ and j.get("state") == "pending"]
         rows.sort(key=lambda j: j.get("started_at") or 0)
         return rows
+
+    def _signal_work(self, type_: str) -> None:
+        if not _NOTIFY_ENABLED:
+            return
+        # A separate transaction from the enqueue's INSERT (not threaded
+        # through save()), so the row is provably committed before any
+        # listener woken by this NOTIFY can see it -- no "woken but the row
+        # isn't visible yet" race. The cost is a crash in between the two
+        # loses the wakeup; that's exactly what the fallback poll
+        # (wait_for_work_or_sleep) exists to cover. Best-effort: a failed
+        # notify must never fail the enqueue -- the row is already durable.
+        try:
+            with self._pool.connection() as conn:
+                conn.execute("SELECT pg_notify(%s, %s)", (_NOTIFY_CHANNEL, type_))
+        except Exception:
+            logger.debug("failed to notify pipeline=%s", type_, exc_info=True)
+
+    def _listen_connection(self, connect_timeout: int):
+        """Return the cached LISTEN connection, (re)connecting if it is
+        absent or closed. The lock guards creation only -- never the wait
+        itself -- so close() is never blocked for up to a whole poll
+        interval behind a caller stuck inside wait_for_work()."""
+        with self._listen_lock:
+            if self._listen_conn is None or self._listen_conn.closed:
+                import psycopg
+
+                conn = psycopg.connect(
+                    self._dsn, autocommit=True, connect_timeout=connect_timeout,
+                )
+                # LISTEN only takes effect at commit; autocommit=True above is
+                # what makes it take effect immediately rather than sitting in
+                # an open transaction that never delivers anything. The
+                # channel name is a module constant (never external input),
+                # so this f-string carries no injection risk -- LISTEN cannot
+                # take a bind parameter for the channel name at all.
+                conn.execute(f"LISTEN {_NOTIFY_CHANNEL}")
+                self._listen_conn = conn
+            return self._listen_conn
+
+    def _close_listen_connection(self) -> None:
+        with self._listen_lock:
+            if self._listen_conn is not None:
+                try:
+                    self._listen_conn.close()
+                except Exception:
+                    logger.debug("failed to close LISTEN connection", exc_info=True)
+                self._listen_conn = None
+
+    def wait_for_work(self, timeout: float) -> bool:
+        start = time.monotonic()
+        try:
+            # connect_timeout derived from the caller's own timeout so an
+            # unreachable server blocks for ~timeout seconds, not the OS TCP
+            # connect timeout (minutes) -- the same no-hot-spin-but-also-no-
+            # multi-minute-stall guarantee wait_for_work_or_sleep enforces
+            # around this call.
+            conn = self._listen_connection(connect_timeout=max(1, int(timeout)))
+            # A (re)connect above is time already spent out of *timeout*, not
+            # extra -- budget what's left for notifies() rather than handing
+            # it the full timeout again, or a slow-but-successful reconnect
+            # would make this call take up to ~2x timeout (connect_time +
+            # timeout instead of connect_time + remaining). max(0.0, ...):
+            # connecting can itself run slightly past connect_timeout (OS/
+            # libpq granularity), which must never go negative here.
+            remaining = max(0.0, timeout - (time.monotonic() - start))
+            # stop_after=1 ends the generator itself once one notification
+            # arrives (rather than a manual break), so its internal `finally`
+            # -- which restores any backlog for the next call -- always runs.
+            # A notification delivered before this call (buffered by psycopg
+            # while nothing was iterating) is not lost: it's returned as the
+            # first item immediately, per psycopg's own notifies() contract.
+            for _ in conn.notifies(timeout=remaining, stop_after=1):
+                return True
+            return False
+        except Exception:
+            logger.debug("wait_for_work: LISTEN failed, reconnecting next call", exc_info=True)
+            self._close_listen_connection()
+            return False
 
     def claim_slot(self, pipeline: str, holder_key: str, max_slots: int) -> bool:
         with self._pool.connection() as conn:
@@ -583,16 +840,49 @@ class PostgresJobStore(JobRepository, JobQueue, JobConcurrency):
             # the pipeline name, serializes claims for that pipeline across
             # every connection/host and releases automatically at this
             # transaction's COMMIT/ROLLBACK, so it never needs an explicit
-            # unlock or leaks past a crash.
+            # unlock or leaks past a crash. Deliberately left in this
+            # single-argument form (not switched to the two-argument form used
+            # by the host lock below): Postgres's advisory-lock keyspaces for
+            # the one-arg and two-arg overloads are disjoint by construction,
+            # regardless of the values passed, so changing this call's form
+            # would silently stop it from serializing against an old-code
+            # process's identical call during a rolling deploy -- reopening
+            # the very race this lock exists to close, even when the new host
+            # cap below is never configured. The two-arg form is only used for
+            # the *new* host lock, which needs no such backward compatibility
+            # (no prior call to be compatible with) and gets its collision
+            # safety from being in an already-disjoint keyspace instead.
             conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (pipeline,))
+            if _WORKER_MAX_SLOTS is None:
+                cur = conn.execute(
+                    """
+                    INSERT INTO job_concurrency_slots (pipeline, holder_key, claimed_at)
+                    SELECT %s, %s, %s
+                    WHERE (SELECT COUNT(*) FROM job_concurrency_slots WHERE pipeline = %s) < %s
+                    ON CONFLICT (pipeline, holder_key) DO NOTHING
+                    """,
+                    (pipeline, holder_key, time.time(), pipeline, max_slots),
+                )
+                return cur.rowcount > 0
+            # The host cap spans ALL pipelines combined, so a claim for a
+            # *different* pipeline on the same host would take a different
+            # pipeline-keyed lock above and not be mutually exclusive with
+            # this one -- both could read the same pre-commit host COUNT and
+            # over-grant. A second lock, keyed on host (not pipeline), closes
+            # that gap. Always acquired after the pipeline lock, at every call
+            # site, so two claims can never wait on each other in reverse
+            # order (no ABBA deadlock).
+            conn.execute("SELECT pg_advisory_xact_lock(1, hashtext(%s))", (_HOST,))
             cur = conn.execute(
                 """
-                INSERT INTO job_concurrency_slots (pipeline, holder_key, claimed_at)
-                SELECT %s, %s, %s
+                INSERT INTO job_concurrency_slots (pipeline, holder_key, claimed_at, host)
+                SELECT %s, %s, %s, %s
                 WHERE (SELECT COUNT(*) FROM job_concurrency_slots WHERE pipeline = %s) < %s
+                  AND (SELECT COUNT(*) FROM job_concurrency_slots WHERE host = %s) < %s
                 ON CONFLICT (pipeline, holder_key) DO NOTHING
                 """,
-                (pipeline, holder_key, time.time(), pipeline, max_slots),
+                (pipeline, holder_key, time.time(), _HOST,
+                 pipeline, max_slots, _HOST, _WORKER_MAX_SLOTS),
             )
             return cur.rowcount > 0
 
@@ -675,6 +965,40 @@ def set_job_store(store) -> None:
     _STORE = store
 
 
+def wait_for_work_or_sleep(timeout: float) -> bool:
+    """Block *timeout* seconds, returning True early only when the installed
+    store actually signalled new work; False otherwise (including every
+    disabled/unavailable/error path).
+
+    This is the single invariant every caller (the web process's background
+    loop, the standalone `muscatdb worker` loop) depends on: **this never
+    returns early without a signal.** A dead control plane, a store that
+    predates wait_for_work (inherited the Protocol's ``...`` body, which
+    returns None instantly), or MUSCAT_JOB_NOTIFY unset must all degrade to
+    exactly today's poll cadence -- never to a hot loop hammering
+    reconnects. Every failure path below sleeps out the remaining time
+    before returning, which is what enforces that."""
+    timeout = max(0.0, timeout)
+    if not _NOTIFY_ENABLED:
+        time.sleep(timeout)
+        return False
+    deadline = time.monotonic() + timeout
+    store = get_job_store()
+    wait = getattr(store, "wait_for_work", None)
+    signalled = False
+    if wait is not None:
+        try:
+            signalled = bool(wait(timeout))
+        except Exception:
+            logger.debug("wait_for_work_or_sleep: store.wait_for_work failed", exc_info=True)
+            signalled = False
+    if not signalled:
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(remaining)
+    return signalled
+
+
 # Which *role* in this process launches jobs and therefore may reconcile them.
 # Every sync_jobs() (photometry/transit_fit/ttv_fit) treats a DB row in
 # state='running' that its own in-memory job registry no longer recognizes as
@@ -691,10 +1015,10 @@ def set_job_store(store) -> None:
 # A row with no owner (written before this existed, or by a caller that never
 # passed one) is always treated as this process's own -- the pre-existing,
 # single-owner behaviour -- so upgrading a database with old rows in flight
-# never left them stuck. This does not need a lease/heartbeat: it only ever
-# widens who is *exempt* from reconciliation, never who forcibly reclaims a
-# slot, so the existing self-healing-on-restart behaviour for genuinely
-# orphaned rows is unchanged.
+# never left them stuck. This owner check alone needs no lease/heartbeat: it
+# only ever widens who is *exempt* from reconciliation, never who forcibly
+# reclaims a slot, so the existing self-healing-on-restart behaviour for
+# genuinely orphaned rows is unchanged.
 _OWNER = "web"
 
 
@@ -709,3 +1033,120 @@ def set_owner(owner: str) -> None:
 def current_owner() -> str:
     """This process's job-row ownership tag -- see :data:`_OWNER`."""
     return _OWNER
+
+
+# Per-*process* identity (architecture issue #51 step 3), distinct from the
+# per-*role* _OWNER above. Two `muscatdb worker` processes for the same
+# pipeline share owner="worker", so the owner check by itself cannot tell
+# "a live sibling worker holds this job" from "the worker that held it is
+# gone" -- either would be an unrecognized running row to the other process's
+# in-memory registry, and worker.py's module docstring documents this as a
+# known limitation of step 1. instance_id closes that gap: each launch site
+# tags its row with current_instance_id() the same moment it tags `owner`,
+# and each sync_jobs() pass refreshes state='running' rows it still tracks in
+# memory via store.heartbeat() (see each pipeline's "unchanged" branch).
+#
+# A running row stamped with someone else's instance_id is left alone only
+# while its heartbeat is still fresh (within MUSCAT_JOB_HEARTBEAT_STALE_S,
+# see jobs.is_orphan_reconcilable) -- proof some other process is actively
+# driving it even though this process's registry has never heard of it. Once
+# that heartbeat goes stale, the owning instance is presumed dead and the row
+# reconciles exactly as before -- retried (state="pending") up to a limit if
+# nothing shows it actually completed, then abandoned -- see jobs.py's
+# reclaim-with-attempt-limit section. This check runs *in addition to* the owner
+# check above, never instead of it: a legacy row with an owner but no
+# instance_id (written before this existed) still relies on the owner check
+# alone, unchanged.
+#
+# Follows the same hostname:pid:uuid shape as lco_monitor.py's per-instance
+# lease owner, for the same reason: pid alone can be reused across a process
+# restart, so the uuid suffix is what actually guarantees two process
+# lifetimes never collide.
+_INSTANCE_ID = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+
+
+def current_instance_id() -> str:
+    """This process's unique instance identity -- see :data:`_INSTANCE_ID`."""
+    return _INSTANCE_ID
+
+
+# Per-*host* concurrency cap (architecture issue #51), distinct from both
+# _OWNER (per-role) and _INSTANCE_ID (per-process) above. issue #51 originally
+# proposed gating job pickup on a sampled os.getloadavg() reading -- never
+# implemented, and rejected here: sampled load lags an actual claim (a host
+# that just started a heavy job still looks idle for a while), and it can
+# wedge the whole cluster if every host's *ambient* load -- including
+# unrelated non-muscat activity -- already sits above threshold, so nothing
+# ever gets claimed anywhere even when real capacity exists.
+#
+# Replacement: a second, opt-in predicate on claim_slot, keyed on hostname,
+# capping total slots held by *this host* across ALL pipelines combined (one
+# shared budget, not per-pipeline) -- deterministic and race-free, unlike a
+# sampled OS metric. Unset (MUSCAT_WORKER_MAX_SLOTS absent/blank, the
+# default) disables it entirely: claim_slot's SQL is then byte-for-byte
+# identical to before this existed, so every existing single-host deployment
+# and the web process on the gateway host see no behavior change at all.
+_HOST = socket.gethostname()
+
+
+def current_host() -> str:
+    """This process's hostname -- scopes claim_slot's optional per-host cap.
+    Mirrors :func:`current_instance_id`. See :data:`_WORKER_MAX_SLOTS`."""
+    return _HOST
+
+
+def _parse_worker_max_slots(raw: str | None) -> int | None:
+    """None (unset/blank) disables the host cap entirely -- today's exact
+    behavior. Any parseable non-negative integer (including 0, meaning "no
+    full jobs on this host") enables it."""
+    if raw is None or not raw.strip():
+        return None
+    return max(0, int(raw))
+
+
+_WORKER_MAX_SLOTS: int | None = _parse_worker_max_slots(os.environ.get("MUSCAT_WORKER_MAX_SLOTS"))
+
+
+# Instant dispatch (architecture issue #51, "Signalling & live logs" --
+# notes/MUSCATDB-LITE.md §12). Every reconciliation loop (web.py's own
+# background task, and the standalone `muscatdb worker` CLI) polls on a
+# timer today; this lets `enqueue()` wake an idle, waiting loop within
+# milliseconds instead of it sitting out the rest of MUSCAT_JOB_RECONCILE_INTERVAL_S.
+#
+# The channel is one shared constant, not a per-deployment env var, because
+# Postgres NOTIFY is database-scoped: two deployments on the same server with
+# different databases can never cross-signal regardless of channel name, and
+# two deployments sharing one *database* already share the `jobs` table --
+# they are the same control plane and already claim each other's jobs. The
+# worst case of a shared channel is a spurious wakeup, costing one extra
+# pending() query; claim_slot's atomicity is unaffected either way.
+#
+# Signalling on enqueue() only, not release_slot(): enqueue only ever fires
+# at capacity today (each pipeline's launch path calls it as the fallback
+# when claim_slot fails), so on a single host it usually wakes a loop that
+# just re-loses the same race. Its real payoff is cross-host Postgres, where
+# a *different* host may have a free slot right now. Waking on release_slot
+# too -- the moment a queued job actually becomes launchable -- is a natural
+# follow-up, deliberately left for a later issue rather than bundled here.
+#
+# Unset (MUSCAT_JOB_NOTIFY absent/blank/not "1", the default) disables this
+# entirely: no LISTEN connection is ever opened, no NOTIFY ever issued, and
+# every wait degrades to exactly today's `time.sleep(interval)` -- see
+# wait_for_work_or_sleep(), the one function every caller should use instead
+# of calling a store's wait_for_work() directly.
+_NOTIFY_CHANNEL = "muscatdb_jobs"
+
+
+def _parse_notify_enabled(raw: str | None) -> bool:
+    return (raw or "").strip() == "1"
+
+
+_NOTIFY_ENABLED: bool = _parse_notify_enabled(os.environ.get("MUSCAT_JOB_NOTIFY"))
+
+
+def notify_enabled() -> bool:
+    """Whether instant dispatch (MUSCAT_JOB_NOTIFY=1) is on. Parsed once at
+    import, like :data:`_WORKER_MAX_SLOTS` -- tests must monkeypatch the
+    ``_NOTIFY_ENABLED`` attribute directly; setting the env var after import
+    has no effect."""
+    return _NOTIFY_ENABLED

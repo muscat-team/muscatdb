@@ -23,7 +23,7 @@ from typing import IO
 import yaml
 
 from muscat_db import jobs, database
-from muscat_db.job_store import current_owner, get_job_store
+from muscat_db.job_store import current_instance_id, current_owner, get_job_store
 from muscat_db import __meta__, __muscatdb_version__, __version__
 from muscat_db.instruments import INSTRUMENTS
 from muscat_db.photometry import (
@@ -1413,6 +1413,7 @@ def compute_logp(inst: str, date: str, target: str, options: dict, selected_csvs
             proc = subprocess.run(
                 [timer_py, str(_LOGP_HELPER), str(tmpdir)],
                 capture_output=True, text=True, timeout=_LOGP_TIMEOUT,
+                env={**os.environ, **jobs.core_pinning_env()},
             )
         except subprocess.TimeoutExpired:
             return {"ok": False, "error": f"logP computation timed out after {_LOGP_TIMEOUT}s"}
@@ -1615,6 +1616,9 @@ def start_fit(
             stderr=subprocess.STDOUT,
             text=True,
             start_new_session=True,
+            # Core pinning (architecture issue #51, 2.4): no-op unless
+            # MUSCAT_JOB_MAX_THREADS is configured.
+            env={**os.environ, **jobs.core_pinning_env()},
         )
         try:
             with open(rdir / "timer-fit.pid", "w") as pidf:
@@ -1650,6 +1654,7 @@ def start_fit(
             run_name=run_name,
             user_name=user_name,
             owner=current_owner(),
+            instance_id=current_instance_id(),
         )
 
     return {"ok": True, "key": key, "run_id": run_id}
@@ -2265,24 +2270,9 @@ def _discover_orphan_fits(existing: set[str]) -> list[dict]:
                     })
     return orphans
 
-def _is_pid_running(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
-
 
 def _detect_process_running(rdir: pathlib.Path) -> bool:
-    pid_file = rdir / "timer-fit.pid"
-    if pid_file.is_file():
-        try:
-            with open(pid_file) as f:
-                pid = int(f.read().strip())
-            return _is_pid_running(pid)
-        except Exception:
-            logger.debug("failed to read timer-fit.pid in %s", rdir, exc_info=True)
-    return False
+    return jobs.pid_file_process_alive(rdir / "timer-fit.pid")
 
 
 def sync_jobs() -> None:
@@ -2333,6 +2323,8 @@ def sync_jobs() -> None:
             )
             running_keys.discard(db_key)
             if unchanged:
+                if persist_state == "running":
+                    store.heartbeat(db_key, current_instance_id())
                 continue
 
             error_desc = ""
@@ -2378,6 +2370,13 @@ def sync_jobs() -> None:
                 # sync_jobs() pass may judge it lost. See photometry.py's
                 # matching guard for the full rationale.
                 continue
+            if not jobs.is_orphan_reconcilable(
+                row.get("instance_id"), row.get("heartbeat_at"), current_instance_id()
+            ):
+                # A live sibling instance of this same role still holds this
+                # job. See photometry.py's matching guard for the full
+                # rationale.
+                continue
             inst = row["inst"]
             date = row["date"]
             target = row["target"]
@@ -2416,18 +2415,43 @@ def sync_jobs() -> None:
                 # Process is still running on the system, leave state as "running"
                 continue
             else:
-                store.save(
-                    type_="transit_fit",
-                    inst=inst,
-                    date=date,
-                    target=target,
-                    run_id=run_id,
-                    state="error",
-                    returncode=-1,
-                    elapsed=row["elapsed"],
-                    started_at=row["started_at"],
-                    error_desc="Process lost (server restart)"
-                )
+                # No evidence of completion and the underlying process is gone
+                # too -- reclaim-with-attempt-limit: retry by requeuing (the
+                # pending-drain loop below relaunches it with its original,
+                # preserved params) up to a limit, then give up for good.
+                next_state, new_attempts = jobs.next_reconcile_attempt(int(row.get("attempts") or 0))
+                if next_state == "pending":
+                    logger.warning(
+                        "transit_fit job %s orphaned with no evidence of completion; "
+                        "retrying (attempt %d)", db_key, new_attempts,
+                    )
+                    store.save(
+                        type_="transit_fit",
+                        inst=inst,
+                        date=date,
+                        target=target,
+                        run_id=run_id,
+                        state="pending",
+                        returncode=None,
+                        elapsed=0,
+                        started_at=time.time(),
+                        error_desc="",
+                        attempts=new_attempts,
+                    )
+                else:
+                    store.save(
+                        type_="transit_fit",
+                        inst=inst,
+                        date=date,
+                        target=target,
+                        run_id=run_id,
+                        state="error",
+                        returncode=-1,
+                        elapsed=row["elapsed"],
+                        started_at=row["started_at"],
+                        error_desc=f"Process lost (server restart); gave up after {new_attempts} attempts",
+                        attempts=new_attempts,
+                    )
                 database.refresh_target_status(target)
 
         # Release any concurrency slot whose claimant's persisted job row is
@@ -2511,7 +2535,7 @@ def sync_jobs() -> None:
                     logf = open(log_path, "w")
                     _write_log_banner(logf, cmd, opts, narrowband_aliases)
                     logf.flush()
-                    proc = subprocess.Popen(cmd, cwd=str(rdir), stdout=logf, stderr=subprocess.STDOUT, text=True, start_new_session=True)
+                    proc = subprocess.Popen(cmd, cwd=str(rdir), stdout=logf, stderr=subprocess.STDOUT, text=True, start_new_session=True, env={**os.environ, **jobs.core_pinning_env()})
                     try:
                         with open(rdir / "timer-fit.pid", "w") as pidf:
                             pidf.write(str(proc.pid))
@@ -2526,7 +2550,7 @@ def sync_jobs() -> None:
                 run_type = "test" if test_run else "full"
                 _FIT_JOBS[key] = TransitFitJob(key=key, inst=inst, date=date, target=target, cmd=cmd, proc=proc, logf=logf, log_path=log_path, run_type=run_type, run_id=run_id, site=site, telescope=telescope, mode=mode, run_name=run_name)
                 try:
-                    store.save(type_="transit_fit", inst=inst, date=date, target=target, run_id=run_id, state="running", returncode=None, elapsed=0, started_at=_FIT_JOBS[key].started_at, run_type=run_type, params=entry.get("params", ""), run_name=run_name, owner=current_owner())
+                    store.save(type_="transit_fit", inst=inst, date=date, target=target, run_id=run_id, state="running", returncode=None, elapsed=0, started_at=_FIT_JOBS[key].started_at, run_type=run_type, params=entry.get("params", ""), run_name=run_name, owner=current_owner(), instance_id=current_instance_id(), attempts=int(entry.get("attempts") or 0))
                 except Exception:
                     logger.debug("failed to persist queued transit-fit launch for %s", run_id, exc_info=True)
                     try: proc.terminate()
