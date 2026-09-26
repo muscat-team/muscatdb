@@ -69,6 +69,11 @@ from jinja2 import Environment, FileSystemLoader
 from muscat_db import photometry as phot
 from muscat_db import postprocess as postproc
 from muscat_db import exposure as exp_calc
+from muscat_db.access import (
+    denied_proposal_ids_for,
+    object_hidden as _object_hidden,
+    sql_not_denied as _sql_not_denied,
+)
 from muscat_db.auth import (
     PROXY_SECRET_HEADER,
     authentication_required as _authentication_required,
@@ -152,6 +157,8 @@ from muscat_db.database import (
     get_objects as _get_objects,
     get_summaries as _get_summaries,
     get_targets as _get_targets,
+    objects_with_restricted_proposal as _objects_with_restricted_proposal,
+    visible_targets as _visible_target_rows,
     get_identified_overrides as _get_identified_overrides,
     get_norm_name_overrides as _get_norm_name_overrides,
     set_identified as _set_identified,
@@ -263,6 +270,20 @@ async def _job_reconciliation_loop() -> None:
             await asyncio.sleep(interval)
 
 
+def _resolve_stale_cancelling() -> None:
+    """Startup sweep for rows a restart left mid-cancel (issue #182, finding 4)."""
+    from muscat_db.job_store import get_job_store
+    from muscat_db.jobs import PIPELINE_JOB_TYPES
+
+    try:
+        n = get_job_store().resolve_stale_cancelling(PIPELINE_JOB_TYPES)
+    except Exception:
+        logger.exception("startup: could not resolve stale 'cancelling' job rows")
+        return
+    if n:
+        print(f"[startup] resolved {n} stale 'cancelling' job row(s) to 'cancelled'")
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     """Create the database and schema on startup if they don't exist."""
@@ -296,6 +317,7 @@ async def _lifespan(app: FastAPI):
     # future change to that default can't silently make this process's own
     # launches collide with a standalone `muscatdb worker` process's.
     set_owner("web")
+    _resolve_stale_cancelling()
     reconcile_task = asyncio.create_task(_job_reconciliation_loop())
     observation_monitor = None
     if os.environ.get("MUSCAT_LCO_MONITOR_ENABLED", "1") == "1":
@@ -607,6 +629,29 @@ _CURRENT_USER: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 )
 
 
+def _viewer_denied() -> frozenset[str]:
+    """Restricted proposals the current request's viewer may not see (issue
+    #144); empty for admins and whenever nothing is restricted."""
+    return denied_proposal_ids_for(_db_path(), _CURRENT_USER.get())
+
+
+def _visible_targets(db: str, denied: frozenset[str]) -> list[dict]:
+    """``_get_targets`` narrowed to what a viewer denied *denied* may see.
+
+    Goes through the module-level ``_get_targets`` name so the static site's
+    scrub wrapper still applies underneath.
+    """
+    return _visible_target_rows(db, _get_targets(db), denied)
+
+
+def _denied_cache_suffix(denied: frozenset[str]) -> str:
+    """Rendered-HTML caches are shared across viewers, so any page built from
+    a filtered view keys on the denied set too."""
+    # repr() of the sorted tuple, not a join: no proposal id can make two
+    # different sets collide.
+    return "|" + repr(tuple(sorted(denied))) if denied else ""
+
+
 def _render(name: str, **kwargs) -> str:
     tpl = jinja.get_template(name)
     kwargs.setdefault("current_user", _CURRENT_USER.get())
@@ -667,11 +712,13 @@ def index():
     tpl_path = TEMPLATE_DIR / "index.html"
     tpl_mtime = str(tpl_path.stat().st_mtime_ns) if tpl_path.is_file() else ""
     key = (tpl_mtime, _db_mtime(db))
-    cached = _index_cache.get("index")
+    denied = _viewer_denied()
+    cache_key = "index" + _denied_cache_suffix(denied)
+    cached = _index_cache.get(cache_key)
     if cached is not None and cached[0] == key:
         return HTMLResponse(cached[1])
 
-    targets = _get_targets(db)
+    targets = _visible_targets(db, denied)
 
     # Apply user overrides on top of computed is_identified and norm_name
     overrides = _get_identified_overrides(db)
@@ -696,7 +743,9 @@ def index():
 
     # Per-date frame counts and filters for the Dates column's inline "(N)"
     # frame count and the #Frames filter (mirrors the Project Detail page).
-    frames_by_object_date, filters_by_object_date = _frames_and_filters_by_object_date(db)
+    frames_by_object_date, filters_by_object_date = _frames_and_filters_by_object_date(
+        db, denied=denied
+    )
     for t in targets:
         t["date_frames"] = {d: frames_by_object_date.get((t["object"], d), 0) for d in t["dates"]}
         t["date_filter_chips"] = {
@@ -710,16 +759,22 @@ def index():
         targets=targets,
         last_updated=last_updated,
     )
-    _index_cache["index"] = (key, html)
+    _index_cache[cache_key] = (key, html)
     return HTMLResponse(html)
 
 
-def _get_datasets_for_normalized_target(db: str, normalized_name: str) -> tuple[list[dict], str]:
+def _get_datasets_for_normalized_target(
+    db: str, normalized_name: str, denied: frozenset[str] = frozenset()
+) -> tuple[list[dict], str]:
     """Get all datasets for targets that match a normalized name.
+
+    ``denied`` (issue #144) drops every summary under a proposal the viewer
+    may not see; a target with nothing left comes back exactly like a name
+    that was never observed.
 
     Returns (datasets_list, last_updated_date).
     """
-    targets = _get_targets(db)
+    targets = _visible_targets(db, denied)
     norm_overrides = _get_norm_name_overrides(db)
 
     matching_objects = [
@@ -735,6 +790,7 @@ def _get_datasets_for_normalized_target(db: str, normalized_name: str) -> tuple[
     obs_stats: dict[tuple, dict] = {}
     dataset_notes: dict[tuple, str] = {}
     object_notes: dict[str, str] = {}
+    visible_clause, visible_params = _sql_not_denied(denied)
     with get_conn(db) as conn:
         cur = conn.execute(
             f"""SELECT instrument, obsdate, object,
@@ -744,9 +800,9 @@ def _get_datasets_for_normalized_target(db: str, normalized_name: str) -> tuple[
                        MAX(NULLIF(airmass_max, 0))   AS airmass_max,
                        MAX(NULLIF(proposal_id, ''))  AS proposal_id
                 FROM summaries
-                WHERE object IN ({placeholders})
+                WHERE object IN ({placeholders}) AND {visible_clause}
                 GROUP BY instrument, obsdate, object""",
-            matching_objects,
+            [*matching_objects, *visible_params],
         )
         for row in cur.fetchall():
             raw_filters = sorted(f for f in (row[4] or "").split(",") if f)
@@ -817,7 +873,7 @@ def _get_datasets_for_normalized_target(db: str, normalized_name: str) -> tuple[
 
 
 def _frames_and_filters_by_object_date(
-    db: str, objects: list[str] | None = None
+    db: str, objects: list[str] | None = None, denied: frozenset[str] = frozenset()
 ) -> tuple[dict[tuple[str, str], int], dict[tuple[str, str], list[str]]]:
     """Batched per-(object, obsdate) frame counts and filter lists, for the
     Dates column's per-dataset frame count and the #Frames filter (which
@@ -833,12 +889,15 @@ def _frames_and_filters_by_object_date(
     filters_by_object_date: dict[tuple[str, str], list[str]] = {}
     if objects is not None and not objects:
         return frames_by_object_date, filters_by_object_date
-    query = "SELECT object, obsdate, SUM(nframes), GROUP_CONCAT(DISTINCT filter) FROM summaries"
-    params: list[str] = []
+    visible_clause, params = _sql_not_denied(denied)
+    query = (
+        "SELECT object, obsdate, SUM(nframes), GROUP_CONCAT(DISTINCT filter) "
+        f"FROM summaries WHERE {visible_clause}"
+    )
     if objects is not None:
         placeholders = ",".join("?" for _ in objects)
-        query += f" WHERE object IN ({placeholders})"
-        params = objects
+        query += f" AND object IN ({placeholders})"
+        params = [*params, *objects]
     query += " GROUP BY object, obsdate"
     with get_conn(db) as conn:
         cur = conn.execute(query, params)
@@ -850,7 +909,9 @@ def _frames_and_filters_by_object_date(
     return frames_by_object_date, filters_by_object_date
 
 
-def _project_target_rows(db: str, tag: str) -> list[dict]:
+def _project_target_rows(
+    db: str, tag: str, denied: frozenset[str] = frozenset()
+) -> list[dict]:
     """One aggregated row per norm_name attached to `tag`, for the Project
     Detail table. Deliberately does not call _get_datasets_for_normalized_target
     per target (N+1 queries, and that helper returns one row per
@@ -865,7 +926,7 @@ def _project_target_rows(db: str, tag: str) -> list[dict]:
 
     norm_overrides = _get_norm_name_overrides(db)
     groups: dict[str, list[dict]] = {}
-    for t in _get_targets(db):
+    for t in _visible_targets(db, denied):
         norm = _normalize_target_name(t["object"], norm_overrides)
         if norm in wanted:
             groups.setdefault(norm, []).append(t)
@@ -877,7 +938,9 @@ def _project_target_rows(db: str, tag: str) -> list[dict]:
     # every backing object, mirroring get_tags_for_targets' one-query/
     # fan-out-in-Python template.
     all_objects = sorted({m["object"] for members in groups.values() for m in members})
-    frames_by_object_date, filters_by_object_date = _frames_and_filters_by_object_date(db, all_objects)
+    frames_by_object_date, filters_by_object_date = _frames_and_filters_by_object_date(
+        db, all_objects, denied=denied
+    )
 
     rows = []
     for norm, members in groups.items():
@@ -977,7 +1040,7 @@ def tag_page(name: str = ""):
     db = _db_path()
     description = _get_tag_description(db, tag)
     exists = description is not None
-    rows = _project_target_rows(db, tag) if exists else []
+    rows = _project_target_rows(db, tag, _viewer_denied()) if exists else []
     description = description or ""
     return _render(
         "tag.html",
@@ -1000,13 +1063,14 @@ def target_page(name: str = ""):
     else:
         # Single target view - normalize the input name
         norm_name = _normalize_target_name(name)
+        denied = _viewer_denied()
         key = (tpl_mtime, _db_mtime(db), _catalog_source_cache_key(), _HARPS_MATCH_ARCSEC, _LAMOST_MATCH_ARCSEC, norm_name)
-        cache_key = f"target:{norm_name}"
+        cache_key = f"target:{norm_name}" + _denied_cache_suffix(denied)
         cached = _index_cache.get(cache_key)
         if cached is not None and cached[0] == key:
             return HTMLResponse(cached[1])
 
-        datasets, last_updated = _get_datasets_for_normalized_target(db, norm_name)
+        datasets, last_updated = _get_datasets_for_normalized_target(db, norm_name, denied)
         target_tic_id = _target_tic_id(norm_name, datasets)
 
         has_jwst_data = False
@@ -1041,7 +1105,9 @@ def api_target_harps_rv(name: str = ""):
     norm_name = _normalize_target_name(name)
     if not norm_name:
         return JSONResponse({"ok": False, "error": "Target name is required"}, status_code=400)
-    datasets, _last_updated = _get_datasets_for_normalized_target(_db_path(), norm_name)
+    datasets, _last_updated = _get_datasets_for_normalized_target(
+        _db_path(), norm_name, _viewer_denied()
+    )
     harps_rv = _harps_data_for_target(norm_name, datasets)
     return JSONResponse({
         "ok": True,
@@ -1058,7 +1124,9 @@ def api_target_lamost_rv(name: str = ""):
     norm_name = _normalize_target_name(name)
     if not norm_name:
         return JSONResponse({"ok": False, "error": "Target name is required"}, status_code=400)
-    datasets, _last_updated = _get_datasets_for_normalized_target(_db_path(), norm_name)
+    datasets, _last_updated = _get_datasets_for_normalized_target(
+        _db_path(), norm_name, _viewer_denied()
+    )
     rv_data = _lamost_rv_data_for_target(norm_name, datasets)
     return JSONResponse({
         "ok": True,
@@ -1551,7 +1619,7 @@ async def api_target_jwst(name: str = ""):
         return JSONResponse({"ok": False, "error": "Target name is required"}, status_code=400)
 
     db = _db_path()
-    datasets, _last_updated = _get_datasets_for_normalized_target(db, norm_name)
+    datasets, _last_updated = _get_datasets_for_normalized_target(db, norm_name, _viewer_denied())
     matched = _matched_jwst_targets(norm_name, datasets)
 
     if not matched:
@@ -1642,7 +1710,7 @@ async def api_target_spectra(name: str = ""):
         return JSONResponse({"ok": False, "error": "Target name is required"}, status_code=400)
 
     db = _db_path()
-    datasets, _last_updated = _get_datasets_for_normalized_target(db, norm_name)
+    datasets, _last_updated = _get_datasets_for_normalized_target(db, norm_name, _viewer_denied())
     matched = _matched_spectra_targets(norm_name, datasets)
 
     if not matched:
@@ -1751,7 +1819,7 @@ def nexsci_page():
 @target_router.get("/export.csv")
 def export_targets_csv():
     db = _db_path()
-    targets = _get_targets(db)
+    targets = _visible_targets(db, _viewer_denied())
     norm_overrides = _get_norm_name_overrides(db)
     for t in targets:
         t["norm_name"] = _normalize_target_name(t["object"], norm_overrides)
@@ -3742,7 +3810,9 @@ def api_fov_observed_dates(target: str = ""):
         return JSONResponse({"ok": False, "error": "Target name is required."}, status_code=400)
 
     norm_name = _normalize_target_name(target)
-    datasets, _last_updated = _get_datasets_for_normalized_target(_db_path(), norm_name)
+    datasets, _last_updated = _get_datasets_for_normalized_target(
+        _db_path(), norm_name, _viewer_denied()
+    )
 
     seen: set[tuple[str, str, str]] = set()
     dates = []
@@ -6758,6 +6828,13 @@ def photometry_delete(payload: dict = Body(...)):
     return JSONResponse(result)
 
 
+def _require_visible_object(db: str, obj: str, obsdate: str = "", instrument: str = "") -> None:
+    """404 a write to an object (or one of its nights) the viewer may not see
+    (issue #144). Never-observed names are not affected."""
+    if _object_hidden(db, obj, _viewer_denied(), obsdate=obsdate, instrument=instrument):
+        raise HTTPException(404, f"target {obj!r} not found")
+
+
 @target_router.put("/{obj}/note")
 def api_set_note(obj: str, payload: dict = Body(...)):
     note = (payload.get("note") or "").strip()
@@ -6765,7 +6842,9 @@ def api_set_note(obj: str, payload: dict = Body(...)):
         raise HTTPException(400, "note too long (max 2000 chars)")
     obsdate = (payload.get("obsdate") or "").strip()
     instrument = (payload.get("instrument") or "").strip()
-    _set_note(_db_path(), obj, note, obsdate=obsdate, instrument=instrument)
+    db = _db_path()
+    _require_visible_object(db, obj, obsdate, instrument)
+    _set_note(db, obj, note, obsdate=obsdate, instrument=instrument)
     return JSONResponse({"ok": True, "object": obj, "note": note,
                          "obsdate": obsdate, "instrument": instrument})
 
@@ -6774,7 +6853,9 @@ def api_set_note(obj: str, payload: dict = Body(...)):
 def api_delete_note(obj: str, payload: dict = Body(default=None)):
     obsdate = (payload.get("obsdate") or "") if payload else ""
     instrument = (payload.get("instrument") or "") if payload else ""
-    _delete_note(_db_path(), obj, obsdate=obsdate, instrument=instrument)
+    db = _db_path()
+    _require_visible_object(db, obj, obsdate, instrument)
+    _delete_note(db, obj, obsdate=obsdate, instrument=instrument)
     return JSONResponse({"ok": True, "object": obj})
 
 
@@ -6783,7 +6864,9 @@ def api_set_identified(obj: str, payload: dict = Body(...)):
     val = payload.get("is_identified")
     if val not in (0, 1):
         raise HTTPException(400, "is_identified must be 0 or 1")
-    _set_identified(_db_path(), obj, val)
+    db = _db_path()
+    _require_visible_object(db, obj)
+    _set_identified(db, obj, val)
     return JSONResponse({"ok": True, "object": obj, "is_identified": bool(val)})
 
 
@@ -6792,18 +6875,38 @@ def api_set_norm_name(obj: str, payload: dict = Body(...)):
     norm_name = (payload.get("norm_name") or "").strip()
     if len(norm_name) > 200:
         raise HTTPException(400, "norm_name too long (max 200 chars)")
-    _set_norm_name_override(_db_path(), obj, norm_name)
+    db = _db_path()
+    _require_visible_object(db, obj)
+    _set_norm_name_override(db, obj, norm_name)
     return JSONResponse({"ok": True, "object": obj, "norm_name": norm_name})
 
 
-def _all_norm_names(db: str) -> set[str]:
+def _all_norm_names(db: str, denied: frozenset[str] = frozenset()) -> set[str]:
     """Every norm_name that actually corresponds to a target in the DB
     (i.e. some raw obslog OBJECT normalizes to it). Used to reject attaching
     a project tag to a norm_name that doesn't exist -- e.g. a typo in the
     Project Detail page's attach box, which is a <datalist> (a suggestion,
-    not a hard constraint on what can be submitted)."""
+    not a hard constraint on what can be submitted). ``denied`` (issue #144)
+    leaves out targets the viewer may not see, so they read as nonexistent."""
     norm_overrides = _get_norm_name_overrides(db)
-    return {_normalize_target_name(t["object"], norm_overrides) for t in _get_targets(db)}
+    return {
+        _normalize_target_name(t["object"], norm_overrides)
+        for t in _visible_targets(db, denied)
+    }
+
+
+def _norm_name_hidden(db: str, norm_name: str, denied: frozenset[str]) -> bool:
+    """True when *norm_name* belongs to observed targets but none the viewer
+    may see (issue #144) -- the tag endpoints then answer as for an unknown
+    name."""
+    if not denied:
+        return False
+    norm_overrides = _get_norm_name_overrides(db)
+    restricted_norms = {
+        _normalize_target_name(o, norm_overrides)
+        for o in _objects_with_restricted_proposal(db, denied)
+    }
+    return norm_name in restricted_norms and norm_name not in _all_norm_names(db, denied)
 
 
 @target_router.get("/norm-names", response_class=JSONResponse)
@@ -6812,7 +6915,7 @@ def api_target_norm_names():
     Project Detail page's attach-target search box: ship the (small) full
     list and filter client-side, matching the homepage's own
     ship-everything/filter-in-JS pattern rather than a bespoke server search."""
-    names = sorted(_all_norm_names(_db_path()))
+    names = sorted(_all_norm_names(_db_path(), _viewer_denied()))
     return JSONResponse({"ok": True, "norm_names": names})
 
 
@@ -6820,7 +6923,10 @@ def api_target_norm_names():
 def api_get_target_tags(obj: str):
     db = _db_path()
     norm_name = _normalize_target_name(obj, _get_norm_name_overrides(db))
-    tags = get_tags_for_targets(db, [norm_name]).get(norm_name, [])
+    if _norm_name_hidden(db, norm_name, _viewer_denied()):
+        tags = []
+    else:
+        tags = get_tags_for_targets(db, [norm_name]).get(norm_name, [])
     return JSONResponse({"ok": True, "object": obj, "norm_name": norm_name, "tags": tags})
 
 
@@ -6831,7 +6937,7 @@ def api_add_target_tag(obj: str, payload: dict = Body(...)):
         raise HTTPException(400, "tag is required")
     db = _db_path()
     norm_name = _normalize_target_name(obj, _get_norm_name_overrides(db))
-    if norm_name not in _all_norm_names(db):
+    if norm_name not in _all_norm_names(db, _viewer_denied()):
         raise HTTPException(404, f"target {norm_name!r} not found")
     if not _add_target_tag(db, norm_name, tag):
         raise HTTPException(404, f"project {tag!r} not found")
@@ -6846,7 +6952,9 @@ def api_remove_target_tag(obj: str, payload: dict = Body(...)):
     tag = (payload.get("tag") or "").strip()
     db = _db_path()
     norm_name = _normalize_target_name(obj, _get_norm_name_overrides(db))
-    _remove_target_tag(db, norm_name, tag)
+    # A hidden target answers like an unknown one: a successful no-op.
+    if not _norm_name_hidden(db, norm_name, _viewer_denied()):
+        _remove_target_tag(db, norm_name, tag)
     return JSONResponse({"ok": True, "object": obj, "norm_name": norm_name, "tag": tag})
 
 
@@ -6904,7 +7012,7 @@ def api_export_tag_csv(tag: str):
     db = _db_path()
     if _get_tag_description(db, tag) is None:
         raise HTTPException(404, f"project {tag!r} not found")
-    rows = _project_target_rows(db, tag)
+    rows = _project_target_rows(db, tag, _viewer_denied())
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(["norm_name", "dates", "n_dates", "filters", "n_frames"])

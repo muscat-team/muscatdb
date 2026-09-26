@@ -17,6 +17,7 @@ from contextlib import contextmanager
 
 from cryptography.fernet import Fernet, InvalidToken
 
+from muscat_db import db_backup
 from muscat_db.instruments import INSTRUMENTS, OBSLOG_BASE
 from muscat_db.cache import clear_all_caches
 from muscat_db.coord import (
@@ -425,8 +426,12 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     for sql in _MIGRATIONS:
         try:
             conn.execute(sql)
-        except sqlite3.OperationalError:
-            pass  # column already exists
+        except sqlite3.OperationalError as exc:
+            # Only "already applied" is expected here. Anything else -- a
+            # locked or read-only database, a typo in the SQL -- used to be
+            # swallowed too, silently leaving the schema unmigrated.
+            if "duplicate column name" not in str(exc):
+                raise
 
 
 def _apply_schema(conn: sqlite3.Connection) -> None:
@@ -660,7 +665,16 @@ def _insert_summary_rows(conn: sqlite3.Connection, rows: list[tuple]) -> None:
     )
 
 
-def _target_rows(conn: sqlite3.Connection, objects: set[str] | None = None) -> list[tuple]:
+def _target_rows(
+    conn: sqlite3.Connection,
+    objects: set[str] | None = None,
+    exclude_proposals: frozenset[str] = frozenset(),
+) -> list[tuple]:
+    """Per-object rollup rows in ``targets`` insert order.
+
+    ``exclude_proposals`` (upper-cased, issue #144) drops summaries under
+    those proposals before aggregating, giving a viewer-specific rollup.
+    """
     where = [
         "object IS NOT NULL",
         "TRIM(object) <> ''",
@@ -687,6 +701,12 @@ def _target_rows(conn: sqlite3.Connection, objects: set[str] | None = None) -> l
     if objects:
         where.append(f"object IN ({', '.join('?' for _ in objects)})")
         params.extend(sorted(objects))
+    if exclude_proposals:
+        where.append(
+            "COALESCE(proposal_id, '') COLLATE NOCASE NOT IN "
+            f"({', '.join('?' for _ in exclude_proposals)})"
+        )
+        params.extend(sorted(exclude_proposals))
     cur = conn.execute(
         f"""SELECT
               object,
@@ -842,14 +862,89 @@ def _restore_table(conn: sqlite3.Connection, table: str, rows: list[dict]) -> No
         )
 
 
+def _page_size(db_path: str) -> int:
+    """Page size of the existing database at *db_path*, or SQLite's default."""
+    if not os.path.exists(db_path):
+        return 4096
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=30)
+    try:
+        return int(conn.execute("PRAGMA page_size").fetchone()[0])
+    finally:
+        conn.close()
+
+
+def _read_app_owned_tables(db_path: str) -> dict[str, list[dict]]:
+    """Every row of every app-owned table in *db_path*. Rows are copied
+    verbatim (all columns) so nothing is silently dropped; missing tables or
+    an absent file read as empty, for older or fresh databases."""
+    preserved: dict[str, list[dict]] = {t: [] for t in _APP_OWNED_TABLES}
+    if not os.path.exists(db_path):
+        return preserved
+    try:
+        with get_conn(db_path, row_factory=sqlite3.Row) as old_conn:
+            _apply_schema(old_conn)
+            for table in _APP_OWNED_TABLES:
+                try:
+                    rows = old_conn.execute(f"SELECT * FROM {table}").fetchall()
+                    preserved[table] = [dict(r) for r in rows]
+                except sqlite3.OperationalError:
+                    pass
+    except sqlite3.OperationalError:
+        pass
+    return preserved
+
+
+# Busy timeout for the swap connection's own statements (the journal_mode
+# probe). The copy itself is retried by sqlite3's backup() every 250 ms for as
+# long as another connection holds the write lock; readers never block it (WAL).
+_SWAP_BUSY_TIMEOUT_S = 120.0
+
+
+def _copy_into_live(src_path: str, db_path: str) -> None:
+    """Make *db_path*'s content identical to *src_path*, in place, as a single
+    SQLite write transaction.
+
+    The previous swap deleted the live file's ``-wal``/``-shm`` and then
+    ``os.replace``d the new image over it while the server still had it open.
+    Connections holding the old inode kept writing into an unlinked WAL (writes
+    lost), and a connection opening between the delete and the rename created
+    fresh sidecars for the *old* image that then sat beside the *new* one and
+    were replayed into it -- the corruption vector implicated in #157.
+
+    Copying through the backup API never renames the file or touches its
+    sidecars: SQLite writes the new pages through the destination's own WAL
+    under its normal locking, so every open connection simply sees the new
+    content at its next read transaction, exactly as after any other commit.
+    Writers wait (busy timeout) for the ~seconds the copy holds the write lock.
+    """
+    src = sqlite3.connect(f"file:{src_path}?mode=ro", uri=True)
+    try:
+        dst = connect(db_path, timeout=_SWAP_BUSY_TIMEOUT_S)
+        try:
+            src.backup(dst)
+            # The copy lands in the WAL (as large as the database). Fold it
+            # back now if no reader is pinning an older snapshot; otherwise
+            # the regular auto-checkpoint finishes the job later.
+            dst.execute("PRAGMA busy_timeout=2000;")
+            busy = dst.execute("PRAGMA wal_checkpoint(TRUNCATE);").fetchone()[0]
+            if busy:
+                logger.info("build_db: post-swap checkpoint deferred (readers active)")
+        finally:
+            dst.close()
+    finally:
+        src.close()
+
+
 def build_db(db_path: str, progress=None) -> int:
     """Rebuild the SQLite database from obslog CSVs.
 
     If ``progress`` is a ``rich.progress.Progress`` instance, three tasks are
     reported: CSV ingestion, summary aggregation, and targets aggregation.
 
-    Builds to a temporary file first, then atomically replaces the target
-    so a concurrently-running web server is never blocked by ``DROP TABLE``.
+    Builds to a temporary file first so a concurrently-running web server is
+    never blocked by ``DROP TABLE``, then copies it into the target with
+    SQLite's online backup API (:func:`_copy_into_live`) instead of renaming it
+    over the live file -- see that function for why (issue #182, finding 2).
     """
     tmp_path = db_path + ".tmp"
 
@@ -859,24 +954,14 @@ def build_db(db_path: str, progress=None) -> int:
     # any leftover sidecars before opening the new connection.
     _remove_sqlite_tmp(tmp_path)
 
-    # Preserve every app-owned table (user notes, manual identification
-    # overrides, exposure calibration, job history, saved ephemeris views) from
-    # the existing database so the temp-file rebuild of the observation-derived
-    # tables doesn't wipe them. Rows are copied verbatim (all columns) so nothing
-    # is silently dropped; missing tables/columns are tolerated for older DBs.
-    preserved: dict[str, list[dict]] = {t: [] for t in _APP_OWNED_TABLES}
+    # Snapshot the live database before touching anything, and refuse to
+    # rebuild over one that fails integrity_check: the copy below would carry
+    # its app-owned rows forward and destroy the last good copy's context
+    # (issue #182, finding 1). The snapshot is the disaster-recovery point for
+    # a rebuild that goes wrong after this point.
     if os.path.exists(db_path):
-        try:
-            with get_conn(db_path, row_factory=sqlite3.Row) as old_conn:
-                _apply_schema(old_conn)
-                for table in _APP_OWNED_TABLES:
-                    try:
-                        rows = old_conn.execute(f"SELECT * FROM {table}").fetchall()
-                        preserved[table] = [dict(r) for r in rows]
-                    except sqlite3.OperationalError:
-                        pass
-        except sqlite3.OperationalError:
-            pass
+        db_backup.snapshot(db_path)
+        db_backup.prune(db_path)
 
     # Phase 1: discover all CSVs (cheap walk so we can size the progress bar).
     csv_jobs = _discover_csv_jobs()
@@ -886,6 +971,10 @@ def build_db(db_path: str, progress=None) -> int:
         # Robust coordinate picker (filters malformed strings, keeps RA/Dec
         # paired, takes the median) — replaces the old MAX() string aggregation.
         conn.create_aggregate("coord_repr", 2, CoordRepr)
+        # The backup API cannot change a WAL-mode destination's page size, so
+        # the image must be built with the live file's. Only settable before
+        # the first table exists and before WAL is enabled.
+        conn.execute(f"PRAGMA page_size={_page_size(db_path)};")
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA synchronous=OFF;")
         conn.execute("PRAGMA cache_size=100000;")
@@ -942,24 +1031,30 @@ def build_db(db_path: str, progress=None) -> int:
             (datetime.datetime.now().isoformat(),)
         )
 
-        # Restore every preserved app-owned table verbatim so build-db never
-        # wipes user notes, identification overrides, exposure calibration, job
-        # history, or saved ephemeris views.
+        conn.commit()
+
+        # Carry every app-owned table (user notes, identification overrides,
+        # exposure calibration, job history, chat, ...) over verbatim. Read as
+        # late as possible: the rebuild above takes minutes, and anything the
+        # running server wrote before this read is kept, whereas the old
+        # read-at-start dropped every write made during the build.
+        preserved = _read_app_owned_tables(db_path)
         for table in _APP_OWNED_TABLES:
             _restore_table(conn, table, preserved.get(table) or [])
-
         conn.commit()
         conn.close()
-    except Exception:
-        _remove_sqlite_tmp(tmp_path)
-        raise
 
-    for suffix in ("-wal", "-shm"):
-        try:
-            os.remove(db_path + suffix)
-        except OSError:
-            pass
-    os.replace(tmp_path, db_path)
+        # Never copy in a rebuilt image that is itself malformed.
+        if not db_backup.integrity_ok(tmp_path):
+            raise db_backup.IntegrityError(
+                f"rebuilt database {tmp_path} failed PRAGMA integrity_check; "
+                f"{db_path} left untouched"
+            )
+
+        _copy_into_live(tmp_path, db_path)
+    finally:
+        _remove_sqlite_tmp(tmp_path)
+
     clear_all_caches()
     return count
 
@@ -1042,11 +1137,9 @@ def ingest_date(db_path: str, instrument: str, obsdate: str, progress=None) -> i
     if not csv_jobs:
         raise FileNotFoundError(f"No obslog CSVs found for {instrument} {obsdate}")
 
-    conn = sqlite3.connect(db_path, timeout=30)
+    conn = connect(db_path)
     try:
         conn.create_aggregate("coord_repr", 2, CoordRepr)
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA synchronous=NORMAL;")
         conn.execute("PRAGMA cache_size=100000;")
         # Keep GROUP BY / sort spills on the DB's own (roomy) volume, not /tmp.
         _set_temp_store_dir(conn, db_path)
@@ -1196,7 +1289,7 @@ def clear_stale_date(db_path: str, instrument: str, obsdate: str) -> None:
     to a different night. Without this, the pre-move rows for that date would
     survive forever, pointing at files that no longer live there.
     """
-    conn = sqlite3.connect(db_path, timeout=30)
+    conn = connect(db_path)
     try:
         # _replace_target_rows -> _target_rows calls the coord_repr aggregate.
         conn.create_aggregate("coord_repr", 2, CoordRepr)
@@ -1256,8 +1349,11 @@ def objects_with_restricted_proposal(
         return set()
     with get_conn(db_path) as conn:
         placeholders = ",".join("?" * len(restricted))
+        # summaries.proposal_id has no NOCASE collation, but the ids in
+        # restricted_proposals are admin-typed: match them case-insensitively.
         cur = conn.execute(
-            f"SELECT DISTINCT object FROM summaries WHERE proposal_id IN ({placeholders})",
+            "SELECT DISTINCT object FROM summaries "
+            f"WHERE proposal_id COLLATE NOCASE IN ({placeholders})",
             tuple(restricted),
         )
         return {r[0] for r in cur.fetchall() if r[0]}
@@ -1317,32 +1413,96 @@ def _targets_from_conn(conn: sqlite3.Connection) -> list[dict]:
            LEFT JOIN target_notes n ON n.object = t.object AND n.obsdate = '' AND n.instrument = ''
            ORDER BY t.object COLLATE NOCASE"""
     )
-    result = []
-    for r in cur.fetchall():
-        dates = sorted(d for d in set((r[4] or "").split(",")) if _is_obsdate(d)) if r[4] else []
-        filters = sorted(f for f in set((r[5] or "").split(",")) if f) if r[5] else []
-        total_s = r[6] or 0.0
-        date_to_inst = {d: i for d, i in _parse_inst_dates(r[13]).items() if _is_obsdate(d)}
+    return [
+        _target_dict(
+            obj=r[0], n_frames=r[2], instruments=r[3], dates=r[4], filters=r[5],
+            total_exptime=r[6], ra=r[7], declination=r[8], airmass_min=r[9],
+            airmass_max=r[10], is_identified=r[11], note=r[12], inst_dates=r[13],
+            phot=r[14], fit=r[15],
+        )
+        for r in cur.fetchall()
+    ]
 
-        result.append({
-            "object": r[0],
-            "n_dates": len(dates),
-            "n_frames": r[2],
-            "instruments": sorted(set((r[3] or "").split(","))) if r[3] else [],
-            "dates": dates,
-            "filters": filters,
-            "total_exptime_hr": round(total_s / 3600.0, 2),
-            "ra": r[7] or "",
-            "declination": r[8] or "",
-            "airmass_min": r[9],
-            "airmass_max": r[10],
-            "is_identified": bool(r[11]),
-            "note": r[12] or "",
-            "date_to_inst": date_to_inst,
-            "filter_chips": _normalize_filters(filters),
-            "phot": r[14],
-            "fit": r[15],
-        })
+
+def _target_dict(
+    *, obj, n_frames, instruments, dates, filters, total_exptime, ra, declination,
+    airmass_min, airmass_max, is_identified, note, inst_dates, phot, fit,
+) -> dict:
+    """One ``get_targets`` row from rollup columns (comma-joined strings as
+    stored in ``targets``)."""
+    date_list = sorted(d for d in set((dates or "").split(",")) if _is_obsdate(d)) if dates else []
+    filter_list = sorted(f for f in set((filters or "").split(",")) if f) if filters else []
+    total_s = total_exptime or 0.0
+    return {
+        "object": obj,
+        "n_dates": len(date_list),
+        "n_frames": n_frames,
+        "instruments": sorted(set((instruments or "").split(","))) if instruments else [],
+        "dates": date_list,
+        "filters": filter_list,
+        "total_exptime_hr": round(total_s / 3600.0, 2),
+        "ra": ra or "",
+        "declination": declination or "",
+        "airmass_min": airmass_min,
+        "airmass_max": airmass_max,
+        "is_identified": bool(is_identified),
+        "note": note or "",
+        "date_to_inst": {
+            d: i for d, i in _parse_inst_dates(inst_dates or "").items() if _is_obsdate(d)
+        },
+        "filter_chips": _normalize_filters(filter_list),
+        "phot": phot,
+        "fit": fit,
+    }
+
+
+def visible_targets(
+    db_path: str, base_rows: list[dict], denied: frozenset[str]
+) -> list[dict]:
+    """Re-derive ``get_targets``-shaped rows for a viewer denied the
+    (upper-cased) proposals in *denied* (issue #144).
+
+    Only objects with at least one summary under a denied proposal are
+    touched: each is re-aggregated from its visible summaries alone, or
+    dropped when none are visible. Every other row of *base_rows* passes
+    through unchanged, and an empty *denied* returns *base_rows* as-is, so
+    unrestricted viewers keep the precomputed fast path. Fields outside the
+    rollup (``note``) are carried over from the base row.
+    """
+    if not denied:
+        return base_rows
+    affected = objects_with_restricted_proposal(db_path, denied)
+    if not affected:
+        return base_rows
+    to_recompute = affected & {r["object"] for r in base_rows}
+    recomputed: dict[str, tuple] = {}
+    if to_recompute:
+        with get_conn(db_path) as conn:
+            conn.create_aggregate("coord_repr", 2, CoordRepr)
+            recomputed = {
+                r[0]: r
+                for r in _target_rows(conn, objects=to_recompute, exclude_proposals=denied)
+            }
+    result = []
+    for row in base_rows:
+        obj = row["object"]
+        if obj not in affected:
+            result.append(row)
+            continue
+        r = recomputed.get(obj)
+        if r is None:
+            continue
+        # _target_rows order: object, n_dates, n_frames, instruments, dates,
+        # inst_dates, filters, total_exptime, ra, declination, airmass_min,
+        # airmass_max, is_identified, phot_status, fit_status.
+        fresh = _target_dict(
+            obj=obj, n_frames=r[2], instruments=r[3], dates=r[4], filters=r[6],
+            total_exptime=r[7], ra=r[8], declination=r[9], airmass_min=r[10],
+            airmass_max=r[11], is_identified=r[12], note=row["note"],
+            inst_dates=r[5], phot=r[13], fit=r[14],
+        )
+        # Keep any caller-applied fields the rollup does not produce.
+        result.append({**row, **fresh})
     return result
 
 
@@ -1811,6 +1971,50 @@ def db_path() -> str:
     return str(pathlib.Path(os.environ.get("MUSCAT_DB_PATH", "muscat.db")).resolve())
 
 
+# Connection policy for the live database (issue #182, finding 5). Every
+# connection to it is opened by connect() below, so the rules live in one place:
+#
+# * busy timeout -- sqlite3's ``timeout`` argument *is* sqlite3_busy_timeout, so
+#   writers wait that long for the lock before "database is locked". 30 s by
+#   default; callers on a request path may pass less.
+# * journal_mode=WAL -- readers never block the writer or each other. The mode
+#   is persistent in the file; asserting it per connection is a no-op once set
+#   and makes a freshly created file WAL from its first connection.
+# * synchronous=NORMAL -- in WAL mode a crash or power loss can at worst roll
+#   back the most recent commits; it cannot corrupt the file. That guarantee
+#   needs WAL (NORMAL under a rollback journal *can* corrupt), which is why
+#   the two are set together here. The one deliberate exception is
+#   build_db's throwaway .tmp image, built with synchronous=OFF because a
+#   crash discards it anyway.
+# * foreign_keys stays OFF (SQLite's default), deliberately. The schema
+#   declares foreign keys that have never been enforced; turning enforcement
+#   on changes behaviour -- INSERT OR REPLACE on a parent row deletes it and
+#   cascades to its children, existing orphan rows start failing writes, and
+#   build_db's verbatim table restore would have to run in dependency order.
+#   That needs a foreign_key_check of production data first, so it is a
+#   separate change (#184).
+_SYNCHRONOUS = "NORMAL"
+
+
+def connect(path: str | None = None, *, timeout: float = 30.0) -> sqlite3.Connection:
+    """Open a connection to the live database with the policy above applied.
+
+    Prefer :func:`get_conn`, which also guarantees the connection is closed;
+    this is for the few callers that manage the connection's lifetime
+    themselves.
+    """
+    if path is None:
+        path = db_path()
+    conn = sqlite3.connect(path, timeout=timeout)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute(f"PRAGMA synchronous={_SYNCHRONOUS};")
+    except BaseException:
+        conn.close()
+        raise
+    return conn
+
+
 @contextmanager
 def get_conn(
     path: str | None = None,
@@ -1822,13 +2026,11 @@ def get_conn(
 
     Guarantees the connection is closed even if the body raises — the previous
     open-coded ``connect(...) ... close()`` helpers leaked the handle on any
-    exception between the two — and standardizes the busy ``timeout`` (default
-    30s) so writers don't fail fast under WAL contention. Schema-ensure and
+    exception between the two — and applies the connection policy of
+    :func:`connect` (busy timeout, WAL, synchronous). Schema-ensure and
     migration calls stay at the call site because they vary per table.
     """
-    if path is None:
-        path = db_path()
-    conn = sqlite3.connect(path, timeout=timeout)
+    conn = connect(path, timeout=timeout)
     try:
         if row_factory is not None:
             conn.row_factory = row_factory

@@ -68,7 +68,7 @@ import logging
 import signal
 from collections.abc import Callable
 
-from muscat_db import job_store
+from muscat_db import job_store, jobs
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +142,17 @@ def _loop(
         job_store.wait_for_work_or_sleep(interval)
 
 
+def _resolve_stale_cancelling() -> None:
+    """Startup sweep for rows a restart left mid-cancel (issue #182, finding 4)."""
+    try:
+        n = job_store.get_job_store().resolve_stale_cancelling(jobs.PIPELINE_JOB_TYPES)
+    except Exception:
+        logger.exception("worker: could not resolve stale 'cancelling' job rows")
+        return
+    if n:
+        logger.info("worker: resolved %d stale 'cancelling' job row(s) to 'cancelled'", n)
+
+
 def run(pipeline: str, *, interval: float = 2.0, once: bool = False) -> None:
     """Claim and launch *pipeline*'s pending jobs and reconcile jobs already
     launched, on a timer, until SIGTERM/SIGINT (or once, if *once*).
@@ -183,6 +194,7 @@ def run(pipeline: str, *, interval: float = 2.0, once: bool = False) -> None:
     # restoration above exists to close.
     prev_handlers = None
     try:
+        _resolve_stale_cancelling()
         if not once:
             prev_handlers = (signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGINT))
             signal.signal(signal.SIGTERM, _handle_signal)

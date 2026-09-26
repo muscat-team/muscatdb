@@ -353,6 +353,32 @@ def resolve_job_state(
     return terminal_job_state(rc, job.cancelled, job.log_path, cfg), rc, True
 
 
+# Returncode recorded for a cancel before the process has actually exited; the
+# real signal exit code replaces it once the job goes terminal.
+CANCELLED_RC = -1
+
+# Pipeline job types whose jobs-table rows sync_jobs() owns (exposure
+# calibration keeps its own table and its own cancel flow).
+PIPELINE_JOB_TYPES = ("photometry", "transit_fit", "ttv_fit")
+
+
+def persisted_state(state: str, returncode: int | None) -> tuple[str, int | None]:
+    """Map a live :func:`resolve_job_state` state to what the jobs table stores.
+
+    ``finalizing`` is live-view-only and persists as ``running``. ``cancelling``
+    persists as ``cancelled``: ``cancel_run`` already wrote ``cancelled``
+    durably, and writing the live ``cancelling`` back over it would leave a row
+    that no reconcile pass ever resolves if the server restarts before the
+    process dies (orphan reconcile only looks at ``running`` rows, the pending
+    drain only at ``pending`` ones) -- issue #182, finding 4.
+    """
+    if state == "finalizing":
+        return "running", None
+    if state == "cancelling":
+        return "cancelled", CANCELLED_RC
+    return state, returncode
+
+
 # --------------------------- orphan reconciliation ---------------------------
 #
 # Shared by all three sync_jobs() implementations' "is this running row truly
@@ -416,11 +442,23 @@ def is_pid_running(pid: int) -> bool:
         return False
 
 
+def is_process_group_alive(pgid: int) -> bool:
+    """True if any process is still a member of process group *pgid*.
+
+    Same failure semantics as :func:`is_pid_running`: a lookup or permission
+    failure reads as "nothing live visible to us"."""
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except OSError:
+        return False
+
+
 def pid_file_process_alive(pid_file: Path) -> bool:
-    """True if *pid_file* (one PID per line, written by a pipeline at launch)
-    names a still-running process. A missing/unreadable file, or a PID that is
-    no longer alive, both read as False -- the caller then treats the
-    underlying work as genuinely gone rather than merely between heartbeats.
+    """True if the job whose launch PID is recorded in *pid_file* still has any
+    live process. A missing/unreadable file, or no live process, both read as
+    False -- the caller then treats the underlying work as genuinely gone
+    rather than merely between heartbeats.
 
     Shared by all three pipelines' orphan-reconciliation checks: the process
     that *launched* a job (and held the in-memory Popen handle) can be gone --
@@ -428,16 +466,24 @@ def pid_file_process_alive(pid_file: Path) -> bool:
     keeps running independently. This is what stops reclaim-with-attempt-limit
     from relaunching a second run into a directory the first one is still
     writing.
+
+    Every pipeline launches with ``start_new_session=True`` and records that
+    child's PID, so the recorded PID is also the job's process-group id. The
+    group is checked as well as the PID itself: the recorded process can exit
+    while other members still run and write into the run directory -- a
+    ``conda run`` wrapper's interpreter, or multiprocessing workers finishing
+    their current task -- and relaunching then would clobber their output
+    (issue #182, finding 3).
     """
     if not pid_file.is_file():
         return False
     try:
         with open(pid_file) as f:
             pid = int(f.read().strip())
-        return is_pid_running(pid)
     except Exception:
         _logger.debug("failed to read pid file %s", pid_file, exc_info=True)
         return False
+    return is_pid_running(pid) or is_process_group_alive(pid)
 
 
 def next_reconcile_attempt(attempts: int) -> tuple[str, int]:

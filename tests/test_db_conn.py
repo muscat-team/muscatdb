@@ -138,23 +138,9 @@ def test_build_db_never_removes_destination_file_itself(tmp_path, monkeypatch, n
 
 
 
-def test_build_db_clears_sidecars_held_by_a_live_connection(tmp_path, monkeypatch, no_real_obslog_scan):
-    """A stale ``-wal`` at the destination silently masks the rebuilt database.
-
-    The other two build_db tests here pass whether or not the sidecar removal in
-    ``build_db`` exists, because the preserve-step connection checkpoints and
-    deletes the WAL when it closes, so a sidecar with no live owner disappears on
-    its own. Production is the case where another connection still holds the
-    destination open: the WAL then survives into ``os.replace``, SQLite replays
-    it over the freshly built file, and every reader keeps seeing pre-rebuild
-    data with ``PRAGMA integrity_check`` still reporting ``ok``.
-    """
-    import sqlite3
-    from muscat_db.database import build_db
-
-    target = tmp_path / "muscat.db"
-    monkeypatch.setenv("MUSCAT_DB_PATH", str(target))
-
+def _wal_db_with_stale_rows(target):
+    """A WAL-mode database held open by a live connection whose un-checkpointed
+    WAL carries 200 db_meta rows the rebuild must not resurrect."""
     live = sqlite3.connect(str(target))
     live.execute("PRAGMA journal_mode=WAL;")
     live.execute("PRAGMA wal_autocheckpoint=0;")
@@ -164,10 +150,212 @@ def test_build_db_clears_sidecars_held_by_a_live_connection(tmp_path, monkeypatc
         [(f"k{i}", "stale") for i in range(200)],
     )
     live.commit()
+    return live
+
+
+def _stale_count(conn) -> int:
+    return conn.execute("SELECT COUNT(*) FROM db_meta WHERE value = 'stale'").fetchone()[0]
+
+
+def test_build_db_with_live_connection_every_reader_sees_rebuilt_data(
+    tmp_path, monkeypatch, no_real_obslog_scan,
+):
+    """With a server connection holding the destination open (production), the
+    rebuilt content must be what every connection sees afterwards -- the open
+    one included -- and the file must pass integrity_check (issue #182,
+    finding 2). The old delete-sidecars-then-rename swap left the open
+    connection on the detached pre-rebuild inode."""
+    from muscat_db.database import build_db
+
+    target = tmp_path / "muscat.db"
+    monkeypatch.setenv("MUSCAT_DB_PATH", str(target))
+    live = _wal_db_with_stale_rows(target)
     try:
-        assert (tmp_path / "muscat.db-wal").exists(), "setup: the WAL must be live"
         build_db(str(target))
-        assert not (tmp_path / "muscat.db-wal").exists()
-        assert not (tmp_path / "muscat.db-shm").exists()
+        assert _stale_count(live) == 0
+        with sqlite3.connect(str(target)) as fresh:
+            assert _stale_count(fresh) == 0
+            assert fresh.execute(
+                "SELECT COUNT(*) FROM db_meta WHERE key = 'last_build_at'"
+            ).fetchone()[0] == 1
+            assert fresh.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     finally:
         live.close()
+
+
+# -- connection policy (issue #182, finding 5) --------------------------------
+
+_SYNCHRONOUS_NORMAL = 1
+
+
+def _policy(conn):
+    return (
+        conn.execute("PRAGMA journal_mode").fetchone()[0],
+        conn.execute("PRAGMA synchronous").fetchone()[0],
+        conn.execute("PRAGMA foreign_keys").fetchone()[0],
+    )
+
+
+def test_get_conn_applies_wal_and_synchronous_normal(tmp_path):
+    with get_conn(str(tmp_path / "fresh.db")) as conn:
+        assert _policy(conn) == ("wal", _SYNCHRONOUS_NORMAL, 0)
+
+
+def test_connect_applies_the_same_policy(tmp_path):
+    from muscat_db.database import connect
+
+    conn = connect(str(tmp_path / "fresh.db"))
+    try:
+        assert _policy(conn) == ("wal", _SYNCHRONOUS_NORMAL, 0)
+    finally:
+        conn.close()
+
+
+def test_exposure_connection_uses_the_policy(tmp_path, monkeypatch):
+    from muscat_db import exposure
+
+    monkeypatch.setenv("MUSCAT_DB_PATH", str(tmp_path / "exp.db"))
+    conn = exposure._conn()
+    try:
+        assert _policy(conn) == ("wal", _SYNCHRONOUS_NORMAL, 0)
+    finally:
+        conn.close()
+
+
+def test_migrations_tolerate_already_applied_columns(tmp_path):
+    from muscat_db.database import _apply_schema
+
+    with get_conn(str(tmp_path / "m.db")) as conn:
+        _apply_schema(conn)
+        _apply_schema(conn)  # every ALTER now hits "duplicate column name"
+
+
+def test_migrations_surface_real_failures(tmp_path, monkeypatch):
+    """A failing migration used to be swallowed as "column already exists",
+    silently leaving the schema unmigrated."""
+    import muscat_db.database as database
+
+    monkeypatch.setattr(
+        database, "_MIGRATIONS",
+        [*database._MIGRATIONS, "ALTER TABLE no_such_table ADD COLUMN x TEXT"],
+    )
+    with get_conn(str(tmp_path / "m.db")) as conn:
+        with pytest.raises(sqlite3.OperationalError, match="no such table"):
+            database._apply_schema(conn)
+
+
+def test_build_db_writes_on_a_connection_open_across_the_swap_are_kept(
+    tmp_path, monkeypatch, no_real_obslog_scan,
+):
+    """A long-lived server connection that writes after the rebuild must write
+    into the live database. Under the old swap it wrote into the unlinked
+    pre-rebuild inode and the row silently vanished for everyone else."""
+    from muscat_db.database import SCHEMA, build_db
+
+    target = tmp_path / "muscat.db"
+    monkeypatch.setenv("MUSCAT_DB_PATH", str(target))
+    live = sqlite3.connect(str(target))
+    live.execute("PRAGMA journal_mode=WAL;")
+    live.executescript(SCHEMA)
+    live.commit()
+    try:
+        build_db(str(target))
+        live.execute(
+            "INSERT INTO target_notes(object, obsdate, instrument, note) "
+            "VALUES ('AFTER-SWAP', '', '', 'x')"
+        )
+        live.commit()
+        with sqlite3.connect(str(target)) as fresh:
+            assert fresh.execute(
+                "SELECT COUNT(*) FROM target_notes WHERE object = 'AFTER-SWAP'"
+            ).fetchone()[0] == 1
+    finally:
+        live.close()
+
+
+def test_build_db_keeps_app_writes_made_while_the_build_runs(
+    tmp_path, monkeypatch, no_real_obslog_scan,
+):
+    """App-owned rows written by the server mid-rebuild (job state, chat,
+    notes) must survive. The old code snapshotted them at the start of a
+    ~15-minute build, silently dropping everything written in between."""
+    import muscat_db.database as database
+    from muscat_db.database import SCHEMA, build_db
+
+    target = tmp_path / "muscat.db"
+    monkeypatch.setenv("MUSCAT_DB_PATH", str(target))
+    with sqlite3.connect(str(target)) as c:
+        c.executescript(SCHEMA)
+
+    real_populate = database._populate_targets
+
+    def populate_then_server_writes(conn):
+        real_populate(conn)
+        with sqlite3.connect(str(target)) as server:
+            server.execute(
+                "INSERT INTO target_notes(object, obsdate, instrument, note) "
+                "VALUES ('MID-BUILD', '', '', 'x')"
+            )
+
+    monkeypatch.setattr(database, "_populate_targets", populate_then_server_writes)
+
+    build_db(str(target))
+
+    with sqlite3.connect(str(target)) as c:
+        assert c.execute(
+            "SELECT COUNT(*) FROM target_notes WHERE object = 'MID-BUILD'"
+        ).fetchone()[0] == 1
+
+
+def test_build_db_matches_a_non_default_page_size(tmp_path, monkeypatch, no_real_obslog_scan):
+    """The backup API cannot change a WAL destination's page size, so the
+    rebuilt image has to be built with the live file's."""
+    from muscat_db.database import build_db
+
+    target = tmp_path / "muscat.db"
+    monkeypatch.setenv("MUSCAT_DB_PATH", str(target))
+    with sqlite3.connect(str(target)) as c:
+        c.execute("PRAGMA page_size=8192;")
+        c.execute("PRAGMA journal_mode=WAL;")
+        c.execute("CREATE TABLE db_meta (key TEXT PRIMARY KEY, value TEXT)")
+
+    build_db(str(target))
+
+    with sqlite3.connect(str(target)) as c:
+        assert c.execute("PRAGMA page_size").fetchone()[0] == 8192
+        assert c.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert c.execute("SELECT COUNT(*) FROM db_meta WHERE key='last_build_at'").fetchone()[0] == 1
+
+
+def test_build_db_leaves_no_tmp_image_behind(tmp_path, monkeypatch, no_real_obslog_scan):
+    from muscat_db.database import build_db
+
+    target = tmp_path / "muscat.db"
+    monkeypatch.setenv("MUSCAT_DB_PATH", str(target))
+
+    build_db(str(target))
+
+    assert sorted(p.name for p in tmp_path.iterdir() if ".tmp" in p.name) == []
+
+
+def test_build_db_copies_into_live_through_the_connection_policy(
+    tmp_path, monkeypatch, no_real_obslog_scan,
+):
+    """The copy writes the whole database into the live file, so it must use
+    the same WAL + synchronous=NORMAL connection as every other writer."""
+    import muscat_db.database as database
+
+    target = tmp_path / "muscat.db"
+    monkeypatch.setenv("MUSCAT_DB_PATH", str(target))
+    opened = []
+    real_connect = database.connect
+
+    def recording_connect(path=None, **kwargs):
+        conn = real_connect(path, **kwargs)
+        opened.append((path, _policy(conn)))
+        return conn
+
+    monkeypatch.setattr(database, "connect", recording_connect)
+    database.build_db(str(target))
+
+    assert (str(target), ("wal", _SYNCHRONOUS_NORMAL, 0)) in opened
