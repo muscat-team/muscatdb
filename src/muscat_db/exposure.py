@@ -37,7 +37,7 @@ except ImportError:
     _HAS_ASTROQUERY = False
 
 from muscat_db.instruments import INSTRUMENTS
-from muscat_db.database import db_path, SCHEMA
+from muscat_db.database import connect, db_path, SCHEMA
 
 logger = logging.getLogger(__name__)
 
@@ -812,8 +812,7 @@ _EXPOSURE_SCHEMA_LOCK = threading.Lock()
 def _conn():
     """Get a connection to the main muscat DB."""
     path = db_path()
-    c = sqlite3.connect(path, timeout=30)
-    c.execute("PRAGMA journal_mode=WAL")
+    c = connect(path)
     if path not in _EXPOSURE_SCHEMA_PATHS:
         with _EXPOSURE_SCHEMA_LOCK:
             if path not in _EXPOSURE_SCHEMA_PATHS:

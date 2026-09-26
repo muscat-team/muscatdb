@@ -426,8 +426,12 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     for sql in _MIGRATIONS:
         try:
             conn.execute(sql)
-        except sqlite3.OperationalError:
-            pass  # column already exists
+        except sqlite3.OperationalError as exc:
+            # Only "already applied" is expected here. Anything else -- a
+            # locked or read-only database, a typo in the SQL -- used to be
+            # swallowed too, silently leaving the schema unmigrated.
+            if "duplicate column name" not in str(exc):
+                raise
 
 
 def _apply_schema(conn: sqlite3.Connection) -> None:
@@ -1059,11 +1063,9 @@ def ingest_date(db_path: str, instrument: str, obsdate: str, progress=None) -> i
     if not csv_jobs:
         raise FileNotFoundError(f"No obslog CSVs found for {instrument} {obsdate}")
 
-    conn = sqlite3.connect(db_path, timeout=30)
+    conn = connect(db_path)
     try:
         conn.create_aggregate("coord_repr", 2, CoordRepr)
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA synchronous=NORMAL;")
         conn.execute("PRAGMA cache_size=100000;")
         # Keep GROUP BY / sort spills on the DB's own (roomy) volume, not /tmp.
         _set_temp_store_dir(conn, db_path)
@@ -1213,7 +1215,7 @@ def clear_stale_date(db_path: str, instrument: str, obsdate: str) -> None:
     to a different night. Without this, the pre-move rows for that date would
     survive forever, pointing at files that no longer live there.
     """
-    conn = sqlite3.connect(db_path, timeout=30)
+    conn = connect(db_path)
     try:
         # _replace_target_rows -> _target_rows calls the coord_repr aggregate.
         conn.create_aggregate("coord_repr", 2, CoordRepr)
@@ -1828,6 +1830,50 @@ def db_path() -> str:
     return str(pathlib.Path(os.environ.get("MUSCAT_DB_PATH", "muscat.db")).resolve())
 
 
+# Connection policy for the live database (issue #182, finding 5). Every
+# connection to it is opened by connect() below, so the rules live in one place:
+#
+# * busy timeout -- sqlite3's ``timeout`` argument *is* sqlite3_busy_timeout, so
+#   writers wait that long for the lock before "database is locked". 30 s by
+#   default; callers on a request path may pass less.
+# * journal_mode=WAL -- readers never block the writer or each other. The mode
+#   is persistent in the file; asserting it per connection is a no-op once set
+#   and makes a freshly created file WAL from its first connection.
+# * synchronous=NORMAL -- in WAL mode a crash or power loss can at worst roll
+#   back the most recent commits; it cannot corrupt the file. That guarantee
+#   needs WAL (NORMAL under a rollback journal *can* corrupt), which is why
+#   the two are set together here. The one deliberate exception is
+#   build_db's throwaway .tmp image, built with synchronous=OFF because a
+#   crash discards it anyway.
+# * foreign_keys stays OFF (SQLite's default), deliberately. The schema
+#   declares foreign keys that have never been enforced; turning enforcement
+#   on changes behaviour -- INSERT OR REPLACE on a parent row deletes it and
+#   cascades to its children, existing orphan rows start failing writes, and
+#   build_db's verbatim table restore would have to run in dependency order.
+#   That needs a foreign_key_check of production data first, so it is a
+#   separate change (#184).
+_SYNCHRONOUS = "NORMAL"
+
+
+def connect(path: str | None = None, *, timeout: float = 30.0) -> sqlite3.Connection:
+    """Open a connection to the live database with the policy above applied.
+
+    Prefer :func:`get_conn`, which also guarantees the connection is closed;
+    this is for the few callers that manage the connection's lifetime
+    themselves.
+    """
+    if path is None:
+        path = db_path()
+    conn = sqlite3.connect(path, timeout=timeout)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute(f"PRAGMA synchronous={_SYNCHRONOUS};")
+    except BaseException:
+        conn.close()
+        raise
+    return conn
+
+
 @contextmanager
 def get_conn(
     path: str | None = None,
@@ -1839,13 +1885,11 @@ def get_conn(
 
     Guarantees the connection is closed even if the body raises — the previous
     open-coded ``connect(...) ... close()`` helpers leaked the handle on any
-    exception between the two — and standardizes the busy ``timeout`` (default
-    30s) so writers don't fail fast under WAL contention. Schema-ensure and
+    exception between the two — and applies the connection policy of
+    :func:`connect` (busy timeout, WAL, synchronous). Schema-ensure and
     migration calls stay at the call site because they vary per table.
     """
-    if path is None:
-        path = db_path()
-    conn = sqlite3.connect(path, timeout=timeout)
+    conn = connect(path, timeout=timeout)
     try:
         if row_factory is not None:
             conn.row_factory = row_factory

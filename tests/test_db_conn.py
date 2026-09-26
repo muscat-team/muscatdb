@@ -171,3 +171,64 @@ def test_build_db_clears_sidecars_held_by_a_live_connection(tmp_path, monkeypatc
         assert not (tmp_path / "muscat.db-shm").exists()
     finally:
         live.close()
+
+
+# -- connection policy (issue #182, finding 5) --------------------------------
+
+_SYNCHRONOUS_NORMAL = 1
+
+
+def _policy(conn):
+    return (
+        conn.execute("PRAGMA journal_mode").fetchone()[0],
+        conn.execute("PRAGMA synchronous").fetchone()[0],
+        conn.execute("PRAGMA foreign_keys").fetchone()[0],
+    )
+
+
+def test_get_conn_applies_wal_and_synchronous_normal(tmp_path):
+    with get_conn(str(tmp_path / "fresh.db")) as conn:
+        assert _policy(conn) == ("wal", _SYNCHRONOUS_NORMAL, 0)
+
+
+def test_connect_applies_the_same_policy(tmp_path):
+    from muscat_db.database import connect
+
+    conn = connect(str(tmp_path / "fresh.db"))
+    try:
+        assert _policy(conn) == ("wal", _SYNCHRONOUS_NORMAL, 0)
+    finally:
+        conn.close()
+
+
+def test_exposure_connection_uses_the_policy(tmp_path, monkeypatch):
+    from muscat_db import exposure
+
+    monkeypatch.setenv("MUSCAT_DB_PATH", str(tmp_path / "exp.db"))
+    conn = exposure._conn()
+    try:
+        assert _policy(conn) == ("wal", _SYNCHRONOUS_NORMAL, 0)
+    finally:
+        conn.close()
+
+
+def test_migrations_tolerate_already_applied_columns(tmp_path):
+    from muscat_db.database import _apply_schema
+
+    with get_conn(str(tmp_path / "m.db")) as conn:
+        _apply_schema(conn)
+        _apply_schema(conn)  # every ALTER now hits "duplicate column name"
+
+
+def test_migrations_surface_real_failures(tmp_path, monkeypatch):
+    """A failing migration used to be swallowed as "column already exists",
+    silently leaving the schema unmigrated."""
+    import muscat_db.database as database
+
+    monkeypatch.setattr(
+        database, "_MIGRATIONS",
+        [*database._MIGRATIONS, "ALTER TABLE no_such_table ADD COLUMN x TEXT"],
+    )
+    with get_conn(str(tmp_path / "m.db")) as conn:
+        with pytest.raises(sqlite3.OperationalError, match="no such table"):
+            database._apply_schema(conn)
