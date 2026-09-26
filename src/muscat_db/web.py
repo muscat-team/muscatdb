@@ -263,6 +263,20 @@ async def _job_reconciliation_loop() -> None:
             await asyncio.sleep(interval)
 
 
+def _resolve_stale_cancelling() -> None:
+    """Startup sweep for rows a restart left mid-cancel (issue #182, finding 4)."""
+    from muscat_db.job_store import get_job_store
+    from muscat_db.jobs import PIPELINE_JOB_TYPES
+
+    try:
+        n = get_job_store().resolve_stale_cancelling(PIPELINE_JOB_TYPES)
+    except Exception:
+        logger.exception("startup: could not resolve stale 'cancelling' job rows")
+        return
+    if n:
+        print(f"[startup] resolved {n} stale 'cancelling' job row(s) to 'cancelled'")
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     """Create the database and schema on startup if they don't exist."""
@@ -296,6 +310,7 @@ async def _lifespan(app: FastAPI):
     # future change to that default can't silently make this process's own
     # launches collide with a standalone `muscatdb worker` process's.
     set_owner("web")
+    _resolve_stale_cancelling()
     reconcile_task = asyncio.create_task(_job_reconciliation_loop())
     observation_monitor = None
     if os.environ.get("MUSCAT_LCO_MONITOR_ENABLED", "1") == "1":
