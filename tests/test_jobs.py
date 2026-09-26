@@ -379,6 +379,37 @@ class TestPidFileProcessAlive:
         assert jobs.pid_file_process_alive(pid_file) is False
 
 
+    def test_group_member_outliving_the_recorded_pid_keeps_job_alive(self, tmp_path):
+        """Launch the way the pipelines do (start_new_session=True, record the
+        child's PID), let that recorded process exit while a descendant it
+        spawned keeps running -- as a `conda run` interpreter or a
+        multiprocessing worker would. The job is not orphaned yet, so
+        reconcile must not requeue it into the same run directory
+        (issue #182, finding 3)."""
+        import signal
+        import subprocess
+        import sys
+
+        leader = subprocess.Popen(
+            [sys.executable, "-c",
+             "import subprocess; subprocess.Popen(['sleep', '30'])"],
+            start_new_session=True,
+        )
+        pid_file = tmp_path / "run.pid"
+        pid_file.write_text(str(leader.pid))
+        leader.wait(timeout=10)  # recorded process has exited and been reaped
+        try:
+            assert jobs.is_pid_running(leader.pid) is False
+            assert jobs.pid_file_process_alive(pid_file) is True
+        finally:
+            os.killpg(leader.pid, signal.SIGKILL)
+
+        deadline = time.time() + 10
+        while jobs.is_process_group_alive(leader.pid) and time.time() < deadline:
+            time.sleep(0.05)
+        assert jobs.pid_file_process_alive(pid_file) is False
+
+
 class TestNextReconcileAttempt:
     def test_first_attempt_retries(self, monkeypatch):
         monkeypatch.setattr(jobs, "_MAX_RECONCILE_ATTEMPTS", 5)

@@ -416,11 +416,23 @@ def is_pid_running(pid: int) -> bool:
         return False
 
 
+def is_process_group_alive(pgid: int) -> bool:
+    """True if any process is still a member of process group *pgid*.
+
+    Same failure semantics as :func:`is_pid_running`: a lookup or permission
+    failure reads as "nothing live visible to us"."""
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except OSError:
+        return False
+
+
 def pid_file_process_alive(pid_file: Path) -> bool:
-    """True if *pid_file* (one PID per line, written by a pipeline at launch)
-    names a still-running process. A missing/unreadable file, or a PID that is
-    no longer alive, both read as False -- the caller then treats the
-    underlying work as genuinely gone rather than merely between heartbeats.
+    """True if the job whose launch PID is recorded in *pid_file* still has any
+    live process. A missing/unreadable file, or no live process, both read as
+    False -- the caller then treats the underlying work as genuinely gone
+    rather than merely between heartbeats.
 
     Shared by all three pipelines' orphan-reconciliation checks: the process
     that *launched* a job (and held the in-memory Popen handle) can be gone --
@@ -428,16 +440,24 @@ def pid_file_process_alive(pid_file: Path) -> bool:
     keeps running independently. This is what stops reclaim-with-attempt-limit
     from relaunching a second run into a directory the first one is still
     writing.
+
+    Every pipeline launches with ``start_new_session=True`` and records that
+    child's PID, so the recorded PID is also the job's process-group id. The
+    group is checked as well as the PID itself: the recorded process can exit
+    while other members still run and write into the run directory -- a
+    ``conda run`` wrapper's interpreter, or multiprocessing workers finishing
+    their current task -- and relaunching then would clobber their output
+    (issue #182, finding 3).
     """
     if not pid_file.is_file():
         return False
     try:
         with open(pid_file) as f:
             pid = int(f.read().strip())
-        return is_pid_running(pid)
     except Exception:
         _logger.debug("failed to read pid file %s", pid_file, exc_info=True)
         return False
+    return is_pid_running(pid) or is_process_group_alive(pid)
 
 
 def next_reconcile_attempt(attempts: int) -> tuple[str, int]:
