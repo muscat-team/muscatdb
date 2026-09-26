@@ -847,14 +847,90 @@ def _restore_table(conn: sqlite3.Connection, table: str, rows: list[dict]) -> No
         )
 
 
+def _page_size(db_path: str) -> int:
+    """Page size of the existing database at *db_path*, or SQLite's default."""
+    if not os.path.exists(db_path):
+        return 4096
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=30)
+    try:
+        return int(conn.execute("PRAGMA page_size").fetchone()[0])
+    finally:
+        conn.close()
+
+
+def _read_app_owned_tables(db_path: str) -> dict[str, list[dict]]:
+    """Every row of every app-owned table in *db_path*. Rows are copied
+    verbatim (all columns) so nothing is silently dropped; missing tables or
+    an absent file read as empty, for older or fresh databases."""
+    preserved: dict[str, list[dict]] = {t: [] for t in _APP_OWNED_TABLES}
+    if not os.path.exists(db_path):
+        return preserved
+    try:
+        with get_conn(db_path, row_factory=sqlite3.Row) as old_conn:
+            _apply_schema(old_conn)
+            for table in _APP_OWNED_TABLES:
+                try:
+                    rows = old_conn.execute(f"SELECT * FROM {table}").fetchall()
+                    preserved[table] = [dict(r) for r in rows]
+                except sqlite3.OperationalError:
+                    pass
+    except sqlite3.OperationalError:
+        pass
+    return preserved
+
+
+# Busy timeout for the swap connection's own statements (the journal_mode
+# probe). The copy itself is retried by sqlite3's backup() every 250 ms for as
+# long as another connection holds the write lock; readers never block it (WAL).
+_SWAP_BUSY_TIMEOUT_S = 120.0
+
+
+def _copy_into_live(src_path: str, db_path: str) -> None:
+    """Make *db_path*'s content identical to *src_path*, in place, as a single
+    SQLite write transaction.
+
+    The previous swap deleted the live file's ``-wal``/``-shm`` and then
+    ``os.replace``d the new image over it while the server still had it open.
+    Connections holding the old inode kept writing into an unlinked WAL (writes
+    lost), and a connection opening between the delete and the rename created
+    fresh sidecars for the *old* image that then sat beside the *new* one and
+    were replayed into it -- the corruption vector implicated in #157.
+
+    Copying through the backup API never renames the file or touches its
+    sidecars: SQLite writes the new pages through the destination's own WAL
+    under its normal locking, so every open connection simply sees the new
+    content at its next read transaction, exactly as after any other commit.
+    Writers wait (busy timeout) for the ~seconds the copy holds the write lock.
+    """
+    src = sqlite3.connect(f"file:{src_path}?mode=ro", uri=True)
+    try:
+        dst = sqlite3.connect(db_path, timeout=_SWAP_BUSY_TIMEOUT_S)
+        try:
+            dst.execute("PRAGMA journal_mode=WAL;")
+            src.backup(dst)
+            # The copy lands in the WAL (as large as the database). Fold it
+            # back now if no reader is pinning an older snapshot; otherwise
+            # the regular auto-checkpoint finishes the job later.
+            dst.execute("PRAGMA busy_timeout=2000;")
+            busy = dst.execute("PRAGMA wal_checkpoint(TRUNCATE);").fetchone()[0]
+            if busy:
+                logger.info("build_db: post-swap checkpoint deferred (readers active)")
+        finally:
+            dst.close()
+    finally:
+        src.close()
+
+
 def build_db(db_path: str, progress=None) -> int:
     """Rebuild the SQLite database from obslog CSVs.
 
     If ``progress`` is a ``rich.progress.Progress`` instance, three tasks are
     reported: CSV ingestion, summary aggregation, and targets aggregation.
 
-    Builds to a temporary file first, then atomically replaces the target
-    so a concurrently-running web server is never blocked by ``DROP TABLE``.
+    Builds to a temporary file first so a concurrently-running web server is
+    never blocked by ``DROP TABLE``, then copies it into the target with
+    SQLite's online backup API (:func:`_copy_into_live`) instead of renaming it
+    over the live file -- see that function for why (issue #182, finding 2).
     """
     tmp_path = db_path + ".tmp"
 
@@ -865,32 +941,13 @@ def build_db(db_path: str, progress=None) -> int:
     _remove_sqlite_tmp(tmp_path)
 
     # Snapshot the live database before touching anything, and refuse to
-    # rebuild over one that fails integrity_check: the swap below would carry
+    # rebuild over one that fails integrity_check: the copy below would carry
     # its app-owned rows forward and destroy the last good copy's context
     # (issue #182, finding 1). The snapshot is the disaster-recovery point for
     # a rebuild that goes wrong after this point.
     if os.path.exists(db_path):
         db_backup.snapshot(db_path)
         db_backup.prune(db_path)
-
-    # Preserve every app-owned table (user notes, manual identification
-    # overrides, exposure calibration, job history, saved ephemeris views) from
-    # the existing database so the temp-file rebuild of the observation-derived
-    # tables doesn't wipe them. Rows are copied verbatim (all columns) so nothing
-    # is silently dropped; missing tables/columns are tolerated for older DBs.
-    preserved: dict[str, list[dict]] = {t: [] for t in _APP_OWNED_TABLES}
-    if os.path.exists(db_path):
-        try:
-            with get_conn(db_path, row_factory=sqlite3.Row) as old_conn:
-                _apply_schema(old_conn)
-                for table in _APP_OWNED_TABLES:
-                    try:
-                        rows = old_conn.execute(f"SELECT * FROM {table}").fetchall()
-                        preserved[table] = [dict(r) for r in rows]
-                    except sqlite3.OperationalError:
-                        pass
-        except sqlite3.OperationalError:
-            pass
 
     # Phase 1: discover all CSVs (cheap walk so we can size the progress bar).
     csv_jobs = _discover_csv_jobs()
@@ -900,6 +957,10 @@ def build_db(db_path: str, progress=None) -> int:
         # Robust coordinate picker (filters malformed strings, keeps RA/Dec
         # paired, takes the median) — replaces the old MAX() string aggregation.
         conn.create_aggregate("coord_repr", 2, CoordRepr)
+        # The backup API cannot change a WAL-mode destination's page size, so
+        # the image must be built with the live file's. Only settable before
+        # the first table exists and before WAL is enabled.
+        conn.execute(f"PRAGMA page_size={_page_size(db_path)};")
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA synchronous=OFF;")
         conn.execute("PRAGMA cache_size=100000;")
@@ -956,31 +1017,30 @@ def build_db(db_path: str, progress=None) -> int:
             (datetime.datetime.now().isoformat(),)
         )
 
-        # Restore every preserved app-owned table verbatim so build-db never
-        # wipes user notes, identification overrides, exposure calibration, job
-        # history, or saved ephemeris views.
+        conn.commit()
+
+        # Carry every app-owned table (user notes, identification overrides,
+        # exposure calibration, job history, chat, ...) over verbatim. Read as
+        # late as possible: the rebuild above takes minutes, and anything the
+        # running server wrote before this read is kept, whereas the old
+        # read-at-start dropped every write made during the build.
+        preserved = _read_app_owned_tables(db_path)
         for table in _APP_OWNED_TABLES:
             _restore_table(conn, table, preserved.get(table) or [])
-
         conn.commit()
         conn.close()
 
-        # Never swap in a rebuilt image that is itself malformed.
+        # Never copy in a rebuilt image that is itself malformed.
         if not db_backup.integrity_ok(tmp_path):
             raise db_backup.IntegrityError(
                 f"rebuilt database {tmp_path} failed PRAGMA integrity_check; "
                 f"{db_path} left untouched"
             )
-    except Exception:
-        _remove_sqlite_tmp(tmp_path)
-        raise
 
-    for suffix in ("-wal", "-shm"):
-        try:
-            os.remove(db_path + suffix)
-        except OSError:
-            pass
-    os.replace(tmp_path, db_path)
+        _copy_into_live(tmp_path, db_path)
+    finally:
+        _remove_sqlite_tmp(tmp_path)
+
     clear_all_caches()
     return count
 
