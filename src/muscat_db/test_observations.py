@@ -14,7 +14,7 @@ import sqlite3
 import uuid
 from typing import Any
 
-from muscat_db.database import db_path
+from muscat_db.database import connect, db_path
 
 ANALYSIS_VERSION = "test-observation-v1"
 # qhy600 is schedulable (LCO instrument_type "0M4-SCICAM-QHY600", confirmed
@@ -160,7 +160,7 @@ def request_configurations(plan: dict, base: dict) -> list[dict]:
 
 
 def _connect(path=None):
-    conn = sqlite3.connect(path or db_path(), timeout=30)
+    conn = connect(path or db_path())
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
     return conn
