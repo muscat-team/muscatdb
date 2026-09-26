@@ -353,6 +353,32 @@ def resolve_job_state(
     return terminal_job_state(rc, job.cancelled, job.log_path, cfg), rc, True
 
 
+# Returncode recorded for a cancel before the process has actually exited; the
+# real signal exit code replaces it once the job goes terminal.
+CANCELLED_RC = -1
+
+# Pipeline job types whose jobs-table rows sync_jobs() owns (exposure
+# calibration keeps its own table and its own cancel flow).
+PIPELINE_JOB_TYPES = ("photometry", "transit_fit", "ttv_fit")
+
+
+def persisted_state(state: str, returncode: int | None) -> tuple[str, int | None]:
+    """Map a live :func:`resolve_job_state` state to what the jobs table stores.
+
+    ``finalizing`` is live-view-only and persists as ``running``. ``cancelling``
+    persists as ``cancelled``: ``cancel_run`` already wrote ``cancelled``
+    durably, and writing the live ``cancelling`` back over it would leave a row
+    that no reconcile pass ever resolves if the server restarts before the
+    process dies (orphan reconcile only looks at ``running`` rows, the pending
+    drain only at ``pending`` ones) -- issue #182, finding 4.
+    """
+    if state == "finalizing":
+        return "running", None
+    if state == "cancelling":
+        return "cancelled", CANCELLED_RC
+    return state, returncode
+
+
 # --------------------------- orphan reconciliation ---------------------------
 #
 # Shared by all three sync_jobs() implementations' "is this running row truly

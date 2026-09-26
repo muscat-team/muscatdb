@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 # Imported as a module (not by name) so the concrete store sees monkeypatched
 # muscat_db.database.save_job / get_persisted_jobs in tests and any runtime swap.
 from muscat_db import database
+from muscat_db.jobs import CANCELLED_RC as _CANCELLED_RC
 
 if TYPE_CHECKING:
     from psycopg_pool import ConnectionPool
@@ -124,6 +125,17 @@ class JobRepository(Protocol):
 
     def delete(self, key: str) -> None:
         """Remove the job row for *key* if present (no-op when absent)."""
+        ...
+
+    def resolve_stale_cancelling(self, types: tuple[str, ...]) -> int:
+        """Terminally resolve every *types* row stuck in ``state='cancelling'``
+        to ``cancelled``; return how many rows changed.
+
+        No live process persists ``cancelling`` for these types any more (see
+        :func:`muscat_db.jobs.persisted_state`), so any such row is a leftover
+        from a restart that landed mid-cancel: orphan reconcile never looks at
+        it and the pending drain never picks it up, so without this sweep it
+        shows as a live job forever. Called once at process startup."""
         ...
 
 
@@ -309,6 +321,23 @@ class DatabaseJobStore(JobRepository, JobQueue, JobConcurrency):
                 conn.commit()
         except Exception:
             logger.debug("failed to update heartbeat for job %s", key, exc_info=True)
+
+    def resolve_stale_cancelling(self, types: tuple[str, ...]) -> int:
+        if not types:
+            return 0
+        placeholders = ",".join("?" for _ in types)
+        with database.get_conn() as conn:
+            cur = conn.execute(
+                f"UPDATE jobs SET state = 'cancelled', "
+                f"returncode = COALESCE(returncode, {_CANCELLED_RC}), "
+                "error_desc = COALESCE(NULLIF(error_desc, ''), 'Cancelled by user') "
+                f"WHERE state = 'cancelling' AND type IN ({placeholders})",
+                types,
+            )
+            conn.commit()
+        if cur.rowcount:
+            database.clear_all_caches()
+        return cur.rowcount
 
     def delete(self, key: str) -> None:
         # Best-effort, matching the prior inline behaviour: a failed delete must
@@ -703,6 +732,19 @@ class PostgresJobStore(JobRepository, JobQueue, JobConcurrency):
                 )
         except Exception:
             logger.debug("failed to update heartbeat for job %s", key, exc_info=True)
+
+    def resolve_stale_cancelling(self, types: tuple[str, ...]) -> int:
+        if not types:
+            return 0
+        with self._pool.connection() as conn:
+            cur = conn.execute(
+                "UPDATE jobs SET state = 'cancelled', "
+                f"returncode = COALESCE(returncode, {_CANCELLED_RC}), "
+                "error_desc = COALESCE(NULLIF(error_desc, ''), 'Cancelled by user') "
+                "WHERE state = 'cancelling' AND type = ANY(%s)",
+                (list(types),),
+            )
+            return cur.rowcount
 
     def delete(self, key: str) -> None:
         try:

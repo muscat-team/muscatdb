@@ -1217,8 +1217,7 @@ def sync_jobs() -> None:
                 except OSError:
                     pass
 
-            persist_state = "running" if state == "finalizing" else state
-            persist_rc = None if state == "finalizing" else rc
+            persist_state, persist_rc = jobs.persisted_state(state, rc)
             existing = db_by_key.get(db_key)
             if job.state not in ("running", "cancelling") and job.elapsed is not None:
                 elapsed = job.elapsed
@@ -1257,7 +1256,7 @@ def sync_jobs() -> None:
                 run_name=job.run_name,
             )
 
-            if persist_state in ("done", "error", "cancelled"):
+            if is_terminal and persist_state in ("done", "error", "cancelled"):
                 database.refresh_target_status(job.target)
 
         for db_key in running_keys:

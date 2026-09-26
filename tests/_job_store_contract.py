@@ -54,6 +54,24 @@ class JobStoreContractTests:
         save(store, target="NEW", state="done", started_at=200.0)
         assert [r["target"] for r in store.all()] == ["NEW", "OLD"]
 
+    def test_resolve_stale_cancelling_sweeps_only_requested_types(self, store):
+        save(store, target="A", state="cancelling", started_at=100.0)
+        save(store, target="B", state="cancelling", started_at=101.0, type_="transit_fit")
+        save(store, target="C", state="running", started_at=102.0)
+        save(store, target="D", state="cancelling", started_at=103.0, type_="other")
+
+        n = store.resolve_stale_cancelling(("photometry", "transit_fit"))
+
+        assert n == 2
+        by_target = {r["target"]: r for r in store.all()}
+        assert by_target["A"]["state"] == "cancelled"
+        assert by_target["A"]["returncode"] == -1
+        assert by_target["A"]["error_desc"] == "Cancelled by user"
+        assert by_target["B"]["state"] == "cancelled"
+        assert by_target["C"]["state"] == "running"
+        assert by_target["D"]["state"] == "cancelling"
+        assert store.resolve_stale_cancelling(("photometry", "transit_fit")) == 0
+
     def test_delete_removes_only_that_key(self, store):
         save(store, target="A", state="done", started_at=100.0)
         save(store, target="B", state="done", started_at=101.0)
