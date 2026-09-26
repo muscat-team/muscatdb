@@ -516,7 +516,7 @@ def test_target_detail_has_no_standalone_target_nav_item(mock_db, monkeypatch):
     plumbing, just the shared photometry/transit-fit/ephemeris ones."""
     monkeypatch.setattr(
         "muscat_db.web._get_datasets_for_normalized_target",
-        lambda _db, norm_name: ([], "2026-07-01"),
+        lambda _db, norm_name, _denied=frozenset(): ([], "2026-07-01"),
     )
 
     response = TestClient(app).get("/target?name=V1298Tau_b")
@@ -536,7 +536,7 @@ def test_target_detail_has_lco_schedule_and_archive_buttons(mock_db, monkeypatch
     web._index_cache.clear()
     monkeypatch.setattr(
         "muscat_db.web._get_datasets_for_normalized_target",
-        lambda _db, norm_name: ([], "2026-07-01"),
+        lambda _db, norm_name, _denied=frozenset(): ([], "2026-07-01"),
     )
     monkeypatch.setattr(web, "_target_tic_id", lambda target_name, datasets=None: "12345")
 
@@ -571,7 +571,7 @@ def test_target_detail_harps_panel_is_lazy_loaded(mock_db, monkeypatch):
     monkeypatch.setattr(
         web,
         "_get_datasets_for_normalized_target",
-        lambda _db, norm_name: ([
+        lambda _db, norm_name, _denied=frozenset(): ([
             {
                 "object": "HD 209458",
                 "date": "260101",
@@ -610,7 +610,7 @@ def test_target_harps_rv_api_returns_table_payload(mock_db, monkeypatch):
     monkeypatch.setattr(
         web,
         "_get_datasets_for_normalized_target",
-        lambda _db, norm_name: ([
+        lambda _db, norm_name, _denied=frozenset(): ([
             {
                 "object": "HD 209458",
                 "date": "260101",
@@ -2874,7 +2874,7 @@ def test_target_page_renders_propid_column(mock_db, monkeypatch):
     monkeypatch.setattr(
         web,
         "_get_datasets_for_normalized_target",
-        lambda _db, norm_name: ([
+        lambda _db, norm_name, _denied=frozenset(): ([
             {
                 "object": "WASP-10", "date": "260101", "instrument": "muscat3",
                 "filters": ["gp"],

@@ -665,7 +665,16 @@ def _insert_summary_rows(conn: sqlite3.Connection, rows: list[tuple]) -> None:
     )
 
 
-def _target_rows(conn: sqlite3.Connection, objects: set[str] | None = None) -> list[tuple]:
+def _target_rows(
+    conn: sqlite3.Connection,
+    objects: set[str] | None = None,
+    exclude_proposals: frozenset[str] = frozenset(),
+) -> list[tuple]:
+    """Per-object rollup rows in ``targets`` insert order.
+
+    ``exclude_proposals`` (upper-cased, issue #144) drops summaries under
+    those proposals before aggregating, giving a viewer-specific rollup.
+    """
     where = [
         "object IS NOT NULL",
         "TRIM(object) <> ''",
@@ -692,6 +701,12 @@ def _target_rows(conn: sqlite3.Connection, objects: set[str] | None = None) -> l
     if objects:
         where.append(f"object IN ({', '.join('?' for _ in objects)})")
         params.extend(sorted(objects))
+    if exclude_proposals:
+        where.append(
+            "COALESCE(proposal_id, '') COLLATE NOCASE NOT IN "
+            f"({', '.join('?' for _ in exclude_proposals)})"
+        )
+        params.extend(sorted(exclude_proposals))
     cur = conn.execute(
         f"""SELECT
               object,
@@ -1334,8 +1349,11 @@ def objects_with_restricted_proposal(
         return set()
     with get_conn(db_path) as conn:
         placeholders = ",".join("?" * len(restricted))
+        # summaries.proposal_id has no NOCASE collation, but the ids in
+        # restricted_proposals are admin-typed: match them case-insensitively.
         cur = conn.execute(
-            f"SELECT DISTINCT object FROM summaries WHERE proposal_id IN ({placeholders})",
+            "SELECT DISTINCT object FROM summaries "
+            f"WHERE proposal_id COLLATE NOCASE IN ({placeholders})",
             tuple(restricted),
         )
         return {r[0] for r in cur.fetchall() if r[0]}
@@ -1395,32 +1413,96 @@ def _targets_from_conn(conn: sqlite3.Connection) -> list[dict]:
            LEFT JOIN target_notes n ON n.object = t.object AND n.obsdate = '' AND n.instrument = ''
            ORDER BY t.object COLLATE NOCASE"""
     )
-    result = []
-    for r in cur.fetchall():
-        dates = sorted(d for d in set((r[4] or "").split(",")) if _is_obsdate(d)) if r[4] else []
-        filters = sorted(f for f in set((r[5] or "").split(",")) if f) if r[5] else []
-        total_s = r[6] or 0.0
-        date_to_inst = {d: i for d, i in _parse_inst_dates(r[13]).items() if _is_obsdate(d)}
+    return [
+        _target_dict(
+            obj=r[0], n_frames=r[2], instruments=r[3], dates=r[4], filters=r[5],
+            total_exptime=r[6], ra=r[7], declination=r[8], airmass_min=r[9],
+            airmass_max=r[10], is_identified=r[11], note=r[12], inst_dates=r[13],
+            phot=r[14], fit=r[15],
+        )
+        for r in cur.fetchall()
+    ]
 
-        result.append({
-            "object": r[0],
-            "n_dates": len(dates),
-            "n_frames": r[2],
-            "instruments": sorted(set((r[3] or "").split(","))) if r[3] else [],
-            "dates": dates,
-            "filters": filters,
-            "total_exptime_hr": round(total_s / 3600.0, 2),
-            "ra": r[7] or "",
-            "declination": r[8] or "",
-            "airmass_min": r[9],
-            "airmass_max": r[10],
-            "is_identified": bool(r[11]),
-            "note": r[12] or "",
-            "date_to_inst": date_to_inst,
-            "filter_chips": _normalize_filters(filters),
-            "phot": r[14],
-            "fit": r[15],
-        })
+
+def _target_dict(
+    *, obj, n_frames, instruments, dates, filters, total_exptime, ra, declination,
+    airmass_min, airmass_max, is_identified, note, inst_dates, phot, fit,
+) -> dict:
+    """One ``get_targets`` row from rollup columns (comma-joined strings as
+    stored in ``targets``)."""
+    date_list = sorted(d for d in set((dates or "").split(",")) if _is_obsdate(d)) if dates else []
+    filter_list = sorted(f for f in set((filters or "").split(",")) if f) if filters else []
+    total_s = total_exptime or 0.0
+    return {
+        "object": obj,
+        "n_dates": len(date_list),
+        "n_frames": n_frames,
+        "instruments": sorted(set((instruments or "").split(","))) if instruments else [],
+        "dates": date_list,
+        "filters": filter_list,
+        "total_exptime_hr": round(total_s / 3600.0, 2),
+        "ra": ra or "",
+        "declination": declination or "",
+        "airmass_min": airmass_min,
+        "airmass_max": airmass_max,
+        "is_identified": bool(is_identified),
+        "note": note or "",
+        "date_to_inst": {
+            d: i for d, i in _parse_inst_dates(inst_dates or "").items() if _is_obsdate(d)
+        },
+        "filter_chips": _normalize_filters(filter_list),
+        "phot": phot,
+        "fit": fit,
+    }
+
+
+def visible_targets(
+    db_path: str, base_rows: list[dict], denied: frozenset[str]
+) -> list[dict]:
+    """Re-derive ``get_targets``-shaped rows for a viewer denied the
+    (upper-cased) proposals in *denied* (issue #144).
+
+    Only objects with at least one summary under a denied proposal are
+    touched: each is re-aggregated from its visible summaries alone, or
+    dropped when none are visible. Every other row of *base_rows* passes
+    through unchanged, and an empty *denied* returns *base_rows* as-is, so
+    unrestricted viewers keep the precomputed fast path. Fields outside the
+    rollup (``note``) are carried over from the base row.
+    """
+    if not denied:
+        return base_rows
+    affected = objects_with_restricted_proposal(db_path, denied)
+    if not affected:
+        return base_rows
+    to_recompute = affected & {r["object"] for r in base_rows}
+    recomputed: dict[str, tuple] = {}
+    if to_recompute:
+        with get_conn(db_path) as conn:
+            conn.create_aggregate("coord_repr", 2, CoordRepr)
+            recomputed = {
+                r[0]: r
+                for r in _target_rows(conn, objects=to_recompute, exclude_proposals=denied)
+            }
+    result = []
+    for row in base_rows:
+        obj = row["object"]
+        if obj not in affected:
+            result.append(row)
+            continue
+        r = recomputed.get(obj)
+        if r is None:
+            continue
+        # _target_rows order: object, n_dates, n_frames, instruments, dates,
+        # inst_dates, filters, total_exptime, ra, declination, airmass_min,
+        # airmass_max, is_identified, phot_status, fit_status.
+        fresh = _target_dict(
+            obj=obj, n_frames=r[2], instruments=r[3], dates=r[4], filters=r[6],
+            total_exptime=r[7], ra=r[8], declination=r[9], airmass_min=r[10],
+            airmass_max=r[11], is_identified=r[12], note=row["note"],
+            inst_dates=r[5], phot=r[13], fit=r[14],
+        )
+        # Keep any caller-applied fields the rollup does not produce.
+        result.append({**row, **fresh})
     return result
 
 

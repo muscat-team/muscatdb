@@ -45,7 +45,7 @@ def test_observed_dates_requires_target(mock_db):
 def test_observed_dates_dedupes_and_reports_across_instruments(mock_db, monkeypatch):
     monkeypatch.setattr(
         "muscat_db.web._get_datasets_for_normalized_target",
-        lambda _db, norm_name: ([
+        lambda _db, norm_name, _denied=frozenset(): ([
             {"instrument": "muscat3", "date": "260102", "object": "WASP-12", "n_frames": 50},
             {"instrument": "muscat4", "date": "260101", "object": "WASP-12", "n_frames": 30},
             # duplicate (e.g. two filters counted separately upstream) collapses to one row
@@ -65,7 +65,7 @@ def test_observed_dates_dedupes_and_reports_across_instruments(mock_db, monkeypa
 def test_observed_dates_empty_for_unknown_target(mock_db, monkeypatch):
     monkeypatch.setattr(
         "muscat_db.web._get_datasets_for_normalized_target",
-        lambda _db, norm_name: ([], "2026-07-01"),
+        lambda _db, norm_name, _denied=frozenset(): ([], "2026-07-01"),
     )
     r = TestClient(app).get("/api/fov/observed-dates?target=NOT-A-REAL-TARGET")
     assert r.status_code == 200
