@@ -919,6 +919,56 @@ def htpasswd_delete(
         pass
 
 
+@htpasswd_app.command("promote")
+def htpasswd_promote(
+    username: str = typer.Argument(..., help="Username"),
+):
+    """Mark an existing user as admin without touching their password.
+
+    ``htpasswd add --admin`` also resets the password, so it cannot promote
+    someone else. This only flips ``users.is_admin``, so it needs write access
+    to the database but not to the htpasswd file.
+    """
+    from muscat_db.database import _ensure_users_schema, db_path, get_conn
+
+    try:
+        entries: dict[str, str] | None = _read_htpasswd()
+    except PermissionError:
+        # 0640 root:www-data in production; the database check below still
+        # catches a typo'd name.
+        entries = None
+        console.print(
+            f"[yellow]Cannot read {_htpasswd_path()}; checking the users table only[/]"
+        )
+    if entries is not None and username not in entries:
+        console.print(f"[red]Error: '{username}' is not in {_htpasswd_path()}[/]")
+        raise typer.Exit(1)
+
+    with get_conn(db_path()) as conn:
+        _ensure_users_schema(conn)
+        row = conn.execute(
+            "SELECT is_admin FROM users WHERE username = ?", (username,)
+        ).fetchone()
+        if row is None and entries is None:
+            console.print(
+                f"[red]Error: '{username}' has no users row; add them with "
+                "`muscat-db htpasswd add` first[/]"
+            )
+            raise typer.Exit(1)
+        if row is not None and row[0]:
+            console.print(f"[yellow]'{username}' is already an admin[/]")
+            return
+        # In the htpasswd file but never logged in: create the row the same
+        # way `htpasswd add` does, then promote it.
+        conn.execute(
+            "INSERT OR IGNORE INTO users (username, display_name) VALUES (?, ?)",
+            (username, username),
+        )
+        conn.execute("UPDATE users SET is_admin = 1 WHERE username = ?", (username,))
+        conn.commit()
+    console.print(f"[green]'{username}' is now an admin[/]")
+
+
 @htpasswd_app.command("list")
 def htpasswd_list():
     """List all users in the nginx htpasswd file."""
