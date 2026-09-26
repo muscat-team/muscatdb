@@ -39,12 +39,12 @@ from __future__ import annotations
 import json
 import logging
 import os
-import sqlite3
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from muscat_db.db_backup import integrity_ok
 from muscat_db.instruments import INSTRUMENTS
 
 logger = logging.getLogger(__name__)
@@ -97,21 +97,6 @@ def _save_checkpoint(path: Path, done: set[str]) -> None:
     os.replace(tmp, path)
 
 
-def _integrity_check_ok(db_path: str) -> bool:
-    conn = sqlite3.connect(db_path, timeout=30)
-    try:
-        row = conn.execute("PRAGMA integrity_check").fetchone()
-        return bool(row) and row[0] == "ok"
-    except sqlite3.DatabaseError:
-        # On a sufficiently corrupt file, some SQLite builds raise straight out
-        # of PRAGMA integrity_check itself instead of returning a non-"ok" row
-        # (observed to vary by linked libsqlite3 version) -- either way, the
-        # database is not sound.
-        return False
-    finally:
-        conn.close()
-
-
 def backfill_propid_for_instrument(
     instrument: str,
     *,
@@ -142,7 +127,7 @@ def backfill_propid_for_instrument(
 
     stats = BackfillStats(instrument=instrument)
 
-    stats.integrity_ok_before = _integrity_check_ok(db_path)
+    stats.integrity_ok_before = integrity_ok(db_path)
     if not stats.integrity_ok_before:
         raise RuntimeError(
             f"refusing to backfill {instrument}: {db_path} already fails "
@@ -186,5 +171,5 @@ def backfill_propid_for_instrument(
         if sleep_s and i < len(candidates) - 1:
             time.sleep(sleep_s)
 
-    stats.integrity_ok_after = _integrity_check_ok(db_path)
+    stats.integrity_ok_after = integrity_ok(db_path)
     return stats

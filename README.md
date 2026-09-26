@@ -176,6 +176,14 @@ runs with a minimal environment; pin it in `.env` too for manual/GUI runs (see
 day's obslog, so a one-off manual `build-db` or `scan` never gets silently
 overwritten by the next nightly run of this job.
 
+`build-db` snapshots the existing database before rebuilding it (SQLite backup
+API, safe while the server is running) to `$MUSCAT_DB_BACKUP_DIR` (default
+`$MUSCAT_TMPDIR`, i.e. `~/temp`) as `muscat.db.nightly-<stamp>.sqlite`, keeping
+the newest `$MUSCAT_DB_BACKUP_KEEP` (default 2). It aborts, leaving the live
+file untouched, if either that snapshot or the freshly built database fails
+`PRAGMA integrity_check`; a failed snapshot is kept with a `.CORRUPT` suffix.
+The integrity checks add roughly 3-4 minutes to the nightly run.
+
 ## Documentation
 
 The published docs site is https://muscat-team.github.io/muscatdb/ (updates when

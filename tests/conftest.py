@@ -95,6 +95,16 @@ def _isolate_proxy_auth_config(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_db_backup_dir(monkeypatch, tmp_path_factory):
+    """Keep build_db()'s pre-rebuild snapshots out of the real ``~/temp``.
+
+    Every build_db() over an existing file now snapshots it first; without
+    this, each such test would write (and prune!) real backups on the host.
+    """
+    monkeypatch.setenv("MUSCAT_DB_BACKUP_DIR", str(tmp_path_factory.mktemp("db-backups")))
+
+
+@pytest.fixture(autouse=True)
 def _browser_request_headers(monkeypatch):
     """Make unsafe TestClient calls match real same-origin browser requests.
 

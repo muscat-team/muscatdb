@@ -17,6 +17,7 @@ from contextlib import contextmanager
 
 from cryptography.fernet import Fernet, InvalidToken
 
+from muscat_db import db_backup
 from muscat_db.instruments import INSTRUMENTS, OBSLOG_BASE
 from muscat_db.cache import clear_all_caches
 from muscat_db.coord import (
@@ -859,6 +860,15 @@ def build_db(db_path: str, progress=None) -> int:
     # any leftover sidecars before opening the new connection.
     _remove_sqlite_tmp(tmp_path)
 
+    # Snapshot the live database before touching anything, and refuse to
+    # rebuild over one that fails integrity_check: the swap below would carry
+    # its app-owned rows forward and destroy the last good copy's context
+    # (issue #182, finding 1). The snapshot is the disaster-recovery point for
+    # a rebuild that goes wrong after this point.
+    if os.path.exists(db_path):
+        db_backup.snapshot(db_path)
+        db_backup.prune(db_path)
+
     # Preserve every app-owned table (user notes, manual identification
     # overrides, exposure calibration, job history, saved ephemeris views) from
     # the existing database so the temp-file rebuild of the observation-derived
@@ -950,6 +960,13 @@ def build_db(db_path: str, progress=None) -> int:
 
         conn.commit()
         conn.close()
+
+        # Never swap in a rebuilt image that is itself malformed.
+        if not db_backup.integrity_ok(tmp_path):
+            raise db_backup.IntegrityError(
+                f"rebuilt database {tmp_path} failed PRAGMA integrity_check; "
+                f"{db_path} left untouched"
+            )
     except Exception:
         _remove_sqlite_tmp(tmp_path)
         raise
