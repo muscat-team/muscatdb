@@ -904,9 +904,8 @@ def _copy_into_live(src_path: str, db_path: str) -> None:
     """
     src = sqlite3.connect(f"file:{src_path}?mode=ro", uri=True)
     try:
-        dst = sqlite3.connect(db_path, timeout=_SWAP_BUSY_TIMEOUT_S)
+        dst = connect(db_path, timeout=_SWAP_BUSY_TIMEOUT_S)
         try:
-            dst.execute("PRAGMA journal_mode=WAL;")
             src.backup(dst)
             # The copy lands in the WAL (as large as the database). Fold it
             # back now if no reader is pinning an older snapshot; otherwise

@@ -336,3 +336,26 @@ def test_build_db_leaves_no_tmp_image_behind(tmp_path, monkeypatch, no_real_obsl
     build_db(str(target))
 
     assert sorted(p.name for p in tmp_path.iterdir() if ".tmp" in p.name) == []
+
+
+def test_build_db_copies_into_live_through_the_connection_policy(
+    tmp_path, monkeypatch, no_real_obslog_scan,
+):
+    """The copy writes the whole database into the live file, so it must use
+    the same WAL + synchronous=NORMAL connection as every other writer."""
+    import muscat_db.database as database
+
+    target = tmp_path / "muscat.db"
+    monkeypatch.setenv("MUSCAT_DB_PATH", str(target))
+    opened = []
+    real_connect = database.connect
+
+    def recording_connect(path=None, **kwargs):
+        conn = real_connect(path, **kwargs)
+        opened.append((path, _policy(conn)))
+        return conn
+
+    monkeypatch.setattr(database, "connect", recording_connect)
+    database.build_db(str(target))
+
+    assert (str(target), ("wal", _SYNCHRONOUS_NORMAL, 0)) in opened
