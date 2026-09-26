@@ -36,7 +36,23 @@ sudo bash deploy/setup-nginx.sh
 sudo env "PATH=$PATH" uv run muscat-db htpasswd add <user>
 uv run muscat-db htpasswd delete <user>
 uv run muscat-db htpasswd list
+
+# Restrict an LCO proposal's observations and grant users access (issue #144)
+uv run muscat-db access restrict <proposal_id> [--description "..."]
+uv run muscat-db access unrestrict <proposal_id>
+uv run muscat-db access grant <user> <proposal_id>
+uv run muscat-db access revoke <user> <proposal_id>
+uv run muscat-db access list [--user <user>]
 ```
+
+A restricted proposal is hidden from `/targets`, `/target`, project pages and
+the target APIs for every viewer without a grant; admins
+(`htpasswd add --admin`) see everything, and a request with no authenticated
+user is treated as having no grants. Restriction only covers frames whose
+`proposal_id` is known, so `access restrict` warns while
+`muscat-db backfill-propid` still has dates pending. Jobs, photometry,
+transit-fit, TTV-fit and the `/inst/date/ccd` browser are not gated yet
+(#144 PRs 5 and 6).
 
 Connect to production via SSH tunnel: `ssh -L 8000:localhost:8000 <user>@muscat-ut2` → http://localhost:8000. Staging's public port is `:8002` (`ssh -L 8002:localhost:8002`).
 

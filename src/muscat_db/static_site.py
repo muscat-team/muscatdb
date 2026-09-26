@@ -339,6 +339,8 @@ def _install_scrub(
     the rendered HTML (including the ``data-note`` / ``data-search`` attributes
     built from it).
     """
+    from muscat_db.access import is_denied
+
     orig = _pristine(web)
     if not hasattr(web, "_static_site_pristine_orphan_fits"):
         web._static_site_pristine_orphan_fits = web.fit._discover_orphan_fits
@@ -353,9 +355,11 @@ def _install_scrub(
             rows = [{**r, "note": ""} for r in rows]
         return rows
 
-    def datasets_scrubbed(db, normalized_name):
-        datasets, last = orig["_get_datasets_for_normalized_target"](db, normalized_name)
-        datasets = [d for d in datasets if d.get("proposal_id", "") not in restricted_proposals]
+    def datasets_scrubbed(db, normalized_name, denied=frozenset()):
+        datasets, last = orig["_get_datasets_for_normalized_target"](
+            db, normalized_name, denied
+        )
+        datasets = [d for d in datasets if not is_denied(d.get("proposal_id"), restricted_proposals)]
         if scrub_notes:
             datasets = [{**d, "note": ""} for d in datasets]
         return datasets, last
@@ -375,11 +379,11 @@ def _install_scrub(
 
     def summaries_scrubbed(db, instrument, obsdate):
         rows = orig["_get_summaries"](db, instrument, obsdate)
-        return [r for r in rows if r.get("proposal_id", "") not in restricted_proposals]
+        return [r for r in rows if not is_denied(r.get("proposal_id"), restricted_proposals)]
 
     def frames_scrubbed(db, instrument, obsdate, ccd):
         rows = orig["_get_frames"](db, instrument, obsdate, ccd)
-        return [r for r in rows if r.get("proposal_id", "") not in restricted_proposals]
+        return [r for r in rows if not is_denied(r.get("proposal_id"), restricted_proposals)]
 
     def dates_scrubbed(db, instrument):
         rows = orig["_get_dates"](db, instrument)
@@ -395,7 +399,7 @@ def _install_scrub(
         return [
             r for r in rows
             if any(
-                s.get("proposal_id", "") not in restricted_proposals
+                not is_denied(s.get("proposal_id"), restricted_proposals)
                 for s in orig["_get_summaries"](db, instrument, r["obsdate"])
             )
         ]
@@ -465,6 +469,8 @@ def _drilldown_urls(
     older visible date; an instrument whose entire history is restricted is
     skipped outright rather than capturing an empty drill-down.
     """
+    from muscat_db.access import is_denied
+
     db = os.environ["MUSCAT_DB_PATH"]
     urls: list[str] = []
     for inst in instruments:
@@ -473,7 +479,7 @@ def _drilldown_urls(
         visible_summaries: list[dict] = []
         for d in dates:
             summaries = database.get_summaries(db, inst, d["obsdate"])
-            visible = [s for s in summaries if s.get("proposal_id", "") not in restricted_proposals]
+            visible = [s for s in summaries if not is_denied(s.get("proposal_id"), restricted_proposals)]
             if visible:
                 chosen_date = d["obsdate"]
                 visible_summaries = visible
@@ -933,7 +939,10 @@ def build_site(
     # scrub below. The static site has no per-viewer identity, so it is treated
     # as a zero-grants viewer -- every restricted proposal is denied, with no
     # exceptions.
-    restricted_proposals = frozenset(database.restricted_proposal_ids(resolved_db))
+    # Upper-cased to match access.is_denied's case-insensitive comparison.
+    restricted_proposals = frozenset(
+        p.upper() for p in database.restricted_proposal_ids(resolved_db)
+    )
     restricted_object_slugs = frozenset(
         _slug(o)
         for o in database.objects_with_restricted_proposal(resolved_db, restricted_proposals)
