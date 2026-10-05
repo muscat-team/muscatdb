@@ -7,8 +7,10 @@ pattern of driving a coroutine with a bare ``asyncio.run(scenario())``.
 
 The loop clamps its interval to a 0.5s floor
 (``max(0.5, MUSCAT_JOB_RECONCILE_INTERVAL_S)``) regardless of how low the env
-var is set, so every scenario here runs for just over that floor rather than
-a shorter window, to actually observe a second pass.
+var is set, so every scenario here waits to observe another pass rather than
+racing a wall-clock window sized just above that floor (issue #181: the old
+fixed 0.6s window left ~0.1s of margin for a slow CI runner to fit a second
+pass into, and flaked there).
 """
 
 from __future__ import annotations
@@ -18,14 +20,28 @@ import asyncio
 import muscat_db.web as web
 
 
-async def _run_briefly(seconds: float = 0.6) -> None:
+async def _run_until(calls: list, at_least: int, *, timeout: float = 5.0) -> None:
+    """Drive ``_job_reconciliation_loop`` until ``calls`` has recorded at
+    least ``at_least`` passes, then cancel it.
+
+    Waiting on an observed pass count instead of a fixed duration removes the
+    time-race: the loop never has to *fit N passes into a deadline*, only to
+    complete them, and a slow runner gets the full ``timeout`` backstop
+    (~100x the margin of the old 0.6s window) instead of failing. A burn-in
+    that times out raises ``TimeoutError`` from inside ``asyncio.run``, so a
+    genuinely stuck loop still fails loudly rather than passing vacuously.
+    """
     task = asyncio.create_task(web._job_reconciliation_loop())
-    await asyncio.sleep(seconds)
-    task.cancel()
     try:
-        await task
-    except asyncio.CancelledError:
-        pass
+        async with asyncio.timeout(timeout):
+            while len(calls) < at_least:
+                await asyncio.sleep(0.01)
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 
 def test_loop_sleeps_on_the_event_loop_when_notify_is_disabled(monkeypatch):
@@ -41,7 +57,7 @@ def test_loop_sleeps_on_the_event_loop_when_notify_is_disabled(monkeypatch):
     calls: list[int] = []
     monkeypatch.setattr(web, "_reconcile_all_jobs", lambda: calls.append(1))
 
-    asyncio.run(_run_briefly())
+    asyncio.run(_run_until(calls, at_least=2))
     assert len(calls) >= 2
     assert waits == []
 
@@ -58,7 +74,7 @@ def test_loop_waits_on_the_store_signal_when_notify_is_enabled(monkeypatch):
     calls: list[int] = []
     monkeypatch.setattr(web, "_reconcile_all_jobs", lambda: calls.append(1))
 
-    asyncio.run(_run_briefly())
+    asyncio.run(_run_until(calls, at_least=1))
     assert len(calls) >= 1
     assert waits and all(w == 0.5 for w in waits)  # clamped floor: max(0.5, 0.01)
 
@@ -74,5 +90,5 @@ def test_loop_keeps_running_when_a_pass_raises(monkeypatch):
 
     monkeypatch.setattr(web, "_reconcile_all_jobs", boom)
 
-    asyncio.run(_run_briefly())  # must not raise -- one bad pass never kills the loop
+    asyncio.run(_run_until(calls, at_least=2))  # must not raise -- one bad pass never kills the loop
     assert len(calls) >= 2

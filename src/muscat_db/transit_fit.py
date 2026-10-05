@@ -2298,8 +2298,7 @@ def sync_jobs() -> None:
             # running/terminal, so persist a finalizing job as still running.
             # This keeps the Jobs page (which reads state from the DB) consistent
             # with the transit-fit page until the log truly goes quiescent.
-            persist_state = "running" if state == "finalizing" else state
-            persist_rc = None if state == "finalizing" else rc
+            persist_state, persist_rc = jobs.persisted_state(state, rc)
 
             # Only persist when the row actually changed. A steadily-running job
             # whose DB row already says "running" needs no rewrite; elapsed is
@@ -2350,7 +2349,7 @@ def sync_jobs() -> None:
             # A terminal transition may have produced new fit outputs; refresh the
             # target's persisted Phot/Fit status so the Targets page reflects it
             # on the next refresh instead of waiting for the daily build_db cron.
-            if persist_state in ("done", "error", "cancelled"):
+            if is_terminal and persist_state in ("done", "error", "cancelled"):
                 database.refresh_target_status(job.target)
                 # Notify chat once per job (dedup handled in jobs.fire_job_finished).
                 jobs.fire_job_finished(

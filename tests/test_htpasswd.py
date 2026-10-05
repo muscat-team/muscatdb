@@ -91,3 +91,95 @@ def test_htpasswd_add_rejects_password_and_password_stdin_together(tmp_path, mon
     assert result.exit_code != 0
     assert "mutually exclusive" in result.output
     assert cli._read_htpasswd() == {}
+
+
+# -- htpasswd promote ---------------------------------------------------------
+
+
+def _promote_env(tmp_path, monkeypatch):
+    ht_path = tmp_path / "htpasswd-muscatdb"
+    monkeypatch.setenv("MUSCAT_HTPASSWD_FILE", str(ht_path))
+    monkeypatch.setenv("MUSCAT_DB_PATH", str(tmp_path / "test.db"))
+    monkeypatch.setenv("MUSCAT_NGINX_GROUP", "no-such-group-xyz")
+    return ht_path
+
+
+def _is_admin(tmp_path, username):
+    import sqlite3
+
+    with sqlite3.connect(tmp_path / "test.db") as conn:
+        try:
+            row = conn.execute(
+                "SELECT is_admin FROM users WHERE username = ?", (username,)
+            ).fetchone()
+        except sqlite3.OperationalError:  # rejected before any schema was created
+            return None
+    return None if row is None else bool(row[0])
+
+
+def test_htpasswd_promote_keeps_the_password_hash(tmp_path, monkeypatch):
+    """`htpasswd add --admin` re-prompts and rewrites the hash, so it cannot
+    promote someone else; promote must leave the hash byte-identical."""
+    _promote_env(tmp_path, monkeypatch)
+    runner = CliRunner()
+    runner.invoke(cli.app, ["htpasswd", "add", "john", "--password-stdin"], input="secret\n")
+    before = cli._read_htpasswd()["john"]
+    assert _is_admin(tmp_path, "john") is False
+
+    result = runner.invoke(cli.app, ["htpasswd", "promote", "john"])
+
+    assert result.exit_code == 0, result.output
+    assert cli._read_htpasswd()["john"] == before
+    assert _is_admin(tmp_path, "john") is True
+
+
+def test_htpasswd_promote_creates_the_row_for_a_user_who_never_logged_in(tmp_path, monkeypatch):
+    _promote_env(tmp_path, monkeypatch)
+    cli._write_htpasswd({"john": "hash"})
+
+    result = CliRunner().invoke(cli.app, ["htpasswd", "promote", "john"])
+
+    assert result.exit_code == 0, result.output
+    assert _is_admin(tmp_path, "john") is True
+
+
+def test_htpasswd_promote_rejects_a_name_not_in_the_htpasswd_file(tmp_path, monkeypatch):
+    _promote_env(tmp_path, monkeypatch)
+    cli._write_htpasswd({"john": "hash"})
+
+    result = CliRunner().invoke(cli.app, ["htpasswd", "promote", "jhon"])
+
+    assert result.exit_code == 1
+    assert _is_admin(tmp_path, "jhon") is None
+
+
+def test_htpasswd_promote_is_idempotent(tmp_path, monkeypatch):
+    _promote_env(tmp_path, monkeypatch)
+    cli._write_htpasswd({"john": "hash"})
+    runner = CliRunner()
+    runner.invoke(cli.app, ["htpasswd", "promote", "john"])
+
+    result = runner.invoke(cli.app, ["htpasswd", "promote", "john"])
+
+    assert result.exit_code == 0
+    assert "already an admin" in result.output
+
+
+def test_htpasswd_promote_falls_back_to_users_table_when_file_unreadable(tmp_path, monkeypatch):
+    """Production's htpasswd file is 0640 root:www-data, so a non-root admin
+    cannot read it; the users table still guards against typos."""
+    _promote_env(tmp_path, monkeypatch)
+    from muscat_db.database import ensure_user
+
+    ensure_user("john")
+
+    def unreadable():
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(cli, "_read_htpasswd", unreadable)
+    runner = CliRunner()
+
+    assert runner.invoke(cli.app, ["htpasswd", "promote", "john"]).exit_code == 0
+    assert _is_admin(tmp_path, "john") is True
+    assert runner.invoke(cli.app, ["htpasswd", "promote", "jhon"]).exit_code == 1
+    assert _is_admin(tmp_path, "jhon") is None

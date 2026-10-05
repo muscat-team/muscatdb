@@ -98,6 +98,16 @@ ENV_VARS: tuple[EnvVar, ...] = (
         str(Path.home() / "temp"),
         "Temp dir handed to spawned jobs (must be on a non-full filesystem)",
     ),
+    EnvVar(
+        "MUSCAT_DB_BACKUP_DIR",
+        "$MUSCAT_TMPDIR",
+        "Where build-db writes its pre-rebuild muscat.db snapshot",
+    ),
+    EnvVar(
+        "MUSCAT_DB_BACKUP_KEEP",
+        "2",
+        "Number of build-db nightly snapshots to retain (older ones are pruned)",
+    ),
     EnvVar("MUSCAT_PHOT_STALL_LIMIT_S", "1500", "Photometry job stall timeout (seconds)"),
     EnvVar("MUSCAT_PHOT_MAX_RUNTIME_S", "10800", "Photometry job max runtime (seconds)"),
     EnvVar("MUSCAT_PHOT_FINALIZE_GRACE_S", "8", "Log-quiescence grace window (seconds)"),

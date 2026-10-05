@@ -919,6 +919,56 @@ def htpasswd_delete(
         pass
 
 
+@htpasswd_app.command("promote")
+def htpasswd_promote(
+    username: str = typer.Argument(..., help="Username"),
+):
+    """Mark an existing user as admin without touching their password.
+
+    ``htpasswd add --admin`` also resets the password, so it cannot promote
+    someone else. This only flips ``users.is_admin``, so it needs write access
+    to the database but not to the htpasswd file.
+    """
+    from muscat_db.database import _ensure_users_schema, db_path, get_conn
+
+    try:
+        entries: dict[str, str] | None = _read_htpasswd()
+    except PermissionError:
+        # 0640 root:www-data in production; the database check below still
+        # catches a typo'd name.
+        entries = None
+        console.print(
+            f"[yellow]Cannot read {_htpasswd_path()}; checking the users table only[/]"
+        )
+    if entries is not None and username not in entries:
+        console.print(f"[red]Error: '{username}' is not in {_htpasswd_path()}[/]")
+        raise typer.Exit(1)
+
+    with get_conn(db_path()) as conn:
+        _ensure_users_schema(conn)
+        row = conn.execute(
+            "SELECT is_admin FROM users WHERE username = ?", (username,)
+        ).fetchone()
+        if row is None and entries is None:
+            console.print(
+                f"[red]Error: '{username}' has no users row; add them with "
+                "`muscat-db htpasswd add` first[/]"
+            )
+            raise typer.Exit(1)
+        if row is not None and row[0]:
+            console.print(f"[yellow]'{username}' is already an admin[/]")
+            return
+        # In the htpasswd file but never logged in: create the row the same
+        # way `htpasswd add` does, then promote it.
+        conn.execute(
+            "INSERT OR IGNORE INTO users (username, display_name) VALUES (?, ?)",
+            (username, username),
+        )
+        conn.execute("UPDATE users SET is_admin = 1 WHERE username = ?", (username,))
+        conn.commit()
+    console.print(f"[green]'{username}' is now an admin[/]")
+
+
 @htpasswd_app.command("list")
 def htpasswd_list():
     """List all users in the nginx htpasswd file."""
@@ -931,6 +981,170 @@ def htpasswd_list():
     table.add_column("Username", style="cyan")
     for user in sorted(entries):
         table.add_row(user)
+    console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# Proposal access control (issue #144)
+# ---------------------------------------------------------------------------
+
+access_app = typer.Typer(
+    name="access",
+    help="Restrict LCO proposals and grant nginx users access to them.",
+    no_args_is_help=True,
+)
+app.add_typer(access_app)
+
+
+def _warn_restriction_gaps(db: str, proposal_id: str) -> None:
+    """Say loudly what a new restriction does not yet cover."""
+    from muscat_db import access
+
+    pending = access.pending_backfill_dates(db)
+    if pending:
+        detail = ", ".join(f"{inst}: {n}" for inst, n in sorted(pending.items()))
+        console.print(
+            "[bold yellow]WARNING: the PROPID backfill has not processed every date "
+            f"({detail} date(s) pending).[/]\n"
+            "[yellow]Frames on those dates carry an empty proposal_id, so any of "
+            f"them taken under {proposal_id} stay visible to everyone until "
+            "`muscat-db backfill-propid` covers them.[/]"
+        )
+    console.print(
+        "[yellow]Already-published GitHub Pages content is not retracted; the "
+        "next static-site build stops publishing it.[/]"
+    )
+
+
+@access_app.command("restrict")
+def access_restrict(
+    proposal_id: str = typer.Argument(..., help="LCO proposal id, e.g. KEY2026B-001"),
+    description: str = typer.Option("", "--description", "-d", help="Free-text note"),
+):
+    """Hide a proposal's observations from everyone without a grant."""
+    from muscat_db import access
+    from muscat_db.database import db_path
+
+    proposal_id = proposal_id.strip()
+    if not proposal_id:
+        console.print("[red]Error: proposal id cannot be empty[/]")
+        raise typer.Exit(1)
+    db = db_path()
+    observed = access.observed_spelling(db, proposal_id)
+    if observed is None:
+        console.print(
+            f"[yellow]No observation in the database carries {proposal_id} yet "
+            "(typo, or not yet backfilled?). Restricting it anyway.[/]"
+        )
+    else:
+        proposal_id = observed
+    created = access.restrict(db, proposal_id, description)
+    verb = "restricted" if created else "already restricted; description updated"
+    console.print(f"[green]{proposal_id} {verb}[/]")
+    _warn_restriction_gaps(db, proposal_id)
+
+
+@access_app.command("unrestrict")
+def access_unrestrict(
+    proposal_id: str = typer.Argument(..., help="LCO proposal id"),
+):
+    """Make a proposal's observations visible to everyone again (grants are kept)."""
+    from muscat_db import access
+    from muscat_db.database import db_path
+
+    if not access.unrestrict(db_path(), proposal_id.strip()):
+        console.print(f"[yellow]{proposal_id} was not restricted[/]")
+        raise typer.Exit(1)
+    console.print(f"[green]{proposal_id} unrestricted[/]")
+
+
+@access_app.command("grant")
+def access_grant(
+    username: str = typer.Argument(..., help="nginx username"),
+    proposal_id: str = typer.Argument(..., help="LCO proposal id"),
+    granted_by: str = typer.Option(
+        None, "--by", help="Recorded as the granting admin (default: your OS user)"
+    ),
+):
+    """Let a user see a restricted proposal's observations."""
+    from muscat_db import access
+    from muscat_db.database import db_path
+
+    db = db_path()
+    proposal_id = proposal_id.strip()
+    if not access.user_exists(db, username):
+        console.print(
+            f"[yellow]{username} has no users row yet (not added via `muscat-db "
+            "htpasswd add`, or has never logged in). Granting anyway.[/]"
+        )
+    restricted = {r["proposal_id"].upper() for r in access.list_restrictions(db)}
+    if proposal_id.upper() not in restricted:
+        console.print(
+            f"[yellow]{proposal_id} is not restricted, so this grant has no effect "
+            "until it is.[/]"
+        )
+    if access.grant(db, username, proposal_id, granted_by or getpass.getuser()):
+        console.print(f"[green]{username} granted {proposal_id}[/]")
+    else:
+        console.print(f"[yellow]{username} already has {proposal_id}[/]")
+
+
+@access_app.command("revoke")
+def access_revoke(
+    username: str = typer.Argument(..., help="nginx username"),
+    proposal_id: str = typer.Argument(..., help="LCO proposal id"),
+):
+    """Remove a user's grant."""
+    from muscat_db import access
+    from muscat_db.database import db_path
+
+    if not access.revoke(db_path(), username, proposal_id.strip()):
+        console.print(f"[yellow]{username} had no grant for {proposal_id}[/]")
+        raise typer.Exit(1)
+    console.print(f"[green]{username} revoked from {proposal_id}[/]")
+
+
+@access_app.command("list")
+def access_list(
+    username: str | None = typer.Option(None, "--user", "-u", help="Show one user's grants"),
+):
+    """List restricted proposals and their grantees, or one user's grants."""
+    from muscat_db import access
+    from muscat_db.database import db_path
+
+    db = db_path()
+    if username is not None:
+        grants = access.list_grants(db, username)
+        if not grants:
+            console.print(f"[yellow]{username} has no grants[/]")
+            return
+        table = Table(title=f"Grants for {username}")
+        table.add_column("Proposal", style="cyan")
+        table.add_column("Restricted")
+        table.add_column("Granted by")
+        table.add_column("Granted at")
+        for g in grants:
+            table.add_row(
+                g["proposal_id"], "yes" if g["restricted"] else "no",
+                g["granted_by"], g["granted_at"],
+            )
+        console.print(table)
+        return
+
+    rows = access.list_restrictions(db)
+    if not rows:
+        console.print("[yellow]No proposals are restricted[/]")
+        return
+    table = Table(title="Restricted proposals")
+    table.add_column("Proposal", style="cyan")
+    table.add_column("Description")
+    table.add_column("Since")
+    table.add_column("Granted to")
+    for r in rows:
+        table.add_row(
+            r["proposal_id"], r["description"], r["created_at"],
+            ", ".join(r["grantees"]) or "-",
+        )
     console.print(table)
 
 
