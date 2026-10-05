@@ -47,8 +47,20 @@ def _corrupt(path: Path) -> None:
         f.write(b"\xa5" * (size - 3 * 4096))
 
 
+def _make_wal_db(path: Path, notes: int = 1) -> None:
+    """Like ``_make_db`` but persistently in WAL mode, as the live muscat.db
+    is: the backup API copies page 1, so only a WAL source yields a WAL copy."""
+    _make_db(path, notes=notes)
+    with sqlite3.connect(str(path)) as c:
+        assert c.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+
+
 def _snapshots(d: Path) -> list[Path]:
     return sorted(d.glob("*.nightly-*.sqlite"))
+
+
+def _names(d: Path) -> list[str]:
+    return sorted(p.name for p in d.iterdir())
 
 
 # -- snapshot / prune --------------------------------------------------------
@@ -115,6 +127,80 @@ def test_prune_keeps_newest_and_ignores_manual_backups(tmp_path, backups):
                     "muscat.db.nightly-20260904-173000.sqlite"]
     assert len(removed) == 2
     assert manual.exists() and forensic.exists()
+
+
+def test_snapshot_and_prune_of_a_wal_db_leave_no_sidecars(tmp_path, backups):
+    """Issue #194: the copy inherited WAL mode, so the read-only integrity
+    check left ``.part-wal``/``.part-shm`` that the rename and prune never
+    touched -- two orphans per night."""
+    db = tmp_path / "muscat.db"
+    _make_wal_db(db)
+    base = datetime.datetime(2026, 10, 1, 17, 30)
+    for day in range(4):
+        db_backup.snapshot(db, now=base + datetime.timedelta(days=day))
+
+    db_backup.prune(db, keep=2)
+
+    assert _names(backups) == ["muscat.db.nightly-20261003-173000.sqlite",
+                               "muscat.db.nightly-20261004-173000.sqlite"]
+    # Self-contained: a rollback-journal header (bytes 18-19 == 1), so opening
+    # the snapshot later, e.g. to restore from it, needs no sidecar either.
+    assert all(p.read_bytes()[18:20] == b"\x01\x01" for p in _snapshots(backups))
+
+
+def test_corrupt_wal_snapshot_leaves_only_the_forensic_copy(tmp_path, backups):
+    db = tmp_path / "muscat.db"
+    _make_wal_db(db, notes=5000)
+    _corrupt(db)
+
+    with pytest.raises(db_backup.IntegrityError):
+        db_backup.snapshot(db)
+
+    assert [n for n in _names(backups) if not n.endswith(".CORRUPT")] == []
+
+
+def test_snapshot_removes_part_when_the_check_fails_unexpectedly(tmp_path, backups, monkeypatch):
+    """Cleanup used to wrap only ``backup()``; any other error after it (an
+    OSError opening the copy, a failed rename) stranded ``.part``."""
+    db = tmp_path / "muscat.db"
+    _make_wal_db(db)
+
+    def boom(path):
+        raise OSError("disk went away")
+
+    monkeypatch.setattr(db_backup, "integrity_ok", boom)
+
+    with pytest.raises(OSError, match="disk went away"):
+        db_backup.snapshot(db)
+
+    assert _names(backups) == []
+
+
+def test_prune_removes_sidecars_and_sweeps_orphans(tmp_path, backups):
+    db = tmp_path / "muscat.db"
+    _make_db(db)
+    base = datetime.datetime(2026, 10, 1, 17, 30)
+    for day in range(3):
+        db_backup.snapshot(db, now=base + datetime.timedelta(days=day))
+    old, _, newest = (p.name for p in _snapshots(backups))
+    leftovers = [
+        old + "-wal", old + "-shm",                 # of a snapshot being pruned
+        old + ".part-wal", old + ".part-shm",       # pre-fix orphans (#194)
+        "muscat.db.nightly-20260901-000000.sqlite.part-shm",  # main file long gone
+    ]
+    # Sidecars of a file that still exists may belong to an open connection
+    # (someone inspecting the newest snapshot, a snapshot still in progress).
+    in_use = [newest + "-shm", "muscat.db.nightly-20261009-000000.sqlite.part",
+              "muscat.db.nightly-20261009-000000.sqlite.part-shm"]
+    for name in leftovers + in_use:
+        (backups / name).write_bytes(b"")
+
+    db_backup.prune(db, keep=2)
+
+    assert _names(backups) == sorted(
+        [p.name for p in _snapshots(backups)] + in_use
+    )
+    assert len(_snapshots(backups)) == 2
 
 
 def test_backup_keep_env(monkeypatch):
