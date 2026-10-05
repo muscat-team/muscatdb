@@ -176,6 +176,15 @@ runs with a minimal environment; pin it in `.env` too for manual/GUI runs (see
 day's obslog, so a one-off manual `build-db` or `scan` never gets silently
 overwritten by the next nightly run of this job.
 
+A scan that fails for one instrument is logged at WARNING with its traceback
+in `scan.log`, and `scan-yesterday` names it in its output. It is also
+recorded in `$MUSCAT_OBSLOG_DIR/.scan-failures.jsonl`, one entry per
+instrument and date, until a later scan of that date writes cleanly. The same
+happens for a CCD whose CSV could not be written, which would otherwise look
+complete to `scan-missing`. `muscat-db scan-failures` lists the open entries.
+`scan-yesterday` still exits 0 on such a failure, so the other instruments'
+`build-db` goes ahead.
+
 `build-db` snapshots the existing database before rebuilding it (SQLite backup
 API, safe while the server is running) to `$MUSCAT_DB_BACKUP_DIR` (default
 `$MUSCAT_TMPDIR`, i.e. `~/temp`) as `muscat.db.nightly-<stamp>.sqlite`, keeping
