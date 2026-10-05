@@ -791,11 +791,7 @@ def _remove_sqlite_tmp(path: str) -> None:
     multi-GB WAL on every failed build and could leave a stale sidecar that
     corrupts the next build.
     """
-    for suffix in ("", "-wal", "-shm", "-journal"):
-        try:
-            os.remove(path + suffix)
-        except OSError:
-            pass
+    db_backup.remove_with_sidecars(path)
 
 
 def _set_temp_store_dir(conn: sqlite3.Connection, db_file: str) -> None:
