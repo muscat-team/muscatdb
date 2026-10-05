@@ -23,6 +23,7 @@ from typing import IO
 import yaml
 
 from muscat_db import jobs, database
+from muscat_db._optimize_helper import DONE_MARKER as _OPTIMIZE_DONE_MARKER
 from muscat_db.job_store import current_instance_id, current_owner, get_job_store
 from muscat_db import __meta__, __muscatdb_version__, __version__
 from muscat_db.instruments import INSTRUMENTS
@@ -177,8 +178,9 @@ _MAX_TEST_JOBS = max(1, int(os.environ.get("MUSCAT_MAX_TEST_JOBS", "4")))
 # no partial-failure concept, so a zero exit is always ``done``.
 _FINALIZE_GRACE_S = int(os.environ.get("MUSCAT_FIT_FINALIZE_GRACE_S", 8))
 _FINALIZE_GRACE_TERMINAL_S = int(os.environ.get("MUSCAT_FIT_FINALIZE_GRACE_TERMINAL_S", 2))
-# Result line timer logs once a fit has completed; remaining writes are teardown.
-_TERMINAL_LOG_MARKERS = ("Timer-fit completed successfully",)
+# Result lines logged once a fit has completed (timer-fit for full runs, the
+# optimize-only helper for test runs); remaining writes are teardown.
+_TERMINAL_LOG_MARKERS = ("Timer-fit completed successfully", _OPTIMIZE_DONE_MARKER)
 
 
 def _finalize_config() -> jobs.FinalizeConfig:
@@ -336,6 +338,30 @@ def validate_no_duplicate_datasets(
                 "before submitting."
             )
     return None
+
+
+# Test runs stop after MAP optimization (no MCMC): this helper drives timer's
+# API inside the timer conda env and writes the MAP plots.
+_OPTIMIZE_HELPER = pathlib.Path(__file__).parent / "_optimize_helper.py"
+
+
+def _fit_command(rdir: pathlib.Path, run_type: str) -> list[str]:
+    """Return the command that runs a fit of *run_type* in *rdir*.
+
+    A full run is the ``timer-fit`` CLI (optimize, then MCMC). A test run is the
+    optimize-only helper: a quick visual check of the entered parameters using
+    the MAP solution, without sampling.
+    """
+    if run_type != "test":
+        return [*_timer_prefix(), "-v", str(rdir)]
+    env = timer_conda_env()
+    conda_py = _conda_env_python(env)
+    if conda_py:
+        return [conda_py, "-u", str(_OPTIMIZE_HELPER), str(rdir)]
+    if shutil.which("conda"):
+        return ["conda", "run", "-n", env, "--no-capture-output",
+                "python", "-u", str(_OPTIMIZE_HELPER), str(rdir)]
+    return ["python", "-u", str(_OPTIMIZE_HELPER), str(rdir)]
 
 
 def _timer_prefix() -> list[str]:
@@ -1102,12 +1128,9 @@ def _write_fit_inputs(
     # runs default to 4 chains on 4 cores so all chains sample in parallel
     # (a lone core-24 server has ample headroom, and only one full fit runs
     # at a time — see _MAX_FULL_JOBS) for a more reliable r_hat convergence
-    # check. A test run writes its own small values instead — tune=20,
-    # draws=20, chains=1, cores=2 — rather than relying on timer's
-    # --test_run flag to override whatever landed in fit.yaml: that flag
-    # doesn't exist on timer upstream master (#77), and muscat-db already
-    # writes every value --test_run would force, so the flag was always
-    # redundant with what's here.
+    # check. A test run is optimize-only (see _fit_command) and never samples;
+    # it still writes small values (tune=20, draws=20, chains=1, cores=2) so
+    # its fit.yaml can never be mistaken for a full sampler configuration.
     if run_type == "test":
         fit_data["tune"] = 20
         fit_data["draws"] = 20
@@ -1599,10 +1622,9 @@ def start_fit(
     # Clear cached outputs so the next page load reads fresh results from disk.
     _fit_outputs_cache.clear()
 
-    # Launch process. Sampler size for a test run (tune=20/draws=20/chains=1/
-    # cores=2) is already in fit.yaml above, so no --test_run flag is needed
-    # here — that flag doesn't exist on timer upstream master (#77).
-    cmd = [*_timer_prefix(), "-v", str(rdir)]
+    # Launch process: timer-fit for a full run, the optimize-only helper
+    # (no MCMC) for a test run.
+    cmd = _fit_command(rdir, run_type)
     log_path = rdir / "timer-fit.log"
     logf = open(log_path, "w")
     _write_log_banner(logf, cmd, options, narrowband_aliases)
@@ -2198,7 +2220,9 @@ def _detect_run_type(rdir: pathlib.Path) -> str:
                     line = lf.readline()
                     if not line:
                         break
-                    if line.startswith("$ ") and "--test_run" in line:
+                    if line.startswith("$ ") and (
+                        "--test_run" in line or _OPTIMIZE_HELPER.name in line
+                    ):
                         return "test"
     except Exception:
         logger.debug("failed to detect run_type for %s from timer-fit.log", rdir, exc_info=True)
@@ -2391,7 +2415,7 @@ def sync_jobs() -> None:
                     if log_path.is_file():
                         with open(log_path, errors="replace") as lf:
                             log_content = lf.read()
-                            if "Timer-fit completed successfully" in log_content:
+                            if any(m in log_content for m in _TERMINAL_LOG_MARKERS):
                                 completed_ok = True
             except Exception:
                 logger.debug("failed to inspect orphan fit completion for %s", rdir, exc_info=True)
@@ -2526,9 +2550,7 @@ def sync_jobs() -> None:
                     site=site, telescope=telescope, mode=mode, run_name=run_name, run_id=run_id,
                     run_type=run_type)
                 _fit_outputs_cache.clear()
-                # Sampler size for a test run is already in fit.yaml (see
-                # _write_fit_inputs); no --test_run flag needed (#77).
-                cmd = [*_timer_prefix(), "-v", str(rdir)]
+                cmd = _fit_command(rdir, run_type)
                 log_path = rdir / "timer-fit.log"
                 try:
                     logf = open(log_path, "w")
