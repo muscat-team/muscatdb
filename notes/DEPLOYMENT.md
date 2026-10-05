@@ -36,6 +36,8 @@ sudo bash deploy/setup-nginx.sh
 sudo env "PATH=$PATH" uv run muscat-db htpasswd add <user>
 uv run muscat-db htpasswd delete <user>
 uv run muscat-db htpasswd list
+# Make an existing user admin without touching their password
+uv run muscat-db htpasswd promote <user>
 
 # Restrict an LCO proposal's observations and grant users access (issue #144)
 uv run muscat-db access restrict <proposal_id> [--description "..."]
@@ -47,7 +49,7 @@ uv run muscat-db access list [--user <user>]
 
 A restricted proposal is hidden from `/targets`, `/target`, project pages and
 the target APIs for every viewer without a grant; admins
-(`htpasswd add --admin`) see everything, and a request with no authenticated
+(`htpasswd promote <user>`) see everything, and a request with no authenticated
 user is treated as having no grants. Restriction only covers frames whose
 `proposal_id` is known, so `access restrict` warns while
 `muscat-db backfill-propid` still has dates pending. Jobs, photometry,
