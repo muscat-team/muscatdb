@@ -6,6 +6,7 @@ import datetime
 import io
 import os
 import socket
+import subprocess
 import shutil
 import tempfile
 import threading
@@ -1031,7 +1032,29 @@ class DownloadToFileTest(unittest.TestCase):
         self.assertEqual(result["status"], "unpacked")
         self.assertEqual(result["dest"], str(Path(self.dir) / "frame.fits"))
         self.assertTrue(src.exists())
-        self.assertEqual(calls[0][0], ["/usr/bin/funpack", "-O", str(Path(self.dir) / "frame.fits"), str(src)])
+        self.assertEqual((Path(self.dir) / "frame.fits").read_bytes(), b"fits")
+        self.assertFalse((Path(self.dir) / "frame.fits.part").exists())
+        self.assertEqual(calls[0][0], ["/usr/bin/funpack", "-O", str(Path(self.dir) / "frame.fits.part"), str(src)])
+
+    def _funpack_that_dies(self, error):
+        def fake_run(cmd, **kwargs):
+            Path(cmd[2]).write_bytes(b"trunc")  # partial output, then the failure
+            if isinstance(error, BaseException):
+                raise error
+            return MagicMock(returncode=error, stdout="", stderr="boom")
+        return fake_run
+
+    def test_funpack_file_failure_never_leaves_a_partial_fits(self):
+        """A truncated .fits would read as 'already unpacked' on every retry."""
+        src = Path(self.dir) / "frame.fits.fz"
+        for error in (1, subprocess.TimeoutExpired("funpack", 1), OSError("killed")):
+            src.write_bytes(b"packed")
+            with patch("muscat_db.lco.shutil.which", return_value="/usr/bin/funpack"), \
+                    patch("muscat_db.lco.subprocess.run", side_effect=self._funpack_that_dies(error)):
+                result = lco._funpack_file(src)
+            self.assertEqual(result["status"], "error")
+            self.assertFalse((Path(self.dir) / "frame.fits").exists(), error)
+            self.assertFalse((Path(self.dir) / "frame.fits.part").exists(), error)
 
 
 class ArchiveDownloadJobTest(unittest.TestCase):

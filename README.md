@@ -193,6 +193,42 @@ file untouched, if either that snapshot or the freshly built database fails
 `PRAGMA integrity_check`; a failed snapshot is kept with a `.CORRUPT` suffix.
 The integrity checks add roughly 3-4 minutes to the nightly run.
 
+### LCO proposal sync
+
+`muscat-db lco-sync <PROPID>...` downloads a proposal's new BANZAI final
+products (RLEVEL 91, `OBSTYPE=EXPOSE`, engineering frames such as auto-focus
+dropped) from the LCO archive into the download root (`MUSCAT_LCO_DIR`, else
+`MUSCAT_DATA_DIR`), funpacks them, and rescans every night that gained a frame.
+It catches observations the UI's request monitor never saw, e.g. ones scheduled
+directly on the LCO portal. To run it in the same nightly job, put it ahead of
+`build-db` and join it with `;` so an archive outage cannot block the rebuild:
+
+```
+30 17 * * * cd $MUSCATDB_ROOT && uv run muscat-db lco-sync KEY2026B-001 --user <name> --no-ingest >> $MUSCATDB_ROOT/logs/lco-sync.log 2>&1; bash scripts/download_catalogs.sh >> $MUSCATDB_ROOT/logs/download_catalogs.log 2>&1 && uv run muscat-db scan-yesterday >> $MUSCATDB_ROOT/logs/scan.log 2>&1 && uv run muscat-db build-db >> $MUSCATDB_ROOT/logs/build-db.log 2>&1
+```
+
+- **Window.** `--days 7` (default) re-queries a week of DATE_OBS on every run.
+  Frames already unpacked on disk are skipped before any download, so the
+  overlap costs only metadata queries, and it is what picks up reductions
+  BANZAI publishes days late. Use `--start/--end` (ISO UTC) for a one-off
+  backfill. A window over 10,000 frames is refused rather than half-synced.
+- **Token.** `--user <name>` uses that muscat-db user's LCO token saved in
+  Settings. Without it the command falls back to `$LCO_API_TOKEN`. The token
+  must belong to a member of the proposal, since unreleased frames are
+  proprietary.
+- **Volume.** A busy 0.4m key project can produce thousands of QHY600 frames a
+  night (about 67 MB each once the `.fz` and the unpacked `.fits` are both on
+  disk). Run `--dry-run` first to see per-night counts. `--max-frames N` caps
+  one run's downloads, and the remaining frames, oldest night first, are
+  fetched on later runs.
+- **Ingest.** `--no-ingest` stops after writing the obslog CSVs and leaves
+  ingestion to the `build-db` that follows. Without that flag, each night is
+  also ingested straight away.
+- **Safety.** A lock file (`.lco-sync.lock` in the download root) makes an
+  overlapping run exit instead of racing the first one. The exit status is
+  non-zero if any frame, scan, or proposal failed. Frames that downloaded
+  successfully are kept, so the next run retries only the failures.
+
 ## Documentation
 
 The published docs site is https://muscat-team.github.io/muscatdb/ (updates when
