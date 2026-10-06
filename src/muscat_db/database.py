@@ -872,19 +872,31 @@ def _page_size(db_path: str) -> int:
 def _read_app_owned_tables(db_path: str) -> dict[str, list[dict]]:
     """Every row of every app-owned table in *db_path*. Rows are copied
     verbatim (all columns) so nothing is silently dropped; missing tables or
-    an absent file read as empty, for older or fresh databases."""
+    an absent file read as empty, for older or fresh databases.
+
+    All tables are read inside one read transaction, so they come from a single
+    snapshot. Read one by one, the server could save a parent row and its
+    children between two reads (an LCO request and its frames, #184), and the
+    rebuild would restore the children without their parent.
+    """
     preserved: dict[str, list[dict]] = {t: [] for t in _APP_OWNED_TABLES}
     if not os.path.exists(db_path):
         return preserved
     try:
         with get_conn(db_path, row_factory=sqlite3.Row) as old_conn:
             _apply_schema(old_conn)
-            for table in _APP_OWNED_TABLES:
-                try:
-                    rows = old_conn.execute(f"SELECT * FROM {table}").fetchall()
-                    preserved[table] = [dict(r) for r in rows]
-                except sqlite3.OperationalError:
-                    pass
+            if old_conn.in_transaction:
+                old_conn.commit()
+            old_conn.execute("BEGIN")
+            try:
+                for table in _APP_OWNED_TABLES:
+                    try:
+                        rows = old_conn.execute(f"SELECT * FROM {table}").fetchall()
+                        preserved[table] = [dict(r) for r in rows]
+                    except sqlite3.OperationalError:
+                        pass
+            finally:
+                old_conn.rollback()
     except sqlite3.OperationalError:
         pass
     return preserved
@@ -973,6 +985,9 @@ def build_db(db_path: str, progress=None) -> int:
         conn.execute(f"PRAGMA page_size={_page_size(db_path)};")
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA synchronous=OFF;")
+        # Restoring the app-owned tables must not write an orphan into the
+        # image that gets copied into the live file (#184).
+        conn.execute("PRAGMA foreign_keys=ON;")
         conn.execute("PRAGMA cache_size=100000;")
         # Keep GROUP BY / sort spills on the DB's own (roomy) volume, not /tmp.
         _set_temp_store_dir(conn, tmp_path)
@@ -1982,13 +1997,14 @@ def db_path() -> str:
 #   the two are set together here. The one deliberate exception is
 #   build_db's throwaway .tmp image, built with synchronous=OFF because a
 #   crash discards it anyway.
-# * foreign_keys stays OFF (SQLite's default), deliberately. The schema
-#   declares foreign keys that have never been enforced; turning enforcement
-#   on changes behaviour -- INSERT OR REPLACE on a parent row deletes it and
-#   cascades to its children, existing orphan rows start failing writes, and
-#   build_db's verbatim table restore would have to run in dependency order.
-#   That needs a foreign_key_check of production data first, so it is a
-#   separate change (#184).
+# * foreign_keys=ON (#184). The only declared key is lco_observation_frames ->
+#   lco_observation_requests ON DELETE CASCADE. Production had no orphans when
+#   this was enabled, nothing deletes or INSERT OR REPLACEs a request (the
+#   monitor upserts with ON CONFLICT DO UPDATE), and build_db restores
+#   _APP_OWNED_TABLES parents first from one read snapshot. Keep it that way:
+#   with enforcement on, INSERT OR REPLACE on a parent row deletes its
+#   children. It is a per-connection setting, so build_db's .tmp connection
+#   sets it too.
 _SYNCHRONOUS = "NORMAL"
 
 
@@ -2005,6 +2021,7 @@ def connect(path: str | None = None, *, timeout: float = 30.0) -> sqlite3.Connec
     try:
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute(f"PRAGMA synchronous={_SYNCHRONOUS};")
+        conn.execute("PRAGMA foreign_keys=ON;")
     except BaseException:
         conn.close()
         raise
