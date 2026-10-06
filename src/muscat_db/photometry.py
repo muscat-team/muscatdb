@@ -481,6 +481,27 @@ def _telescope_token_to_value(digits: str | None, inst: str = "sinistro") -> str
     return f"{prefix}-{digits}"
 
 
+def empty_outputs() -> dict:
+    """What :func:`list_outputs` returns for a target with no products."""
+    return {
+        "summary": {},
+        "summary_items": [],
+        "bands": {},
+        "npz": None,
+        "log": None,
+        "has_any": False,
+        "masters": [],
+        "sites": [],
+        "site": None,
+        "telescopes": [],
+        "telescope": None,
+        "modes": [],
+        "mode": None,
+        "ref_header": None,
+        "ref_selection": None,
+    }
+
+
 def list_outputs(
     inst: str,
     date: str,
@@ -519,23 +540,7 @@ def list_outputs(
     therefore build regexes that accept any 6-digit date token instead of
     requiring an exact match against the passed-in ``date``.
     """
-    out: dict = {
-        "summary": {},
-        "summary_items": [],
-        "bands": {},
-        "npz": None,
-        "log": None,
-        "has_any": False,
-        "masters": [],
-        "sites": [],
-        "site": None,
-        "telescopes": [],
-        "telescope": None,
-        "modes": [],
-        "mode": None,
-        "ref_header": None,
-        "ref_selection": None,
-    }
+    out = empty_outputs()
     try:
         rdir = run_output_dir(inst, date, target, run_id)
     except ValueError:

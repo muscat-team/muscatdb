@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 
 from muscat_db.database import get_conn, sql_not_denied
 
@@ -98,6 +98,99 @@ def is_denied(proposal_id: str | None, denied: frozenset[str]) -> bool:
     """Whether one row's ``proposal_id`` falls in a denied set from
     :func:`denied_proposal_ids_for`."""
     return bool(denied) and (proposal_id or "").upper() in denied
+
+
+def _compact(name: str) -> str:
+    """Job keys and product directories use the target with spaces removed."""
+    return (name or "").replace(" ", "").casefold()
+
+
+class NightVisibility:
+    """Which objects on one (instrument, obsdate) a viewer may see (issue #144
+    PR5), for resources keyed by night and target name: photometry and
+    transit-fit runs, their files and logs, and jobs.
+
+    Those keys are free text -- a job's target is whatever was submitted, and a
+    product directory is the OBJECT with spaces removed -- so a name is matched
+    to ``summaries.object`` with spaces and case ignored, then by *normalize*
+    (the app's target-name normalizer) when nothing matches that way.
+
+    A night with no denied summary is never hidden, so the common case costs
+    one query per night and changes nothing. On a night with denied rows, a
+    name is visible only if it matches an object with a visible summary: an
+    unrecognized name there is hidden too (fail closed), since a run under it
+    could still hold restricted frames. Rows are read once per night and
+    cached on the instance, so build one per request.
+    """
+
+    def __init__(
+        self,
+        db_path: str,
+        denied: frozenset[str],
+        normalize: Callable[[str], str] | None = None,
+    ) -> None:
+        self.db_path = db_path
+        self.denied = denied
+        self.normalize = normalize
+        self._rows: dict[tuple[str, str], list[tuple[str, bool]]] = {}
+
+    def _night(self, instrument: str, obsdate: str) -> list[tuple[str, bool]]:
+        """``(object, visible)`` per summary on one night."""
+        key = (instrument, obsdate)
+        if key not in self._rows:
+            with get_conn(self.db_path) as conn:
+                rows = conn.execute(
+                    "SELECT object, proposal_id FROM summaries "
+                    "WHERE instrument = ? AND obsdate = ?",
+                    (instrument, obsdate),
+                ).fetchall()
+            self._rows[key] = [
+                (obj or "", not is_denied(pid, self.denied)) for obj, pid in rows
+            ]
+        return self._rows[key]
+
+    def hidden(self, instrument: str, obsdate: str, target: str) -> bool:
+        """True when the viewer may not see *target*'s data on this night."""
+        if not self.denied:
+            return False
+        rows = self._night(instrument, obsdate)
+        if all(visible for _, visible in rows):
+            return False
+        want = _compact(target)
+        matched = [visible for obj, visible in rows if _compact(obj) == want]
+        if not matched and self.normalize is not None:
+            norm = self.normalize(target)
+            matched = [visible for obj, visible in rows if self.normalize(obj) == norm]
+        return not any(matched)
+
+    def hidden_objects(self, instrument: str, obsdate: str) -> set[str]:
+        """Compact names of the objects on this night with nothing visible."""
+        if not self.denied:
+            return set()
+        visible: dict[str, bool] = {}
+        for obj, is_visible in self._night(instrument, obsdate):
+            name = _compact(obj)
+            visible[name] = visible.get(name, False) or is_visible
+        return {name for name, v in visible.items() if name and not v}
+
+
+def hidden_obsdates(db_path: str, instrument: str, denied: frozenset[str]) -> set[str]:
+    """Obsdates of *instrument* with summaries but none the viewer may see.
+
+    Pages that add dates from the photometry output tree (not just the
+    obslog) subtract these, so a fully restricted night cannot come back
+    through its products.
+    """
+    if not denied:
+        return set()
+    clause, deny_params = sql_not_denied(denied)
+    with get_conn(db_path) as conn:
+        rows = conn.execute(
+            "SELECT obsdate FROM summaries WHERE instrument = ? GROUP BY obsdate "
+            f"HAVING SUM(CASE WHEN {clause} THEN 1 ELSE 0 END) = 0",
+            [instrument, *deny_params],
+        ).fetchall()
+    return {r[0] for r in rows}
 
 
 def object_hidden(
