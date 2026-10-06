@@ -31,7 +31,7 @@ import logging
 import sqlite3
 from collections.abc import Iterable
 
-from muscat_db.database import get_conn
+from muscat_db.database import get_conn, sql_not_denied
 
 logger = logging.getLogger(__name__)
 
@@ -98,21 +98,6 @@ def is_denied(proposal_id: str | None, denied: frozenset[str]) -> bool:
     """Whether one row's ``proposal_id`` falls in a denied set from
     :func:`denied_proposal_ids_for`."""
     return bool(denied) and (proposal_id or "").upper() in denied
-
-
-def sql_not_denied(denied: frozenset[str], column: str = "proposal_id") -> tuple[str, list[str]]:
-    """``(clause, params)`` keeping only rows outside *denied*.
-
-    Returns ``("1", [])`` for an empty set so callers can always splice the
-    clause in. *column* is a trusted identifier, never user input.
-    """
-    if not denied:
-        return "1", []
-    placeholders = ",".join("?" for _ in denied)
-    return (
-        f"COALESCE({column}, '') COLLATE NOCASE NOT IN ({placeholders})",
-        sorted(denied),
-    )
 
 
 def object_hidden(

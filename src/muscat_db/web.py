@@ -3847,7 +3847,7 @@ def api_fov_observed_pointing(inst: str = "", obsdate: str = "", obj: str = ""):
             status_code=400,
         )
 
-    pointing = _get_observed_pointing(_db_path(), inst, obsdate, obj)
+    pointing = _get_observed_pointing(_db_path(), inst, obsdate, obj, denied=_viewer_denied())
     if pointing is None:
         return JSONResponse(
             {"ok": False, "error": f"No usable pointing found for {obj!r} on {inst}/{obsdate}."},
@@ -4658,8 +4658,12 @@ def api_lco_obslog_exposures(target: str):
     norm_overrides = _get_norm_name_overrides(db)
     norm = _normalize_target_name(target, norm_overrides)
     try:
-        objects = [o for o in _get_frame_objects(db) if _normalize_target_name(o, norm_overrides) == norm]
-        exposures = _get_exposure_log_for_objects(db, objects)
+        denied = _viewer_denied()
+        objects = [
+            o for o in _get_frame_objects(db, denied=denied)
+            if _normalize_target_name(o, norm_overrides) == norm
+        ]
+        exposures = _get_exposure_log_for_objects(db, objects, denied=denied)
     except Exception:
         logger.debug("obslog exposure lookup failed for %s", target, exc_info=True)
         return JSONResponse({"ok": False, "error": "obslog lookup failed"}, status_code=500)
@@ -7210,9 +7214,13 @@ app.include_router(ads_router)
 # router-based route whose full path happens to also be exactly one or two
 # segments (e.g. GET /api/tags was being matched here as
 # instrument="api", obsdate="tags" instead of reaching tags_router).
+# The obslog browser filters by the viewer's denied set (issue #144 PR6). A
+# night or CCD with nothing visible renders exactly like one never observed
+# (200, empty), not 404: an unknown date is already a 200 here, so a 404 would
+# confirm the hidden night exists.
 @app.get("/{instrument}", response_class=HTMLResponse)
 def instrument_page(instrument: str):
-    dates = _get_dates(_db_path(), instrument)
+    dates = _get_dates(_db_path(), instrument, denied=_viewer_denied())
     return _render(
         "instrument.html",
         instrument=instrument,
@@ -7223,12 +7231,12 @@ def instrument_page(instrument: str):
 
 @app.get("/{instrument}/{obsdate}", response_class=HTMLResponse)
 def date_page(instrument: str, obsdate: str):
-    summaries = _get_summaries(_db_path(), instrument, obsdate)
+    summaries = _get_summaries(_db_path(), instrument, obsdate, denied=_viewer_denied())
     ccds = sorted(set(s["ccd"] for s in summaries))
     return _render("date.html", instrument=instrument, obsdate=obsdate, summaries=summaries, ccds=ccds)
 
 
 @app.get("/{instrument}/{obsdate}/ccd{ccd}", response_class=HTMLResponse)
 def ccd_page(instrument: str, obsdate: str, ccd: int):
-    frames = _get_frames(_db_path(), instrument, obsdate, ccd)
+    frames = _get_frames(_db_path(), instrument, obsdate, ccd, denied=_viewer_denied())
     return _render("ccd.html", instrument=instrument, obsdate=obsdate, ccd=ccd, frames=frames)
