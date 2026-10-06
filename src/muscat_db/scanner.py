@@ -454,6 +454,43 @@ def _scan_date(
     }
 
 
+def missing_dates(inst_name: str, year_prefix: str, force: bool = False) -> list[str]:
+    """Raw date directories of *inst_name* that ``scan_missing_dates`` would scan.
+
+    Same selection rules as there (see its docstring); split out so the
+    periodic sweep can vet each date before rescanning it.
+    """
+    prefix = "" if year_prefix.lower() == "all" else year_prefix
+    inst = INSTRUMENTS[inst_name]
+    data_dir = inst.data_dir
+    obslog_dir = f"{OBSLOG_BASE}/{inst_name}"
+    existing = set()
+    if not force and os.path.isdir(obslog_dir):
+        try:
+            entries = os.listdir(obslog_dir)
+        except (PermissionError, OSError) as e:
+            print(f"[warn] cannot list {obslog_dir}: {e}")
+            entries = []
+        for d in entries:
+            if (
+                os.path.isdir(f"{obslog_dir}/{d}") and d.startswith(prefix)
+                and _obsdate_dir_is_complete(obslog_dir, d)
+            ):
+                existing.add(d)
+    if not os.path.isdir(data_dir):
+        return []
+    try:
+        data_entries = sorted(os.listdir(data_dir))
+    except (PermissionError, OSError) as e:
+        print(f"[warn] cannot list {data_dir}: {e}")
+        return []
+    return [
+        d for d in data_entries
+        if _is_obsdate_dir(d)
+        and os.path.isdir(f"{data_dir}/{d}") and d.startswith(prefix) and d not in existing
+    ]
+
+
 def scan_missing_dates(
     inst_name: str,
     year_prefix: str,
@@ -475,38 +512,11 @@ def scan_missing_dates(
     overwriting any existing CSVs — useful for fixing legacy malformed
     obslogs.
     """
-    prefix = "" if year_prefix.lower() == "all" else year_prefix
-    inst = INSTRUMENTS[inst_name]
-    data_dir = inst.data_dir
-    obslog_dir = f"{OBSLOG_BASE}/{inst_name}"
-    existing = set()
-    if not force and os.path.isdir(obslog_dir):
-        try:
-            entries = os.listdir(obslog_dir)
-        except (PermissionError, OSError) as e:
-            print(f"[warn] cannot list {obslog_dir}: {e}")
-            entries = []
-        for d in entries:
-            if (
-                os.path.isdir(f"{obslog_dir}/{d}") and d.startswith(prefix)
-                and _obsdate_dir_is_complete(obslog_dir, d)
-            ):
-                existing.add(d)
     scanned: list[str] = []
-    if not os.path.isdir(data_dir):
-        return scanned
-    try:
-        data_entries = sorted(os.listdir(data_dir))
-    except (PermissionError, OSError) as e:
-        print(f"[warn] cannot list {data_dir}: {e}")
-        return scanned
-    missing = [
-        d for d in data_entries
-        if _is_obsdate_dir(d)
-        and os.path.isdir(f"{data_dir}/{d}") and d.startswith(prefix) and d not in existing
-    ]
+    missing = missing_dates(inst_name, year_prefix, force=force)
     if not missing:
         return scanned
+    prefix = "" if year_prefix.lower() == "all" else year_prefix
     task_id = None
     if progress is not None:
         label = "all" if prefix == "" else f"{prefix}xx"
