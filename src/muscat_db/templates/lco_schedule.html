@@ -2257,7 +2257,8 @@
     // p.kind (from requestgroup_to_params/_INSTRUMENT_TYPE_TO_KIND) is one of
     // "muscat", "sinistro", "qhy600" -- never muscat3/muscat4, which aren't
     // real #sch-kind options (they're view-only instrument identities).
-    setSelectValue('sch-kind', isSingleFilterKind(p.kind) ? p.kind : 'muscat');
+    var muscat = !isSingleFilterKind(p.kind);
+    setSelectValue('sch-kind', muscat ? 'muscat' : p.kind);
     applyKind();
     if (p.proposal != null && p.proposal !== '') setSelectValue('sch-proposal', String(p.proposal));
     if (p.target_name != null) setVal('sch-target', p.target_name);
