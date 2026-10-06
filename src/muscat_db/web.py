@@ -1937,6 +1937,7 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
     sel_run: str | None = None
     previews: dict[str, dict] = {}
     nearby_preview: dict | None = None
+    post_jd_range: dict | None = None
     command = ""
     raw_missing = False
 
@@ -2065,6 +2066,19 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
                 if csv_info:
                     headers, rows = phot.csv_preview(rdir / csv_info["file"], n=8)
                     previews[band] = {"headers": headers, "rows": rows}
+            # Slider bounds for the post-processing Exclude JD Range: the
+            # band CSVs' own BJD_TDB, the axis prose2's cut compares against.
+            span = phot.lightcurve_time_range(
+                rdir / p["csv"]["file"] for p in outputs["bands"].values() if p.get("csv")
+            )
+            if span:
+                lo, hi = round(span[0], 6), round(span[1], 6)
+                post_jd_range = {
+                    "min": lo,
+                    "max": hi,
+                    "min_utc": _jd_to_utc_minute(lo),
+                    "max_utc": _jd_to_utc_minute(hi),
+                }
             nearby_info = outputs.get("summary", {}).get("nearby_stars")
             if nearby_info:
                 nb_headers, nb_rows = phot.csv_preview(rdir / nearby_info["file"], n=100)
@@ -2115,6 +2129,7 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
         available_telescopes=available_telescopes,
         available_modes=available_modes,
         jd_range=jd_range,
+        post_jd_range=post_jd_range,
     )
     # The run buttons' enabled/disabled state is JavaScript-driven and reflects
     # the live job state. A cached or back/forward-restored snapshot can show

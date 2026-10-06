@@ -657,14 +657,26 @@
       <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 1.25rem; margin: 0.75rem 0 0.5rem; max-width: 420px;">
         <div class="opt">
           <label for="opt-post_exclude_before_jd">EXCLUDE BEFORE JD <span class="help-tooltip" title="Drop rows with BJD_TDB less than this value. Blank -> no lower cut.">?</span></label>
+          {% if post_jd_range %}
+          <div style="display:flex; align-items:center; gap:0.5rem;">
+            <input type="range" id="jdslider-post_exclude_before_jd" min="{{ post_jd_range.min }}" max="{{ post_jd_range.max }}" step="0.0001" value="{{ post_jd_range.min }}" style="flex:1;" title="drag to set the lower BJD_TDB cut; at the left end means no cut" {% if not sel_run %}disabled{% endif %}>
+            <span class="hint" id="jdslider-post_exclude_before_jd-label" style="white-space:nowrap;">≈ {{ post_jd_range.min_utc }}</span>
+          </div>
+          {% endif %}
           <input type="number" id="opt-post_exclude_before_jd" placeholder="none" value="{{ postproc_defaults['post_exclude_before_jd'] }}" step="0.0001" style="width: 100%;" {% if not sel_run %}disabled{% endif %}>
         </div>
         <div class="opt">
           <label for="opt-post_exclude_after_jd">EXCLUDE AFTER JD <span class="help-tooltip" title="Drop rows with BJD_TDB greater than this value. Blank -> no upper cut.">?</span></label>
+          {% if post_jd_range %}
+          <div style="display:flex; align-items:center; gap:0.5rem;">
+            <input type="range" id="jdslider-post_exclude_after_jd" min="{{ post_jd_range.min }}" max="{{ post_jd_range.max }}" step="0.0001" value="{{ post_jd_range.max }}" style="flex:1;" title="drag to set the upper BJD_TDB cut; at the right end means no cut" {% if not sel_run %}disabled{% endif %}>
+            <span class="hint" id="jdslider-post_exclude_after_jd-label" style="white-space:nowrap;">≈ {{ post_jd_range.max_utc }}</span>
+          </div>
+          {% endif %}
           <input type="number" id="opt-post_exclude_after_jd" placeholder="none" value="{{ postproc_defaults['post_exclude_after_jd'] }}" step="0.0001" style="width: 100%;" {% if not sel_run %}disabled{% endif %}>
         </div>
       </div>
-      <p style="color: var(--text-dim); font-size: 0.78rem; margin: 0 0 0.5rem;">BJD_TDB, the light curve's own time column; blank means no cut. Both set requires before &lt; after.</p>
+      <p style="color: var(--text-dim); font-size: 0.78rem; margin: 0 0 0.5rem;">BJD_TDB, the light curve's own time column; blank means no cut. Both set requires before &lt; after.{% if post_jd_range %} Light curve spans ≈ {{ post_jd_range.min_utc }}–{{ post_jd_range.max_utc }}.{% endif %}</p>
     </details>
     <div class="run-actions">
       <button class="btn primary" type="button" id="postproc-test-btn" {% if not sel_run %}disabled{% endif %}>Test post-process</button>
@@ -1044,19 +1056,21 @@
     return d.getUTCFullYear() + '-' + pad(d.getUTCMonth() + 1) + '-' + pad(d.getUTCDate()) +
       ' ' + pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes()) + ' UTC';
   }
-  function jdSliderEls(mode) {
-    var key = mode === 'after' ? 'exclude_after_jd' : 'exclude_before_jd';
+  // key: the option id ('exclude_after_jd', 'post_exclude_before_jd', ...).
+  // An *_after_* slider rests at its max and a *_before_* one at its min,
+  // i.e. the end where the cut keeps every row.
+  function jdSliderEls(key) {
     return {
       slider: document.getElementById('jdslider-' + key),
       field: document.getElementById('opt-' + key),
       label: document.getElementById('jdslider-' + key + '-label'),
     };
   }
-  function syncJdSliderFromField(mode) {
-    var els = jdSliderEls(mode);
+  function syncJdSliderFromField(key, labelPrefix) {
+    var els = jdSliderEls(key);
     if (!els.slider || !els.field) return;
     var lo = parseFloat(els.slider.min), hi = parseFloat(els.slider.max);
-    var neutral = mode === 'after' ? hi : lo;
+    var neutral = key.indexOf('_after_') !== -1 ? hi : lo;
     var raw = (els.field.value || '').trim();
     var isMulti = raw.indexOf(',') !== -1;
     // A single-thumb slider can't represent a comma-separated list, and
@@ -1076,21 +1090,25 @@
     var v = parseFloat(raw);
     var pos = (raw !== '' && isFinite(v) && v >= lo && v <= hi) ? v : neutral;
     els.slider.value = pos;
-    if (els.label) els.label.textContent = jdToUtcMinuteLabel(pos);
+    if (els.label) els.label.textContent = labelPrefix + jdToUtcMinuteLabel(pos);
   }
-  function initJdSlider(mode) {
-    var els = jdSliderEls(mode);
+  // labelPrefix: '' for header JD (UTC); '≈ ' for BJD_TDB, which is offset
+  // from UTC by up to ~9 min (TDB-UTC plus the barycentric light-time).
+  function initJdSlider(key, labelPrefix) {
+    var els = jdSliderEls(key);
     if (!els.slider || !els.field) return;
     els.slider.addEventListener('input', function () {
       var v = parseFloat(els.slider.value);
       els.field.value = v.toFixed(4);
-      if (els.label) els.label.textContent = jdToUtcMinuteLabel(v);
+      if (els.label) els.label.textContent = labelPrefix + jdToUtcMinuteLabel(v);
     });
-    els.field.addEventListener('input', function () { syncJdSliderFromField(mode); });
-    syncJdSliderFromField(mode);
+    els.field.addEventListener('input', function () { syncJdSliderFromField(key, labelPrefix); });
+    syncJdSliderFromField(key, labelPrefix);
   }
-  initJdSlider('after');
-  initJdSlider('before');
+  initJdSlider('exclude_after_jd', '');
+  initJdSlider('exclude_before_jd', '');
+  initJdSlider('post_exclude_after_jd', '≈ ');
+  initJdSlider('post_exclude_before_jd', '≈ ');
 
   function updateWcsMethod() {
     var el = document.getElementById('opt-wcs_method');
@@ -1138,8 +1156,10 @@
       });
       saveOptions();
       updateApertureHints();
-      syncJdSliderFromField('after');
-      syncJdSliderFromField('before');
+      syncJdSliderFromField('exclude_after_jd', '');
+      syncJdSliderFromField('exclude_before_jd', '');
+      syncJdSliderFromField('post_exclude_after_jd', '≈ ');
+      syncJdSliderFromField('post_exclude_before_jd', '≈ ');
       refreshCmd();
     });
   }

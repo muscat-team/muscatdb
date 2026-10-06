@@ -508,6 +508,24 @@ class TestListOutputs:
         assert len(rows) == 2
         assert rows[0][1] == "1.0001"
 
+    def test_lightcurve_time_range_spans_all_band_csvs(self, tmp_path):
+        a = tmp_path / "a.csv"
+        b = tmp_path / "b.csv"
+        a.write_text("BJD_TDB,Flux\n2460807.80,1\n2460807.90,1\n")
+        b.write_text("Flux,BJD_TDB\n1,2460807.75\n1,nan\n1,\n1,2460807.85\n")
+        assert phot.lightcurve_time_range([a, b]) == (2460807.75, 2460807.90)
+
+    def test_lightcurve_time_range_none_without_usable_times(self, tmp_path):
+        no_col = tmp_path / "no_col.csv"
+        no_col.write_text("Flux,Err\n1,0.1\n")
+        single = tmp_path / "single.csv"
+        single.write_text("BJD_TDB,Flux\n2460807.80,1\n")
+        assert phot.lightcurve_time_range([no_col]) is None
+        # a zero-width span has nothing to drag across
+        assert phot.lightcurve_time_range([single]) is None
+        assert phot.lightcurve_time_range([tmp_path / "missing.csv"]) is None
+        assert phot.lightcurve_time_range([]) is None
+
     def test_get_photometry_status_none(self, prose_dir):
         status = phot.get_photometry_status(INST, DATE, "UnknownTarget")
         assert status == "none"

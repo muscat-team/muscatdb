@@ -831,6 +831,37 @@ def csv_preview(path: Path, n: int = 8) -> tuple[list[str], list[list[str]]]:
         return [], []
 
 
+def lightcurve_time_range(paths) -> tuple[float, float] | None:
+    """Min/max finite ``BJD_TDB`` across band light-curve CSVs, or ``None``.
+
+    This is the time axis prose2's post-process JD-range cut compares
+    against -- not the raw header JD in ``frames.jd_start`` that the
+    run-time ``--exclude_after_jd``/``--exclude_before_jd`` use. A
+    zero-width span returns ``None`` (nothing to drag a slider across).
+    """
+    lo = hi = None
+    for path in paths:
+        try:
+            with open(path, newline="") as f:
+                reader = _csv.DictReader(f)
+                if "BJD_TDB" not in (reader.fieldnames or []):
+                    continue
+                for row in reader:
+                    try:
+                        t = float(row["BJD_TDB"])
+                    except (TypeError, ValueError):
+                        continue
+                    if not math.isfinite(t):
+                        continue
+                    lo = t if lo is None else min(lo, t)
+                    hi = t if hi is None else max(hi, t)
+        except OSError:
+            logger.debug("failed to read BJD_TDB span from %s", path, exc_info=True)
+    if lo is None or hi is None or not hi > lo:
+        return None
+    return lo, hi
+
+
 @dataclass
 class RunDescriptor:
     run_id: str
