@@ -1531,6 +1531,36 @@ def visible_targets(
     return result
 
 
+def visible_target_rollup(
+    db_path: str, obj: str, denied: frozenset[str]
+) -> dict | None:
+    """``n_dates``, ``n_frames``, ``ra`` and ``declination`` of *obj* as seen
+    by a viewer denied the (upper-cased) proposals in *denied* (issue #144).
+
+    Reads the precomputed ``targets`` row unless *obj* has a summary under a
+    denied proposal; that row spans every proposal, so the rollup is then
+    re-aggregated from the visible summaries alone. ``None`` when nothing of
+    *obj* is visible.
+    """
+    if denied and obj in objects_with_restricted_proposal(db_path, denied):
+        with get_conn(db_path) as conn:
+            conn.create_aggregate("coord_repr", 2, CoordRepr)
+            rows = _target_rows(conn, objects={obj}, exclude_proposals=denied)
+        if not rows:
+            return None
+        # _target_rows order: see visible_targets.
+        r = rows[0]
+        return {"n_dates": r[1], "n_frames": r[2], "ra": r[8], "declination": r[9]}
+    with get_conn(db_path) as conn:
+        row = conn.execute(
+            "SELECT n_dates, n_frames, ra, declination FROM targets WHERE object = ?",
+            (obj,),
+        ).fetchone()
+    if row is None:
+        return None
+    return {"n_dates": row[0], "n_frames": row[1], "ra": row[2], "declination": row[3]}
+
+
 _FILTER_COLOR_ALIAS = {
     "g":  "g",  "gp": "g",
     "r":  "r",  "rp": "r",  "R": "r",

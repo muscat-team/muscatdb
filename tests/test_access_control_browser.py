@@ -9,7 +9,9 @@ Covers ``/{instrument}``, ``/{instrument}/{obsdate}``,
 * sinistro 260102: ``HIDDENTGT`` only, under the restricted proposal, so a
   denied viewer must not learn the night exists;
 * sinistro 260103: a mixed night, ``OPENTGT`` (open) and ``HIDDENTGT``
-  (restricted) on the same CCD.
+  (restricted) on the same CCD;
+* ``MIXTGT``: one open frame on 260101 and one restricted frame on 260102, a
+  target whose precomputed ``targets`` row spans both proposals.
 
 As in PR4, the restriction row is stored lower-cased while frames carry the
 upper-case header spelling.
@@ -43,6 +45,8 @@ _FRAMES = [
     ("sinistro", "260103", "SIN_2601030001", "OPENTGT", 3.0, _OPEN),
     ("sinistro", "260103", "SIN_2601030002", "HIDDENTGT", 3.1, _RESTRICTED),
     ("sinistro", "260103", "SIN_2601030003", "HIDDENTGT", 3.2, _RESTRICTED),
+    ("sinistro", "260101", "SIN_2601010003", "MIXTGT", 1.2, _OPEN),
+    ("sinistro", "260102", "SIN_2601020003", "MIXTGT", 2.2, _RESTRICTED),
 ]
 
 
@@ -225,3 +229,35 @@ def test_obslog_exposures_count_only_visible_frames(client, db):
     _set_admin(db, "root")
     admin_rows = _exposures(client, "root", "HIDDENTGT")["exposures"]
     assert sum(r["nframes"] for r in admin_rows) == 4
+
+
+# ── /api/exposure/target/{target} ───────────────────────────────────────
+
+
+def _exposure_target(client, user, target):
+    headers = _headers(user) if user else {}
+    return client.get(f"/api/exposure/target/{target}", headers=headers)
+
+
+@pytest.mark.parametrize("user", ["alice", None])
+def test_exposure_target_of_hidden_target_looks_like_unknown_name(client, user):
+    hidden = _exposure_target(client, user, "HIDDENTGT")
+    never = _exposure_target(client, user, "NEVERTGT")
+    assert hidden.status_code == never.status_code == 404
+    assert hidden.json()["error"].replace("HIDDENTGT", "NEVERTGT") == never.json()["error"]
+
+
+def test_exposure_target_rollup_counts_only_visible_frames(client, db):
+    mix = _exposure_target(client, "alice", "MIXTGT").json()
+    assert (mix["n_observations"], mix["n_unique_dates"], mix["n_total_frames"]) == (1, 1, 1)
+    _set_admin(db, "root")
+    mix = _exposure_target(client, "root", "MIXTGT").json()
+    assert (mix["n_observations"], mix["n_unique_dates"], mix["n_total_frames"]) == (2, 2, 2)
+    hidden = _exposure_target(client, "root", "HIDDENTGT").json()
+    assert (hidden["n_observations"], hidden["n_unique_dates"]) == (4, 2)
+
+
+def test_exposure_target_of_open_target_unchanged(client):
+    resp = _exposure_target(client, "alice", "OPENTGT").json()
+    assert (resp["n_observations"], resp["n_unique_dates"]) == (3, 2)
+    assert resp["coordinates"] is not None

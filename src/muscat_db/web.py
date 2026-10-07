@@ -159,6 +159,7 @@ from muscat_db.database import (
     get_targets as _get_targets,
     objects_with_restricted_proposal as _objects_with_restricted_proposal,
     visible_targets as _visible_target_rows,
+    visible_target_rollup as _visible_target_rollup,
     get_identified_overrides as _get_identified_overrides,
     get_norm_name_overrides as _get_norm_name_overrides,
     set_identified as _set_identified,
@@ -3567,24 +3568,23 @@ def api_exposure_target(target: str):
 
     try:
         db = _db_path()
+        # Frames under a proposal the viewer is denied are dropped, and a
+        # target with none left answers like an unknown name (issue #144).
+        denied = _viewer_denied()
+        visible_clause, visible_params = _sql_not_denied(denied)
         with get_conn(db, timeout=10, row_factory=sqlite3.Row) as conn:
-            # Get all frames for this target
             frames = conn.execute(
-                """
+                f"""
                 SELECT
                     instrument, obsdate, filter, exptime, read_mode,
                     ra, declination, airmass, focus, ccd
                 FROM frames
-                WHERE object = ?
+                WHERE object = ? AND {visible_clause}
                 ORDER BY obsdate DESC, instrument, filter, exptime
                 """,
-                (target,)
+                (target, *visible_params),
             ).fetchall()
-            # Get target info from targets table
-            target_info = conn.execute(
-                "SELECT n_dates, n_frames, ra, declination FROM targets WHERE object = ?",
-                (target,)
-            ).fetchone()
+        target_info = _visible_target_rollup(db, target, denied) if frames else None
 
         if not frames:
             return JSONResponse({
