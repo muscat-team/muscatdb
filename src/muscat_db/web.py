@@ -5150,7 +5150,7 @@ def api_lco_archive_frames(
             result = lco.archive_search_all(req_filters, _request_user(request))
             rows = result.get("results") or []
             if isinstance(rows, list):
-                annotated, dataset_count = _annotate_lco_archive_results(instrument, rows)
+                annotated, dataset_count = _annotate_lco_archive_results(instrument, rows, denied=_viewer_denied())
                 result = dict(result)
                 result["results"] = annotated
                 result["dataset_count"] = dataset_count
@@ -5237,7 +5237,7 @@ def api_lco_archive_frames(
             result = dict(result)
             result["results"] = rows
         if isinstance(rows, list):
-            annotated, dataset_count = _annotate_lco_archive_results(instrument, rows)
+            annotated, dataset_count = _annotate_lco_archive_results(instrument, rows, denied=_viewer_denied())
             result = dict(result)
             result["results"] = annotated
             result["dataset_count"] = dataset_count
@@ -5269,7 +5269,7 @@ def api_lco_archive_exofop(
             {"ok": False, "error": "Enter a target name to check ExoFOP time series."},
             status_code=400,
         )
-    report = exofop.build_time_series_report(target)
+    report = exofop.build_time_series_report(target, denied=_viewer_denied())
     if not report.get("ok"):
         return JSONResponse({"ok": False, "error": report.get("error", "not a TOI")})
     return JSONResponse(
@@ -5318,7 +5318,7 @@ def api_lco_archive_exofop_download(request: Request, payload: dict = Body(...))
                 status_code=404,
             )
         annotated, _dataset_count = _annotate_lco_archive_results(
-            str(payload.get("instrument") or ""), rows
+            str(payload.get("instrument") or ""), rows, denied=_viewer_denied()
         )
         frames = [dict(f) for f in annotated]
         job = lco.start_archive_download(

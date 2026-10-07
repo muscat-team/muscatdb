@@ -38,6 +38,7 @@ from muscat_db.database import (
     db_path as _db_path,
     get_conn,
     get_user_lco_token,
+    sql_not_denied,
     user_lco_token_configured,
 )
 from muscat_db.instruments import INSTRUMENTS
@@ -616,20 +617,30 @@ def _frame_coords_deg(frame: dict) -> tuple[float | None, float | None]:
     return _coord_to_deg(ra, is_ra=True), _coord_to_deg(dec, is_ra=False)
 
 
-def _local_lco_datasets(inst: str, obsdate: str, site: str) -> list[dict]:
+def _local_lco_datasets(
+    inst: str, obsdate: str, site: str, *, denied: frozenset[str] = frozenset()
+) -> list[dict]:
+    """Local frames for one (inst, night, site), minus restricted proposals.
+
+    *denied* is the viewer's restricted-proposal set (issue #144); frames under
+    it are left out so archive annotation and the ExoFOP cross-check cannot
+    reveal a restricted object or its frame count.
+    """
     db = _db_path()
+    visible_clause, visible_params = sql_not_denied(denied)
     with get_conn(db) as conn:
         conn.create_aggregate("coord_repr", 2, CoordRepr)
         rows = conn.execute(
-            """
+            f"""
             SELECT object, COUNT(*) AS nframes, coord_repr(ra, declination) AS coord
             FROM frames
             WHERE instrument = ?
               AND obsdate = ?
               AND filename LIKE ?
+              AND {visible_clause}
             GROUP BY object
             """,
-            (inst, obsdate, f"{site}%"),
+            (inst, obsdate, f"{site}%", *visible_params),
         ).fetchall()
     out = []
     for obj, nframes, packed in rows:
@@ -685,6 +696,7 @@ def local_lco_dataset_match(
     dec_deg: float,
     match_arcsec: float = _LCO_DATASET_MATCH_ARCSEC,
     object_name: str = "",
+    denied: frozenset[str] = frozenset(),
 ) -> dict | None:
     """Return the local frames dataset (if any) matching an observation.
 
@@ -709,7 +721,7 @@ def local_lco_dataset_match(
     labels = [obsdates] if isinstance(obsdates, str) else list(obsdates or [])
     candidates: list[dict] = []
     for label in labels:
-        candidates.extend(_local_lco_datasets(inst, label, site))
+        candidates.extend(_local_lco_datasets(inst, label, site, denied=denied))
 
     obj_ids = _target_identifiers(object_name)
     if obj_ids:
@@ -733,7 +745,9 @@ def local_lco_dataset_match(
     return None
 
 
-def _annotate_lco_archive_results(inst: str, results: list[dict]) -> tuple[list[dict], int]:
+def _annotate_lco_archive_results(
+    inst: str, results: list[dict], *, denied: frozenset[str] = frozenset()
+) -> tuple[list[dict], int]:
     if not results:
         return [], 0
 
@@ -801,7 +815,7 @@ def _annotate_lco_archive_results(inst: str, results: list[dict]) -> tuple[list[
             continue
         key = (inst_name, obsdate, site)
         if key not in local_cache:
-            local_cache[key] = _local_lco_datasets(inst_name, obsdate, site)
+            local_cache[key] = _local_lco_datasets(inst_name, obsdate, site, denied=denied)
 
         archive_ra = meta.get("archive_ra_deg")
         archive_dec = meta.get("archive_dec_deg")

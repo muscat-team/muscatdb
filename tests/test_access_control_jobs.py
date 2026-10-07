@@ -397,3 +397,20 @@ def test_ephemeris_targets_exclude_fits_on_hidden_nights(client, monkeypatch):
     assert not any("HIDDENTGT" in t for t in targets)
     root = _get(client, "/api/ephemeris/targets", user="root").json()["targets"]
     assert any("HIDDENTGT" in t for t in root)
+
+
+# ── LCO archive / ExoFOP local cross-check ──────────────────────────────
+
+
+def test_exofop_cross_check_receives_viewer_denied_set(client, monkeypatch):
+    seen = {}
+
+    def fake_report(target, *, denied=frozenset(), **_kw):
+        seen["denied"] = denied
+        return {"ok": True, "toi": 1, "time_series": [], "total": 0}
+
+    monkeypatch.setattr(web.exofop, "build_time_series_report", fake_report)
+    assert _get(client, "/api/lco/archive/exofop", user="alice", OBJECT="TOI-1").status_code == 200
+    assert seen["denied"] == DENIED
+    assert _get(client, "/api/lco/archive/exofop", user="root", OBJECT="TOI-1").status_code == 200
+    assert seen["denied"] == frozenset()

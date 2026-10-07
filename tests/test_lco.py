@@ -1647,6 +1647,71 @@ class ExofopTimeSeriesTest(unittest.TestCase):
         self.assertNotEqual(lco._target_identifiers("TOI-2876"), lco._target_identifiers("TIC 2876"))
         self.assertFalse(lco._target_identifiers("TOI-2876") & lco._target_identifiers("TIC 2876"))
 
+    def _make_proposal_db(self):
+        """A frames table with the ``proposal_id`` column (issue #144)."""
+        import sqlite3
+        db = self._make_db()
+        conn = sqlite3.connect(db)
+        conn.execute("ALTER TABLE frames ADD COLUMN proposal_id TEXT NOT NULL DEFAULT ''")
+        conn.execute(
+            "INSERT INTO frames (instrument, obsdate, ccd, filename, object, ra, declination, proposal_id)"
+            " VALUES ('sinistro','240513',0,'cpt1m010-fa03-20240513-0001-e91.fits',"
+            "'TIC 460950389','10:36:37.96','-64:47:53.0','KEY2026B-001')"
+        )
+        conn.commit()
+        conn.close()
+        return db
+
+    def test_local_lco_datasets_hides_denied_proposals(self):
+        """#144: a night under a restricted proposal must not surface in
+        archive-search annotation or the ExoFOP cross-check for a denied viewer."""
+        db = self._make_proposal_db()
+        self.addCleanup(os.unlink, db)
+        with patch("muscat_db.lco._db_path", return_value=db):
+            open_view = lco._local_lco_datasets("sinistro", "240513", "cpt")
+            hidden = lco._local_lco_datasets(
+                "sinistro", "240513", "cpt", denied=frozenset({"KEY2026B-001"}),
+            )
+            other = lco._local_lco_datasets(
+                "sinistro", "240513", "cpt", denied=frozenset({"OTHER-001"}),
+            )
+        self.assertEqual([d["object"] for d in open_view], ["TIC 460950389"])
+        self.assertEqual(hidden, [])
+        self.assertEqual(len(other), 1)
+
+    def test_local_lco_dataset_match_hides_denied_proposals(self):
+        db = self._make_proposal_db()
+        self.addCleanup(os.unlink, db)
+        args = ("sinistro", ["240513"], "cpt", 159.15817, -64.79805)
+        with patch("muscat_db.lco._db_path", return_value=db):
+            self.assertIsNotNone(lco.local_lco_dataset_match(*args, object_name="TOI-6715"))
+            self.assertIsNone(
+                lco.local_lco_dataset_match(
+                    *args, object_name="TIC 460950389", denied=frozenset({"KEY2026B-001"}),
+                )
+            )
+
+    def test_annotate_archive_results_hides_denied_local_frames(self):
+        """#144: ``dataset_exists`` / ``matched_object`` / the frame count in
+        archive search results must not reveal a restricted proposal's frames."""
+        db = self._make_proposal_db()
+        self.addCleanup(os.unlink, db)
+        rows = [{
+            "filename": "cpt1m010-fa03-20240513-0002-e91.fits",
+            "OBJECT": "TIC 460950389", "SITEID": "cpt", "TELID": "1m0a", "INSTRUME": "fa03",
+            "DATE_OBS": "2024-05-13T10:00:00Z", "RA": 159.15817, "DEC": -64.79805,
+        }]
+        with patch("muscat_db.lco._db_path", return_value=db):
+            open_out, _ = lco._annotate_lco_archive_results("sinistro", rows)
+            hidden_out, _ = lco._annotate_lco_archive_results(
+                "sinistro", rows, denied=frozenset({"KEY2026B-001"}),
+            )
+        self.assertTrue(open_out[0]["dataset_exists"])
+        self.assertEqual(open_out[0]["dataset_matched_object"], "TIC 460950389")
+        self.assertFalse(hidden_out[0]["dataset_exists"])
+        self.assertEqual(hidden_out[0]["dataset_existing_count"], 0)
+        self.assertNotIn("TIC 460950389", str(hidden_out[0].get("dataset_matched_object") or ""))
+
     def test_local_lco_dataset_match_does_not_pool_tic_and_toi(self):
         """Regression (PR #121 review): with a candidate dataset whose OBJECT
         is ``TIC 2876`` sitting many degrees from the query coordinates,
