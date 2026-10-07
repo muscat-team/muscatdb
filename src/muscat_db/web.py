@@ -659,14 +659,20 @@ def _require_visible_night(inst: str, date: str, target: str) -> None:
 
 
 def _ttv_target_hidden(target: str, denied: frozenset[str] | None = None) -> bool:
-    """A TTV fit spans nights, so it is hidden only when every night of its
-    target is (the rule /targets uses), not when some are."""
+    """A TTV fit combines transit times from many nights, and no run records
+    which ones it used (#208). It is therefore hidden when *any* night of its
+    target is denied, not only when every night is (the /targets rule): a
+    model fitted to a denied night's timing would expose it."""
     denied = _viewer_denied() if denied is None else denied
     if not denied:
         return False
     db = _db_path()
-    norm_name = _normalize_target_name(target, _get_norm_name_overrides(db))
-    return _norm_name_hidden(db, norm_name, denied)
+    norm_overrides = _get_norm_name_overrides(db)
+    norm_name = _normalize_target_name(target, norm_overrides)
+    return norm_name in {
+        _normalize_target_name(o, norm_overrides)
+        for o in _objects_with_restricted_proposal(db, denied)
+    }
 
 
 def _require_visible_ttv_target(target: str) -> None:

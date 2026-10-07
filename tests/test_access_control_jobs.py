@@ -4,7 +4,8 @@ and ephemeris data (issue #144 PR5).
 Derived data inherits the proposal of the night it came from: a photometry or
 transit-fit run on (instrument, obsdate, target) is hidden when that target's
 summaries on that night are all under denied proposals. A TTV fit spans
-nights, so it is hidden only when every night of its target is.
+nights and no run records which ones it used (#208), so it is hidden when any
+night of its target is: a fit over a denied night's timing would expose it.
 
 Fixture DB (sinistro):
 
@@ -326,8 +327,9 @@ def test_jobs_status_active_only_drops_hidden_rows(client):
 def test_jobs_status_counts_only_visible(client):
     alice = _get(client, "/api/jobs/status").json()["counts"]["done"]
     root = _get(client, "/api/jobs/status", user="root").json()["counts"]["done"]
-    # Hidden: HIDDENTGT's 2 photometry + 2 transit-fit jobs and its TTV job.
-    assert root - alice == 5
+    # Hidden: HIDDENTGT's 2 photometry + 2 transit-fit jobs, and the TTV jobs
+    # of HIDDENTGT and MIXTGT.
+    assert root - alice == 6
 
 
 def test_archive_download_job_hidden_if_any_listed_night_is(client):
@@ -345,33 +347,44 @@ def test_rerun_of_hidden_job_is_404(client):
 # ── TTV fits ────────────────────────────────────────────────────────────
 
 
-def test_ttv_reads_of_fully_hidden_target_look_absent(client):
-    assert _get(client, "/api/ttv-fit/runs", target="HIDDENTGT").json()["runs"] == []
-    outputs = _get(client, "/api/ttv-fit/outputs", target="HIDDENTGT", run_name=RUN).json()
+# MIXTGT has one open and one restricted night. Its fit may have used the
+# restricted night's timing, and no run records which nights it used (#208),
+# so it is hidden like a fully restricted target.
+_TTV_HIDDEN = pytest.mark.parametrize("target", ["HIDDENTGT", "MIXTGT"])
+
+
+@_TTV_HIDDEN
+def test_ttv_reads_of_hidden_target_look_absent(client, target):
+    assert _get(client, "/api/ttv-fit/runs", target=target).json()["runs"] == []
+    outputs = _get(client, "/api/ttv-fit/outputs", target=target, run_name=RUN).json()
     assert outputs["outputs"] == ttv.empty_ttv_outputs()
-    assert _get(client, "/api/ttv-fit/status", target="HIDDENTGT", run_name=RUN).json() == _NONE
-    model = _get(client, "/api/ttv-fit/model", target="HIDDENTGT", run_name=RUN)
+    assert _get(client, "/api/ttv-fit/status", target=target, run_name=RUN).json() == _NONE
+    model = _get(client, "/api/ttv-fit/model", target=target, run_name=RUN)
     never = _get(client, "/api/ttv-fit/model", target="NEVERTGT", run_name=RUN)
     assert (model.status_code, model.json()) == (never.status_code, never.json())
-    assert _get(client, "/api/ttv-fit/output-file", target="HIDDENTGT",
+    assert _get(client, "/api/ttv-fit/output-file", target=target,
                 run_name=RUN, file="data.csv").status_code == 404
-    assert _get(client, "/api/ttv-fit/download-all", target="HIDDENTGT",
+    assert _get(client, "/api/ttv-fit/download-all", target=target,
                 run_name=RUN).status_code == 404
-    assert _get(client, "/api/jobs/ttv-log/HIDDENTGT", run=RUN).status_code == 404
+    assert _get(client, f"/api/jobs/ttv-log/{target}", run=RUN).status_code == 404
 
 
-def test_ttv_of_partly_hidden_target_stays_visible(client):
-    assert _get(client, "/api/ttv-fit/runs", target="MIXTGT").json()["runs"] != []
+def test_ttv_of_open_target_on_mixed_night_stays_visible(client):
+    # OPENTGT shares 260103 with a restricted object, but none of its own
+    # summaries are restricted.
+    assert _get(client, "/api/ttv-fit/runs", target="OPENTGT").json()["runs"] != []
 
 
-def test_ttv_admin_sees_hidden_target(client):
-    assert _get(client, "/api/ttv-fit/runs", user="root", target="HIDDENTGT").json()["runs"] != []
+@_TTV_HIDDEN
+def test_ttv_admin_sees_hidden_target(client, target):
+    assert _get(client, "/api/ttv-fit/runs", user="root", target=target).json()["runs"] != []
 
 
+@_TTV_HIDDEN
 @pytest.mark.parametrize("path", ["/api/ttv-fit/start", "/api/ttv-fit/cancel", "/api/ttv-fit/delete"])
-def test_ttv_writes_on_hidden_target_are_404(client, path):
-    assert _post(client, path, {"target": "HIDDENTGT", "run_name": RUN}).status_code == 404
-    assert ttv.ttv_output_dir("HIDDENTGT", RUN).is_dir()
+def test_ttv_writes_on_hidden_target_are_404(client, path, target):
+    assert _post(client, path, {"target": target, "run_name": RUN}).status_code == 404
+    assert ttv.ttv_output_dir(target, RUN).is_dir()
 
 
 # ── ephemeris (built from completed transit fits) ───────────────────────
