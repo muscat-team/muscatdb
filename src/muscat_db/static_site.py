@@ -377,32 +377,26 @@ def _install_scrub(
             selected.append({**job, "user_name": ""} if scrub_notes else job)
         return selected
 
-    def summaries_scrubbed(db, instrument, obsdate):
-        rows = orig["_get_summaries"](db, instrument, obsdate)
-        return [r for r in rows if not is_denied(r.get("proposal_id"), restricted_proposals)]
+    # The obslog readers filter by proposal in SQL (issue #144 PR6); the build
+    # denies every restricted proposal on top of whatever the live handler
+    # passes for its (anonymous) viewer.
+    def _build_denied(denied: frozenset[str]) -> frozenset[str]:
+        return frozenset(denied) | restricted_proposals
 
-    def frames_scrubbed(db, instrument, obsdate, ccd):
-        rows = orig["_get_frames"](db, instrument, obsdate, ccd)
-        return [r for r in rows if not is_denied(r.get("proposal_id"), restricted_proposals)]
+    def summaries_scrubbed(db, instrument, obsdate, *, denied=frozenset()):
+        return orig["_get_summaries"](db, instrument, obsdate, denied=_build_denied(denied))
 
-    def dates_scrubbed(db, instrument):
-        rows = orig["_get_dates"](db, instrument)
-        if not restricted_proposals:
-            return rows
-        # A date stays in the list as long as *something* on it is visible
-        # (row-level filtering happens one level down, in summaries/frames); it
+    def frames_scrubbed(db, instrument, obsdate, ccd, *, denied=frozenset()):
+        return orig["_get_frames"](db, instrument, obsdate, ccd, denied=_build_denied(denied))
+
+    def dates_scrubbed(db, instrument, *, denied=frozenset()):
+        # A date stays in the list as long as *something* on it is visible; it
         # is dropped only once every summary on it is restricted. Also closes a
         # leak the review didn't name explicitly: the photometry/transit-fit
         # example pages' date picker is built from this same function, so an
         # unfiltered list would surface a restricted night right next to an
         # otherwise-safe example page.
-        return [
-            r for r in rows
-            if any(
-                not is_denied(s.get("proposal_id"), restricted_proposals)
-                for s in orig["_get_summaries"](db, instrument, r["obsdate"])
-            )
-        ]
+        return orig["_get_dates"](db, instrument, denied=_build_denied(denied))
 
     def objects_scrubbed(db, instrument, obsdate):
         names = orig["_get_objects"](db, instrument, obsdate)

@@ -14,7 +14,10 @@ import logging
 
 import pytest
 
-from muscat_db import scan_failures, scanner
+# cli is imported here, before any fixture patches scanner._find_fits_files:
+# obsdate_normalize binds that name at import time, so a first import of cli
+# from inside a test would keep the fake bound for the rest of the session.
+from muscat_db import cli, scan_failures, scanner  # noqa: F401
 from muscat_db.instruments import INSTRUMENTS
 
 

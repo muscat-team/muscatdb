@@ -3107,6 +3107,59 @@ def test_photometry_page_no_jd_slider_without_frame_data(mock_db, monkeypatch, t
     assert 'id="opt-exclude_after_jd"' in r.text
 
 
+def _outputs_with_band_csvs(files: dict[str, str]) -> dict:
+    return {
+        "has_any": True, "summary": {}, "summary_items": [],
+        "bands": {band: {"csv": {"file": name}} for band, name in files.items()},
+        "sites": [], "modes": [], "masters": [], "npz": None, "log": None,
+        "ref_header": None, "ref_selection": None, "site": "", "mode": "",
+    }
+
+
+def test_photometry_page_post_jd_slider_uses_lightcurve_bjd(mock_db, monkeypatch, tmp_path):
+    """The post-processing Exclude JD Range sliders are bounded by the band
+    CSVs' own BJD_TDB span (what prose2's cut compares against), spanning
+    every band -- not the raw header JD that bounds the run-time sliders."""
+    from muscat_db import web
+
+    (tmp_path / "T_muscat3_gp_260101.csv").write_text("BJD_TDB,Flux\n2461000.10,1\n2461000.30,1\n")
+    (tmp_path / "T_muscat3_rp_260101.csv").write_text("BJD_TDB,Flux\n2461000.05,1\n2461000.25,1\n")
+    outputs = _outputs_with_band_csvs({"gp": "T_muscat3_gp_260101.csv", "rp": "T_muscat3_rp_260101.csv"})
+    monkeypatch.setattr(web.phot, "list_photometry_runs", lambda inst, date, target: ([], {}))
+    monkeypatch.setattr(web.phot, "list_outputs", lambda *args, **kwargs: outputs)
+    monkeypatch.setattr(web.phot, "run_output_dir", lambda *args, **kwargs: tmp_path)
+    monkeypatch.setattr(web.phot, "command_str", lambda inst, date, target, test_run=False: "run photometry")
+    monkeypatch.setattr(web.phot, "raw_data_dir", lambda inst, date: tmp_path)
+
+    r = TestClient(app).get("/photometry?inst=muscat3&date=260101&target=TOI-1")
+
+    assert r.status_code == 200
+    html = r.text
+    assert 'id="jdslider-post_exclude_before_jd" min="2461000.05" max="2461000.3" step="0.0001" value="2461000.05"' in html
+    assert 'id="jdslider-post_exclude_after_jd" min="2461000.05" max="2461000.3" step="0.0001" value="2461000.3"' in html
+    # BJD_TDB is not UTC, so the calendar readout is marked approximate
+    assert 'id="jdslider-post_exclude_before_jd-label" style="white-space:nowrap;">≈ 2025-11-20 13:12 UTC<' in html
+    assert 'id="jdslider-post_exclude_after_jd-label" style="white-space:nowrap;">≈ 2025-11-20 19:12 UTC<' in html
+
+
+def test_photometry_page_no_post_jd_slider_without_bjd(mock_db, monkeypatch, tmp_path):
+    from muscat_db import web
+
+    (tmp_path / "T_muscat3_gp_260101.csv").write_text("Flux,Err\n1,0.1\n")
+    outputs = _outputs_with_band_csvs({"gp": "T_muscat3_gp_260101.csv"})
+    monkeypatch.setattr(web.phot, "list_photometry_runs", lambda inst, date, target: ([], {}))
+    monkeypatch.setattr(web.phot, "list_outputs", lambda *args, **kwargs: outputs)
+    monkeypatch.setattr(web.phot, "run_output_dir", lambda *args, **kwargs: tmp_path)
+    monkeypatch.setattr(web.phot, "command_str", lambda inst, date, target, test_run=False: "run photometry")
+    monkeypatch.setattr(web.phot, "raw_data_dir", lambda inst, date: tmp_path)
+
+    r = TestClient(app).get("/photometry?inst=muscat3&date=260101&target=TOI-1")
+
+    assert r.status_code == 200
+    assert "jdslider-post_exclude_before_jd" not in r.text
+    assert 'id="opt-post_exclude_before_jd"' in r.text
+
+
 def test_photometry_page_keeps_selected_run_with_no_outputs(mock_db, monkeypatch, tmp_path):
     """A run that failed (or is still running) before writing any output file
     is scanned into run_outputs by list_photometry_runs() but, since has_any
