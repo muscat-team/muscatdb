@@ -1271,22 +1271,30 @@ def _instruments_summary(conn: sqlite3.Connection, min_frames: int) -> list[dict
     ]
 
 
-def get_dates(db_path: str, instrument: str) -> list[dict]:
+def get_dates(
+    db_path: str, instrument: str, *, denied: frozenset[str] = frozenset()
+) -> list[dict]:
     """Return one row per obsdate. Only YYMMDD-formatted dates are returned;
     legacy/test directories like ``200722_2`` or ``csv_old_220914`` are skipped.
+
+    Summaries under a *denied* proposal (issue #144) are left out before
+    aggregating, so a night with nothing visible drops out and a mixed night
+    counts only its visible CCDs and frames.
     """
     # Read from the pre-aggregated `summaries` table rather than `frames`: it is
     # ~1000x smaller per instrument and SUM(nframes) reproduces COUNT(*) over
     # frames exactly, turning a multi-second scan into a sub-second query.
+    visible, visible_params = sql_not_denied(denied)
     with get_conn(db_path) as conn:
         cur = conn.execute(
-            """SELECT obsdate, COUNT(DISTINCT ccd), SUM(nframes)
+            f"""SELECT obsdate, COUNT(DISTINCT ccd), SUM(nframes)
                FROM summaries
                WHERE instrument = ?
                  AND length(obsdate) = 6
                  AND obsdate GLOB '[0-9][0-9][0-9][0-9][0-9][0-9]'
+                 AND {visible}
                GROUP BY obsdate ORDER BY obsdate DESC""",
-            (instrument,),
+            (instrument, *visible_params),
         )
         return [{"obsdate": r[0], "nccd": r[1], "nframes": r[2]} for r in cur.fetchall()]
 
@@ -1321,16 +1329,37 @@ def clear_stale_date(db_path: str, instrument: str, obsdate: str) -> None:
     clear_all_caches()
 
 
-def get_summaries(db_path: str, instrument: str, obsdate: str) -> list[dict]:
+def sql_not_denied(denied: frozenset[str], column: str = "proposal_id") -> tuple[str, list[str]]:
+    """``(clause, params)`` keeping only rows outside *denied* (issue #144).
+
+    *denied* is upper-cased (see ``access.denied_proposal_ids_for``) and the
+    match is case-insensitive, because ``summaries``/``frames`` keep the header
+    spelling. Returns ``("1", [])`` for an empty set so callers can always
+    splice the clause in. *column* is a trusted identifier, never user input.
+    """
+    if not denied:
+        return "1", []
+    placeholders = ",".join("?" for _ in denied)
+    return (
+        f"COALESCE({column}, '') COLLATE NOCASE NOT IN ({placeholders})",
+        sorted(denied),
+    )
+
+
+def get_summaries(
+    db_path: str, instrument: str, obsdate: str, *, denied: frozenset[str] = frozenset()
+) -> list[dict]:
+    """Summary rows for one night, without those under a *denied* proposal."""
+    visible, visible_params = sql_not_denied(denied)
     with get_conn(db_path, row_factory=sqlite3.Row) as conn:
         cur = conn.execute(
-            """SELECT ccd, object, exptime, read_mode,
+            f"""SELECT ccd, object, exptime, read_mode,
                       telescope, frame_start, frame_end, ut_start, ut_end, nframes,
                       proposal_id
                FROM summaries
-               WHERE instrument = ? AND obsdate = ?
+               WHERE instrument = ? AND obsdate = ? AND {visible}
                ORDER BY ccd, object, telescope, ut_start""",
-            (instrument, obsdate),
+            (instrument, obsdate, *visible_params),
         )
         return [dict(r) for r in cur.fetchall()]
 
@@ -1515,6 +1544,36 @@ def visible_targets(
         # Keep any caller-applied fields the rollup does not produce.
         result.append({**row, **fresh})
     return result
+
+
+def visible_target_rollup(
+    db_path: str, obj: str, denied: frozenset[str]
+) -> dict | None:
+    """``n_dates``, ``n_frames``, ``ra`` and ``declination`` of *obj* as seen
+    by a viewer denied the (upper-cased) proposals in *denied* (issue #144).
+
+    Reads the precomputed ``targets`` row unless *obj* has a summary under a
+    denied proposal; that row spans every proposal, so the rollup is then
+    re-aggregated from the visible summaries alone. ``None`` when nothing of
+    *obj* is visible.
+    """
+    if denied and obj in objects_with_restricted_proposal(db_path, denied):
+        with get_conn(db_path) as conn:
+            conn.create_aggregate("coord_repr", 2, CoordRepr)
+            rows = _target_rows(conn, objects={obj}, exclude_proposals=denied)
+        if not rows:
+            return None
+        # _target_rows order: see visible_targets.
+        r = rows[0]
+        return {"n_dates": r[1], "n_frames": r[2], "ra": r[8], "declination": r[9]}
+    with get_conn(db_path) as conn:
+        row = conn.execute(
+            "SELECT n_dates, n_frames, ra, declination FROM targets WHERE object = ?",
+            (obj,),
+        ).fetchone()
+    if row is None:
+        return None
+    return {"n_dates": row[0], "n_frames": row[1], "ra": row[2], "declination": row[3]}
 
 
 _FILTER_COLOR_ALIAS = {
@@ -1857,20 +1916,26 @@ def get_tags_for_targets(db_path: str, norm_names: list[str]) -> dict[str, list[
     return out
 
 
-def get_frames(db_path: str, instrument: str, obsdate: str, ccd: int) -> list[dict]:
+def get_frames(
+    db_path: str, instrument: str, obsdate: str, ccd: int,
+    *, denied: frozenset[str] = frozenset(),
+) -> list[dict]:
+    """Frames on one night/CCD, without those under a *denied* proposal."""
+    visible, visible_params = sql_not_denied(denied)
     with get_conn(db_path) as conn:
         cur = conn.execute(
-            """SELECT * FROM frames
-               WHERE instrument = ? AND obsdate = ? AND ccd = ?
+            f"""SELECT * FROM frames
+               WHERE instrument = ? AND obsdate = ? AND ccd = ? AND {visible}
                ORDER BY jd_start, filename""",
-            (instrument, obsdate, ccd),
+            (instrument, obsdate, ccd, *visible_params),
         )
         columns = [d[0] for d in cur.description]
         return [dict(zip(columns, r)) for r in cur.fetchall()]
 
 
 def get_observed_pointing(
-    db_path: str, instrument: str, obsdate: str, object_name: str
+    db_path: str, instrument: str, obsdate: str, object_name: str,
+    *, denied: frozenset[str] = frozenset(),
 ) -> dict | None:
     """Actual telescope pointing (RA/Dec/PA) for one previously observed night.
 
@@ -1888,15 +1953,17 @@ def get_observed_pointing(
     muscat3, muscat4, sinistro, sbig, qhy600 all leave it null).
 
     Returns ``None`` if no frame matches, or if no frame on the chosen CCD has
-    a well-formed RA/Dec pair.
+    a well-formed RA/Dec pair. Frames under a *denied* proposal (issue #144)
+    do not match.
     """
+    visible, visible_params = sql_not_denied(denied)
     with get_conn(db_path) as conn:
         cur = conn.execute(
-            """SELECT ccd, ra, declination, pa, read_mode
+            f"""SELECT ccd, ra, declination, pa, read_mode
                FROM frames
-               WHERE instrument = ? AND obsdate = ? AND object = ?
+               WHERE instrument = ? AND obsdate = ? AND object = ? AND {visible}
                ORDER BY ccd""",
-            (instrument, obsdate, object_name),
+            (instrument, obsdate, object_name, *visible_params),
         )
         rows = cur.fetchall()
     if not rows:
@@ -1936,27 +2003,35 @@ def get_observed_pointing(
     }
 
 
-def get_frame_objects(db_path: str) -> list[str]:
-    """Distinct non-empty OBJECT values present in the frames obslog."""
+def get_frame_objects(db_path: str, *, denied: frozenset[str] = frozenset()) -> list[str]:
+    """Distinct non-empty OBJECT values present in the frames obslog, counting
+    only frames outside the *denied* proposals."""
+    visible, visible_params = sql_not_denied(denied)
     with get_conn(db_path) as conn:
         cur = conn.execute(
-            "SELECT DISTINCT object FROM frames WHERE object IS NOT NULL AND TRIM(object) != ''"
+            "SELECT DISTINCT object FROM frames "
+            f"WHERE object IS NOT NULL AND TRIM(object) != '' AND {visible}",
+            visible_params,
         )
         return [r[0] for r in cur.fetchall()]
 
 
-def get_exposure_log_for_objects(db_path: str, objects: list[str]) -> list[dict]:
+def get_exposure_log_for_objects(
+    db_path: str, objects: list[str], *, denied: frozenset[str] = frozenset()
+) -> list[dict]:
     """Distinct past exposure configurations for the given OBJECT values.
 
     Groups the frames obslog by (instrument, filter, read_mode, focus, exptime)
     so each row is one recurring setup with its frame count and the obsdate
     range it was used, newest first. Feeds the schedule page's "Show ObsLog"
     lookup so a recurring observation can reuse a prior exposure time.
+    Frames under a *denied* proposal (issue #144) are not counted.
     """
     objects = [o for o in objects if o]
     if not objects:
         return []
     placeholders = ",".join("?" for _ in objects)
+    visible, visible_params = sql_not_denied(denied)
     with get_conn(db_path, row_factory=sqlite3.Row) as conn:
         cur = conn.execute(
             f"""SELECT instrument,
@@ -1968,11 +2043,11 @@ def get_exposure_log_for_objects(db_path: str, objects: list[str]) -> list[dict]
                        MAX(obsdate)            AS last_date,
                        MIN(obsdate)            AS first_date
                   FROM frames
-                 WHERE object IN ({placeholders}) AND exptime IS NOT NULL
+                 WHERE object IN ({placeholders}) AND exptime IS NOT NULL AND {visible}
               GROUP BY instrument, COALESCE(filter, ''), COALESCE(read_mode, ''),
                        ROUND(focus * 2) / 2, ROUND(exptime)
               ORDER BY last_date DESC, instrument, filter""",
-            objects,
+            [*objects, *visible_params],
         )
         return [dict(r) for r in cur.fetchall()]
 
