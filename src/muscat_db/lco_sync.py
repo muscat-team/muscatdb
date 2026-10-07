@@ -341,6 +341,8 @@ def sync_proposal(
     picked up by the next run, oldest nights first.
     """
     proposal_id = validate_proposal_id(proposal_id)
+    # Large windows paginate for a minute or more with nothing else to show.
+    log(f"{proposal_id}: querying the LCO archive for {start} .. {end} UTC ...")
     count, frames = query_frames(proposal_id, start, end, user_name=user_name)
     plan = plan_frames(frames)
     log(

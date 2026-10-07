@@ -323,3 +323,13 @@ def test_cli_archive_error_on_one_proposal_does_not_stop_the_next(roots, fakes, 
     assert result.exit_code == 1
     assert "[bold]start[/bold]" in result.output  # markup in the error text is printed, not parsed
     assert "KEY2026B-001: 0 downloaded" in result.output
+
+
+def test_cli_banner_reports_the_window_actually_requested(roots, fakes):
+    result = CliRunner().invoke(app, [
+        "lco-sync", "KEY2026B-001", "--start", "2026-09-01", "--end", "2026-09-10", "--dry-run",
+    ])
+    assert result.exit_code == 0, result.output
+    assert "lco-sync KEY2026B-001 --start 2026-09-01 --end 2026-09-10 --dry-run" in " ".join(result.output.split())
+    assert "--days" not in result.output
+    assert "querying the LCO archive for 2026-09-01 00:00 .. 2026-09-10 00:00 UTC" in result.output

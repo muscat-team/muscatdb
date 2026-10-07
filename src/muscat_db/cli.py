@@ -501,7 +501,16 @@ def lco_sync_cmd(
 
     from muscat_db import lco_sync
 
-    _log_startup_banner(f"lco-sync {' '.join(proposal_ids)} --days {days}")
+    window_args = f"--start {start}" if start else f"--days {days}"
+    if end:
+        window_args += f" --end {end}"
+    flags = [
+        f"--user {user}" if user else "",
+        f"--max-frames {max_frames}" if max_frames else "",
+        "--no-ingest" if not ingest else "",
+        "--dry-run" if dry_run else "",
+    ]
+    _log_startup_banner(" ".join(["lco-sync", *proposal_ids, window_args, *filter(None, flags)]))
     write_db = ingest and not dry_run
     if write_db:
         _require_existing_db(ctx, db, "ingest")
@@ -514,7 +523,7 @@ def lco_sync_cmd(
         raise typer.Exit(1)
 
     def log(message: str) -> None:
-        console.print(message, markup=False)
+        console.print(message, markup=False, soft_wrap=True)
 
     failed = False
     try:
