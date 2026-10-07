@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -13,18 +14,22 @@ from muscat_db.cli import app
 UTC = datetime.timezone.utc
 
 
-def _frame(number: int, *, night: str = "20261004", obj: str = "TOI-123", tel: str = "0m463",
-           instrume: str = "sq35") -> dict:
+def _frame(number: int, *, night: str = "20261004", date_obs: str = "2026-10-05T08:00:00Z",
+           obj: str = "TOI-123", tel: str = "0m463", instrume: str = "sq35") -> dict:
     return {
-        "id": number,
+        "id": f"{night}-{number}",
         "filename": f"ogg{tel}-{instrume}-{night}-{number:04d}-e91.fits.fz",
         "SITEID": "ogg",
         "TELID": tel,
         "INSTRUME": instrume,
         "OBJECT": obj,
-        "DATE_OBS": "2026-10-05T12:00:00Z",
+        "DATE_OBS": date_obs,
         "url": "https://archive-api.lco.global/frames/x.fits.fz",
     }
+
+
+def _night(night: str, n: int, date_obs: str) -> list[dict]:
+    return [_frame(i, night=night, date_obs=date_obs) for i in range(1, n + 1)]
 
 
 @pytest.fixture
@@ -38,46 +43,58 @@ def roots(tmp_path, monkeypatch):
     return data, obslog
 
 
-def _unpacked(data, frame) -> Path:
+def _paths(frame) -> tuple[Path, Path]:
+    """(packed .fz, unpacked .fits) destinations of *frame*."""
     _inst, _date, dest = lco.frame_destination(frame)
-    return dest.with_name(dest.name[: -len(".fz")])
+    return dest, dest.with_name(dest.name[: -len(".fz")])
 
 
-def _touch(path):
+def _touch(path: Path, mtime: float | None = None) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"")
+    if mtime is not None:
+        os.utime(path, (mtime, mtime))
     return path
+
+
+def _in_range(frame, filters) -> bool:
+    when = lco_sync._parse_utc(frame["DATE_OBS"], "x")
+    return (lco_sync._parse_utc(filters["start"], "x") <= when
+            < lco_sync._parse_utc(filters["end"], "x"))
 
 
 @pytest.fixture
 def fakes(monkeypatch):
-    """Archive, download, funpack, scan and ingest stand-ins that record calls."""
-    calls = {"pages": [], "downloads": [], "scans": [], "ingests": [], "fail": set()}
+    """Archive, download, funpack, scan and ingest stand-ins that log events."""
+    calls = {"archive": [], "queries": [], "events": [], "fail": set()}
 
     def fake_search(filters, user_name=None):
-        calls["filters"] = (filters, user_name)
-        frames = calls["pages"]
-        return {"count": len(frames), "results": frames, "truncated": False}
+        calls["queries"].append((filters, user_name))
+        rows = [f for f in calls["archive"] if _in_range(f, filters)]
+        return {"count": len(rows), "results": rows, "truncated": False}
 
     def fake_download(frame, overwrite=False):
         name = frame["filename"]
-        calls["downloads"].append(name)
+        calls["events"].append(("download", name))
         if name in calls["fail"]:
             return {"filename": name, "status": "error", "error": "HTTP 403"}
-        _inst, _date, dest = lco.frame_destination(frame)
-        _touch(dest)
-        return {"filename": name, "status": "downloaded", "dest": str(dest)}
+        packed, _ = _paths(frame)
+        if packed.exists():
+            return {"filename": name, "status": "exists", "dest": str(packed)}
+        _touch(packed)
+        return {"filename": name, "status": "downloaded", "dest": str(packed)}
 
     def fake_funpack(path):
+        calls["events"].append(("funpack", path.name))
         _touch(path.with_name(path.name[: -len(".fz")]))
         return {"filename": path.name, "status": "unpacked"}
 
     def fake_scan(instrument, obsdate, max_workers=None, data_root=None):
-        calls["scans"].append((instrument, obsdate, data_root))
+        calls["events"].append(("scan", instrument, obsdate, data_root))
         return {"total": 3, "per_ccd": {0: 3}}
 
     def fake_ingest(db, instrument, obsdate):
-        calls["ingests"].append((db, instrument, obsdate))
+        calls["events"].append(("ingest", db, instrument, obsdate))
         return 3
 
     monkeypatch.setattr("muscat_db.lco.archive_search_all", fake_search)
@@ -88,9 +105,13 @@ def fakes(monkeypatch):
     return calls
 
 
+def _events(calls, kind):
+    return [e[1:] for e in calls["events"] if e[0] == kind]
+
+
 def _sync(data, **kwargs):
-    defaults = dict(start="2026-09-29 00:00", end="2026-10-06 00:00", data_root=data,
-                    db="test.db", log=lambda _m: None)
+    defaults = dict(start="2026-10-01 00:00", end="2026-10-07 00:00", data_root=data,
+                    db="test.db", workers=1, log=lambda _m: None)
     return lco_sync.sync_proposal("KEY2026B-001", **{**defaults, **kwargs})
 
 
@@ -129,148 +150,204 @@ def test_validate_proposal_id_accepts_lco_ids():
 
 # --- archive query ----------------------------------------------------------
 
-def test_query_frames_requests_reduced_science_for_proposal(fakes):
-    fakes["pages"] = [_frame(1)]
-    count, frames = lco_sync.query_frames("KEY2026B-001", "2026-09-29 00:00", "2026-10-06 00:00", "alice")
-    filters, user = fakes["filters"]
-    assert (count, len(frames), user) == (1, 1, "alice")
-    assert filters["proposal_id"] == "KEY2026B-001"
-    assert filters["reduction_level"] == 91
-    assert filters["OBSTYPE"] == "EXPOSE"
-    assert (filters["start"], filters["end"]) == ("2026-09-29 00:00", "2026-10-06 00:00")
+def test_query_pads_window_by_two_days_in_daily_chunks(fakes):
+    fakes["archive"] = [_frame(1, date_obs="2026-09-30T08:00:00Z")]
+    frames = lco_sync.query_frames("KEY2026B-001", "2026-10-01 00:00", "2026-10-03 00:00", "alice",
+                                   log=lambda _m: None)
+    assert [f["filename"] for f in frames] == [fakes["archive"][0]["filename"]]
+    windows = [(f["start"], f["end"]) for f, _user in fakes["queries"]]
+    assert windows[0] == ("2026-09-29 00:00", "2026-09-30 00:00")
+    assert windows[-1] == ("2026-10-04 00:00", "2026-10-05 00:00")
+    assert len(windows) == 6
+    filters, user = fakes["queries"][0]
+    assert user == "alice"
+    assert (filters["proposal_id"], filters["reduction_level"], filters["OBSTYPE"]) == (
+        "KEY2026B-001", 91, "EXPOSE",
+    )
 
 
-def test_query_frames_refuses_truncated_listing(monkeypatch):
+def test_query_refuses_a_truncated_chunk(monkeypatch):
     monkeypatch.setattr(
         "muscat_db.lco.archive_search_all",
         lambda filters, user_name=None: {"count": 20000, "results": [], "truncated": True},
     )
-    with pytest.raises(lco_sync.SyncError, match="narrow the window"):
-        lco_sync.query_frames("KEY2026B-001", "a", "b")
+    with pytest.raises(lco_sync.SyncError, match="partial listing"):
+        lco_sync.query_frames("KEY2026B-001", "2026-10-01 00:00", "2026-10-02 00:00",
+                              log=lambda _m: None)
 
 
-# --- planning ---------------------------------------------------------------
+# --- grouping into datasets -------------------------------------------------
 
-def test_plan_frames_skips_unpacked_and_engineering_and_reports_unplaceable(roots):
-    data, _ = roots
-    done, fresh = _frame(1), _frame(2)
-    _touch(_unpacked(data, done))
+def test_night_cut_by_window_start_is_kept_whole(roots):
+    # DAY-OBS 261004 runs from 23:00 UTC on 10-04 into 10-05; the window opens
+    # mid-night, so its first frame lies before `start`.
+    early = _frame(1, date_obs="2026-10-04T23:00:00Z")
+    late = _frame(2, date_obs="2026-10-05T03:00:00Z")
+    datasets, _eng, _bad = lco_sync.group_datasets([early, late], "2026-10-05 00:00", "2026-10-06 00:00")
+    assert [(d.label, len(d.frames)) for d in datasets] == [("qhy600 261004", 2)]
+
+
+def test_night_seen_only_through_padding_is_dropped(roots):
+    outside = _frame(1, night="20261001", date_obs="2026-10-01T08:00:00Z")
+    inside = _frame(1, night="20261004", date_obs="2026-10-05T08:00:00Z")
+    datasets, _eng, _bad = lco_sync.group_datasets([outside, inside], "2026-10-03 00:00", "2026-10-06 00:00")
+    assert [d.obsdate for d in datasets] == ["261004"]
+
+
+def test_grouping_skips_engineering_and_reports_unplaceable(roots):
     unplaceable = {**_frame(3), "TELID": "0m4", "INSTRUME": "zz99",
                    "filename": "ogg0m4-zz99-20261004-0003-e91.fits.fz"}
-    plan = lco_sync.plan_frames([done, fresh, fresh, _frame(4, obj="auto_focus"), unplaceable])
-    assert [p.filename for p in plan.present] == [done["filename"]]
-    assert [p.filename for p in plan.to_download] == [fresh["filename"]]
-    assert plan.engineering == 1
-    assert len(plan.errors) == 1 and "zz99" in plan.errors[0]
+    datasets, engineering, bad = lco_sync.group_datasets(
+        [_frame(1), _frame(1), _frame(2, obj="auto_focus"), unplaceable],
+        "2026-10-01 00:00", "2026-10-07 00:00",
+    )
+    assert [len(d.frames) for d in datasets] == [1]  # duplicate listing collapsed
+    assert engineering == 1
+    assert len(bad) == 1 and "zz99" in bad[0]
 
 
-def test_plan_frames_requeues_packed_frame_whose_funpack_failed(roots):
-    data, _ = roots
+def test_packed_frame_whose_funpack_never_finished_counts_as_missing(roots):
     frame = _frame(1)
-    _inst, _date, packed = lco.frame_destination(frame)
+    packed, _ = _paths(frame)
     _touch(packed)  # .fz on disk, no .fits next to it
-    plan = lco_sync.plan_frames([frame])
-    assert [p.filename for p in plan.to_download] == [frame["filename"]]
-    assert plan.present == ()
+    datasets, _e, _b = lco_sync.group_datasets([frame], "2026-10-01 00:00", "2026-10-07 00:00")
+    assert [p.filename for p in datasets[0].missing] == [frame["filename"]]
 
 
-# --- full sync --------------------------------------------------------------
+# --- syncing ----------------------------------------------------------------
 
-def test_sync_downloads_new_frames_then_scans_and_ingests_each_night(roots, fakes):
+def test_each_night_is_finished_before_the_next_starts(roots, fakes):
     data, _ = roots
-    fakes["pages"] = [_frame(1), _frame(2), _frame(3, night="20261005")]
+    fakes["archive"] = (_night("20261002", 2, "2026-10-03T08:00:00Z")
+                        + _night("20261004", 2, "2026-10-05T08:00:00Z"))
     report = _sync(data)
     assert report.ok
-    assert sorted(report.downloaded) == sorted(f["filename"] for f in fakes["pages"])
-    assert fakes["scans"] == [
-        ("qhy600", "261004", str(data)),
-        ("qhy600", "261005", str(data)),
-    ]
-    assert fakes["ingests"] == [("test.db", "qhy600", "261004"), ("test.db", "qhy600", "261005")]
+    kinds = [(e[0], e[1] if e[0] != "scan" else e[2]) for e in fakes["events"]
+             if e[0] in {"download", "scan"}]
+    first_scan = kinds.index(("scan", "261002"))
+    assert all("20261002" in name for kind, name in kinds[:first_scan])
+    assert all("20261004" in name for kind, name in kinds[first_scan + 1:] if kind == "download")
+    assert _events(fakes, "ingest") == [("test.db", "qhy600", "261002"), ("test.db", "qhy600", "261004")]
+    assert all(d.complete for d in report.datasets)
 
 
-def test_sync_second_run_downloads_nothing_and_skips_scanned_nights(roots, fakes):
+def test_rerun_after_kill_fetches_only_missing_frames_and_rescans(roots, fakes):
     data, obslog = roots
-    fakes["pages"] = [_frame(1)]
-    _sync(data)
-    _touch(obslog / "qhy600" / "261004" / "obslog-qhy600-261004-ccd0.csv")
-    fakes["downloads"].clear()
-    fakes["scans"].clear()
+    night = _night("20261004", 4, "2026-10-05T08:00:00Z")
+    fakes["archive"] = night
+    # State left by a run killed mid-night: two frames done, one downloaded but
+    # never unpacked, one cut off mid-download, and an obslog from an earlier run.
+    _touch(obslog / "qhy600" / "261004" / "obslog-qhy600-261004-ccd0.csv", mtime=1_000)
+    for frame in night[:2]:
+        _touch(_paths(frame)[1], mtime=500)
+    _touch(_paths(night[2])[0])
+    stale_part = _touch(_paths(night[3])[0].with_name(night[3]["filename"] + ".part"),
+                        mtime=time.time() - 2 * 3600)
     report = _sync(data)
     assert report.ok
-    assert fakes["downloads"] == []
-    assert fakes["scans"] == []
+    assert sorted(_events(fakes, "download")) == [(night[2]["filename"],), (night[3]["filename"],)]
+    assert (night[2]["filename"],) in _events(fakes, "funpack")
+    assert not stale_part.exists()
+    assert [e[1] for e in _events(fakes, "scan")] == ["261004"]
+    assert report.datasets[0].missing_before == 2 and report.datasets[0].complete
 
 
-def test_sync_rescans_local_night_that_never_got_an_obslog(roots, fakes):
+def test_fresh_part_file_is_left_for_a_live_download(roots, fakes):
     data, _ = roots
     frame = _frame(1)
-    _touch(_unpacked(data, frame))  # downloaded by a run that died before scanning
-    fakes["pages"] = [frame]
-    report = _sync(data)
-    assert fakes["downloads"] == []
-    assert [d.obsdate for d in report.datasets] == ["261004"]
+    fakes["archive"] = [frame]
+    live = _touch(_paths(frame)[0].with_name("other-frame.fits.fz.part"))
+    _sync(data)
+    assert live.exists()
 
 
-def test_sync_rescans_night_whose_obslog_predates_a_local_frame(roots, fakes):
+def test_complete_night_with_current_obslog_is_left_alone(roots, fakes):
     data, obslog = roots
-    old, late = _frame(1), _frame(2)
-    csv = _touch(obslog / "qhy600" / "261004" / "obslog-qhy600-261004-ccd0.csv")
-    _touch(_unpacked(data, old))
-    os.utime(csv, (1_000, 1_000))
-    os.utime(_unpacked(data, old), (500, 500))
-    # `late` was fetched by a run that died before rescanning: newer than the CSV.
-    _touch(_unpacked(data, late))
-    os.utime(_unpacked(data, late), (2_000, 2_000))
-    fakes["pages"] = [old, late]
+    frame = _frame(1)
+    fakes["archive"] = [frame]
+    _touch(_paths(frame)[1], mtime=500)
+    _touch(obslog / "qhy600" / "261004" / "obslog-qhy600-261004-ccd0.csv", mtime=1_000)
     report = _sync(data)
-    assert fakes["downloads"] == []
-    assert [d.obsdate for d in report.datasets] == ["261004"]
+    assert report.ok and fakes["events"] == []
 
 
-def test_sync_failed_download_marks_report_and_skips_its_night(roots, fakes):
+def test_complete_night_with_stale_obslog_is_rescanned(roots, fakes):
+    data, obslog = roots
+    frame = _frame(1)
+    fakes["archive"] = [frame]
+    _touch(_paths(frame)[1], mtime=2_000)  # downloaded by a run that died before scanning
+    _touch(obslog / "qhy600" / "261004" / "obslog-qhy600-261004-ccd0.csv", mtime=1_000)
+    _sync(data)
+    assert _events(fakes, "download") == []
+    assert [e[1] for e in _events(fakes, "scan")] == ["261004"]
+
+
+def test_failed_frame_marks_night_incomplete_and_retries_next_run(roots, fakes):
     data, _ = roots
-    good, bad = _frame(1), _frame(2, night="20261005")
-    fakes["pages"] = [good, bad]
+    good, bad = _night("20261004", 2, "2026-10-05T08:00:00Z")
+    fakes["archive"] = [good, bad]
     fakes["fail"] = {bad["filename"]}
     report = _sync(data)
     assert not report.ok
-    assert report.download_errors == (f"{bad['filename']}: HTTP 403",)
-    assert [d.obsdate for d in report.datasets] == ["261004"]
+    night = report.datasets[0]
+    assert night.failures == (f"{bad['filename']}: HTTP 403",)
+    assert not night.complete
+    assert night.scanned == 3  # the frames that did arrive are still usable
+    fakes["fail"] = set()
+    fakes["events"].clear()
+    assert _sync(data).ok
+    assert _events(fakes, "download") == [(bad["filename"],)]
 
 
-def test_sync_scan_failure_is_reported_not_raised(roots, fakes, monkeypatch):
+def test_scan_failure_is_reported_not_raised(roots, fakes, monkeypatch):
     data, _ = roots
-    fakes["pages"] = [_frame(1)]
+    fakes["archive"] = [_frame(1)]
     monkeypatch.setattr("muscat_db.scanner.scan_date", lambda *a, **k: {})
     report = _sync(data)
     assert not report.ok
     assert "no reduced FITS" in report.datasets[0].error
-    assert fakes["ingests"] == []
+    assert _events(fakes, "ingest") == []
 
 
-def test_sync_without_db_scans_but_does_not_ingest(roots, fakes):
+def test_without_db_scans_but_does_not_ingest(roots, fakes):
     data, _ = roots
-    fakes["pages"] = [_frame(1)]
+    fakes["archive"] = [_frame(1)]
     report = _sync(data, db=None)
     assert report.datasets[0].ingested is None
-    assert fakes["scans"] and fakes["ingests"] == []
+    assert _events(fakes, "scan") and _events(fakes, "ingest") == []
 
 
-def test_sync_max_frames_defers_newest_frames(roots, fakes):
+def test_max_nights_defers_whole_newer_nights(roots, fakes):
     data, _ = roots
-    fakes["pages"] = [_frame(3, night="20261005"), _frame(1), _frame(2)]
-    report = _sync(data, max_frames=2)
-    assert report.deferred == 1
-    assert sorted(fakes["downloads"]) == [_frame(1)["filename"], _frame(2)["filename"]]
+    fakes["archive"] = (_night("20261004", 3, "2026-10-05T08:00:00Z")
+                        + _night("20261002", 3, "2026-10-03T08:00:00Z"))
+    report = _sync(data, max_nights=1)
+    assert [(d.obsdate, d.deferred) for d in report.datasets] == [("261002", False), ("261004", True)]
+    assert all("20261002" in name for (name,) in _events(fakes, "download"))
+    assert len(_events(fakes, "download")) == 3
 
 
-def test_sync_dry_run_touches_nothing(roots, fakes):
+def test_dry_run_touches_nothing(roots, fakes):
     data, _ = roots
-    fakes["pages"] = [_frame(1)]
+    fakes["archive"] = [_frame(1)]
     report = _sync(data, dry_run=True)
-    assert len(report.plan.to_download) == 1
-    assert fakes["downloads"] == [] and fakes["scans"] == [] and fakes["ingests"] == []
+    assert report.datasets[0].missing_before == 1
+    assert fakes["events"] == []
+
+
+def test_interrupt_cancels_queued_frames_instead_of_draining_them(roots, fakes, monkeypatch):
+    data, _ = roots
+    fakes["archive"] = _night("20261004", 20, "2026-10-05T08:00:00Z")
+    started = []
+
+    def interrupted(planned):
+        started.append(planned.filename)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(lco_sync, "_fetch_one", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        _sync(data, workers=2)
+    assert len(started) < 20
 
 
 def test_sync_lock_refuses_overlapping_run(tmp_path):
@@ -284,29 +361,57 @@ def test_sync_lock_refuses_overlapping_run(tmp_path):
 
 # --- CLI --------------------------------------------------------------------
 
+def _flat(output: str) -> str:
+    return " ".join(output.split())
+
+
 def test_cli_rejects_malformed_proposal_id(roots):
     result = CliRunner().invoke(app, ["lco-sync", "../x", "--dry-run"])
     assert result.exit_code == 1
     assert "not a valid LCO proposal ID" in result.output
 
 
-def test_cli_dry_run_plans_without_downloading(roots, fakes):
-    fakes["pages"] = [_frame(1)]
-    result = CliRunner().invoke(app, ["lco-sync", "KEY2026B-001", "--dry-run", "--user", "alice"])
+def test_cli_dry_run_reports_each_night(roots, fakes):
+    fakes["archive"] = [_frame(1)]
+    result = CliRunner().invoke(app, [
+        "lco-sync", "KEY2026B-001", "--start", "2026-10-01", "--end", "2026-10-07",
+        "--dry-run", "--user", "alice",
+    ])
     assert result.exit_code == 0, result.output
-    assert "would download 1 frames for qhy600 261004" in result.output
-    assert fakes["filters"][1] == "alice"
-    assert fakes["downloads"] == []
+    assert "qhy600 261004: 1 frames, 1 missing" in result.output
+    assert fakes["queries"][0][1] == "alice"
+    assert fakes["events"] == []
+
+
+def test_cli_banner_reports_the_window_actually_requested(roots, fakes):
+    result = CliRunner().invoke(app, [
+        "lco-sync", "KEY2026B-001", "--start", "2026-09-01", "--end", "2026-09-10", "--dry-run",
+    ])
+    assert result.exit_code == 0, result.output
+    assert "lco-sync KEY2026B-001 --start 2026-09-01 --end 2026-09-10 --dry-run" in _flat(result.output)
+    assert "--days" not in result.output
+    assert "querying the LCO archive for 2026-08-30 00:00 .. 2026-09-12 00:00 UTC" in result.output
 
 
 def test_cli_exits_nonzero_when_a_download_fails(roots, fakes, tmp_path):
-    fakes["pages"] = [_frame(1)]
+    fakes["archive"] = [_frame(1)]
     fakes["fail"] = {_frame(1)["filename"]}
-    result = CliRunner().invoke(
-        app, ["lco-sync", "KEY2026B-001", "--no-ingest", "--db", str(tmp_path / "x.db")]
-    )
+    result = CliRunner().invoke(app, [
+        "lco-sync", "KEY2026B-001", "--start", "2026-10-01", "--end", "2026-10-07",
+        "--no-ingest", "--db", str(tmp_path / "x.db"),
+    ])
     assert result.exit_code == 1
-    assert "1 failed" in result.output
+    assert "0/1 nights complete" in result.output and "1 failed" in result.output
+
+
+def test_cli_interrupt_exits_130_with_resume_hint(roots, fakes, monkeypatch):
+    def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(lco_sync, "sync_proposal", interrupted)
+    result = CliRunner().invoke(app, ["lco-sync", "KEY2026B-001", "--no-ingest", "--db", "x.db"])
+    assert result.exit_code == 130
+    assert "Re-run the same command to resume" in result.output
 
 
 def test_cli_archive_error_on_one_proposal_does_not_stop_the_next(roots, fakes, monkeypatch):
@@ -322,14 +427,4 @@ def test_cli_archive_error_on_one_proposal_does_not_stop_the_next(roots, fakes, 
     )
     assert result.exit_code == 1
     assert "[bold]start[/bold]" in result.output  # markup in the error text is printed, not parsed
-    assert "KEY2026B-001: 0 downloaded" in result.output
-
-
-def test_cli_banner_reports_the_window_actually_requested(roots, fakes):
-    result = CliRunner().invoke(app, [
-        "lco-sync", "KEY2026B-001", "--start", "2026-09-01", "--end", "2026-09-10", "--dry-run",
-    ])
-    assert result.exit_code == 0, result.output
-    assert "lco-sync KEY2026B-001 --start 2026-09-01 --end 2026-09-10 --dry-run" in " ".join(result.output.split())
-    assert "--days" not in result.output
-    assert "querying the LCO archive for 2026-09-01 00:00 .. 2026-09-10 00:00 UTC" in result.output
+    assert "KEY2026B-001: 0/0 nights complete" in _flat(result.output)

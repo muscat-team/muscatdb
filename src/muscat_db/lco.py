@@ -415,14 +415,34 @@ def archive_search_all(
     url: str | None = f"{base_url}?{params}"
     results: list[dict] = []
     total: int | None = None
+    estimated = False
     while url and len(results) < max_frames:
         page = _lco_api_request(url, user_name=user_name, token=token)
+        rows = page.get("results") or []
         if total is None:
             total = page.get("count")
-        results.extend(page.get("results") or [])
+            estimated = bool(page.get("count_estimated"))
+        results.extend(rows)
         url = page.get("next")
+        if not url and estimated and rows and len(rows) >= _page_size(filters, rows):
+            # Past a size threshold the archive only estimates `count` (observed:
+            # 128 for a 36,625-frame query) and omits `next`, though `offset`
+            # keeps returning full pages. Trusting `next` silently stopped at
+            # page one, so page by offset until a short page instead.
+            url = f"{base_url}?{_query_params({**filters, 'offset': len(results)})}"
     truncated = bool(url) and len(results) >= max_frames
+    if estimated:
+        # The estimate is meaningless to callers; report what was retrieved
+        # (a lower bound when `truncated` is set).
+        total = len(results)
     return {"count": total, "results": results[:max_frames], "truncated": truncated}
+
+
+def _page_size(filters: dict, first_rows: list) -> int:
+    try:
+        return int(filters.get("limit") or len(first_rows))
+    except (TypeError, ValueError):
+        return len(first_rows)
 
 
 # OBJECT values LCO stamps on engineering frames that still carry a real

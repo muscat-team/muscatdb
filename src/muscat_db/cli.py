@@ -476,7 +476,7 @@ def lco_sync_cmd(
     ),
     days: int = typer.Option(
         7, "--days", min=1,
-        help="Lookback window in days of DATE_OBS (overlap catches late BANZAI reductions)",
+        help="Sync nights with frames in the last N days of DATE_OBS (overlap catches late reductions)",
     ),
     start: str = typer.Option("", "--start", help="Window start, ISO UTC (overrides --days)"),
     end: str = typer.Option("", "--end", help="Window end, ISO UTC (default: now)"),
@@ -485,9 +485,9 @@ def lco_sync_cmd(
         help="Use this muscat-db user's saved LCO token instead of $LCO_API_TOKEN",
     ),
     workers: int = typer.Option(4, "--workers", "-w", min=1, max=16, help="Concurrent downloads"),
-    max_frames: int = typer.Option(
-        0, "--max-frames", min=0,
-        help="Cap downloads per proposal per run (0 = no cap); the rest wait for the next run",
+    max_nights: int = typer.Option(
+        0, "--max-nights", min=0,
+        help="Download at most N incomplete nights per proposal per run, oldest first (0 = no cap)",
     ),
     ingest: bool = typer.Option(
         True, "--ingest/--no-ingest",
@@ -496,7 +496,11 @@ def lco_sync_cmd(
     dry_run: bool = typer.Option(False, "--dry-run", help="Query and plan only; download nothing"),
     db: str = _db_option(),
 ):
-    """Download new reduced frames for LCO proposal(s) and scan them (cron-friendly)."""
+    """Download LCO proposal datasets (whole nights), then scan and ingest them (cron-friendly).
+
+    Any night with a frame in the window is synced whole. Re-running resumes:
+    each night's missing frames are fetched and stale obslogs rescanned.
+    """
     from rich.markup import escape
 
     from muscat_db import lco_sync
@@ -506,7 +510,7 @@ def lco_sync_cmd(
         window_args += f" --end {end}"
     flags = [
         f"--user {user}" if user else "",
-        f"--max-frames {max_frames}" if max_frames else "",
+        f"--max-nights {max_nights}" if max_nights else "",
         "--no-ingest" if not ingest else "",
         "--dry-run" if dry_run else "",
     ]
@@ -538,7 +542,7 @@ def lco_sync_cmd(
                         db=db if write_db else None,
                         user_name=user or None,
                         workers=workers,
-                        max_frames=max_frames,
+                        max_nights=max_nights,
                         dry_run=dry_run,
                         log=log,
                     )
@@ -550,11 +554,18 @@ def lco_sync_cmd(
                 if dry_run:
                     continue
                 color = "green" if report.ok else "yellow"
+                complete = sum(1 for d in report.datasets if d.complete)
+                scanned = sum(1 for d in report.datasets if d.scanned is not None)
                 console.print(
-                    f"[{color}]{proposal_id}: {len(report.downloaded)} downloaded, "
-                    f"{len(report.download_errors)} failed, "
-                    f"{len(report.datasets)} nights scanned, {report.deferred} deferred[/]"
+                    f"[{color}]{proposal_id}: {complete}/{len(report.datasets)} nights complete, "
+                    f"{report.downloaded} frames downloaded, {report.failed} failed, "
+                    f"{scanned} nights scanned, {report.deferred} deferred[/]",
+                    soft_wrap=True,
                 )
+    except KeyboardInterrupt:
+        console.print("[yellow]Interrupted. Re-run the same command to resume; "
+                      "finished frames are kept and only missing ones are fetched.[/]")
+        raise typer.Exit(130)
     except lco_sync.SyncError as e:
         console.print(f"[red]Error: {escape(str(e))}[/]")
         raise typer.Exit(1)
