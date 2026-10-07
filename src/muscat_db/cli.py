@@ -31,6 +31,7 @@ from muscat_db.obsdate_normalize import (
     plan_all,
 )
 from muscat_db.propid_backfill import PROPID_INSTRUMENTS
+from muscat_db import scan_failures, scanner
 from muscat_db.scanner import scan_date, scan_missing_dates, scan_yesterday
 from muscat_db.summarizer import summarize_csv
 
@@ -288,11 +289,41 @@ def scan_yesterday_cmd(
 ):
     """Scan yesterday's data for all instruments (cron-friendly)."""
     _log_startup_banner("scan-yesterday")
+    obsdate = scanner.yesterday_obsdate()
     scanned = scan_yesterday(max_workers=workers)
     if scanned:
         console.print(f"[green]Scanned yesterday for: {', '.join(scanned)}[/]")
     else:
         console.print("[yellow]No data found for yesterday[/]")
+    # Exit 0 regardless: the cron runs `scan-yesterday && build-db`, and one
+    # instrument's failure must not also skip everyone else's rebuild (#196).
+    failed = sorted(
+        e["instrument"] for e in scan_failures.pending(scanner.OBSLOG_BASE)
+        if e["obsdate"] == obsdate
+    )
+    if failed:
+        console.print(
+            f"[red]Scan failed for {obsdate}: {', '.join(failed)} "
+            "-- recorded for retry; see `muscat-db scan-failures`[/]"
+        )
+
+
+@app.command(name="scan-failures", cls=_Cmd)
+def scan_failures_cmd():
+    """List obslog scans that failed and have not since succeeded."""
+    entries = scan_failures.pending(scanner.OBSLOG_BASE)
+    if not entries:
+        console.print("[green]No open scan failures[/]")
+        return
+    table = Table(title=f"Open scan failures ({scan_failures.ledger_path(scanner.OBSLOG_BASE)})")
+    for col in ("instrument", "obsdate", "attempts", "first failed", "last failed", "reason"):
+        table.add_column(col)
+    for e in sorted(entries, key=lambda e: (e["instrument"], e["obsdate"])):
+        table.add_row(
+            e["instrument"], e["obsdate"], str(e.get("attempts", 1)),
+            e.get("first_failed", ""), e.get("last_failed", ""), e.get("reason", ""),
+        )
+    console.print(table)
 
 
 @app.command(cls=_Cmd)
