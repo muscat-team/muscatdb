@@ -407,6 +407,8 @@
   var chk = MuscatDom.chk, setVal = MuscatDom.setVal;
   var setChk = MuscatDom.setChk;
   var msg = MuscatDom.msg;
+  // Readable text for a rejected fetch (MuscatFetch.fetchJson rejects with a friendly Error).
+  function errText(e) { return e && e.message ? e.message : String(e); }
   var escapeHtml = MuscatDom.escapeHtml;
   function msgHtml(id, html, kind) {
     var e = el(id); if (!e) return;
@@ -645,7 +647,7 @@
   var lastSplitLegBResult = null;     // leg B's submit result, once booked
 
   function setDot(id, ok) { var e = el(id); if (e) e.className = 'dot ' + (ok ? 'ok' : 'no'); }
-  fetch('/api/lco/config').then(function (r) { return r.json(); }).then(function (d) {
+  MuscatFetch.fetchJson('/api/lco/config').then(function (d) {
     if (!d.ok) return;
     setDot('cfg-token', d.token_configured);
     setDot('cfg-root', d.download_root_configured);
@@ -910,8 +912,7 @@
 
   function fetchProposals(silent) {
     if (!silent) msg('msg-proposals', 'Loading proposals…');
-    fetch('/api/lco/proposals')
-      .then(function (r) { return r.json(); })
+    MuscatFetch.fetchJson('/api/lco/proposals')
       .then(function (d) {
         if (!d.ok) {
           if (!silent) msg('msg-proposals', d.error || 'failed', 'err');
@@ -923,7 +924,7 @@
         if (!silent) msg('msg-proposals', 'Loaded ' + list.length + ' proposals', 'ok');
       })
       .catch(function (e) {
-        if (!silent) msg('msg-proposals', String(e), 'err');
+        if (!silent) msg('msg-proposals', errText(e), 'err');
       });
   }
 
@@ -998,8 +999,7 @@
 
   function fetchTargetInfo(target) {
     if (lastTargetInfo && lastInfoTarget === target) return Promise.resolve(lastTargetInfo);
-    return fetch('/api/ephemeris/target-info?target=' + encodeURIComponent(target))
-      .then(function (r) { return r.json(); })
+    return MuscatFetch.fetchJson('/api/ephemeris/target-info?target=' + encodeURIComponent(target))
       .then(function (info) { if (info.ok) { lastTargetInfo = info; lastInfoTarget = target; } return info; });
   }
 
@@ -1185,8 +1185,7 @@
       })
     };
     calcBody.planets_ephem[planet] = { t0: seed.t0, period: seed.period };
-    fetch('/api/ephemeris/calculate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(calcBody) })
-      .then(function (r) { return r.json(); })
+    MuscatFetch.fetchJson('/api/ephemeris/calculate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(calcBody) })
       .then(function (cd) {
         var res = cd.ok && cd.results ? cd.results[planet] : null;
         if (!res) { msg('msg-windows', 'Linear fit unavailable for ' + planet, 'err'); return; }
@@ -1197,7 +1196,7 @@
         saveOptions();
         var nfit = (res.points || []).filter(function (p) { return p.checked; }).length;
         msg('msg-windows', (res.was_fit ? 'Linear fit' : 'Seed (need ≥2 epochs)') + ': t0=' + res.t0_fit + ', P=' + res.period_fit + ' d (' + nfit + ' epochs)', 'ok');
-      }).catch(function (e) { msg('msg-windows', String(e), 'err'); });
+      }).catch(function (e) { msg('msg-windows', errText(e), 'err'); });
   }
 
   function refreshTargetFields(opts) {
@@ -1230,7 +1229,7 @@
       applySource(info, opts);
       if (coordErr) msg('msg-windows', coordErr, 'err');
     }).catch(function (e) {
-      msg('msg-windows', String(e), 'err');
+      msg('msg-windows', errText(e), 'err');
     });
   }
 
@@ -1918,8 +1917,7 @@
       rank: isTtv && chk('sch-rank'), rank_by: 'ttv',
       sites: selectedSites()
     };
-    fetch('/api/lco/windows', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-      .then(function (r) { return r.json(); }).then(function (d) {
+    MuscatFetch.fetchJson('/api/lco/windows', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(function (d) {
         if (!d.ok) { clearWindows(); msg('msg-windows', d.error || 'failed', 'err'); return; }
         lastWindows = d.windows || [];
         if (d.duration && !val('sch-duration')) setVal('sch-duration', tupleString(d.duration, null));
@@ -1932,7 +1930,7 @@
         var provenance = d.ttv_run ? 'TTV model: ' + d.ttv_run
                                    : 't0=' + d.t0 + ', P=' + d.period + ' d';
         msg('msg-windows', lastWindows.length + ' windows (' + provenance + ')' + extra, 'ok');
-      }).catch(function (e) { clearWindows(); msg('msg-windows', String(e), 'err'); });
+      }).catch(function (e) { clearWindows(); msg('msg-windows', errText(e), 'err'); });
   });
 
   el('windows-body').addEventListener('click', function (e) {
@@ -1967,8 +1965,7 @@
         moon_sep_min: val('sch-moon-sep') || '30',
         max_lunar_phase: val('sch-max-lunar-phase') || '1.0'
       });
-      return fetch('/api/lco/visibility?' + q.toString())
-        .then(function (r) { return r.json(); })
+      return MuscatFetch.fetchJson('/api/lco/visibility?' + q.toString())
         .then(function (d) { return { site: s, data: d }; });
     })).then(function (results) {
       var ok = results.filter(function (r) { return r.data && r.data.ok; });
@@ -1998,7 +1995,7 @@
         ' — visible: ' + visParts.join(', ');
       el('vis-caption').textContent = caption;
       renderVisibility(ok, w);
-    }).catch(function (e) { msg('msg-windows', String(e), 'err'); });
+    }).catch(function (e) { msg('msg-windows', errText(e), 'err'); });
   });
   el('vis-close').addEventListener('click', function () {
     el('vis-figure').style.display = 'none';
@@ -2127,8 +2124,7 @@
     msg('msg-ipp', 'Building draft…');
     lastDryRunHash = null;
     el('btn-submit').disabled = true;
-    fetch('/api/lco/build', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(buildParams()) })
-      .then(function (r) { return r.json(); }).then(function (d) {
+    MuscatFetch.fetchJson('/api/lco/build', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(buildParams()) }).then(function (d) {
         if (!d.ok) { errMsg('msg-ipp', d.error, d.detail); return; }
         el('payload-pre').value = JSON.stringify(d.payload, null, 2);
         el('ipp-summary').textContent = '';
@@ -2138,7 +2134,7 @@
         el('btn-submit').disabled = true;
         msg('msg-ipp', 'Draft created. Edit if needed, then Check settings.', 'ok');
         saveScheduleState();
-      }).catch(function (e) { msg('msg-ipp', String(e), 'err'); });
+      }).catch(function (e) { msg('msg-ipp', errText(e), 'err'); });
   });
 
   // Any edit to the draft invalidates the last dry-run.
@@ -2155,8 +2151,7 @@
     msg('msg-ipp', 'Running dry-run…');
     lastDryRunHash = null;
     el('btn-submit').disabled = true;
-    fetch('/api/lco/ipp', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requestgroup: rg }) })
-      .then(function (r) { return r.json(); }).then(function (d) {
+    MuscatFetch.fetchJson('/api/lco/ipp', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requestgroup: rg }) }).then(function (d) {
         if (!d.ok) { errMsg('msg-ipp', d.error, d.detail); return; }
         lastDryRunHash = d.payload_hash;
         var ipp = d.ipp || {};
@@ -2176,7 +2171,7 @@
           msg('msg-ipp', 'Dry-run OK. Submit button enabled.', 'ok');
         }
         saveScheduleState();
-      }).catch(function (e) { msg('msg-ipp', String(e), 'err'); });
+      }).catch(function (e) { msg('msg-ipp', errText(e), 'err'); });
   });
 
   // Shared by the single-site and split submit flows: LCO's submit response
@@ -2215,7 +2210,7 @@
   }
 
   function refreshMonitoredRequests() {
-    fetch('/api/lco/monitored-requests').then(function (r) { return r.json(); }).then(function (d) {
+    MuscatFetch.fetchJson('/api/lco/monitored-requests').then(function (d) {
       var body = el('monitor-body');
       if (!body || !d.ok) return;
       var rows = d.requests || [];
@@ -2308,13 +2303,13 @@
     id = String(id || '').trim();
     if (!id) { msg('msg-clone', 'Enter an LCO request or group ID', 'err'); return; }
     msg('msg-clone', 'Loading request ' + id + '…');
-    fetch('/api/lco/clone/' + encodeURIComponent(id)).then(function (r) { return r.json(); }).then(function (d) {
+    MuscatFetch.fetchJson('/api/lco/clone/' + encodeURIComponent(id)).then(function (d) {
       if (!d.ok) { errMsg('msg-clone', d.error || 'clone failed', d.detail); return; }
       applyClonedParams(d.params || {});
       msg('msg-clone', 'Loaded from ' + (d.source === 'local' ? 'local record' : 'LCO') + ' — fetch ephemeris and generate windows, then submit', 'ok');
       var target = el('sch-target');
       if (target && target.scrollIntoView) target.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    }).catch(function (e) { msg('msg-clone', String(e), 'err'); });
+    }).catch(function (e) { msg('msg-clone', errText(e), 'err'); });
   }
 
   el('btn-clone').addEventListener('click', function () { cloneRequest(val('sch-clone-id')); });
@@ -2334,8 +2329,7 @@
     body.confirm = true;
     body.dry_run_hash = lastDryRunHash;
     msg('msg-ipp', 'Submitting…');
-    fetch('/api/lco/submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-      .then(function (r) { return r.json(); }).then(function (d) {
+    MuscatFetch.fetchJson('/api/lco/submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(function (d) {
         if (!d.ok) { errMsg('msg-ipp', d.error, d.detail); return; }
         refreshMonitoredRequests();
         var ids = extractRequestIds(d.result);
@@ -2344,7 +2338,7 @@
         } else {
           msgHtml('msg-ipp', 'Submitted: ' + escapeHtml(JSON.stringify(d.result || {})) + monitoringWarning(d.monitoring), d.monitoring && d.monitoring.ok === false ? 'err' : 'ok');
         }
-      }).catch(function (e) { msg('msg-ipp', String(e), 'err'); });
+      }).catch(function (e) { msg('msg-ipp', errText(e), 'err'); });
   }
 
   el('btn-submit').addEventListener('click', function () {
@@ -2391,8 +2385,7 @@
     }
     resetSplitSubmitState();
     msg('msg-split-ipp', 'Running dry-run for both legs…');
-    fetch('/api/lco/split-ipp', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(params) })
-      .then(function (r) { return r.json(); }).then(function (d) {
+    MuscatFetch.fetchJson('/api/lco/split-ipp', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(params) }).then(function (d) {
         if (!d.ok) {
           errMsg('msg-split-ipp', 'Leg ' + (d.leg === 'leg_b' ? 'B' : 'A') + ' failed: ' + (d.error || 'failed'), d.detail);
           return;
@@ -2416,7 +2409,7 @@
           msg('msg-split-ipp', 'Both legs have validation errors — see details above.', 'err');
         }
         saveScheduleState();
-      }).catch(function (e) { msg('msg-split-ipp', String(e), 'err'); });
+      }).catch(function (e) { msg('msg-split-ipp', errText(e), 'err'); });
   });
 
   // Submits exactly one leg via the plain single-site /api/lco/submit
@@ -2431,8 +2424,7 @@
     body.confirm = true;
     body.dry_run_hash = hash;
     msg('msg-split-ipp', 'Submitting leg ' + which.toUpperCase() + '…');
-    fetch('/api/lco/submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-      .then(function (r) { return r.json(); }).then(function (d) {
+    MuscatFetch.fetchJson('/api/lco/submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(function (d) {
         if (!d.ok) { errMsg('msg-split-ipp', 'Leg ' + which.toUpperCase() + ' failed: ' + (d.error || 'failed'), d.detail); return; }
         refreshMonitoredRequests();
         var ids = extractRequestIds(d.result);
@@ -2444,7 +2436,7 @@
         if (which === 'a') { lastSplitLegAResult = d.result; } else { lastSplitLegBResult = d.result; }
         el('split-partial-warning').style.display = 'none';
         msgHtml('msg-split-ipp', 'Leg ' + which.toUpperCase() + ' booked: ' + requestLinksHtml(ids) + monitoringWarning(d.monitoring), d.monitoring && d.monitoring.ok === false ? 'err' : 'ok');
-      }).catch(function (e) { msg('msg-split-ipp', String(e), 'err'); });
+      }).catch(function (e) { msg('msg-split-ipp', errText(e), 'err'); });
   }
 
   el('btn-submit-leg-a').addEventListener('click', function () {
@@ -2475,8 +2467,7 @@
       dry_run_hash_a: lastSplitDryRunHashes.a, dry_run_hash_b: lastSplitDryRunHashes.b
     };
     msg('msg-split-ipp', 'Submitting leg A, then leg B…');
-    fetch('/api/lco/split-submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-      .then(function (r) { return r.json(); }).then(function (d) {
+    MuscatFetch.fetchJson('/api/lco/split-submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(function (d) {
         if (d.ok) {
           refreshMonitoredRequests();
           // Both legs are now real bookings -- disable every submit button so
@@ -2512,7 +2503,7 @@
           return;
         }
         msg('msg-split-ipp', 'Leg ' + (d.leg === 'leg_b' ? 'B' : 'A') + ' failed: ' + (d.error || 'failed'), 'err');
-      }).catch(function (e) { msg('msg-split-ipp', String(e), 'err'); });
+      }).catch(function (e) { msg('msg-split-ipp', errText(e), 'err'); });
   }
 
   el('btn-split-submit').addEventListener('click', function () {
@@ -2606,8 +2597,7 @@
     var target = val('sch-target');
     if (!target) { msg('msg-obslog', 'Enter a target first', 'err'); return; }
     msg('msg-obslog', 'Loading obs log…');
-    fetch('/api/lco/obslog-exposures?target=' + encodeURIComponent(target))
-      .then(function (r) { return r.json(); })
+    MuscatFetch.fetchJson('/api/lco/obslog-exposures?target=' + encodeURIComponent(target))
       .then(function (d) {
         if (!d.ok) { msg('msg-obslog', d.error || 'lookup failed', 'err'); return; }
         var rows = d.exposures || [];
@@ -2615,7 +2605,7 @@
         if (!rows.length) { msg('msg-obslog', 'No past exposures found for ' + target + '.', ''); }
         else { msg('msg-obslog', rows.length + ' past exposure setup(s) for ' + target + '. Click one to apply.', 'ok'); }
       })
-      .catch(function (e) { msg('msg-obslog', String(e), 'err'); });
+      .catch(function (e) { msg('msg-obslog', errText(e), 'err'); });
   });
 
   // --- Observation-request tabs (Science obs / Test obs) --------------------
@@ -2656,8 +2646,8 @@
     p.transit = { planet: val('sch-planet'), t0: val('sch-t0'), period: val('sch-period'), duration_h: val('sch-duration') };
     p.provenance = { schedule_state: 'lco_schedule', assumed_airmass: p.max_airmass, lunar_distance_deg: p.min_lunar_distance };
     msg('msg-test-observation', 'Optimizing FOV and generating plan…');
-    fetch('/api/lco/test-observations/plan', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(p) })
-      .then(function (r) { return r.json(); }).then(function (d) {
+    MuscatFetch.fetchJson('/api/lco/test-observations/plan', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(p) })
+      .then(function (d) {
         if (!d.ok) throw new Error(d.error || 'Could not generate test plan');
         currentTestRecord = d.record; currentTestHash = null;
         el('btn-test-submit').disabled = true;
@@ -2668,7 +2658,7 @@
         el('test-observation-summary').style.display = '';
         el('test-obs-actions').style.display = '';
         msg('msg-test-observation', 'Draft generated. Edit if needed, then Check settings.');
-      }).catch(function (e) { showMessageModal('Test plan failed', String(e)); });
+      }).catch(function (e) { showMessageModal('Test plan failed', errText(e)); });
   });
   // The edited plan draft (displayed subset) is overlaid on the stored plan.
   function parseTestDraft() {
@@ -2693,12 +2683,11 @@
     if (!override) return;
     var p = buildParams(); p.kind = currentTestRecord.instrument; p.plan_override = override;
     msg('msg-test-observation', 'Running guarded LCO dry-run…');
-    fetch('/api/lco/test-observations/' + encodeURIComponent(currentTestRecord.id) + '/ipp', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(p) })
-      .then(function (r) { return r.json(); }).then(function (d) {
+    MuscatFetch.fetchJson('/api/lco/test-observations/' + encodeURIComponent(currentTestRecord.id) + '/ipp', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(p) }).then(function (d) {
         if (!d.ok) throw new Error(d.error || 'Validation failed');
         currentTestHash = d.payload_hash; el('btn-test-submit').disabled = false;
         msg('msg-test-observation', 'Validated · hash ' + currentTestHash.slice(0, 12));
-      }).catch(function (e) { currentTestHash = null; el('btn-test-submit').disabled = true; msg('msg-test-observation', String(e), 'err'); });
+      }).catch(function (e) { currentTestHash = null; el('btn-test-submit').disabled = true; msg('msg-test-observation', errText(e), 'err'); });
   });
   el('btn-test-submit').addEventListener('click', function () {
     if (!currentTestRecord || !currentTestHash) return;
@@ -2707,15 +2696,14 @@
     showConfirmModal('Submit TEST observation?', 'This books the displayed telescope time and requires server-side live submission to be enabled.', {confirmLabel: 'Submit TEST', confirmClass: 'btn danger'}).then(function (confirmed) {
       if (!confirmed) return;
       var p = buildParams(); p.kind = currentTestRecord.instrument; p.confirm = true; p.dry_run_hash = currentTestHash; p.plan_override = override;
-      fetch('/api/lco/test-observations/' + encodeURIComponent(currentTestRecord.id) + '/submit', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(p) })
-        .then(function (r) { return r.json(); }).then(function (d) {
+      MuscatFetch.fetchJson('/api/lco/test-observations/' + encodeURIComponent(currentTestRecord.id) + '/submit', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(p) }).then(function (d) {
           if (!d.ok) throw new Error(d.error || 'Submission failed');
           refreshMonitoredRequests();
           var warning = monitoringWarning(d.monitoring);
           msgHtml('msg-test-observation', 'Submitted successfully.' + warning, warning ? 'err' : 'ok');
           el('btn-test-submit').disabled = true;
         })
-        .catch(function (e) { msg('msg-test-observation', String(e), 'err'); });
+        .catch(function (e) { msg('msg-test-observation', errText(e), 'err'); });
     });
   });
 
@@ -2734,7 +2722,7 @@
   function prefillFromView(params) {
     var slug = params.get('view');
     if (!slug) return;
-    fetch('/api/ephemeris/view/' + encodeURIComponent(slug)).then(function (r) { return r.json(); }).then(function (d) {
+    MuscatFetch.fetchJson('/api/ephemeris/view/' + encodeURIComponent(slug)).then(function (d) {
       if (!d.ok || !d.state) return;
       var targets = d.state.targets || [];
       if (targets.length && !val('sch-target')) {
@@ -2745,7 +2733,7 @@
     }).catch(function () {});
   }
 
-  fetch('/api/ephemeris/targets').then(function (r) { return r.json(); }).then(function (res) {
+  MuscatFetch.fetchJson('/api/ephemeris/targets').then(function (res) {
     if (res.ok && res.targets) {
       var dl = document.getElementById('target-datalist');
       res.targets.forEach(function (t) {

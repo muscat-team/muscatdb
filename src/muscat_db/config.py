@@ -323,6 +323,7 @@ ENV_VARS: tuple[EnvVar, ...] = (
     # --- caches --------------------------------------------------------------
     EnvVar("MUSCAT_CATALOG_CACHE_MAX", "512", "Max entries in the in-process catalog lookup cache"),
     EnvVar("MUSCAT_GAIA_CACHE_MAX", "512", "Max entries in the in-process Gaia cone-search cache"),
+    EnvVar("MUSCAT_GAIA_CACHE_DIR", "~/.cache/muscat-db/gaia", "Directory for the persistent Gaia cone-search cache (.npz per field)"),
     EnvVar("MUSCAT_INDEX_CACHE_MAX", "64", "Max entries in the index-page render cache"),
 
     # --- chat ----------------------------------------------------------------
