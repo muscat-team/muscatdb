@@ -725,3 +725,12 @@ def test_api_fov_optimize_forwards_avoid_mag(monkeypatch):
     })
     assert resp.status_code == 200
     assert seen["avoid_mag"] == 8.0
+
+
+def test_gaia_disk_path_keeps_memory_key_resolution():
+    # The in-memory key distinguishes RA at 1e-4 deg; a `%g` disk name drops to
+    # 1e-3 for RA >= 100 (~3.6"), so the disk layer must format at 4 decimals.
+    a = fov._gaia_cache_key(123.4567, 10.0, 300.0, 0.0, 18.0)
+    b = fov._gaia_cache_key(123.4568, 10.0, 300.0, 0.0, 18.0)
+    assert a != b
+    assert fov._gaia_disk_path(a) != fov._gaia_disk_path(b)

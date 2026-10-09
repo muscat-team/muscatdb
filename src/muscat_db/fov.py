@@ -707,7 +707,7 @@ def _gaia_disk_dir() -> Path:
 
 
 def _gaia_disk_path(key: tuple) -> Path:
-    name = "_".join(f"{v:g}" for v in key).replace("-", "m").replace(".", "p")
+    name = "_".join(f"{v:.4f}" for v in key).replace("-", "m").replace(".", "p")
     return _gaia_disk_dir() / f"gaia_{name}.npz"
 
 
