@@ -161,6 +161,28 @@ def _get_lco_api_token(user_name: str | None = None, *, require_own_token: bool 
     return token
 
 
+def require_own_token_for_archive(user_name: str | None) -> None:
+    """Refuse an archive read that would run under the shared ``LCO_API_TOKEN``.
+
+    Archive search and download normally fall back to the server token, which
+    never carries the caller's identity. With proposal access control (#144)
+    that fallback lets a viewer who is denied a restricted proposal fetch its
+    frames from LCO under the operator's account. Callers use this when the
+    viewer has any denied proposal: they must then read the archive with their
+    own token, whose reach is whatever their own LCO account can see.
+    """
+    if not (user_name or "").strip():
+        raise LcoError(
+            "Sign in and save your own LCO API token to use the LCO archive",
+            status=403,
+            detail=(
+                "Some proposals are restricted, so the archive is not read "
+                "with the server's shared token for anonymous callers."
+            ),
+        )
+    _get_lco_api_token(user_name, require_own_token=True)
+
+
 def config_state(user_name: str | None = None) -> dict:
     """Return the configuration state for LCO variables. No secrets exposed.
 
