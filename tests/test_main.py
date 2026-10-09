@@ -108,7 +108,7 @@ class TestInstruments:
         assert MUSCAT3.name == "muscat3"
         assert MUSCAT3.nccd == 4
         assert MUSCAT3.prefix == "ogg2m001-"
-        assert MUSCAT3.ep_names == ["ep02", "ep03", "ep04", "ep05"]
+        assert MUSCAT3.ep_names == ["ep02", "ep03", "ep04", ("ep05", "ep01")]
         assert MUSCAT3.has_pa is False
         assert MUSCAT3.use_alt_ut_key is True
         assert MUSCAT3.has_wcs is True
@@ -282,6 +282,103 @@ class TestScanner:
         result = scan_date("muscat4", obsdate, max_workers=1)
 
         assert result["per_ccd"].get(3) == 1
+
+    @staticmethod
+    def _muscat3_header(**extra):
+        header = {
+            "OBJECT": "TEST", "EXPTIME": 10.0, "FILTER": "zs", "RA": "12:00:00",
+            "DEC": "+00:00:00", "MJD-OBS": 59225.0, "UTSTART": "00:00:00",
+            "CONFMODE": "high", "FOCPOSN": 0.0, "PROPID": "CON2021A-003",
+        }
+        header.update(extra)
+        return header
+
+    def test_muscat3_ccd3_lists_both_zs_epoch_names(self):
+        """The z-band camera was ``ep01`` on 210110, 210127 and 210210 and
+        ``ep05`` from 210317 on. ep02-ep04 (r, i, g) never changed, so CCD3 is
+        the z-band channel on every night (issue #197)."""
+        assert INSTRUMENTS["muscat3"].ep_names == ["ep02", "ep03", "ep04", ("ep05", "ep01")]
+
+    def test_scan_date_muscat3_ccd3_matches_ep01_z_band_camera(self, tmp_obslog, tmp_data):
+        """Regression test for #197 (A): on 210110/210127/210210 the z-band
+        camera was ep01. With only ep02-ep05 listed, the scanner dropped it
+        and read each remaining camera as the CCD below it, so a rescan
+        disagreed with the existing database rows."""
+        from muscat_db.scanner import scan_date
+        inst = INSTRUMENTS["muscat3"]
+        obsdate = "210110"
+        ddir = f"{tmp_data}/{inst.name}/{obsdate}"
+        os.makedirs(ddir, exist_ok=True)
+        for ep, flt in (("ep01", "zs"), ("ep02", "rp"), ("ep03", "ip"), ("ep04", "gp")):
+            _make_fits(
+                f"{ddir}/{inst.prefix}{ep}-20{obsdate}-0001-e91.fits",
+                self._muscat3_header(FILTER=flt),
+            )
+
+        result = scan_date("muscat3", obsdate, max_workers=1)
+
+        assert result["per_ccd"] == {0: 1, 1: 1, 2: 1, 3: 1}
+        # CCD0 is the r-band camera and CCD3 the z-band one, as on every other night.
+        ccd0 = open(f"{tmp_obslog}/muscat3/{obsdate}/obslog-muscat3-{obsdate}-ccd0.csv").read()
+        ccd3 = open(f"{tmp_obslog}/muscat3/{obsdate}/obslog-muscat3-{obsdate}-ccd3.csv").read()
+        assert "-ep02-" in ccd0
+        assert "-ep01-" in ccd3
+
+    def test_scan_date_warns_about_frames_with_an_unrecognised_epoch(
+        self, tmp_obslog, tmp_data, capsys,
+    ):
+        """A frame whose epoch token matches no CCD is skipped by the globs.
+        Say so loudly instead of letting a rescan quietly lose it (#197)."""
+        from muscat_db.scanner import scan_date
+        inst = INSTRUMENTS["muscat3"]
+        obsdate = "210111"
+        ddir = f"{tmp_data}/{inst.name}/{obsdate}"
+        os.makedirs(ddir, exist_ok=True)
+        _make_fits(f"{ddir}/{inst.prefix}ep02-20{obsdate}-0001-e91.fits", self._muscat3_header())
+        for n in (1, 2):
+            _make_fits(f"{ddir}/{inst.prefix}ep09-20{obsdate}-000{n}-e91.fits", self._muscat3_header())
+
+        scan_date("muscat3", obsdate, max_workers=1)
+
+        out = capsys.readouterr().out
+        assert "[warn]" in out
+        assert "muscat3 210111" in out
+        assert "ep09" in out and "2 frame" in out
+
+    def test_scan_date_warns_about_fz_frames_with_no_unpacked_fits(
+        self, tmp_obslog, tmp_data, capsys,
+    ):
+        """``*.fits.fz`` frames with no unpacked ``.fits`` are never matched
+        (the glob is ``*e91.fits``). That was the silent cause of #198's
+        funpack-only dates; the scan must name them and say how to fix it."""
+        from muscat_db.scanner import scan_date
+        inst = INSTRUMENTS["muscat3"]
+        obsdate = "210112"
+        ddir = f"{tmp_data}/{inst.name}/{obsdate}"
+        os.makedirs(ddir, exist_ok=True)
+        _make_fits(f"{ddir}/{inst.prefix}ep02-20{obsdate}-0001-e91.fits", self._muscat3_header())
+        open(f"{ddir}/{inst.prefix}ep02-20{obsdate}-0002-e91.fits.fz", "wb").close()
+        open(f"{ddir}/{inst.prefix}ep03-20{obsdate}-0003-e91.fits.fz", "wb").close()
+        # Packed AND unpacked: nothing is missing, so it must not be counted.
+        open(f"{ddir}/{inst.prefix}ep02-20{obsdate}-0001-e91.fits.fz", "wb").close()
+
+        scan_date("muscat3", obsdate, max_workers=1)
+
+        out = capsys.readouterr().out
+        assert "[warn]" in out
+        assert "2 .fits.fz frame" in out and "funpack" in out
+
+    def test_scan_date_is_quiet_when_every_frame_is_matched(self, tmp_obslog, tmp_data, capsys):
+        from muscat_db.scanner import scan_date
+        inst = INSTRUMENTS["muscat3"]
+        obsdate = "210113"
+        ddir = f"{tmp_data}/{inst.name}/{obsdate}"
+        os.makedirs(ddir, exist_ok=True)
+        _make_fits(f"{ddir}/{inst.prefix}ep02-20{obsdate}-0001-e91.fits", self._muscat3_header())
+
+        scan_date("muscat3", obsdate, max_workers=1)
+
+        assert "[warn]" not in capsys.readouterr().out
 
     def test_scan_date_no_files(self, tmp_obslog, tmp_data):
         from muscat_db.scanner import scan_date
@@ -848,6 +945,34 @@ class TestSummarizer:
              "AIRMASS": "1.2", "FOCUS (mm)": ""},
             {"FRAME": f"coj2m002-ep09-20{obsdate}-0002-e91", "OBJECT": "TOI-1",
              "JD-STRT": "60000.2", "UT-STRT": "01:01:00", "EXPTIME (s)": "5",
+             "READ_MODE": "high", "FILTER": "zs", "RA": "", "DEC": "",
+             "AIRMASS": "1.2", "FOCUS (mm)": ""},
+        ])
+
+        rows = summarize_csv(inst, obsdate, ccd)
+
+        assert len(rows) == 1
+        assert rows[0].frame_start == "0001"
+        assert rows[0].frame_end == "0002"
+        assert rows[0].nframes == 2
+
+
+    def test_summarize_csv_muscat3_ccd3_parses_both_epoch_names(self, tmp_obslog):
+        """Same as muscat4's: CCD3 rows recorded under ep01 (210110, 210127,
+        210210) must still have their frame number parsed (#197)."""
+        from muscat_db.summarizer import summarize_csv
+        inst, obsdate, ccd = "muscat3", "210110", 3
+        d = f"{tmp_obslog}/{inst}/{obsdate}"
+        os.makedirs(d, exist_ok=True)
+        fieldnames = ["FRAME", "OBJECT", "JD-STRT", "UT-STRT", "EXPTIME (s)",
+                      "READ_MODE", "FILTER", "RA", "DEC", "AIRMASS", "FOCUS (mm)"]
+        _make_csv(f"{d}/obslog-{inst}-{obsdate}-ccd{ccd}.csv", fieldnames, [
+            {"FRAME": f"ogg2m001-ep01-20{obsdate}-0001-e91", "OBJECT": "TOI-1",
+             "JD-STRT": "59225.1", "UT-STRT": "01:00:00", "EXPTIME (s)": "5",
+             "READ_MODE": "high", "FILTER": "zs", "RA": "", "DEC": "",
+             "AIRMASS": "1.2", "FOCUS (mm)": ""},
+            {"FRAME": f"ogg2m001-ep05-20{obsdate}-0002-e91", "OBJECT": "TOI-1",
+             "JD-STRT": "59225.2", "UT-STRT": "01:01:00", "EXPTIME (s)": "5",
              "READ_MODE": "high", "FILTER": "zs", "RA": "", "DEC": "",
              "AIRMASS": "1.2", "FOCUS (mm)": ""},
         ])

@@ -59,12 +59,21 @@ MUSCAT2 = InstrumentConfig(
     has_wcs=False,
 )
 
+# CCD3 is the z-band channel. Its camera was ``ep01`` on the three nights
+# 210110, 210127 and 210210 and ``ep05`` from 210317 on; ep02 (r), ep03 (i) and
+# ep04 (g) never changed (checked against the FILTER of every ingested frame,
+# #197). Listing both keeps CCD0-2 as the same channels on every night, where a
+# date-dependent shift would have renumbered them. Same approach as muscat4's
+# ep10 -> ep09 below.
+_MUSCAT3_CCD3_EP_NEW = "ep05"
+_MUSCAT3_CCD3_EP_OLD = "ep01"
+
 MUSCAT3 = InstrumentConfig(
     name="muscat3",
     nccd=4,
     data_subdir="MuSCAT3",
     prefix="ogg2m001-",
-    ep_names=["ep02", "ep03", "ep04", "ep05"],
+    ep_names=["ep02", "ep03", "ep04", (_MUSCAT3_CCD3_EP_NEW, _MUSCAT3_CCD3_EP_OLD)],
     keys=["OBJECT", "MJD-OBS", "UTSTART", "EXPTIME", "CONFMODE", "FILTER", "RA", "DEC", "AIRMASS", "FOCPOSN", "PROPID"],
     csv_header="FRAME,OBJECT,JD-STRT,UT-STRT,EXPTIME (s),READ_MODE,FILTER,RA,DEC,AIRMASS,FOCUS (mm),PROPID",
     has_pa=False,

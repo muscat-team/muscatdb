@@ -5024,6 +5024,13 @@ def api_lco_monitored_requests():
     return JSONResponse({"ok": True, "requests": lco_monitor.list_requests()})
 
 
+def _require_own_archive_token(request: Request) -> None:
+    """Issue #210: a viewer denied any proposal reads the LCO archive with their
+    own token, never the shared one (which would bypass the proposal filters)."""
+    if _viewer_denied():
+        lco.require_own_token_for_archive(_request_user(request))
+
+
 @lco_router.get("/archive/frames", response_class=JSONResponse)
 def api_lco_archive_frames(
     request: Request,
@@ -5041,6 +5048,10 @@ def api_lco_archive_frames(
     fuzzy_name: str = "",
     request_id: str = "",
 ):
+    try:
+        _require_own_archive_token(request)
+    except lco.LcoError as e:
+        return _lco_error_response(e)
     # Request-id path: a single observation request (e.g. the id in
     # https://observe.lco.global/requests/4236675) fully specifies a dataset on
     # its own, so it short-circuits the coordinate/name search and pulls every
@@ -5206,6 +5217,7 @@ def api_lco_archive_exofop_download(request: Request, payload: dict = Body(...))
     download + ingest job, so a missing dataset can be fetched in one click.
     """
     try:
+        _require_own_archive_token(request)
         target = str(payload.get("target") or "").strip()
         tsdate = str(payload.get("tsdate") or "").strip()
         if not target or not tsdate:
@@ -5245,6 +5257,7 @@ def api_lco_archive_exofop_download(request: Request, payload: dict = Body(...))
 @lco_router.post("/archive/download", response_class=JSONResponse)
 def api_lco_archive_download(request: Request, payload: dict = Body(...)):
     try:
+        _require_own_archive_token(request)
         frames = payload.get("frames")
         if not isinstance(frames, list) or not frames:
             return JSONResponse({"ok": False, "error": "no frames selected"}, status_code=400)
