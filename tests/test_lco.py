@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch, MagicMock
 import datetime
 import io
+import json
 import os
 import socket
 import shutil
@@ -1868,3 +1869,135 @@ class ToiResolutionTest(unittest.TestCase):
         self.assertIsNone(exofop.resolve_toi_number("WASP-12"))
         self.assertIsNone(exofop.resolve_toi_number(""))
         self.assertIsNone(exofop.resolve_toi_number("   "))
+
+
+class SiteInstrumentsTest(unittest.TestCase):
+    """Per-site instrument availability behind the schedule page's annotation.
+
+    The page must never hardcode elp out of the Sinistro/QHY600 lists: ELP is a
+    Sinistro site whose 1 m unit is temporarily offline (Sophia upgrade), so the
+    UI annotates it "currently unavailable" from live data and drops the
+    auto-pin, letting it return on its own when LCO re-lists the instrument.
+    """
+
+    def setUp(self):
+        lco._site_instruments_cache.clear()
+
+    @staticmethod
+    def _opener(by_site):
+        """A fake ``_API_OPENER.open`` that answers /api/instruments/?site=<s>."""
+        from urllib.parse import urlparse, parse_qs
+
+        def _open(req, timeout=None):
+            site = parse_qs(urlparse(req.full_url).query).get("site", [None])[0]
+            resp = MagicMock()
+            resp.status = 200
+            resp.read.return_value = json.dumps(by_site.get(site, {})).encode()
+            cm = MagicMock()
+            cm.__enter__.return_value = resp
+            return cm
+
+        return _open
+
+    @patch.dict(os.environ, {"LCO_API_TOKEN": "test-token"})
+    @patch("muscat_db.lco._API_OPENER")
+    def test_site_instruments_maps_each_site_to_its_codes(self, mock_opener):
+        from muscat_db import transit_obs
+
+        by_site = {s: {} for s in transit_obs.LCO_SITES}
+        by_site["ogg"] = {"2M0-SCICAM-MUSCAT": {}, "1M0-SCICAM-SINISTRO": {}}
+        by_site["elp"] = {"0M4-SCICAM-QHY600": {}}
+        mock_opener.open.side_effect = self._opener(by_site)
+
+        result = lco.site_instruments()
+
+        self.assertEqual(result["elp"], ["0M4-SCICAM-QHY600"])
+        self.assertEqual(
+            result["ogg"], ["1M0-SCICAM-SINISTRO", "2M0-SCICAM-MUSCAT"]
+        )
+        self.assertEqual(result["coj"], [])
+        # One request per LCO site.
+        self.assertEqual(mock_opener.open.call_count, len(transit_obs.LCO_SITES))
+
+    @patch.dict(os.environ, {"LCO_API_TOKEN": "test-token"})
+    @patch("muscat_db.lco._API_OPENER")
+    def test_site_instruments_cache_hit_skips_refetch(self, mock_opener):
+        from muscat_db import transit_obs
+
+        by_site = {s: {} for s in transit_obs.LCO_SITES}
+        by_site["elp"] = {"0M4-SCICAM-QHY600": {}}
+        mock_opener.open.side_effect = self._opener(by_site)
+
+        first = lco.site_instruments()
+        calls = mock_opener.open.call_count
+        second = lco.site_instruments()
+
+        self.assertEqual(mock_opener.open.call_count, calls)
+        self.assertEqual(second, first)
+        # A caller mutating its copy must not corrupt the cache.
+        second["elp"].append("BOGUS")
+        self.assertEqual(lco.site_instruments()["elp"], ["0M4-SCICAM-QHY600"])
+
+    @patch.dict(os.environ, {"LCO_API_TOKEN": "test-token"})
+    @patch("muscat_db.lco._API_OPENER")
+    def test_force_refetches_past_the_ttl(self, mock_opener):
+        from muscat_db import transit_obs
+
+        by_site = {s: {} for s in transit_obs.LCO_SITES}
+        mock_opener.open.side_effect = self._opener(by_site)
+
+        lco.site_instruments()
+        calls = mock_opener.open.call_count
+        lco.site_instruments(force=True)
+        self.assertEqual(mock_opener.open.call_count, 2 * calls)
+
+    @patch.dict(os.environ, {"LCO_API_TOKEN": "test-token"})
+    @patch("muscat_db.lco._API_OPENER")
+    def test_failure_serves_stale_snapshot(self, mock_opener):
+        from muscat_db import transit_obs
+
+        by_site = {s: {} for s in transit_obs.LCO_SITES}
+        by_site["elp"] = {"0M4-SCICAM-QHY600": {}}
+        mock_opener.open.side_effect = self._opener(by_site)
+        good = lco.site_instruments()
+
+        # Force a refresh that fails: the last good snapshot must survive.
+        mock_opener.open.side_effect = lco.LcoError("portal down", detail="boom")
+        self.assertEqual(lco.site_instruments(force=True), good)
+
+    @patch.dict(os.environ, {"LCO_API_TOKEN": "test-token"})
+    @patch("muscat_db.lco._API_OPENER")
+    def test_failure_without_cache_propagates(self, mock_opener):
+        mock_opener.open.side_effect = lco.LcoError("portal down", detail="boom")
+        with self.assertRaises(lco.LcoError):
+            lco.site_instruments()
+
+    @patch.dict(os.environ, {"LCO_API_TOKEN": "test-token"})
+    @patch("muscat_db.lco._API_OPENER")
+    def test_availability_rollup_excludes_offline_elp_sinistro(self, mock_opener):
+        """elp must not be reported as a schedulable Sinistro site while down."""
+        from muscat_db import transit_obs
+
+        by_site = {s: {} for s in transit_obs.LCO_SITES}
+        for site in ("coj", "lsc", "cpt", "tfn"):
+            by_site[site] = {"1M0-SCICAM-SINISTRO": {}}
+        by_site["ogg"] = {"2M0-SCICAM-MUSCAT": {}}
+        by_site["elp"] = {"0M4-SCICAM-QHY600": {}}
+        mock_opener.open.side_effect = self._opener(by_site)
+
+        result = lco.instrument_availability()
+
+        self.assertNotIn("elp", result["by_kind"]["sinistro"])
+        self.assertEqual(
+            result["by_kind"]["sinistro"], ["coj", "cpt", "lsc", "tfn"]
+        )
+        self.assertEqual(result["by_kind"]["qhy600"], ["elp"])
+        self.assertEqual(result["by_kind"]["muscat"], ["ogg"])
+
+    def test_kind_instrument_type_maps_schedule_kinds(self):
+        self.assertEqual(lco.kind_instrument_type("sinistro"), "1M0-SCICAM-SINISTRO")
+        self.assertEqual(lco.kind_instrument_type("Sinistro"), "1M0-SCICAM-SINISTRO")
+        self.assertEqual(lco.kind_instrument_type("muscat4"), "2M0-SCICAM-MUSCAT")
+        self.assertEqual(lco.kind_instrument_type("qhy600"), "0M4-SCICAM-QHY600")
+        # sbig is retired: no live instrument_type, so never availability-checked.
+        self.assertIsNone(lco.kind_instrument_type("sbig"))

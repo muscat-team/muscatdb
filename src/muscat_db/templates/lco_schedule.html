@@ -196,6 +196,7 @@
           <option value="elp">elp (McDonald)</option>
         </select>
       </div>
+      <div class="lco-msg" id="sch-site-note" style="display: none; margin-top: 0.3rem;"></div>
     </div>
     <div class="lco-field sinistro-only" style="display: none;">
       <label for="sch-effective-filter">Filter <span class="help-tooltip" title="LCO Sinistro filters: Pan-STARRS (rp/gp/ip/up/zs/w) and Bessell (U/B/V/R/I). central_2k_2x2 readout only calibrates up/gp/rp/ip/zs/w. QHY600 offers a wider set incl. narrowband (OIII, S[II], H-Alpha).">?</span></label>
@@ -707,6 +708,97 @@
   // capabilities schema (mirrors muscat_db.lco._DEFOCUS_LIMIT_MM).
   var DEFOCUS_LIMIT_MM = { muscat: 8, muscat3: 8, muscat4: 8, sinistro: 5, qhy600: 0.5 };
 
+  // Live per-site instrument availability (GET /api/lco/instruments), used to
+  // annotate -- never remove -- a site whose instrument is temporarily
+  // unschedulable there (e.g. ELP while its 1m Sinistro is down for the Sophia
+  // upgrade). elp stays in every site list and becomes available again on its
+  // own once LCO re-lists the instrument. null until the first successful load,
+  // in which case nothing is annotated (every site stays enabled).
+  var siteAvailability = null;
+  // Mirror of lco.py's _KIND_TO_INSTRUMENT_TYPE. sbig has no live code.
+  var KIND_INSTRUMENT_TYPE = {
+    muscat: '2M0-SCICAM-MUSCAT', muscat3: '2M0-SCICAM-MUSCAT',
+    muscat4: '2M0-SCICAM-MUSCAT', sinistro: '1M0-SCICAM-SINISTRO',
+    qhy600: '0M4-SCICAM-QHY600'
+  };
+  var INSTRUMENT_TYPE_LABEL = {
+    '2M0-SCICAM-MUSCAT': 'MuSCAT', '1M0-SCICAM-SINISTRO': 'Sinistro',
+    '0M4-SCICAM-QHY600': 'QHY600'
+  };
+  var SITE_OFFLINE_SUFFIX = ' — currently unavailable';
+
+  // True when `kind` is currently schedulable at `site`. Unknown availability
+  // (not loaded yet, fetch failed, or a site absent from the payload) answers
+  // true, so an outage or portal hiccup never hides a working option.
+  function kindAvailableAt(kind, site) {
+    if (!siteAvailability || !siteAvailability.by_site) return true;
+    var codes = siteAvailability.by_site[site];
+    if (!codes) return true;
+    var itype = KIND_INSTRUMENT_TYPE[kind];
+    if (!itype) return true;
+    return codes.indexOf(itype) !== -1;
+  }
+
+  // Append/remove the "(currently unavailable)" suffix on the site dropdowns
+  // for the current kind. Options are never disabled: a saved view that pins a
+  // temporarily-down site must keep working, and a returning site (elp) must
+  // come back silently rather than needing a code change.
+  function annotateSiteOptions() {
+    var kind = val('sch-kind');
+    ['sch-muscat-site', 'sch-site', 'sch-site-a', 'sch-site-b'].forEach(function (id) {
+      var sel = el(id);
+      if (!sel) return;
+      Array.prototype.forEach.call(sel.options, function (o) {
+        if (!o.value) return;
+        var base = o.getAttribute('data-base-label');
+        if (!base) { base = o.textContent; o.setAttribute('data-base-label', base); }
+        if (kindAvailableAt(kind, o.value)) {
+          o.textContent = base;
+        } else if (o.textContent === base) {
+          o.textContent = base + SITE_OFFLINE_SUFFIX;
+        }
+      });
+    });
+  }
+
+  // Explain why the auto-selected site was left unset because its instrument is
+  // temporarily unschedulable there, and what LCO does list at that site.
+  function showSiteNote(site, kind) {
+    var node = el('sch-site-note');
+    if (!node) return;
+    var codes = (siteAvailability && siteAvailability.by_site && siteAvailability.by_site[site]) || [];
+    var avail = codes.map(function (c) { return INSTRUMENT_TYPE_LABEL[c] || c; }).join(', ');
+    var kindLabel = INSTRUMENT_TYPE_LABEL[KIND_INSTRUMENT_TYPE[kind]] || kind;
+    node.className = 'lco-msg err';
+    node.textContent = kindLabel + ' is not currently schedulable at ' + site.toUpperCase() +
+      (avail ? ' (LCO lists: ' + avail + ')' : '') +
+      '. Left the site unset — pick another site or instrument.';
+    node.style.display = '';
+  }
+  function clearSiteNote() {
+    var node = el('sch-site-note');
+    if (!node) return;
+    node.textContent = '';
+    node.style.display = 'none';
+  }
+
+  // Fetch the per-site availability (server caches it; `refresh` bypasses that
+  // TTL). On success re-annotate the dropdowns and re-run the auto-config so a
+  // note/pin decided before the data arrived is corrected. Failures are
+  // swallowed: the page keeps every site enabled.
+  function loadSiteAvailability(refresh) {
+    return fetch('/api/lco/instruments' + (refresh ? '?refresh=1' : ''))
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d && d.ok) {
+          siteAvailability = d;
+          annotateSiteOptions();
+          applyAutoConfig();
+        }
+      })
+      .catch(function () {});
+  }
+
   function setSelectValue(id, v) {
     var e = el(id);
     if (!e) return;
@@ -871,6 +963,7 @@
       setVal('sch-effective-filter', lastSinistroFields.filter);
     }
     updateScheduleFields();
+    annotateSiteOptions();
     lastScheduleKind = k;
   }
   el('sch-kind').addEventListener('change', applyKind);
@@ -1587,7 +1680,7 @@
 
   function applyAutoConfig() {
     var site = autoSiteFromSelection();
-    if (site === null || !site) return;
+    if (site === null || !site) { clearSiteNote(); return; }
 
     // Auto-set instrument from site: sites without a 2m default to Sinistro
     // (the long-standing default; switch to QHY600 manually -- e.g. at ogg,
@@ -1613,7 +1706,22 @@
       var ok = Array.prototype.some.call(sel.options, function (o) { return o.value === site; });
       if (!ok) site = '';
     }
+    // Respect a manual override: only touch the dropdown when it is blank or
+    // still holds the last value we auto-wrote.
     if (sel.value && sel.value !== lastAutoSite) return;
+
+    // Never pin a site whose instrument is temporarily unschedulable there
+    // (e.g. Sinistro at elp during the Sophia upgrade). Leave the dropdown
+    // unset and explain, rather than silently switching site or instrument:
+    // elp returns on its own once LCO re-lists the instrument.
+    var kind = val('sch-kind');
+    if (site && !kindAvailableAt(kind, site)) {
+      showSiteNote(site, kind);
+      site = '';
+    } else {
+      clearSiteNote();
+    }
+
     if (sel.value === site) { lastAutoSite = site; return; }
     sel.value = site;
     lastAutoSite = site;
@@ -2762,6 +2870,9 @@
   applyKind();
   updateScheduleFields();
   restoreScheduleState();
+  // Fetch live per-site availability after the restored state is in place, so
+  // a saved pin is never clobbered before it has been applied.
+  loadSiteAvailability();
   // Read the query string once: saveOptions() rewrites the URL to pathname+hash,
   // dropping ?target=/?view= the moment the target below is applied.
   var urlParams = new URLSearchParams(window.location.search);

@@ -1879,6 +1879,108 @@ _INSTRUMENT_TYPE_TO_KIND = {
     "0M4-SCICAM-QHY600": "qhy600",
 }
 
+# Reverse of the map above, keyed by the schedule form's instrument *kind*.
+# muscat3/muscat4 schedule the same 2M0-SCICAM-MUSCAT hardware as muscat.
+# sbig is deliberately absent: it has no live instrument_type (retired), so it
+# can never be "currently schedulable" and is never availability-annotated.
+_KIND_TO_INSTRUMENT_TYPE = {
+    "muscat": "2M0-SCICAM-MUSCAT",
+    "muscat3": "2M0-SCICAM-MUSCAT",
+    "muscat4": "2M0-SCICAM-MUSCAT",
+    "sinistro": "1M0-SCICAM-SINISTRO",
+    "qhy600": "0M4-SCICAM-QHY600",
+}
+
+# Per-site instrument availability is a slowly-changing fact (LCO moves or
+# installs hardware, or a telescope goes down for repairs), so the schedule page
+# reads it through a short TTL cache rather than calling the portal on every
+# load. ``site_instruments(force=True)`` bypasses it.
+_SITE_INSTRUMENTS_TTL_S = 900.0
+_site_instruments_cache: dict[str, tuple[float, dict[str, list[str]]]] = {}
+_site_instruments_lock = threading.Lock()
+
+
+def kind_instrument_type(kind: str | None) -> str | None:
+    """LCO instrument_type code for a schedule-form instrument kind."""
+    return _KIND_TO_INSTRUMENT_TYPE.get((kind or "").strip().lower())
+
+
+def site_instruments(*, force: bool = False) -> dict[str, list[str]]:
+    """Currently schedulable instrument_type codes, per LCO site.
+
+    Reads the Observation Portal's ``/api/instruments/?site=<site>`` view: the
+    response is a mapping of instrument_type -> capabilities *for that one
+    site*, and it already reflects configdb's schedulability (disabled and
+    manual telescope/instrument states are dropped for a non-staff token), so
+    it answers "can this instrument be scheduled here right now".
+
+    The schedule page uses this to annotate a site whose instrument is
+    temporarily offline -- e.g. ELP while its 1 m Sinistro is down for the
+    Sophia upgrade, or any site during a maintenance outage -- *without*
+    hardcoding it out of the site lists. When LCO re-lists the instrument, the
+    site becomes available again on the next cache expiry.
+
+    Cached for ``_SITE_INSTRUMENTS_TTL_S`` seconds; ``force=True`` re-fetches.
+    A fetch failure returns the last cached snapshot (even if stale) so a
+    transient portal error does not blank the UI; with nothing cached the
+    :class:`LcoError` propagates.
+    """
+    now = time.monotonic()
+    with _site_instruments_lock:
+        cached = _site_instruments_cache.get("value")
+        if (
+            not force
+            and cached is not None
+            and now - cached[0] < _SITE_INSTRUMENTS_TTL_S
+        ):
+            return {site: list(codes) for site, codes in cached[1].items()}
+
+    # Imported here to avoid a module-level cycle: transit_obs does not import
+    # lco, but lco only needs the site keys, which live there.
+    from muscat_db import transit_obs
+
+    try:
+        result: dict[str, list[str]] = {}
+        for site in transit_obs.LCO_SITES:
+            payload = _lco_api_request(
+                f"https://observe.lco.global/api/instruments/?site={site}"
+            )
+            result[site] = (
+                sorted(k for k, v in payload.items() if isinstance(v, dict))
+                if isinstance(payload, dict)
+                else []
+            )
+    except LcoError:
+        with _site_instruments_lock:
+            cached = _site_instruments_cache.get("value")
+        if cached is None:
+            raise
+        logger.warning(
+            "site instrument refresh failed; serving cached snapshot (age %.0fs)",
+            now - cached[0],
+        )
+        return {site: list(codes) for site, codes in cached[1].items()}
+
+    with _site_instruments_lock:
+        _site_instruments_cache["value"] = (now, result)
+    return result
+
+
+def instrument_availability(*, force: bool = False) -> dict:
+    """Site instrument availability for the schedule page.
+
+    Wraps :func:`site_instruments` with a kind -> sites rollup so the frontend
+    can mark a whole instrument's sites in one lookup. ``by_site`` is the raw
+    site -> instrument_type list; ``by_kind`` maps each schedule-form kind to
+    the sites currently listing its instrument_type.
+    """
+    by_site = site_instruments(force=force)
+    by_kind = {
+        kind: sorted(s for s, codes in by_site.items() if itype in codes)
+        for kind, itype in _KIND_TO_INSTRUMENT_TYPE.items()
+    }
+    return {"by_site": by_site, "by_kind": by_kind}
+
 
 def requestgroup_to_params(rg: dict) -> dict:
     """Reverse :func:`build_requestgroup`: an LCO requestgroup -> form params.
