@@ -3760,6 +3760,7 @@ def api_fov_optimize(payload: dict = Body(...)):
             min_mag=min_mag,
             max_mag=max_mag,
             mag_delta=mag_delta,
+            avoid_mag=avoid_mag,
         )
         return JSONResponse(result.to_dict(), status_code=200)
     except Exception as exc:
@@ -4787,11 +4788,16 @@ def api_lco_test_plan(payload: dict = Body(...)):
     """Generate and persist a deterministic, observer-reviewable test plan."""
     try:
         if not payload.get("fov_candidates"):
-            result = fov_opt.optimize(
-                payload.get("kind"), target=payload.get("target_name") or "",
-                ra=payload.get("ra"), dec=payload.get("dec"),
-                sinistro_mode=payload.get("readout_mode"),
-            )
+            try:
+                result = fov_opt.optimize(
+                    payload.get("kind"), target=payload.get("target_name") or "",
+                    ra=payload.get("ra"), dec=payload.get("dec"),
+                    sinistro_mode=payload.get("readout_mode"),
+                )
+            except Exception as exc:
+                # Surface as JSON; an unhandled error would reach the browser as an HTML 500.
+                logger.error("FOV optimization failed during test plan: %s", exc, exc_info=True)
+                raise test_observations.TestObservationError(f"FOV optimization failed: {exc}") from exc
             if not result.ok:
                 raise test_observations.TestObservationError(result.error or "FOV optimization failed")
             best = result.to_dict()
