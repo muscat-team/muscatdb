@@ -2329,7 +2329,7 @@
     body.confirm = true;
     body.dry_run_hash = lastDryRunHash;
     msg('msg-ipp', 'Submitting…');
-    MuscatFetch.fetchJson('/api/lco/submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(function (d) {
+    MuscatFetch.fetchJson('/api/lco/submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, { submit: true }).then(function (d) {
         if (!d.ok) { errMsg('msg-ipp', d.error, d.detail); return; }
         refreshMonitoredRequests();
         var ids = extractRequestIds(d.result);
@@ -2424,7 +2424,7 @@
     body.confirm = true;
     body.dry_run_hash = hash;
     msg('msg-split-ipp', 'Submitting leg ' + which.toUpperCase() + '…');
-    MuscatFetch.fetchJson('/api/lco/submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(function (d) {
+    MuscatFetch.fetchJson('/api/lco/submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, { submit: true }).then(function (d) {
         if (!d.ok) { errMsg('msg-split-ipp', 'Leg ' + which.toUpperCase() + ' failed: ' + (d.error || 'failed'), d.detail); return; }
         refreshMonitoredRequests();
         var ids = extractRequestIds(d.result);
@@ -2467,7 +2467,7 @@
       dry_run_hash_a: lastSplitDryRunHashes.a, dry_run_hash_b: lastSplitDryRunHashes.b
     };
     msg('msg-split-ipp', 'Submitting leg A, then leg B…');
-    MuscatFetch.fetchJson('/api/lco/split-submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(function (d) {
+    MuscatFetch.fetchJson('/api/lco/split-submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, { submit: true }).then(function (d) {
         if (d.ok) {
           refreshMonitoredRequests();
           // Both legs are now real bookings -- disable every submit button so
@@ -2696,7 +2696,7 @@
     showConfirmModal('Submit TEST observation?', 'This books the displayed telescope time and requires server-side live submission to be enabled.', {confirmLabel: 'Submit TEST', confirmClass: 'btn danger'}).then(function (confirmed) {
       if (!confirmed) return;
       var p = buildParams(); p.kind = currentTestRecord.instrument; p.confirm = true; p.dry_run_hash = currentTestHash; p.plan_override = override;
-      MuscatFetch.fetchJson('/api/lco/test-observations/' + encodeURIComponent(currentTestRecord.id) + '/submit', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(p) }).then(function (d) {
+      MuscatFetch.fetchJson('/api/lco/test-observations/' + encodeURIComponent(currentTestRecord.id) + '/submit', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(p) }, { submit: true }).then(function (d) {
           if (!d.ok) throw new Error(d.error || 'Submission failed');
           refreshMonitoredRequests();
           var warning = monitoringWarning(d.monitoring);
