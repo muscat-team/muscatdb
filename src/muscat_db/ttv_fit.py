@@ -725,6 +725,15 @@ def cancel_ttv_fit(target: str, run_name: str = "") -> dict:
                 and j.get("target") == target
                 and (j.get("run_name") == run_name or j.get("run_id") == run_seg)
             ]
+            if (
+                found and found[0]["state"] == "running"
+                and jobs.held_by_other_instance(found[0], current_instance_id())
+                and store.request_cancel(found[0]["key"])
+            ):
+                # A fleet worker launched it, so only that worker holds the
+                # process: marking the row cancelled here would report a still
+                # running fit as stopped. It acts on this request itself.
+                return {"ok": True, "key": found[0]["key"], "requested": True}
             if found and found[0]["state"] in ("running", "pending"):
                 store.save(
                     type_="ttv_fit",
@@ -1198,15 +1207,32 @@ def _detect_process_running(rdir: pathlib.Path) -> bool:
 
 def sync_jobs() -> None:
     store = get_job_store()
+    jobs.apply_cancel_requests(
+        store, "ttv_fit", current_instance_id(),
+        lambda r: cancel_ttv_fit(r["target"], r.get("run_name") or ""),
+    )
     with _TTV_LOCK:
         db_jobs = store.all()
         running_keys = {j["key"] for j in db_jobs if j["state"] == "running" and j["type"] == "ttv_fit"}
         db_by_key = {j["key"]: j for j in db_jobs}
 
+        def _db_key(j) -> str:
+            k = f"ttv_fit:{j.inst}/{j.date}/{j.target.replace(' ', '')}"
+            return f"{k}/{j.run_id}" if j.run_id else k
+
+        # Drop finished jobs a newer queued run has replaced (same key) so their
+        # terminal state is not written over the pending row below.
+        for key in list(_TTV_JOBS.keys()):
+            stale = _TTV_JOBS[key]
+            if jobs.superseded_by_queued_row(db_by_key.get(_db_key(stale)), stale.started_at, stale.proc):
+                try:
+                    stale.logf.close()
+                except OSError:
+                    pass
+                _TTV_JOBS.pop(key, None)
+
         for key, job in _TTV_JOBS.items():
-            db_key = f"ttv_fit:{job.inst}/{job.date}/{job.target.replace(' ', '')}"
-            if job.run_id:
-                db_key = f"{db_key}/{job.run_id}"
+            db_key = _db_key(job)
             state, rc, is_terminal = jobs.resolve_job_state(job, _finalize_config())
             if is_terminal and job.state == "running":
                 job.state = state

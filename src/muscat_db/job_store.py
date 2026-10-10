@@ -123,6 +123,27 @@ class JobRepository(Protocol):
         pipeline's ``sync_jobs()``."""
         ...
 
+    def request_cancel(self, key: str) -> bool:
+        """Record a request to cancel the *running* row at *key*; return
+        whether a running row was flagged.
+
+        This is how a process that does not own a job (the web app, for a job
+        a fleet worker launched) cancels it: the owning instance's in-memory
+        registry is the only place its process handle lives, so the request is
+        left on the durable row and the owner acts on it from its own
+        reconciliation pass (see :meth:`cancel_requested`). The row stays
+        ``running`` until the owner records the terminal state itself."""
+        ...
+
+    def cancel_requested(self, type_: str, instance_id: str) -> list[dict]:
+        """Running *type_* rows held by *instance_id* that have a cancel
+        request newer than their own ``started_at``.
+
+        Comparing against ``started_at`` makes a request die with the run it
+        was made for: a later re-run of the same key starts after it and is
+        not cancelled by the stale flag."""
+        ...
+
     def delete(self, key: str) -> None:
         """Remove the job row for *key* if present (no-op when absent)."""
         ...
@@ -226,6 +247,23 @@ class JobConcurrency(Protocol):
         ...
 
 
+def _requested_cancels(active_rows: list[dict], type_: str, instance_id: str) -> list[dict]:
+    """Filter live rows down to :meth:`JobRepository.cancel_requested`'s result.
+    Shared by both backends so they apply the identical rule."""
+    out = []
+    for row in active_rows:
+        requested_at = float(row.get("cancel_requested_at") or 0)
+        if (
+            row.get("type") == type_
+            and row.get("state") == "running"
+            and row.get("instance_id") == instance_id
+            and requested_at > 0
+            and requested_at >= float(row.get("started_at") or 0)
+        ):
+            out.append(row)
+    return out
+
+
 class DatabaseJobStore(JobRepository, JobQueue, JobConcurrency):
     """``jobs``-table-backed store. Delegates record writes/reads to
     :mod:`muscat_db.database` (so the daily-build and migration paths stay the
@@ -321,6 +359,18 @@ class DatabaseJobStore(JobRepository, JobQueue, JobConcurrency):
                 conn.commit()
         except Exception:
             logger.debug("failed to update heartbeat for job %s", key, exc_info=True)
+
+    def request_cancel(self, key: str) -> bool:
+        with database.get_conn() as conn:
+            cur = conn.execute(
+                "UPDATE jobs SET cancel_requested_at = ? WHERE key = ? AND state = 'running'",
+                (time.time(), key),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+
+    def cancel_requested(self, type_: str, instance_id: str) -> list[dict]:
+        return _requested_cancels(self.active(), type_, instance_id)
 
     def resolve_stale_cancelling(self, types: tuple[str, ...]) -> int:
         if not types:
@@ -521,7 +571,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     owner        TEXT NOT NULL DEFAULT '',
     instance_id  TEXT NOT NULL DEFAULT '',
     heartbeat_at DOUBLE PRECISION NOT NULL DEFAULT 0,
-    attempts     INTEGER NOT NULL DEFAULT 0
+    attempts     INTEGER NOT NULL DEFAULT 0,
+    cancel_requested_at DOUBLE PRECISION NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_state_started ON jobs(state, started_at DESC);
 
@@ -554,6 +605,7 @@ _PG_JOBS_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
     ("instance_id", "TEXT NOT NULL DEFAULT ''"),
     ("heartbeat_at", "DOUBLE PRECISION NOT NULL DEFAULT 0"),
     ("attempts", "INTEGER NOT NULL DEFAULT 0"),
+    ("cancel_requested_at", "DOUBLE PRECISION NOT NULL DEFAULT 0"),
 ]
 
 
@@ -732,6 +784,17 @@ class PostgresJobStore(JobRepository, JobQueue, JobConcurrency):
                 )
         except Exception:
             logger.debug("failed to update heartbeat for job %s", key, exc_info=True)
+
+    def request_cancel(self, key: str) -> bool:
+        with self._pool.connection() as conn:
+            cur = conn.execute(
+                "UPDATE jobs SET cancel_requested_at = %s WHERE key = %s AND state = 'running'",
+                (time.time(), key),
+            )
+            return cur.rowcount > 0
+
+    def cancel_requested(self, type_: str, instance_id: str) -> list[dict]:
+        return _requested_cancels(self.active(), type_, instance_id)
 
     def resolve_stale_cancelling(self, types: tuple[str, ...]) -> int:
         if not types:

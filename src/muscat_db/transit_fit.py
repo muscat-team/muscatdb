@@ -1916,6 +1916,14 @@ def cancel_fit(inst: str, date: str, target: str, run_id: str = "") -> dict:
                     run_name=found[0].get("run_name", ""),
                 )
                 return {"ok": True, "key": key}
+            if (
+                found and found[0]["state"] == "running"
+                and jobs.held_by_other_instance(found[0], current_instance_id())
+                and store.request_cancel(db_key)
+            ):
+                # A fleet worker launched it, so only that worker holds the
+                # process; it acts on this request from its own sync_jobs pass.
+                return {"ok": True, "key": key, "requested": True}
             return {"ok": False, "error": "no job to cancel"}
         if job.proc.poll() is not None:
             return {"ok": True, "already_finished": True}
@@ -2301,10 +2309,26 @@ def _detect_process_running(rdir: pathlib.Path) -> bool:
 
 def sync_jobs() -> None:
     store = get_job_store()
+    jobs.apply_cancel_requests(
+        store, "transit_fit", current_instance_id(),
+        lambda r: cancel_fit(r["inst"], r["date"], r["target"], r.get("run_id") or ""),
+    )
     with _FIT_LOCK:
         db_jobs = store.all()
         running_keys = {j["key"] for j in db_jobs if j["state"] == "running" and j["type"] == "transit_fit"}
         db_by_key = {j["key"]: j for j in db_jobs}
+
+        # Drop finished jobs a newer queued run has replaced (same key) so their
+        # terminal state is not written over the pending row below.
+        for key in list(_FIT_JOBS.keys()):
+            stale = _FIT_JOBS[key]
+            stale_key = f"transit_fit:{fit_job_key(stale.inst, stale.date, stale.target, stale.run_id)}"
+            if jobs.superseded_by_queued_row(db_by_key.get(stale_key), stale.started_at, stale.proc):
+                try:
+                    stale.logf.close()
+                except OSError:
+                    pass
+                _FIT_JOBS.pop(key, None)
 
         for key, job in _FIT_JOBS.items():
             db_key = f"transit_fit:{fit_job_key(job.inst, job.date, job.target, job.run_id)}"
