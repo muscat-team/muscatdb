@@ -4300,9 +4300,10 @@ def api_lco_instruments(refresh: int = 0):
     instrument is temporarily offline (e.g. ELP's 1 m Sinistro during the Sophia
     upgrade, or a telescope down for repairs) is annotated rather than removed,
     so it reappears automatically once LCO re-lists the instrument. Cached
-    server-side for a short TTL; ``?refresh=1`` forces a re-fetch. A failure
-    degrades to ``ok: false`` so the page leaves every site enabled instead of
-    hiding options.
+    server-side for a short TTL; ``?refresh=1`` forces a re-fetch, but at most
+    once per minimum interval (the endpoint is anonymous, and each fetch is one
+    request per LCO site). A failure degrades to ``ok: false`` so the page leaves
+    every site enabled instead of hiding options.
     """
     try:
         return JSONResponse({"ok": True, **lco.instrument_availability(force=bool(refresh))})

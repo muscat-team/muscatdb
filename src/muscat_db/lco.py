@@ -1947,7 +1947,17 @@ _KIND_TO_INSTRUMENT_TYPE = {
 # reads it through a short TTL cache rather than calling the portal on every
 # load. ``site_instruments(force=True)`` bypasses it.
 _SITE_INSTRUMENTS_TTL_S = 900.0
-_site_instruments_cache: dict[str, tuple[float, dict[str, list[str]]]] = {}
+# Minimum spacing between portal fetch *attempts* (successful or not). The
+# endpoint is anonymous and one fetch is six upstream requests, so this bounds
+# ``refresh=1`` callers and stops an outage from being retried on every load.
+_SITE_INSTRUMENTS_MIN_FETCH_INTERVAL_S = 60.0
+# Cache state, all guarded by ``_site_instruments_lock``:
+#   "value"   -> (monotonic time of last success, site -> codes)
+#   "attempt" -> monotonic time of the last fetch attempt
+#   "error"   -> the LcoError from that attempt, if it failed
+_site_instruments_cache: dict = {}
+# Held across the check and the six-site fetch, so concurrent callers queue
+# behind one fetch rather than each issuing their own (single-flight).
 _site_instruments_lock = threading.Lock()
 
 
@@ -1971,50 +1981,68 @@ def site_instruments(*, force: bool = False) -> dict[str, list[str]]:
     hardcoding it out of the site lists. When LCO re-lists the instrument, the
     site becomes available again on the next cache expiry.
 
-    Cached for ``_SITE_INSTRUMENTS_TTL_S`` seconds; ``force=True`` re-fetches.
+    Cached for ``_SITE_INSTRUMENTS_TTL_S`` seconds. ``force=True`` re-fetches,
+    but never sooner than ``_SITE_INSTRUMENTS_MIN_FETCH_INTERVAL_S`` after the
+    previous attempt, so an anonymous ``refresh=1`` cannot drive the portal.
     A fetch failure returns the last cached snapshot (even if stale) so a
-    transient portal error does not blank the UI; with nothing cached the
-    :class:`LcoError` propagates.
-    """
-    now = time.monotonic()
-    with _site_instruments_lock:
-        cached = _site_instruments_cache.get("value")
-        if (
-            not force
-            and cached is not None
-            and now - cached[0] < _SITE_INSTRUMENTS_TTL_S
-        ):
-            return {site: list(codes) for site, codes in cached[1].items()}
+    transient portal error does not blank the UI, and is not retried until
+    the minimum interval has passed. With nothing cached the :class:`LcoError`
+    propagates.
 
+    Concurrent callers are single-flight: the lock is held across the fetch,
+    so a cold cache costs one six-site fetch, not one per caller.
+    """
     # Imported here to avoid a module-level cycle: transit_obs does not import
     # lco, but lco only needs the site keys, which live there.
     from muscat_db import transit_obs
 
-    try:
-        result: dict[str, list[str]] = {}
-        for site in transit_obs.LCO_SITES:
-            payload = _lco_api_request(
-                f"https://observe.lco.global/api/instruments/?site={site}"
-            )
-            result[site] = (
-                sorted(k for k, v in payload.items() if isinstance(v, dict))
-                if isinstance(payload, dict)
-                else []
-            )
-    except LcoError:
-        with _site_instruments_lock:
-            cached = _site_instruments_cache.get("value")
-        if cached is None:
-            raise
-        logger.warning(
-            "site instrument refresh failed; serving cached snapshot (age %.0fs)",
-            now - cached[0],
-        )
-        return {site: list(codes) for site, codes in cached[1].items()}
-
     with _site_instruments_lock:
-        _site_instruments_cache["value"] = (now, result)
-    return result
+        cache = _site_instruments_cache
+        now = time.monotonic()
+        value = cache.get("value")
+        attempt = cache.get("attempt")
+        fresh = value is not None and now - value[0] < _SITE_INSTRUMENTS_TTL_S
+
+        if fresh and not force:
+            return {site: list(codes) for site, codes in value[1].items()}
+
+        may_fetch = (
+            attempt is None
+            or now - attempt >= _SITE_INSTRUMENTS_MIN_FETCH_INTERVAL_S
+        )
+        if not may_fetch:
+            if value is not None:
+                return {site: list(codes) for site, codes in value[1].items()}
+            last = cache.get("error")
+            if last is None:  # pragma: no cover - attempt implies value or error
+                raise LcoError("site instruments unavailable", status=503)
+            raise LcoError(last.message, status=last.status, detail=last.detail)
+
+        cache["attempt"] = now
+        try:
+            result: dict[str, list[str]] = {}
+            for site in transit_obs.LCO_SITES:
+                payload = _lco_api_request(
+                    f"https://observe.lco.global/api/instruments/?site={site}"
+                )
+                result[site] = (
+                    sorted(k for k, v in payload.items() if isinstance(v, dict))
+                    if isinstance(payload, dict)
+                    else []
+                )
+        except LcoError as exc:
+            cache["error"] = exc
+            if value is None:
+                raise
+            logger.warning(
+                "site instrument refresh failed; serving cached snapshot (age %.0fs)",
+                now - value[0],
+            )
+            return {site: list(codes) for site, codes in value[1].items()}
+
+        cache["value"] = (now, result)
+        cache.pop("error", None)
+        return {site: list(codes) for site, codes in result.items()}
 
 
 def instrument_availability(*, force: bool = False) -> dict:
