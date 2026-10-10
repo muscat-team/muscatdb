@@ -1,0 +1,47 @@
+# Worker fleet for the PostgreSQL control plane (issue #51).
+#
+#   .venv/bin/python deploy/workers.py up            # all hosts below
+#   .venv/bin/python deploy/workers.py up ut5        # one host
+#   .venv/bin/python deploy/workers.py down ut5      # refuses while jobs run; --force to override
+#   .venv/bin/python deploy/workers.py status
+#   eval "$(.venv/bin/python deploy/workers.py web-env)"   # in the shell that starts the web app
+#
+# No secrets here: the Postgres password stays in env_file (mode 600).
+# Editing this file changes nothing until `up` is run.
+
+[defaults]
+# Where the repo checkout lives; must resolve identically on every host (/ut2 mount).
+repo        = "/ut2/jerome/github/research/project/muscat-db"
+env_file    = "~/.config/muscatdb/pg.env"   # exports MUSCAT_POSTGRES_DSN with the password
+pg_host     = "157.82.46.83"                # ut2; replaces `localhost` in that DSN
+database    = "muscatdb_test"               # muscatdb_control for the real control plane
+max_slots   = 1                             # MUSCAT_WORKER_MAX_SLOTS: concurrent full jobs per pipeline per host
+job_threads = 8                             # MUSCAT_JOB_MAX_THREADS
+notify      = true                          # MUSCAT_JOB_NOTIFY (LISTEN/NOTIFY wake-up)
+max_full_jobs = 6                           # MUSCAT_MAX_FULL_JOBS: cluster-wide concurrent full runs per pipeline (5 hosts + 1)
+stagger_s   = 3                             # delay between starting one host's workers
+
+[web]
+# true: the web app only queues full runs (MUSCAT_WORKER_MAX_SLOTS=0) and the
+# workers above run them. false: the web app runs a full job itself when a slot is free.
+queue_only = true
+
+[hosts.ut3]
+ssh       = "muscat-ut3"
+pipelines = ["transit_fit", "ttv_fit", "photometry"]
+
+[hosts.ut4]
+ssh       = "muscat-ut4"
+pipelines = ["transit_fit", "ttv_fit", "photometry"]
+
+[hosts.ut5]
+ssh       = "muscat-ut5"
+pipelines = ["transit_fit", "ttv_fit", "photometry"]
+
+[hosts.ut6]
+ssh       = "muscat-ut6"
+pipelines = ["transit_fit", "ttv_fit", "photometry"]
+
+[hosts.ut7]
+ssh       = "muscat-ut7"
+pipelines = ["transit_fit", "ttv_fit", "photometry"]
