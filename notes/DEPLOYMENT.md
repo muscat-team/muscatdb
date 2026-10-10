@@ -166,8 +166,26 @@ Never put the data directory on NFS (locking and fsync semantics; the same reaso
 
 ```bash
 sudo -u postgres createuser --pwprompt muscatdb
-sudo -u postgres createdb -O muscatdb muscatdb_control   # control plane for the app
-sudo -u postgres createdb -O muscatdb muscatdb_test      # pytest only, see warning below
+sudo -u postgres createdb -O muscatdb muscatdb_prod   # production control plane (:8000/:8001)
+sudo -u postgres createdb -O muscatdb muscatdb_dev    # dev server (:8888) and the dev fleet profile
+sudo -u postgres createdb -O muscatdb muscatdb_test   # pytest only, safe to truncate, see warning below
+```
+
+Names say the **environment**, not the role, so a database name tells you what it is and what may touch it:
+
+| Database | Used by | Safe to truncate |
+|---|---|---|
+| `muscatdb_prod` | production web app and the fleet under `--profile prod` | no |
+| `muscatdb_dev` | dev server `:8888` and the fleet under `--profile dev` (the default) | yes, but it is the dev job history |
+| `muscatdb_test` | `tests/test_job_store_postgres.py` and CI only | yes, the suite truncates it |
+
+The first two names replace `muscatdb_control` and `muscatdb_test`, which were the production and dev databases respectively. On a cluster still carrying the old names, stop every web app and worker first (a rename needs no open connections), then:
+
+```bash
+sudo -u postgres psql -c 'ALTER DATABASE muscatdb_control RENAME TO muscatdb_prod'
+sudo -u postgres psql -c 'ALTER DATABASE muscatdb_test    RENAME TO muscatdb_dev'   # keeps the dev job history
+sudo -u postgres createdb -O muscatdb muscatdb_test                                 # fresh, for pytest
+# pg_hba.conf names databases: add a muscatdb_dev line for each worker host (below), reload
 ```
 
 Keep the DSN out of the repo and out of shell history, in a file only the deploy user can read:
@@ -175,7 +193,7 @@ Keep the DSN out of the repo and out of shell history, in a file only the deploy
 ```zsh
 mkdir -p ~/.config/muscatdb && umask 077
 read -rs "PW?password: " && echo
-printf 'export MUSCAT_POSTGRES_DSN=postgresql://muscatdb:%s@localhost:5432/muscatdb_control\n' "$PW" \
+printf 'export MUSCAT_POSTGRES_DSN=postgresql://muscatdb:%s@localhost:5432/muscatdb_dev\n' "$PW" \
   > ~/.config/muscatdb/pg.env; unset PW
 ```
 
@@ -186,7 +204,7 @@ printf 'export MUSCAT_POSTGRES_DSN=postgresql://muscatdb:%s@localhost:5432/musca
 | Variable | Value | Notes |
 |---|---|---|
 | `MUSCAT_CONTROL_PLANE` | `postgres` (default `sqlite`) | Resolved once on the first `get_job_store()` call, then cached: restart to change it. |
-| `MUSCAT_POSTGRES_DSN` | `postgresql://muscatdb:<pw>@localhost:5432/muscatdb_control` | Required when the above is `postgres`. |
+| `MUSCAT_POSTGRES_DSN` | `postgresql://muscatdb:<pw>@localhost:5432/muscatdb_dev` (`muscatdb_prod` for production) | Required when the above is `postgres`. |
 | `MUSCAT_WORKER_MAX_SLOTS` | `1` on workers; `0` on a web instance that should only queue | Concurrent full jobs per pipeline per host. `0` makes `claim_slot` unsatisfiable, so full runs of every pipeline stay `pending` for a worker. Set from `deploy/workers.toml` (`max_slots`, `[web] queue_only`). |
 | `MUSCAT_JOB_MAX_THREADS` | `8` on workers | Thread cap handed to each job. |
 | `MUSCAT_JOB_NOTIFY` | `1` | Wake an idle worker through Postgres `LISTEN`/`NOTIFY` instead of waiting out the poll interval. |
@@ -225,6 +243,8 @@ Do not run it against the database a live instance is using.
 
 ### Done
 
+> The entries below were recorded before the databases were renamed, under `muscatdb_test` (now `muscatdb_dev`) and `muscatdb_control` (now `muscatdb_prod`). Until the rename above is run on ut2 the live cluster still has the old names.
+
 - [x] PostgreSQL 18 installed on ut2 from the Ubuntu 26.04 archive; cluster `main` online and enabled at boot.
 - [x] Initially bound to `127.0.0.1:5432` only; since the multi-host test it also listens on `157.82.46.83`, with `pg_hba.conf` and `ufw` entries per worker host (below).
 - [x] Role `muscatdb` and databases `muscatdb_control` and `muscatdb_test` created.
@@ -261,7 +281,7 @@ Workers on ut3 and ut5 are declared in `deploy/workers.toml` and run as systemd 
 ```toml
 [defaults]
 pg_host   = "157.82.46.83"      # ut2
-database  = "muscatdb_test"     # muscatdb_control for the real control plane
+database  = "muscatdb_dev"      # muscatdb_prod via [profiles.prod]
 max_slots = 1                   # MUSCAT_WORKER_MAX_SLOTS, per pipeline per host
 [web]
 queue_only = true               # web app queues full runs for the workers
@@ -281,7 +301,7 @@ pipelines = ["transit_fit", "ttv_fit", "photometry"]
 eval "$(.venv/bin/python deploy/workers.py web-env)"   # in the shell that starts the web app
 ```
 
-Dev and production share this one fleet and one set of unit names; they rarely run together, so `[profiles.dev]` and `[profiles.prod]` in `workers.toml` switch the keys that must change as a pair. `prod` sets `database = "muscatdb_control"` **and** `repo = /ut2/jerome/deploy/main/app`, because the workers run the code in `repo`: a production database with the dev checkout would run dev code on production jobs. `--profile NAME` (or `MUSCAT_WORKERS_PROFILE`) selects one; `[defaults] profile` is used otherwise, and every command prints the active profile, database and repo. To switch:
+Dev and production share this one fleet and one set of unit names; they rarely run together, so `[profiles.dev]` and `[profiles.prod]` in `workers.toml` switch the keys that must change as a pair. `prod` sets `database = "muscatdb_prod"` **and** `repo = /ut2/jerome/deploy/main/app`, because the workers run the code in `repo`: a production database with the dev checkout would run dev code on production jobs. `--profile NAME` (or `MUSCAT_WORKERS_PROFILE`) selects one; `[defaults] profile` is used otherwise, and every command prints the active profile, database and repo. To switch:
 
 ```bash
 .venv/bin/python deploy/workers.py --profile dev  down    # refuses while jobs run on a host
@@ -289,7 +309,7 @@ Dev and production share this one fleet and one set of unit names; they rarely r
 eval "$(.venv/bin/python deploy/workers.py --profile prod web-env)"   # in the shell that starts :8001
 ```
 
-Before the first `prod` switch: allow `muscatdb_control` for each worker host in `pg_hba.conf` (it is refused today), and decide `max_full_jobs` (production currently documents `1`; the fleet default is hosts + 1). While `prod` is active, the dev server on `:8888` has no worker claiming from `muscatdb_test`, so run it with `queue_only = false` or switch back.
+Before the first `prod` switch: allow `muscatdb_prod` for each worker host in `pg_hba.conf` (the old `muscatdb_control` is refused today), and decide `max_full_jobs` (production currently documents `1`; the fleet default is hosts + 1). While `prod` is active, the dev server on `:8888` has no worker claiming from `muscatdb_dev`, so run it with `queue_only = false` or switch back.
 
 Run it from ut2 (it needs Python >= 3.11; the workers' system python is 3.10). Once per host, `loginctl enable-linger $USER` so the units survive the last logout; `up` warns when it is off.
 
@@ -297,7 +317,7 @@ Adding another host takes two steps on ut2 that need `sudo` in a real terminal, 
 
 ```bash
 sudo cp -p /etc/postgresql/18/main/pg_hba.conf /etc/postgresql/18/main/pg_hba.conf.bak-$(date +%Y%m%d)
-echo "host  muscatdb_test  muscatdb  <host-ip>/32  scram-sha-256" | sudo tee -a /etc/postgresql/18/main/pg_hba.conf
+echo "host  muscatdb_dev  muscatdb  <host-ip>/32  scram-sha-256" | sudo tee -a /etc/postgresql/18/main/pg_hba.conf
 sudo ufw allow from <host-ip> to any port 5432 proto tcp comment 'postgres: <host> worker'
 sudo systemctl reload postgresql@18-main     # reload is enough for pg_hba.conf
 # then add [hosts.<name>] to deploy/workers.toml and run: workers.py up <name>

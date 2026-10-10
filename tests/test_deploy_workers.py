@@ -21,7 +21,7 @@ _spec.loader.exec_module(w)
 
 def _data(**over):
     base = {
-        "defaults": {"pg_host": "10.0.0.1", "database": "muscatdb_test", "repo": "/srv/muscat"},
+        "defaults": {"pg_host": "10.0.0.1", "database": "muscatdb_dev", "repo": "/srv/muscat"},
         "web": {"queue_only": True},
         "hosts": {
             "ut3": {"ssh": "muscat-ut3", "pipelines": ["transit_fit", "photometry"]},
@@ -77,7 +77,7 @@ def _profiled(**over):
     data["defaults"]["profile"] = "dev"
     data["profiles"] = {
         "dev": {},
-        "prod": {"database": "muscatdb_control", "repo": "/srv/deploy/main", "queue_only": False},
+        "prod": {"database": "muscatdb_prod", "repo": "/srv/deploy/main", "queue_only": False},
     }
     data.update(over)
     return data
@@ -85,14 +85,14 @@ def _profiled(**over):
 
 def test_profile_overrides_defaults_as_one_unit():
     cfg = w.parse_config(_profiled(), profile="prod")
-    assert (cfg.profile, cfg.database, cfg.repo) == ("prod", "muscatdb_control", Path("/srv/deploy/main"))
+    assert (cfg.profile, cfg.database, cfg.repo) == ("prod", "muscatdb_prod", Path("/srv/deploy/main"))
     assert cfg.queue_only_web is False
     assert cfg.pg_host == "10.0.0.1"  # not overridden: inherited from [defaults]
 
 
 def test_default_profile_applies_when_none_is_selected():
     cfg = w.parse_config(_profiled())
-    assert (cfg.profile, cfg.database, cfg.repo) == ("dev", "muscatdb_test", Path("/srv/muscat"))
+    assert (cfg.profile, cfg.database, cfg.repo) == ("dev", "muscatdb_dev", Path("/srv/muscat"))
     assert cfg.queue_only_web is True
 
 
@@ -127,7 +127,7 @@ def test_profile_switch_changes_the_worker_env_so_up_restarts_units():
     prod = w.parse_config(_profiled(), profile="prod")
     a = w.render_env(dev, dev.hosts["ut3"], "muscat-ut3")
     b = w.render_env(prod, prod.hosts["ut3"], "muscat-ut3")
-    assert "MUSCAT_WORKER_PG_DATABASE=muscatdb_control\n" in b
+    assert "MUSCAT_WORKER_PG_DATABASE=muscatdb_prod\n" in b
     assert "MUSCAT_WORKER_PROFILE=prod\n" in b and "MUSCAT_WORKER_PROFILE=dev\n" in a
     assert a != b
 
@@ -135,10 +135,16 @@ def test_profile_switch_changes_the_worker_env_so_up_restarts_units():
 def test_shipped_prod_profile_pairs_control_database_with_the_deploy_checkout():
     dev = w.load_config(w.DEFAULT_CONFIG, profile="dev")
     prod = w.load_config(w.DEFAULT_CONFIG, profile="prod")
-    assert dev.database == "muscatdb_test"
-    assert prod.database == "muscatdb_control"
+    assert dev.database == "muscatdb_dev"
+    assert prod.database == "muscatdb_prod"
     assert prod.repo.parts[-3:] == ("deploy", "main", "app")
     assert prod.repo != dev.repo
+
+
+@pytest.mark.parametrize("profile", ["dev", "prod"])
+def test_no_shipped_profile_points_at_the_pytest_database(profile):
+    # tests/test_job_store_postgres.py truncates muscatdb_test; a fleet on it loses its queue
+    assert w.load_config(w.DEFAULT_CONFIG, profile=profile).database != "muscatdb_test"
 
 
 # -- rendering ----------------------------------------------------------------
@@ -158,7 +164,7 @@ def test_env_file_pins_the_host_and_holds_no_secret():
     text = w.render_env(cfg, cfg.hosts["ut5"], "muscat-ut5")
     assert "MUSCAT_WORKER_EXPECT_HOST=muscat-ut5\n" in text
     assert "MUSCAT_WORKER_MAX_SLOTS=2\n" in text
-    assert "MUSCAT_WORKER_PG_DATABASE=muscatdb_test\n" in text
+    assert "MUSCAT_WORKER_PG_DATABASE=muscatdb_dev\n" in text
     assert "POSTGRES_DSN" not in text and "password" not in text.lower()
 
 
