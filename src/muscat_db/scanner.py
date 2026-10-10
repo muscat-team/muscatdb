@@ -4,10 +4,13 @@ import csv
 import logging
 import os
 import pathlib
+import re
 import time
+from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
 from datetime import date, datetime, timedelta
 
+from muscat_db import scan_failures
 from muscat_db.instruments import INSTRUMENTS, OBSLOG_BASE, InstrumentConfig
 
 logger = logging.getLogger(__name__)
@@ -221,17 +224,25 @@ def _process_single_file(filepath: str, inst: InstrumentConfig) -> dict[str, str
     return row
 
 
+def _date_dir(
+    inst: InstrumentConfig,
+    obsdate: str,
+    data_root: str | os.PathLike[str] | None = None,
+) -> str:
+    if data_root is None:
+        instrument_dir = pathlib.Path(inst.data_dir)
+    else:
+        instrument_dir = pathlib.Path(data_root).expanduser() / inst.data_subdir
+    return str(instrument_dir / obsdate)
+
+
 def _find_fits_files(
     inst: InstrumentConfig,
     obsdate: str,
     ccd: int,
     data_root: str | os.PathLike[str] | None = None,
 ) -> list[str]:
-    if data_root is None:
-        instrument_dir = pathlib.Path(inst.data_dir)
-    else:
-        instrument_dir = pathlib.Path(data_root).expanduser() / inst.data_subdir
-    datadir = str(instrument_dir / obsdate)
+    datadir = _date_dir(inst, obsdate, data_root)
     if not os.path.isdir(datadir):
         return []
     if inst.ep_names:
@@ -250,6 +261,72 @@ def _find_fits_files(
         except (PermissionError, OSError):
             return []
     return [str(p) for p in matches]
+
+
+_EPOCH_RE = re.compile(r"(ep\d+)-")
+
+
+def _unscanned_frames(inst: InstrumentConfig, datadir: str) -> tuple[Counter, int]:
+    """Frames in *datadir* that the per-CCD globs in :func:`_find_fits_files` skip.
+
+    Returns ``(unknown_epochs, fz_only)``: a count of unpacked e91 frames per
+    epoch token that no CCD lists, and the number of ``*e91.fits.fz`` frames
+    that have no unpacked ``.fits`` beside them. Only names starting with the
+    instrument's prefix count, so another telescope's frames filed in the same
+    directory are not reported.
+    """
+    known = {
+        ep for entry in inst.ep_names for ep in ((entry,) if isinstance(entry, str) else entry)
+    }
+    names = os.listdir(datadir)
+    present = set(names)
+    unknown: Counter = Counter()
+    fz_only = 0
+    for name in names:
+        if not name.startswith(inst.prefix):
+            continue
+        if name.endswith("e91.fits.fz"):
+            if name[:-3] not in present:
+                fz_only += 1
+        elif name.endswith("e91.fits") and known != {""}:
+            match = _EPOCH_RE.match(name[len(inst.prefix):])
+            if match and match.group(1) not in known:
+                unknown[match.group(1)] += 1
+    return unknown, fz_only
+
+
+def _warn_unscanned_frames(
+    inst_name: str,
+    obsdate: str,
+    data_root: str | os.PathLike[str] | None,
+) -> None:
+    """Say so when frames in the date directory will not be scanned (#197, #198).
+
+    Both cases used to be silent: a rescan simply never saw the frames, so a
+    forced one could replace a correct CSV with fewer rows or none.
+    """
+    inst = INSTRUMENTS[inst_name]
+    if not inst.ep_names:
+        return
+    datadir = _date_dir(inst, obsdate, data_root)
+    try:
+        unknown, fz_only = _unscanned_frames(inst, datadir)
+    except OSError as exc:
+        logger.debug("cannot list %s for unscanned frames: %s", datadir, exc)
+        return
+    if unknown:
+        detail = ", ".join(f"{ep}: {n}" for ep, n in sorted(unknown.items()))
+        print(
+            f"[warn] {inst_name} {obsdate}: {sum(unknown.values())} frame(s) with an "
+            f"unrecognised epoch name were not scanned ({detail}); add the name to "
+            f"instruments.py or every rescan will keep missing them"
+        )
+    if fz_only:
+        print(
+            f"[warn] {inst_name} {obsdate}: {fz_only} .fits.fz frame(s) have no unpacked "
+            f".fits and were not scanned; run funpack on them (scanning and photometry "
+            f"both need the .fits)"
+        )
 
 
 def _stale_csv_grace_seconds() -> float:
@@ -295,13 +372,45 @@ def scan_date(
     """Scan all CCDs for a date.
 
     Returns {"total": int, "per_ccd": {ccd: count}} — falsy if no files found.
+
+    Every outcome is reflected in the scan-failure ledger (issue #196): an
+    exception, or a CCD whose CSV could not be written, records the date; a
+    scan that writes every CSV clears it. Done here rather than in each caller
+    so the cron, CLI, LCO monitor, web and PROPID-backfill paths all report
+    alike. A zero-file result leaves an existing entry alone -- no files is
+    not proof the earlier failure was resolved (the directory may be gone).
     """
+    try:
+        result = _scan_date(inst_name, obsdate, max_workers, progress, data_root)
+    except Exception as exc:
+        scan_failures.record(OBSLOG_BASE, inst_name, obsdate, f"{type(exc).__name__}: {exc}")
+        raise
+    if result.get("write_errors"):
+        scan_failures.record(
+            OBSLOG_BASE, inst_name, obsdate, "; ".join(result["write_errors"]),
+        )
+        if "total" not in result:
+            return {}  # nothing was written; callers read truthy as "had data"
+    elif result:
+        scan_failures.clear(OBSLOG_BASE, inst_name, obsdate)
+    return result
+
+
+def _scan_date(
+    inst_name: str,
+    obsdate: str,
+    max_workers: int | None,
+    progress,
+    data_root: str | os.PathLike[str] | None,
+) -> dict:
     inst = INSTRUMENTS[inst_name]
 
     file_ccd_pairs: list[tuple[str, int]] = []
     for ccd in range(inst.nccd):
         for fp in _find_fits_files(inst, obsdate, ccd, data_root=data_root):
             file_ccd_pairs.append((fp, ccd))
+
+    _warn_unscanned_frames(inst_name, obsdate, data_root)
 
     if not file_ccd_pairs:
         # Returned falsy either way, even when a stale CSV is removed below:
@@ -333,7 +442,7 @@ def scan_date(
         os.makedirs(logdir, exist_ok=True)
     except (PermissionError, OSError) as e:
         print(f"[warn] cannot create {logdir}: {e}")
-        return {}
+        return {"write_errors": [f"cannot create {logdir}: {e}"]}
 
     total = len(file_ccd_pairs)
     max_workers = max_workers or (os.cpu_count() or 4)
@@ -373,6 +482,10 @@ def scan_date(
         if executor is not None:
             executor.shutdown()
 
+    # A CCD whose CSV cannot be written leaves the date looking complete to
+    # scan-missing (the sibling CCDs' CSVs are fine), so it is never retried
+    # on its own. Collected and returned so scan_date can record it.
+    write_errors: list[str] = []
     for ccd in sorted(rows_by_ccd):
         csv_path = f"{logdir}/obslog-{inst_name}-{obsdate}-ccd{ccd}.csv"
         fieldnames = inst.csv_header.split(",")
@@ -384,6 +497,7 @@ def scan_date(
                     writer.writerow({k: row.get(k, "") for k in fieldnames})
         except (PermissionError, OSError) as e:
             print(f"[warn] cannot write {csv_path}: {e}")
+            write_errors.append(f"cannot write ccd{ccd} CSV {csv_path}: {e}")
 
     # A CCD with no rows this scan is not itself ambiguous: every CCD checked
     # here shares this date's one data directory, and `total > 0` (we're past
@@ -414,6 +528,7 @@ def scan_date(
         "total": total,
         "per_ccd": {ccd: len(rows) for ccd, rows in rows_by_ccd.items()},
         "removed_ccds": removed_ccds,
+        "write_errors": write_errors,
     }
 
 
@@ -530,11 +645,19 @@ def scan_date_for_all_inst(obsdate: str, max_workers: int | None = None) -> list
                 if result:
                     scanned.append(name)
             except Exception:
-                logger.debug("scan_date failed for %s %s", name, obsdate, exc_info=True)
+                # WARNING, not DEBUG: nothing prints DEBUG, so this used to drop
+                # an instrument's whole night without a trace (#196). scan_date
+                # has already recorded it in the scan-failure ledger.
+                logger.warning(
+                    "scan_date failed for %s %s; recorded in %s for retry",
+                    name, obsdate, scan_failures.ledger_path(OBSLOG_BASE), exc_info=True,
+                )
     return scanned
 
 
+def yesterday_obsdate() -> str:
+    return (date.today() - timedelta(days=1)).strftime("%y%m%d")
+
+
 def scan_yesterday(max_workers: int | None = None) -> list[str]:
-    yesterday = date.today() - timedelta(days=1)
-    obsdate = yesterday.strftime("%y%m%d")
-    return scan_date_for_all_inst(obsdate, max_workers=max_workers)
+    return scan_date_for_all_inst(yesterday_obsdate(), max_workers=max_workers)

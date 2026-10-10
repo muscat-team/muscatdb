@@ -176,6 +176,15 @@ runs with a minimal environment; pin it in `.env` too for manual/GUI runs (see
 day's obslog, so a one-off manual `build-db` or `scan` never gets silently
 overwritten by the next nightly run of this job.
 
+A scan that fails for one instrument is logged at WARNING with its traceback
+in `scan.log`, and `scan-yesterday` names it in its output. It is also
+recorded in `$MUSCAT_OBSLOG_DIR/.scan-failures.jsonl`, one entry per
+instrument and date, until a later scan of that date writes cleanly. The same
+happens for a CCD whose CSV could not be written, which would otherwise look
+complete to `scan-missing`. `muscat-db scan-failures` lists the open entries.
+`scan-yesterday` still exits 0 on such a failure, so the other instruments'
+`build-db` goes ahead.
+
 `build-db` snapshots the existing database before rebuilding it (SQLite backup
 API, safe while the server is running) to `$MUSCAT_DB_BACKUP_DIR` (default
 `$MUSCAT_TMPDIR`, i.e. `~/temp`) as `muscat.db.nightly-<stamp>.sqlite`, keeping
@@ -183,6 +192,59 @@ the newest `$MUSCAT_DB_BACKUP_KEEP` (default 2). It aborts, leaving the live
 file untouched, if either that snapshot or the freshly built database fails
 `PRAGMA integrity_check`; a failed snapshot is kept with a `.CORRUPT` suffix.
 The integrity checks add roughly 3-4 minutes to the nightly run.
+
+### LCO proposal sync
+
+`muscat-db lco-sync <PROPID>...` syncs a proposal's BANZAI final products
+(RLEVEL 91, `OBSTYPE=EXPOSE`, engineering frames such as auto-focus dropped)
+from the LCO archive into the download root (`MUSCAT_LCO_DIR`, else
+`MUSCAT_DATA_DIR`). It catches observations the UI's request monitor never
+saw, e.g. ones scheduled directly on the LCO portal. To run it in the same
+nightly job, put it ahead of `build-db` and join it with `;` so an archive
+outage cannot block the rebuild:
+
+```
+30 17 * * * cd $MUSCATDB_ROOT && uv run muscat-db lco-sync KEY2026B-001 --user <name> --no-ingest >> $MUSCATDB_ROOT/logs/lco-sync.log 2>&1; bash scripts/download_catalogs.sh >> $MUSCATDB_ROOT/logs/download_catalogs.log 2>&1 && uv run muscat-db scan-yesterday >> $MUSCATDB_ROOT/logs/scan.log 2>&1 && uv run muscat-db build-db >> $MUSCATDB_ROOT/logs/build-db.log 2>&1
+```
+
+- **Whole nights.** The unit of work is a dataset: one instrument night (the
+  `<Instrument>/<DAY-OBS>` directory). A night is selected when any of its
+  frames has a DATE_OBS in the window, and it is then synced whole, even when
+  `--start` or `--end` cuts through it. The archive is queried two days beyond
+  each edge, one day at a time, so a cut night comes back complete. Because
+  the window is DATE_OBS in UTC, a night can be labelled with the day before
+  `--start`.
+- **One night at a time.** Each night's missing frames are downloaded and
+  funpacked, and the night is rescanned (and ingested) before the next night
+  starts. An interrupted run therefore leaves at most one partial night.
+- **Resuming.** Nothing is recorded between runs. Each run compares every
+  night's archive listing with the unpacked files on disk, prints
+  `N frames, M missing` per night, and fetches only the missing frames. A
+  `.fz` whose funpack never finished is unpacked. `.part` files over an hour
+  old, left by a killed run, are removed. A night whose obslog is older than
+  its newest frame is rescanned. Ctrl-C stops after the in-flight downloads,
+  each of which is written atomically. After any interruption, re-run the
+  same command.
+- **Window.** `--days 7` (default) re-checks a week on every run. Nights that
+  are already complete cost only metadata queries, and the overlap is what
+  picks up reductions BANZAI publishes days late. Use `--start/--end` (ISO
+  UTC) for a one-off backfill.
+- **Token.** `--user <name>` uses that muscat-db user's LCO token saved in
+  Settings. Without it the command falls back to `$LCO_API_TOKEN`. The token
+  must belong to a member of the proposal, since unreleased frames are
+  proprietary.
+- **Volume.** A busy 0.4m key project can produce thousands of QHY600 frames a
+  night (about 67 MB each once the `.fz` and the unpacked `.fits` are both on
+  disk). Run `--dry-run` first to see the per-night counts. `--max-nights N`
+  downloads at most N incomplete nights per run, oldest first. The rest are
+  reported as deferred and picked up by later runs.
+- **Ingest.** `--no-ingest` stops after writing the obslog CSVs and leaves
+  ingestion to the `build-db` that follows. Without that flag, each night is
+  also ingested as soon as it is scanned.
+- **Safety.** A lock file (`.lco-sync.lock` in the download root) makes an
+  overlapping run exit instead of racing the first one. The lock is released
+  when the process dies, so a killed run never blocks the next. The exit
+  status is non-zero if any frame, scan, or proposal failed.
 
 ## Documentation
 

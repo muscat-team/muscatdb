@@ -1922,7 +1922,7 @@ def test_lco_split_partial_booking_still_registers_successful_leg(mock_db, monke
     assert rows == [(2002, 2001, "relay A")]
 
 
-def test_lco_archive_frames_search(monkeypatch):
+def test_lco_archive_frames_search(mock_db, monkeypatch):
     monkeypatch.setattr(
         "muscat_db.lco.archive_search_all",
         lambda filters, *a, **kw: {"count": 1, "results": [{"filename": "ogg2m001-ep05-20260102-0001-e91.fits.fz", "SITEID": "ogg", "TELID": "2m0a"}]},
@@ -1934,7 +1934,7 @@ def test_lco_archive_frames_search(monkeypatch):
     assert r.json()["results"][0]["archive_instrument"] == "muscat3"
 
 
-def test_lco_archive_frames_by_request_id(monkeypatch):
+def test_lco_archive_frames_by_request_id(mock_db, monkeypatch):
     captured = {}
 
     def _fake_search_all(filters, max_frames=5000):
@@ -1965,13 +1965,13 @@ def test_lco_archive_frames_by_request_id(monkeypatch):
     assert data["results"][0]["archive_instrument"] == "muscat4"
 
 
-def test_lco_archive_frames_request_id_must_be_numeric():
+def test_lco_archive_frames_request_id_must_be_numeric(mock_db):
     r = TestClient(app).get("/api/lco/archive/frames", params={"request_id": "4236675abc"})
     assert r.status_code == 400
     assert r.json()["ok"] is False
 
 
-def test_lco_archive_frames_coordinate_primary_by_default(monkeypatch):
+def test_lco_archive_frames_coordinate_primary_by_default(mock_db, monkeypatch):
     captured = {}
 
     def _fake_search(filters, *a, **kw):
@@ -1992,7 +1992,7 @@ def test_lco_archive_frames_coordinate_primary_by_default(monkeypatch):
     assert data["resolved_source"] == "catalog"
 
 
-def test_lco_archive_frames_excludes_non_expose_obstype(monkeypatch):
+def test_lco_archive_frames_excludes_non_expose_obstype(mock_db, monkeypatch):
     """Real case: searching TOI-1807 turned up "auto_focus"/EXPERIMENTAL
     frames at the same reduction_level as the real science data -- RLEVEL
     doesn't distinguish an engineering frame from a real exposure, but
@@ -2011,7 +2011,7 @@ def test_lco_archive_frames_excludes_non_expose_obstype(monkeypatch):
     assert captured.get("OBSTYPE") == "EXPOSE"
 
 
-def test_lco_archive_frames_excludes_engineering_object_names(monkeypatch):
+def test_lco_archive_frames_excludes_engineering_object_names(mock_db, monkeypatch):
     """Real case: an auto-focus frame tagged OBSTYPE=EXPOSE with a real
     "e91" filename slips past the server-side OBSTYPE filter and must be
     excluded client-side by OBJECT name instead."""
@@ -2034,7 +2034,7 @@ def test_lco_archive_frames_excludes_engineering_object_names(monkeypatch):
     assert data["results"][0]["OBJECT"] == "TOI-1807"
 
 
-def test_lco_archive_frames_all_filtered_still_reports_archive_total(monkeypatch):
+def test_lco_archive_frames_all_filtered_still_reports_archive_total(mock_db, monkeypatch):
     """Regression: when every frame the archive returns is filtered out
     client-side (engineering object here), `count` must still carry the
     archive's real total so the frontend's "No frames returned (archive
@@ -2057,7 +2057,7 @@ def test_lco_archive_frames_all_filtered_still_reports_archive_total(monkeypatch
     assert data["results"] == []
 
 
-def test_lco_archive_frames_by_request_id_does_not_filter_obstype(monkeypatch):
+def test_lco_archive_frames_by_request_id_does_not_filter_obstype(mock_db, monkeypatch):
     """The request-id path fetches every frame for a specific, already-known
     request -- including calibration frames -- so it must not apply the
     coordinate/name search's OBSTYPE=EXPOSE filter."""
@@ -2073,7 +2073,7 @@ def test_lco_archive_frames_by_request_id_does_not_filter_obstype(monkeypatch):
     assert "OBSTYPE" not in captured
 
 
-def test_lco_archive_frames_coordinate_unresolved_returns_422(monkeypatch):
+def test_lco_archive_frames_coordinate_unresolved_returns_422(mock_db, monkeypatch):
     monkeypatch.setattr("muscat_db.lco.archive_search_all", lambda filters, *a, **kw: {"count": 0, "results": []})
     monkeypatch.setattr("muscat_db.web._resolve_archive_coords", lambda name: None)
 
@@ -2082,13 +2082,13 @@ def test_lco_archive_frames_coordinate_unresolved_returns_422(monkeypatch):
     assert r.json()["ok"] is False
 
 
-def test_lco_archive_frames_coordinate_requires_name(monkeypatch):
+def test_lco_archive_frames_coordinate_requires_name(mock_db, monkeypatch):
     monkeypatch.setattr("muscat_db.lco.archive_search_all", lambda filters, *a, **kw: {"count": 0, "results": []})
     r = TestClient(app).get("/api/lco/archive/frames", params={"limit": "10"})
     assert r.status_code == 400
 
 
-def test_lco_archive_frames_telescope_class_filters_locally(monkeypatch):
+def test_lco_archive_frames_telescope_class_filters_locally(mock_db, monkeypatch):
     monkeypatch.setattr(
         "muscat_db.lco.archive_search_all",
         lambda filters, *a, **kw: {
@@ -2232,7 +2232,7 @@ def test_lco_archive_dataset_exists_matches_by_coordinates_not_name(mock_db):
     assert out[0]["dataset_matched_object"] == "Alias Target"
 
 
-def test_lco_archive_download_per_file_results(monkeypatch):
+def test_lco_archive_download_per_file_results(mock_db, monkeypatch):
     monkeypatch.setattr(
         "muscat_db.lco.download_frames",
         lambda frames, overwrite=False: [{"filename": "f.fits", "instrument": "muscat3", "status": "downloaded", "bytes": 1024}],
@@ -2245,7 +2245,7 @@ def test_lco_archive_download_per_file_results(monkeypatch):
     assert r.json()["results"][0]["instrument"] == "muscat3"
 
 
-def test_lco_archive_download_can_start_background_job(monkeypatch):
+def test_lco_archive_download_can_start_background_job(mock_db, monkeypatch):
     def fake_start(frames, overwrite=False, auto_ingest=False, user_name=None):
         assert overwrite is True
         assert auto_ingest is True
@@ -2355,7 +2355,7 @@ def test_lco_archive_page_has_archive_persistence():
     assert "Save under instrument" not in page
 
 
-def test_lco_archive_download_rejects_unknown_inferred_instrument():
+def test_lco_archive_download_rejects_unknown_inferred_instrument(mock_db):
     r = TestClient(app).post("/api/lco/archive/download",
                              json={"frames": [{"filename": "mystery.fits", "url": "https://x/y", "DAY_OBS": "2026-01-01"}]})
     assert r.status_code == 200
@@ -3105,6 +3105,59 @@ def test_photometry_page_no_jd_slider_without_frame_data(mock_db, monkeypatch, t
     assert r.status_code == 200
     assert "jdslider-exclude_after_jd" not in r.text
     assert 'id="opt-exclude_after_jd"' in r.text
+
+
+def _outputs_with_band_csvs(files: dict[str, str]) -> dict:
+    return {
+        "has_any": True, "summary": {}, "summary_items": [],
+        "bands": {band: {"csv": {"file": name}} for band, name in files.items()},
+        "sites": [], "modes": [], "masters": [], "npz": None, "log": None,
+        "ref_header": None, "ref_selection": None, "site": "", "mode": "",
+    }
+
+
+def test_photometry_page_post_jd_slider_uses_lightcurve_bjd(mock_db, monkeypatch, tmp_path):
+    """The post-processing Exclude JD Range sliders are bounded by the band
+    CSVs' own BJD_TDB span (what prose2's cut compares against), spanning
+    every band -- not the raw header JD that bounds the run-time sliders."""
+    from muscat_db import web
+
+    (tmp_path / "T_muscat3_gp_260101.csv").write_text("BJD_TDB,Flux\n2461000.10,1\n2461000.30,1\n")
+    (tmp_path / "T_muscat3_rp_260101.csv").write_text("BJD_TDB,Flux\n2461000.05,1\n2461000.25,1\n")
+    outputs = _outputs_with_band_csvs({"gp": "T_muscat3_gp_260101.csv", "rp": "T_muscat3_rp_260101.csv"})
+    monkeypatch.setattr(web.phot, "list_photometry_runs", lambda inst, date, target: ([], {}))
+    monkeypatch.setattr(web.phot, "list_outputs", lambda *args, **kwargs: outputs)
+    monkeypatch.setattr(web.phot, "run_output_dir", lambda *args, **kwargs: tmp_path)
+    monkeypatch.setattr(web.phot, "command_str", lambda inst, date, target, test_run=False: "run photometry")
+    monkeypatch.setattr(web.phot, "raw_data_dir", lambda inst, date: tmp_path)
+
+    r = TestClient(app).get("/photometry?inst=muscat3&date=260101&target=TOI-1")
+
+    assert r.status_code == 200
+    html = r.text
+    assert 'id="jdslider-post_exclude_before_jd" min="2461000.05" max="2461000.3" step="0.0001" value="2461000.05"' in html
+    assert 'id="jdslider-post_exclude_after_jd" min="2461000.05" max="2461000.3" step="0.0001" value="2461000.3"' in html
+    # BJD_TDB is not UTC, so the calendar readout is marked approximate
+    assert 'id="jdslider-post_exclude_before_jd-label" style="white-space:nowrap;">≈ 2025-11-20 13:12 UTC<' in html
+    assert 'id="jdslider-post_exclude_after_jd-label" style="white-space:nowrap;">≈ 2025-11-20 19:12 UTC<' in html
+
+
+def test_photometry_page_no_post_jd_slider_without_bjd(mock_db, monkeypatch, tmp_path):
+    from muscat_db import web
+
+    (tmp_path / "T_muscat3_gp_260101.csv").write_text("Flux,Err\n1,0.1\n")
+    outputs = _outputs_with_band_csvs({"gp": "T_muscat3_gp_260101.csv"})
+    monkeypatch.setattr(web.phot, "list_photometry_runs", lambda inst, date, target: ([], {}))
+    monkeypatch.setattr(web.phot, "list_outputs", lambda *args, **kwargs: outputs)
+    monkeypatch.setattr(web.phot, "run_output_dir", lambda *args, **kwargs: tmp_path)
+    monkeypatch.setattr(web.phot, "command_str", lambda inst, date, target, test_run=False: "run photometry")
+    monkeypatch.setattr(web.phot, "raw_data_dir", lambda inst, date: tmp_path)
+
+    r = TestClient(app).get("/photometry?inst=muscat3&date=260101&target=TOI-1")
+
+    assert r.status_code == 200
+    assert "jdslider-post_exclude_before_jd" not in r.text
+    assert 'id="opt-post_exclude_before_jd"' in r.text
 
 
 def test_photometry_page_keeps_selected_run_with_no_outputs(mock_db, monkeypatch, tmp_path):

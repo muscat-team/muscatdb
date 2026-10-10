@@ -159,6 +159,7 @@ from muscat_db.database import (
     get_targets as _get_targets,
     objects_with_restricted_proposal as _objects_with_restricted_proposal,
     visible_targets as _visible_target_rows,
+    visible_target_rollup as _visible_target_rollup,
     get_identified_overrides as _get_identified_overrides,
     get_norm_name_overrides as _get_norm_name_overrides,
     set_identified as _set_identified,
@@ -2033,6 +2034,7 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
     sel_run: str | None = None
     previews: dict[str, dict] = {}
     nearby_preview: dict | None = None
+    post_jd_range: dict | None = None
     command = ""
     raw_missing = False
 
@@ -2161,6 +2163,19 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
                 if csv_info:
                     headers, rows = phot.csv_preview(rdir / csv_info["file"], n=8)
                     previews[band] = {"headers": headers, "rows": rows}
+            # Slider bounds for the post-processing Exclude JD Range: the
+            # band CSVs' own BJD_TDB, the axis prose2's cut compares against.
+            span = phot.lightcurve_time_range(
+                rdir / p["csv"]["file"] for p in outputs["bands"].values() if p.get("csv")
+            )
+            if span:
+                lo, hi = round(span[0], 6), round(span[1], 6)
+                post_jd_range = {
+                    "min": lo,
+                    "max": hi,
+                    "min_utc": _jd_to_utc_minute(lo),
+                    "max_utc": _jd_to_utc_minute(hi),
+                }
             nearby_info = outputs.get("summary", {}).get("nearby_stars")
             if nearby_info:
                 nb_headers, nb_rows = phot.csv_preview(rdir / nearby_info["file"], n=100)
@@ -2211,6 +2226,7 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
         available_telescopes=available_telescopes,
         available_modes=available_modes,
         jd_range=jd_range,
+        post_jd_range=post_jd_range,
     )
     # The run buttons' enabled/disabled state is JavaScript-driven and reflects
     # the live job state. A cached or back/forward-restored snapshot can show
@@ -3567,24 +3583,23 @@ def api_exposure_target(target: str):
 
     try:
         db = _db_path()
+        # Frames under a proposal the viewer is denied are dropped, and a
+        # target with none left answers like an unknown name (issue #144).
+        denied = _viewer_denied()
+        visible_clause, visible_params = _sql_not_denied(denied)
         with get_conn(db, timeout=10, row_factory=sqlite3.Row) as conn:
-            # Get all frames for this target
             frames = conn.execute(
-                """
+                f"""
                 SELECT
                     instrument, obsdate, filter, exptime, read_mode,
                     ra, declination, airmass, focus, ccd
                 FROM frames
-                WHERE object = ?
+                WHERE object = ? AND {visible_clause}
                 ORDER BY obsdate DESC, instrument, filter, exptime
                 """,
-                (target,)
+                (target, *visible_params),
             ).fetchall()
-            # Get target info from targets table
-            target_info = conn.execute(
-                "SELECT n_dates, n_frames, ra, declination FROM targets WHERE object = ?",
-                (target,)
-            ).fetchone()
+        target_info = _visible_target_rollup(db, target, denied) if frames else None
 
         if not frames:
             return JSONResponse({
@@ -3847,7 +3862,7 @@ def api_fov_observed_pointing(inst: str = "", obsdate: str = "", obj: str = ""):
             status_code=400,
         )
 
-    pointing = _get_observed_pointing(_db_path(), inst, obsdate, obj)
+    pointing = _get_observed_pointing(_db_path(), inst, obsdate, obj, denied=_viewer_denied())
     if pointing is None:
         return JSONResponse(
             {"ok": False, "error": f"No usable pointing found for {obj!r} on {inst}/{obsdate}."},
@@ -4658,8 +4673,12 @@ def api_lco_obslog_exposures(target: str):
     norm_overrides = _get_norm_name_overrides(db)
     norm = _normalize_target_name(target, norm_overrides)
     try:
-        objects = [o for o in _get_frame_objects(db) if _normalize_target_name(o, norm_overrides) == norm]
-        exposures = _get_exposure_log_for_objects(db, objects)
+        denied = _viewer_denied()
+        objects = [
+            o for o in _get_frame_objects(db, denied=denied)
+            if _normalize_target_name(o, norm_overrides) == norm
+        ]
+        exposures = _get_exposure_log_for_objects(db, objects, denied=denied)
     except Exception:
         logger.debug("obslog exposure lookup failed for %s", target, exc_info=True)
         return JSONResponse({"ok": False, "error": "obslog lookup failed"}, status_code=500)
@@ -4987,6 +5006,13 @@ def api_lco_monitored_requests():
     return JSONResponse({"ok": True, "requests": lco_monitor.list_requests()})
 
 
+def _require_own_archive_token(request: Request) -> None:
+    """Issue #210: a viewer denied any proposal reads the LCO archive with their
+    own token, never the shared one (which would bypass the proposal filters)."""
+    if _viewer_denied():
+        lco.require_own_token_for_archive(_request_user(request))
+
+
 @lco_router.get("/archive/frames", response_class=JSONResponse)
 def api_lco_archive_frames(
     request: Request,
@@ -5004,6 +5030,10 @@ def api_lco_archive_frames(
     fuzzy_name: str = "",
     request_id: str = "",
 ):
+    try:
+        _require_own_archive_token(request)
+    except lco.LcoError as e:
+        return _lco_error_response(e)
     # Request-id path: a single observation request (e.g. the id in
     # https://observe.lco.global/requests/4236675) fully specifies a dataset on
     # its own, so it short-circuits the coordinate/name search and pulls every
@@ -5169,6 +5199,7 @@ def api_lco_archive_exofop_download(request: Request, payload: dict = Body(...))
     download + ingest job, so a missing dataset can be fetched in one click.
     """
     try:
+        _require_own_archive_token(request)
         target = str(payload.get("target") or "").strip()
         tsdate = str(payload.get("tsdate") or "").strip()
         if not target or not tsdate:
@@ -5208,6 +5239,7 @@ def api_lco_archive_exofop_download(request: Request, payload: dict = Body(...))
 @lco_router.post("/archive/download", response_class=JSONResponse)
 def api_lco_archive_download(request: Request, payload: dict = Body(...)):
     try:
+        _require_own_archive_token(request)
         frames = payload.get("frames")
         if not isinstance(frames, list) or not frames:
             return JSONResponse({"ok": False, "error": "no frames selected"}, status_code=400)
@@ -6710,6 +6742,8 @@ def photometry_postprocess(payload: dict = Body(...)):
         payload.get("degree", 2),
         payload.get("iterations", 5),
         apply=bool(payload.get("apply", False)),
+        exclude_before_jd=payload.get("exclude_before_jd"),
+        exclude_after_jd=payload.get("exclude_after_jd"),
     )
     if not result.get("ok"):
         return JSONResponse(result, status_code=400)
@@ -7210,9 +7244,13 @@ app.include_router(ads_router)
 # router-based route whose full path happens to also be exactly one or two
 # segments (e.g. GET /api/tags was being matched here as
 # instrument="api", obsdate="tags" instead of reaching tags_router).
+# The obslog browser filters by the viewer's denied set (issue #144 PR6). A
+# night or CCD with nothing visible renders exactly like one never observed
+# (200, empty), not 404: an unknown date is already a 200 here, so a 404 would
+# confirm the hidden night exists.
 @app.get("/{instrument}", response_class=HTMLResponse)
 def instrument_page(instrument: str):
-    dates = _get_dates(_db_path(), instrument)
+    dates = _get_dates(_db_path(), instrument, denied=_viewer_denied())
     return _render(
         "instrument.html",
         instrument=instrument,
@@ -7223,12 +7261,12 @@ def instrument_page(instrument: str):
 
 @app.get("/{instrument}/{obsdate}", response_class=HTMLResponse)
 def date_page(instrument: str, obsdate: str):
-    summaries = _get_summaries(_db_path(), instrument, obsdate)
+    summaries = _get_summaries(_db_path(), instrument, obsdate, denied=_viewer_denied())
     ccds = sorted(set(s["ccd"] for s in summaries))
     return _render("date.html", instrument=instrument, obsdate=obsdate, summaries=summaries, ccds=ccds)
 
 
 @app.get("/{instrument}/{obsdate}/ccd{ccd}", response_class=HTMLResponse)
 def ccd_page(instrument: str, obsdate: str, ccd: int):
-    frames = _get_frames(_db_path(), instrument, obsdate, ccd)
+    frames = _get_frames(_db_path(), instrument, obsdate, ccd, denied=_viewer_denied())
     return _render("ccd.html", instrument=instrument, obsdate=obsdate, ccd=ccd, frames=frames)

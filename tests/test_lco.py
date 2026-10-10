@@ -6,11 +6,13 @@ import datetime
 import io
 import os
 import socket
+import subprocess
 import shutil
 import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -1031,7 +1033,29 @@ class DownloadToFileTest(unittest.TestCase):
         self.assertEqual(result["status"], "unpacked")
         self.assertEqual(result["dest"], str(Path(self.dir) / "frame.fits"))
         self.assertTrue(src.exists())
-        self.assertEqual(calls[0][0], ["/usr/bin/funpack", "-O", str(Path(self.dir) / "frame.fits"), str(src)])
+        self.assertEqual((Path(self.dir) / "frame.fits").read_bytes(), b"fits")
+        self.assertFalse((Path(self.dir) / "frame.fits.part").exists())
+        self.assertEqual(calls[0][0], ["/usr/bin/funpack", "-O", str(Path(self.dir) / "frame.fits.part"), str(src)])
+
+    def _funpack_that_dies(self, error):
+        def fake_run(cmd, **kwargs):
+            Path(cmd[2]).write_bytes(b"trunc")  # partial output, then the failure
+            if isinstance(error, BaseException):
+                raise error
+            return MagicMock(returncode=error, stdout="", stderr="boom")
+        return fake_run
+
+    def test_funpack_file_failure_never_leaves_a_partial_fits(self):
+        """A truncated .fits would read as 'already unpacked' on every retry."""
+        src = Path(self.dir) / "frame.fits.fz"
+        for error in (1, subprocess.TimeoutExpired("funpack", 1), OSError("killed")):
+            src.write_bytes(b"packed")
+            with patch("muscat_db.lco.shutil.which", return_value="/usr/bin/funpack"), \
+                    patch("muscat_db.lco.subprocess.run", side_effect=self._funpack_that_dies(error)):
+                result = lco._funpack_file(src)
+            self.assertEqual(result["status"], "error")
+            self.assertFalse((Path(self.dir) / "frame.fits").exists(), error)
+            self.assertFalse((Path(self.dir) / "frame.fits.part").exists(), error)
 
 
 class ArchiveDownloadJobTest(unittest.TestCase):
@@ -1868,3 +1892,48 @@ class ToiResolutionTest(unittest.TestCase):
         self.assertIsNone(exofop.resolve_toi_number("WASP-12"))
         self.assertIsNone(exofop.resolve_toi_number(""))
         self.assertIsNone(exofop.resolve_toi_number("   "))
+
+
+def _archive_pages(monkeypatch, pages):
+    """Serve *pages* keyed by offset, recording every URL requested."""
+    seen = []
+
+    def fake_request(url, user_name=None, token=None, **kwargs):
+        seen.append(url)
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+        return pages[int(query.get("offset", ["0"])[0])]
+
+    monkeypatch.setattr(lco, "_lco_api_request", fake_request)
+    return seen
+
+
+def test_archive_search_all_pages_by_offset_when_count_is_estimated(monkeypatch):
+    # The live archive answers a large query with count_estimated and no `next`.
+    rows = [{"id": i} for i in range(5)]
+    seen = _archive_pages(monkeypatch, {
+        0: {"count": 128, "count_estimated": True, "next": None, "results": rows[:2]},
+        2: {"count": 128, "count_estimated": True, "next": None, "results": rows[2:4]},
+        4: {"count": 128, "count_estimated": True, "next": None, "results": rows[4:]},
+    })
+    result = lco.archive_search_all({"proposal_id": "KEY2026B-001", "limit": "2"})
+    assert [r["id"] for r in result["results"]] == [0, 1, 2, 3, 4]
+    assert result["count"] == 5 and result["truncated"] is False
+    assert len(seen) == 3
+
+
+def test_archive_search_all_follows_next_for_exact_counts(monkeypatch):
+    seen = _archive_pages(monkeypatch, {
+        0: {"count": 3, "next": "https://archive-api.lco.global/frames/?limit=2&offset=2",
+            "results": [{"id": 0}, {"id": 1}]},
+        2: {"count": 3, "next": None, "results": [{"id": 2}]},
+    })
+    result = lco.archive_search_all({"limit": "2"})
+    assert (result["count"], len(result["results"]), result["truncated"]) == (3, 3, False)
+    assert len(seen) == 2
+
+
+def test_archive_search_all_reports_truncation_of_estimated_listing(monkeypatch):
+    full = {"count": 128, "count_estimated": True, "next": None, "results": [{"id": 0}, {"id": 1}]}
+    _archive_pages(monkeypatch, {0: full, 2: full, 4: full})
+    result = lco.archive_search_all({"limit": "2"}, max_frames=4)
+    assert result["truncated"] is True and len(result["results"]) == 4

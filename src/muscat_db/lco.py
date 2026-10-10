@@ -161,6 +161,28 @@ def _get_lco_api_token(user_name: str | None = None, *, require_own_token: bool 
     return token
 
 
+def require_own_token_for_archive(user_name: str | None) -> None:
+    """Refuse an archive read that would run under the shared ``LCO_API_TOKEN``.
+
+    Archive search and download normally fall back to the server token, which
+    never carries the caller's identity. With proposal access control (#144)
+    that fallback lets a viewer who is denied a restricted proposal fetch its
+    frames from LCO under the operator's account. Callers use this when the
+    viewer has any denied proposal: they must then read the archive with their
+    own token, whose reach is whatever their own LCO account can see.
+    """
+    if not (user_name or "").strip():
+        raise LcoError(
+            "Sign in and save your own LCO API token to use the LCO archive",
+            status=403,
+            detail=(
+                "Some proposals are restricted, so the archive is not read "
+                "with the server's shared token for anonymous callers."
+            ),
+        )
+    _get_lco_api_token(user_name, require_own_token=True)
+
+
 def config_state(user_name: str | None = None) -> dict:
     """Return the configuration state for LCO variables. No secrets exposed.
 
@@ -415,14 +437,34 @@ def archive_search_all(
     url: str | None = f"{base_url}?{params}"
     results: list[dict] = []
     total: int | None = None
+    estimated = False
     while url and len(results) < max_frames:
         page = _lco_api_request(url, user_name=user_name, token=token)
+        rows = page.get("results") or []
         if total is None:
             total = page.get("count")
-        results.extend(page.get("results") or [])
+            estimated = bool(page.get("count_estimated"))
+        results.extend(rows)
         url = page.get("next")
+        if not url and estimated and rows and len(rows) >= _page_size(filters, rows):
+            # Past a size threshold the archive only estimates `count` (observed:
+            # 128 for a 36,625-frame query) and omits `next`, though `offset`
+            # keeps returning full pages. Trusting `next` silently stopped at
+            # page one, so page by offset until a short page instead.
+            url = f"{base_url}?{_query_params({**filters, 'offset': len(results)})}"
     truncated = bool(url) and len(results) >= max_frames
+    if estimated:
+        # The estimate is meaningless to callers; report what was retrieved
+        # (a lower bound when `truncated` is set).
+        total = len(results)
     return {"count": total, "results": results[:max_frames], "truncated": truncated}
+
+
+def _page_size(filters: dict, first_rows: list) -> int:
+    try:
+        return int(filters.get("limit") or len(first_rows))
+    except (TypeError, ValueError):
+        return len(first_rows)
 
 
 # OBJECT values LCO stamps on engineering frames that still carry a real
@@ -1118,14 +1160,25 @@ def _funpack_file(path: Path, timeout: float = _FUNPACK_TIMEOUT_S) -> dict:
         status["status"] = "error"
         status["error"] = "funpack is not installed"
         return status
+    # Unpack to a sibling .part and rename on success, as _download_to_file
+    # does: `out.exists()` above is the "already unpacked" signal, so a funpack
+    # killed or timed out mid-write must never leave a truncated .fits there.
+    # cfitsio will not overwrite, so clear a .part left by an earlier crash.
+    tmp = out.with_name(out.name + ".part")
+    tmp.unlink(missing_ok=True)
     try:
         proc = subprocess.run(
-            [funpack, "-O", str(out), str(path)],
+            [funpack, "-O", str(tmp), str(path)],
             check=False,
             capture_output=True,
             text=True,
             timeout=timeout,
         )
+        if proc.returncode != 0:
+            status["status"] = "error"
+            status["error"] = (proc.stderr or proc.stdout or f"funpack exited {proc.returncode}").strip()
+            return status
+        tmp.replace(out)
     except OSError as exc:
         status["status"] = "error"
         status["error"] = str(exc)
@@ -1134,10 +1187,8 @@ def _funpack_file(path: Path, timeout: float = _FUNPACK_TIMEOUT_S) -> dict:
         status["status"] = "error"
         status["error"] = f"funpack timed out after {timeout:g}s"
         return status
-    if proc.returncode != 0:
-        status["status"] = "error"
-        status["error"] = (proc.stderr or proc.stdout or f"funpack exited {proc.returncode}").strip()
-        return status
+    finally:
+        tmp.unlink(missing_ok=True)
     status["status"] = "unpacked"
     return status
 

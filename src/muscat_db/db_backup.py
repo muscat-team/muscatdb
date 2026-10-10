@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_KEEP = 2
 _NIGHTLY_TAG = ".nightly-"
 _CORRUPT_SUFFIX = ".CORRUPT"
+_SIDECARS = ("-wal", "-shm", "-journal")
 
 
 class IntegrityError(RuntimeError):
@@ -68,6 +69,43 @@ def integrity_ok(db_path: str | os.PathLike) -> bool:
         conn.close()
 
 
+def remove_with_sidecars(path: str | os.PathLike) -> None:
+    """Remove a SQLite file and its ``-wal``/``-shm``/``-journal`` sidecars,
+    ignoring any that are absent."""
+    base = os.fspath(path)
+    for suffix in ("", *_SIDECARS):
+        try:
+            os.remove(base + suffix)
+        except OSError:
+            pass
+
+
+def _backup_to(src: Path, part: Path) -> None:
+    """Copy *src* into *part* with the online backup API, as a single file."""
+    source = sqlite3.connect(f"file:{src}?mode=ro", uri=True, timeout=30)
+    try:
+        target = sqlite3.connect(str(part))
+        try:
+            source.backup(target)
+            # The backup copies page 1, so the copy inherits the live file's
+            # WAL mode, and every later open of it -- the read-only integrity
+            # check first -- creates -wal/-shm that a read-only connection
+            # cannot remove and the rename leaves behind (#194). A rollback
+            # journal keeps the snapshot one self-contained file.
+            try:
+                target.execute("PRAGMA journal_mode=DELETE")
+            except sqlite3.DatabaseError:
+                # A malformed copy can refuse the switch. Leave the verdict to
+                # integrity_check, so it still becomes a .CORRUPT forensics
+                # copy; snapshot()'s cleanup removes the sidecars that check
+                # then leaves behind.
+                pass
+        finally:
+            target.close()
+    finally:
+        source.close()
+
+
 def _snapshot_name(db_path: Path, now: datetime.datetime) -> str:
     return f"{db_path.name}{_NIGHTLY_TAG}{now.strftime('%Y%m%d-%H%M%S')}.sqlite"
 
@@ -87,27 +125,22 @@ def snapshot(db_path: str | os.PathLike, dest_dir: Path | None = None,
     dest = dest_dir / _snapshot_name(src, now or datetime.datetime.now())
     part = dest.with_name(dest.name + ".part")
 
-    source = sqlite3.connect(f"file:{src}?mode=ro", uri=True, timeout=30)
     try:
-        target = sqlite3.connect(str(part))
-        try:
-            source.backup(target)
-        finally:
-            target.close()
+        _backup_to(src, part)
+        if not integrity_ok(part):
+            bad = dest.with_name(dest.name + _CORRUPT_SUFFIX)
+            os.replace(part, bad)
+            raise IntegrityError(
+                f"{src} failed PRAGMA integrity_check (snapshot kept at {bad}); "
+                "refusing to rebuild over it -- restore from an earlier backup first"
+            )
+        os.replace(part, dest)
     except BaseException:
-        part.unlink(missing_ok=True)
+        # Any failure from the copy through the final rename must not strand
+        # ``.part``. On the corrupt path it was already renamed to .CORRUPT, so
+        # this only clears whatever sidecars are still named after it.
+        remove_with_sidecars(part)
         raise
-    finally:
-        source.close()
-
-    if not integrity_ok(part):
-        bad = dest.with_name(dest.name + _CORRUPT_SUFFIX)
-        os.replace(part, bad)
-        raise IntegrityError(
-            f"{src} failed PRAGMA integrity_check (snapshot kept at {bad}); "
-            "refusing to rebuild over it -- restore from an earlier backup first"
-        )
-    os.replace(part, dest)
     logger.info("snapshot of %s written to %s", src, dest)
     return dest
 
@@ -118,7 +151,8 @@ def prune(db_path: str | os.PathLike, dest_dir: Path | None = None,
 
     Only files matching ``<name>.nightly-*.sqlite`` are candidates, so manual
     backups and ``.CORRUPT`` forensics copies are never touched. The stamp is
-    fixed-width, so name order is chronological order.
+    fixed-width, so name order is chronological order. Orphaned sidecars of
+    nightly snapshots are swept as well.
     """
     dest_dir = dest_dir if dest_dir is not None else backup_dir()
     keep = keep if keep is not None else backup_keep()
@@ -135,4 +169,21 @@ def prune(db_path: str | os.PathLike, dest_dir: Path | None = None,
             logger.warning("could not prune stale snapshot %s: %s", p, exc)
         else:
             removed.append(p)
+    _sweep_orphan_sidecars(dest_dir, prefix)
     return removed
+
+
+def _sweep_orphan_sidecars(dest_dir: Path, prefix: str) -> None:
+    """Remove nightly sidecars whose main file is gone: those of the snapshots
+    just pruned, and the ``.part-wal``/``.part-shm`` pairs every snapshot left
+    before #194. Sidecars of a file that still exists are left alone, since
+    they may belong to an open connection (a snapshot in progress, or one
+    someone is inspecting)."""
+    for p in dest_dir.glob(f"{prefix}*"):
+        suffix = next((x for x in _SIDECARS if p.name.endswith(x)), None)
+        if suffix is None or p.with_name(p.name[:-len(suffix)]).exists():
+            continue
+        try:
+            p.unlink()
+        except OSError as exc:
+            logger.warning("could not remove orphaned sidecar %s: %s", p, exc)

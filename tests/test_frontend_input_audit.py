@@ -268,6 +268,23 @@ def test_lco_prediction_inputs_invalidate_generated_windows():
     assert "node.addEventListener('change', invalidateGeneratedWindows)" in html
 
 
+def test_lco_clone_declares_muscat_branch_flag_before_use():
+    """applyClonedParams must declare the ``muscat`` flag it branches on.
+
+    #69 dropped ``var muscat`` from the clone path but kept ``if (muscat)``, so
+    every clone threw ``ReferenceError: muscat is not defined`` after only part
+    of the form was filled. The flag must also agree with the kind it selects.
+    """
+    html = _read_template("lco_schedule.html")
+    body = _function_body(html, "applyClonedParams")
+    decl = re.search(r"\bvar muscat\s*=\s*([^;]+);", body)
+    assert decl, "applyClonedParams uses `muscat` without declaring it"
+    first_use = re.search(r"\bif \(muscat\)", body)
+    assert first_use, "applyClonedParams no longer branches on `muscat`"
+    assert decl.start() < first_use.start(), "`muscat` declared after its first use"
+    assert "isSingleFilterKind(p.kind)" in decl.group(1)
+
+
 def test_lco_submit_confirmation_uses_message_modal():
     """Live LCO submission must use the styled app modal, not a browser popup."""
     base = _read_template("base.html")
