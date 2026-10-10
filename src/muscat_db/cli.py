@@ -551,6 +551,111 @@ def ingest_date(
     console.print(f"[green]Ingested {count} frames for {instrument} {obsdate} into {db}[/]")
 
 
+@app.command(name="lco-sync", cls=_Cmd)
+def lco_sync_cmd(
+    ctx: typer.Context,
+    proposal_ids: list[str] = typer.Argument(
+        ..., help="LCO proposal ID(s), e.g. KEY2026B-001",
+    ),
+    days: int = typer.Option(
+        7, "--days", min=1,
+        help="Sync nights with frames in the last N days of DATE_OBS (overlap catches late reductions)",
+    ),
+    start: str = typer.Option("", "--start", help="Window start, ISO UTC (overrides --days)"),
+    end: str = typer.Option("", "--end", help="Window end, ISO UTC (default: now)"),
+    user: str = typer.Option(
+        "", "--user",
+        help="Use this muscat-db user's saved LCO token instead of $LCO_API_TOKEN",
+    ),
+    workers: int = typer.Option(4, "--workers", "-w", min=1, max=16, help="Concurrent downloads"),
+    max_nights: int = typer.Option(
+        0, "--max-nights", min=0,
+        help="Download at most N incomplete nights per proposal per run, oldest first (0 = no cap)",
+    ),
+    ingest: bool = typer.Option(
+        True, "--ingest/--no-ingest",
+        help="Ingest scanned nights now; --no-ingest leaves it to a following build-db",
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Query and plan only; download nothing"),
+    db: str = _db_option(),
+):
+    """Download LCO proposal datasets (whole nights), then scan and ingest them (cron-friendly).
+
+    Any night with a frame in the window is synced whole. Re-running resumes:
+    each night's missing frames are fetched and stale obslogs rescanned.
+    """
+    from rich.markup import escape
+
+    from muscat_db import lco_sync
+
+    window_args = f"--start {start}" if start else f"--days {days}"
+    if end:
+        window_args += f" --end {end}"
+    flags = [
+        f"--user {user}" if user else "",
+        f"--max-nights {max_nights}" if max_nights else "",
+        "--no-ingest" if not ingest else "",
+        "--dry-run" if dry_run else "",
+    ]
+    _log_startup_banner(" ".join(["lco-sync", *proposal_ids, window_args, *filter(None, flags)]))
+    write_db = ingest and not dry_run
+    if write_db:
+        _require_existing_db(ctx, db, "ingest")
+    try:
+        window = lco_sync.archive_window(days, start, end)
+        proposals = [lco_sync.validate_proposal_id(p) for p in proposal_ids]
+        root = lco_sync.require_download_root()
+    except lco_sync.SyncError as e:
+        console.print(f"[red]Error: {escape(str(e))}[/]")
+        raise typer.Exit(1)
+
+    def log(message: str) -> None:
+        console.print(message, markup=False, soft_wrap=True)
+
+    failed = False
+    try:
+        with lco_sync.sync_lock(root):
+            for proposal_id in proposals:
+                try:
+                    report = lco_sync.sync_proposal(
+                        proposal_id,
+                        start=window[0],
+                        end=window[1],
+                        data_root=root,
+                        db=db if write_db else None,
+                        user_name=user or None,
+                        workers=workers,
+                        max_nights=max_nights,
+                        dry_run=dry_run,
+                        log=log,
+                    )
+                except Exception as e:  # keep going so one proposal can't block the rest
+                    failed = True
+                    console.print(f"[red]{proposal_id}: {escape(str(e))}[/]")
+                    continue
+                failed = failed or not report.ok
+                if dry_run:
+                    continue
+                color = "green" if report.ok else "yellow"
+                complete = sum(1 for d in report.datasets if d.complete)
+                scanned = sum(1 for d in report.datasets if d.scanned is not None)
+                console.print(
+                    f"[{color}]{proposal_id}: {complete}/{len(report.datasets)} nights complete, "
+                    f"{report.downloaded} frames downloaded, {report.failed} failed, "
+                    f"{scanned} nights scanned, {report.deferred} deferred[/]",
+                    soft_wrap=True,
+                )
+    except KeyboardInterrupt:
+        console.print("[yellow]Interrupted. Re-run the same command to resume; "
+                      "finished frames are kept and only missing ones are fetched.[/]")
+        raise typer.Exit(130)
+    except lco_sync.SyncError as e:
+        console.print(f"[red]Error: {escape(str(e))}[/]")
+        raise typer.Exit(1)
+    if failed:
+        raise typer.Exit(1)
+
+
 _PROPID_INST_CHOICES = click.Choice([*PROPID_INSTRUMENTS, "all"])
 
 
