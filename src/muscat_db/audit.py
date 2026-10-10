@@ -49,16 +49,27 @@ _SLACK_MAX_LINES = 20
 # Dates where raw and db legitimately disagree until a person resolves the
 # linked issue. A rescan of any of them would destroy good rows, so `sweep`
 # holds them too. Remove an entry when its issue is fixed.
+#
+# The #213 entry is the 2026-10-08 duplicate cleanup. The duplicate rows were
+# removed from the db and their obslog CSVs quarantined, but the raw copies
+# are still on disk under the wrong-date folder, so rescanning any of them
+# would re-ingest rows the real night already holds. The shrink guard cannot
+# see this: it only compares against existing CSV rows, and these dates have
+# none left. The hold itself is the protection; drop it only when the copies
+# are gone or a person has decided what to do with them.
 _KNOWN_ISSUES: dict[str, tuple[tuple[str, str], ...]] = {
     "#197": tuple(("muscat3", d) for d in (
         "210110", "210127", "210210",  # old ep01-ep04 epoch names
         "231111",                      # every row duplicated
         "210408",                      # unreduced e00 frames ingested
-        "260723",                      # frames moved to 260722
     )),
     "#198": (
         ("muscat3", "220309"), ("muscat3", "251111"),  # date directory gone
-        ("muscat3", "250722"), ("muscat3", "260716"),  # only .fits.fz on disk
+        ("muscat3", "250722"),                         # only .fits.fz on disk
+    ),
+    "#213": (
+        ("muscat3", "260729"), ("muscat3", "260727"), ("muscat3", "250704"),
+        ("muscat3", "260716"), ("muscat3", "260723"),
         ("sinistro", "260722"),
     ),
 }

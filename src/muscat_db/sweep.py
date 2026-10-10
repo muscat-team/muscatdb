@@ -188,14 +188,19 @@ def _sweep_missing(result: SweepResult, known, max_workers: int, progress) -> No
                 result.held.append((name, obsdate, why))
                 continue
             try:
-                scan_date(name, obsdate, max_workers=max_workers)
+                wrote = scan_date(name, obsdate, max_workers=max_workers)
             except Exception:
                 # scan_date has recorded it in the ledger; step 2 retries it.
                 logger.warning("sweep scan of %s %s failed", name, obsdate, exc_info=True)
                 continue
-            result.scanned.setdefault(name, []).append(obsdate)
+            # The date is looked at and won't be again until its directory
+            # changes, whether or not anything was written. Only a truthy
+            # result means CSVs were (re)written, so it is scanned-but-empty
+            # otherwise, not reported as success or counted as changed.
             if signature is not None:
                 state[key] = signature
+            if wrote:
+                result.scanned.setdefault(name, []).append(obsdate)
         _save_state(state)  # per instrument, so a killed sweep keeps its progress
 
 

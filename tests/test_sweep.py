@@ -129,6 +129,25 @@ def test_rows_may_grow_but_never_shrink(env):
     assert env.rescanned() == [("muscat", "250101")]
 
 
+def test_a_scan_that_matches_nothing_is_not_reported_or_counted_as_changed(env, monkeypatch):
+    """A zero-match scan writes no CSVs, so it must not read as a successful
+    rescan or make the CLI rebuild, but its signature is still remembered so
+    later sweeps skip it until the directory changes."""
+    env.raw("muscat", "250101", ["MSCT0_2501010001.fits"])
+    env.missing = {"muscat": ["250101"]}
+    monkeypatch.setattr(
+        sweep, "scan_date",
+        lambda inst, obsdate, max_workers=None, progress=None, data_root=None: {},
+    )
+
+    result = sweep.run_sweep()
+
+    assert result.scanned == {}
+    assert result.changed is False
+    assert result.unchanged == 0
+    assert sweep.run_sweep().unchanged == 1
+
+
 def test_known_destructive_dates_are_held_from_both_steps(env):
     env.raw("muscat3", "250722", ["ogg2m001-ep02-20250722-0001-e91.fits.fz"])
     env.missing = {"muscat3": ["250722"]}
@@ -140,6 +159,30 @@ def test_known_destructive_dates_are_held_from_both_steps(env):
     assert sorted(result.held) == [("muscat3", "210110", "#197"), ("muscat3", "250722", "#198")]
     assert [(e["instrument"], e["obsdate"]) for e in scan_failures.pending(str(env.obslog))] == [
         ("muscat3", "210110")]
+
+
+def test_the_213_duplicate_dates_are_held_without_any_csv(env):
+    """Regression for the review (#213): after the 2026-10-08 cleanup the
+    duplicate raw copies have no obslog CSVs left, so the shrink guard — which
+    only compares against existing rows — cannot protect them. Only the hold
+    list can, so a first sweep must not rescan them."""
+    for obsdate in ("260729", "260727", "250704", "260716", "260723"):
+        env.raw("muscat3", obsdate, [f"ogg2m001-ep02-2026{obsdate[-4:]}-0001-e91.fits"])
+    env.raw("sinistro", "260722", ["coj0m416-01-20260721-0001-e91.fits"])
+    env.missing = {
+        "muscat3": ["260729", "260727", "250704", "260716", "260723"],
+        "sinistro": ["260722"],
+    }
+
+    result = sweep.run_sweep()
+
+    assert env.rescans == []
+    held = {f"{i} {d}": why for i, d, why in result.held}
+    assert held == {
+        "muscat3 250704": "#213", "muscat3 260716": "#213",
+        "muscat3 260723": "#213", "muscat3 260727": "#213",
+        "muscat3 260729": "#213", "sinistro 260722": "#213",
+    }
 
 
 # -- retrying the failure ledger ------------------------------------------------

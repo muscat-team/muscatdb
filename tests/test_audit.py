@@ -142,13 +142,15 @@ def test_known_issue_dates_are_tagged(env):
     assert m.known == "#197"
 
 
-def test_known_issues_cover_every_date_in_197_and_198():
+def test_known_issues_cover_every_date_in_197_198_and_213():
     known = audit.known_issues()
     assert {d for (i, d), ref in known.items() if ref == "#197"} == {
-        "210110", "210127", "210210", "231111", "210408", "260723"}
+        "210110", "210127", "210210", "231111", "210408"}
     assert {(i, d) for (i, d), ref in known.items() if ref == "#198"} == {
-        ("muscat3", "220309"), ("muscat3", "251111"), ("muscat3", "250722"),
-        ("muscat3", "260716"), ("sinistro", "260722")}
+        ("muscat3", "220309"), ("muscat3", "251111"), ("muscat3", "250722")}
+    assert {(i, d) for (i, d), ref in known.items() if ref == "#213"} == {
+        ("muscat3", "260729"), ("muscat3", "260727"), ("muscat3", "250704"),
+        ("muscat3", "260716"), ("muscat3", "260723"), ("sinistro", "260722")}
 
 
 def test_reads_the_database_read_only(env):
