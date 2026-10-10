@@ -71,6 +71,7 @@ class Config:
     control_plane: str
     queue_only_web: bool
     stagger_s: float
+    max_full_jobs: int | None = None
     hosts: dict[str, HostSpec] = field(default_factory=dict)
 
 
@@ -116,6 +117,9 @@ def parse_config(data: dict) -> Config:
         control_plane=str(d.get("control_plane") or "postgres"),
         queue_only_web=bool((data.get("web") or {}).get("queue_only", False)),
         stagger_s=float(d.get("stagger_s", 3)),
+        max_full_jobs=(
+            _int(d["max_full_jobs"], "[defaults] max_full_jobs", 1) if "max_full_jobs" in d else None
+        ),
         hosts=hosts,
     )
 
@@ -171,16 +175,22 @@ def render_env(cfg: Config, host: HostSpec, hostname: str) -> str:
         "MUSCAT_JOB_MAX_THREADS": str(host.job_threads),
         "MUSCAT_JOB_NOTIFY": "1" if host.notify else "0",
     }
+    if cfg.max_full_jobs is not None:
+        lines["MUSCAT_MAX_FULL_JOBS"] = str(cfg.max_full_jobs)
     return "".join(f"{k}={v}\n" for k, v in lines.items())
 
 
 def web_env(cfg: Config) -> str:
-    if not cfg.queue_only_web:
-        return "# [web] queue_only is false: the web app runs full jobs itself\n"
-    return (
-        "# [web] queue_only = true: full runs are queued for the workers\n"
-        "export MUSCAT_WORKER_MAX_SLOTS=0\n"
-    )
+    out = []
+    if cfg.queue_only_web:
+        out.append("# [web] queue_only = true: full runs are queued for the workers\n")
+        out.append("export MUSCAT_WORKER_MAX_SLOTS=0\n")
+    else:
+        out.append("# [web] queue_only is false: the web app runs full jobs itself\n")
+    if cfg.max_full_jobs is not None:
+        out.append("# cluster-wide cap on concurrent full runs per pipeline\n")
+        out.append(f"export MUSCAT_MAX_FULL_JOBS={cfg.max_full_jobs}\n")
+    return "".join(out)
 
 
 # -------------------------------------------------------------------- runners

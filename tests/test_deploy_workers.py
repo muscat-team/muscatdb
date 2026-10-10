@@ -52,6 +52,7 @@ def test_parse_config_applies_defaults_and_overrides():
         (lambda d: d["hosts"]["ut3"].update(pipelines=["ttv_fit", "ttv_fit"]), "duplicate"),
         (lambda d: d["hosts"]["ut3"].update(max_slots=-1), "max_slots"),
         (lambda d: d["hosts"]["ut3"].update(job_threads=0), "job_threads"),
+        (lambda d: d["defaults"].update(max_full_jobs=0), "max_full_jobs"),
         (lambda d: d["defaults"].pop("database"), "database"),
         (lambda d: d["hosts"].update({"ut-9": {"pipelines": ["ttv_fit"]}}), "must not contain '-'"),
     ],
@@ -94,6 +95,30 @@ def test_web_env_follows_queue_only_switch():
     off = w.parse_config(_data(web={"queue_only": False}))
     assert "export MUSCAT_WORKER_MAX_SLOTS=0" in w.web_env(on)
     assert "export" not in w.web_env(off)
+
+
+def test_max_full_jobs_is_unset_unless_configured():
+    cfg = w.parse_config(_data())
+    assert cfg.max_full_jobs is None
+    assert "MAX_FULL_JOBS" not in w.render_env(cfg, cfg.hosts["ut3"], "muscat-ut3")
+    assert "MAX_FULL_JOBS" not in w.web_env(cfg)
+
+
+def test_max_full_jobs_reaches_workers_and_web_app():
+    data = _data()
+    data["defaults"]["max_full_jobs"] = 6
+    cfg = w.parse_config(data)
+    assert cfg.max_full_jobs == 6
+    assert "MUSCAT_MAX_FULL_JOBS=6\n" in w.render_env(cfg, cfg.hosts["ut3"], "muscat-ut3")
+    assert "export MUSCAT_MAX_FULL_JOBS=6" in w.web_env(cfg)
+    # exported even when the web app runs jobs itself: it claims the same slots
+    data["web"] = {"queue_only": False}
+    assert "export MUSCAT_MAX_FULL_JOBS=6" in w.web_env(w.parse_config(data))
+
+
+def test_shipped_config_allows_one_full_run_per_host_plus_one():
+    cfg = w.load_config(w.DEFAULT_CONFIG)
+    assert cfg.max_full_jobs == len(cfg.hosts) + 1
 
 
 # -- up / down ----------------------------------------------------------------
