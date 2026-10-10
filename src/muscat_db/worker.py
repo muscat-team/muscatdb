@@ -32,14 +32,13 @@ for the web process (the default), ``"worker"`` here -- and having
 See ``job_store.py``'s ``_OWNER`` docstring for why this needs no
 lease/heartbeat to be correct.
 
-Known limitation: each pipeline's in-memory job registry (e.g.
-``photometry._JOBS``) is process-local. A job claimed and launched by *this*
-process is invisible to the web process's registry, so cancelling it from the
-web UI does not yet work -- the same gap the web process would have for a job
-launched by another web worker under ``--workers N>1``. Jobs still queued
-(not yet claimed) cancel fine either way, since that path only touches the
-durable ``jobs`` table. Closing this needs a cross-process cancel-request
-channel, not yet built.
+Cancelling: each pipeline's in-memory job registry (e.g.
+``photometry._JOBS``) is process-local, so the web process holds no handle on a
+job *this* process launched. Cancelling it from the web UI therefore records a
+request on the durable row (``JobRepository.request_cancel``) and this
+process's next ``sync_jobs`` pass acts on it with its own local cancel path
+(``jobs.apply_cancel_requests``), then records the terminal state itself. A job
+still queued (not yet claimed) is cancelled directly on the ``jobs`` table.
 
 Running two ``worker`` processes for the *same* pipeline **is** now safe
 (architecture issue #51 step 3): both still tag their rows ``owner="worker"``,

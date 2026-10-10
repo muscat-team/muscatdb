@@ -725,6 +725,15 @@ def cancel_ttv_fit(target: str, run_name: str = "") -> dict:
                 and j.get("target") == target
                 and (j.get("run_name") == run_name or j.get("run_id") == run_seg)
             ]
+            if (
+                found and found[0]["state"] == "running"
+                and jobs.held_by_other_instance(found[0], current_instance_id())
+                and store.request_cancel(found[0]["key"])
+            ):
+                # A fleet worker launched it, so only that worker holds the
+                # process: marking the row cancelled here would report a still
+                # running fit as stopped. It acts on this request itself.
+                return {"ok": True, "key": found[0]["key"], "requested": True}
             if found and found[0]["state"] in ("running", "pending"):
                 store.save(
                     type_="ttv_fit",
@@ -1198,6 +1207,10 @@ def _detect_process_running(rdir: pathlib.Path) -> bool:
 
 def sync_jobs() -> None:
     store = get_job_store()
+    jobs.apply_cancel_requests(
+        store, "ttv_fit", current_instance_id(),
+        lambda r: cancel_ttv_fit(r["target"], r.get("run_name") or ""),
+    )
     with _TTV_LOCK:
         db_jobs = store.all()
         running_keys = {j["key"] for j in db_jobs if j["state"] == "running" and j["type"] == "ttv_fit"}

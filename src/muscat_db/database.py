@@ -148,7 +148,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     owner        TEXT NOT NULL DEFAULT '',
     instance_id  TEXT NOT NULL DEFAULT '',
     heartbeat_at REAL NOT NULL DEFAULT 0,
-    attempts     INTEGER NOT NULL DEFAULT 0
+    attempts     INTEGER NOT NULL DEFAULT 0,
+    cancel_requested_at REAL NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_state_started
@@ -2410,6 +2411,7 @@ _JOBS_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
     ("instance_id", "TEXT NOT NULL DEFAULT ''"),
     ("heartbeat_at", "REAL NOT NULL DEFAULT 0"),
     ("attempts", "INTEGER NOT NULL DEFAULT 0"),
+    ("cancel_requested_at", "REAL NOT NULL DEFAULT 0"),
 ]
 
 

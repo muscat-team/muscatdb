@@ -1916,6 +1916,14 @@ def cancel_fit(inst: str, date: str, target: str, run_id: str = "") -> dict:
                     run_name=found[0].get("run_name", ""),
                 )
                 return {"ok": True, "key": key}
+            if (
+                found and found[0]["state"] == "running"
+                and jobs.held_by_other_instance(found[0], current_instance_id())
+                and store.request_cancel(db_key)
+            ):
+                # A fleet worker launched it, so only that worker holds the
+                # process; it acts on this request from its own sync_jobs pass.
+                return {"ok": True, "key": key, "requested": True}
             return {"ok": False, "error": "no job to cancel"}
         if job.proc.poll() is not None:
             return {"ok": True, "already_finished": True}
@@ -2301,6 +2309,10 @@ def _detect_process_running(rdir: pathlib.Path) -> bool:
 
 def sync_jobs() -> None:
     store = get_job_store()
+    jobs.apply_cancel_requests(
+        store, "transit_fit", current_instance_id(),
+        lambda r: cancel_fit(r["inst"], r["date"], r["target"], r.get("run_id") or ""),
+    )
     with _FIT_LOCK:
         db_jobs = store.all()
         running_keys = {j["key"] for j in db_jobs if j["state"] == "running" and j["type"] == "transit_fit"}

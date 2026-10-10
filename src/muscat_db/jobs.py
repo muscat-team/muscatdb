@@ -362,6 +362,38 @@ CANCELLED_RC = -1
 PIPELINE_JOB_TYPES = ("photometry", "transit_fit", "ttv_fit")
 
 
+def held_by_other_instance(row: dict, my_instance_id: str) -> bool:
+    """True when *row* is held by a different live process than this one.
+
+    An empty ``instance_id`` is a row no instance claimed (legacy or lost), so
+    it is *not* held by another instance: the caller's own local handling
+    applies. Such a row cannot be cancelled by request because nobody would
+    read the request."""
+    held_by = row.get("instance_id") or ""
+    return bool(held_by) and held_by != my_instance_id
+
+
+def apply_cancel_requests(store, type_: str, instance_id: str, cancel_row) -> None:
+    """Run *cancel_row* for every running *type_* row of this instance that
+    another process asked to cancel (``JobRepository.request_cancel``).
+
+    Called from each pipeline's ``sync_jobs`` pass, so a job launched by a
+    fleet worker is cancelled by that worker's own local path -- the only
+    process that holds its process handle. *cancel_row* is the pipeline's
+    ordinary cancel function; it records the terminal state itself, which
+    drops the row out of ``cancel_requested`` on the next pass."""
+    try:
+        rows = store.cancel_requested(type_, instance_id)
+    except Exception:
+        _logger.exception("could not read %s cancel requests", type_)
+        return
+    for row in rows:
+        try:
+            cancel_row(row)
+        except Exception:
+            _logger.exception("could not apply cancel request for %s", row.get("key"))
+
+
 def superseded_by_queued_row(row: dict | None, started_at: float | None, proc) -> bool:
     """True when a finished in-memory job has been replaced by a newer queued row.
 

@@ -2098,6 +2098,14 @@ def cancel_run(inst: str, date: str, target: str, run_id: str = "") -> dict:
                     run_id=run_id,
                 )
                 return {"ok": True, "key": key}
+            if (
+                found and found[0]["state"] == "running"
+                and jobs.held_by_other_instance(found[0], current_instance_id())
+                and store.request_cancel(db_key)
+            ):
+                # A fleet worker launched it, so only that worker holds the
+                # process; it acts on this request from its own sync_jobs pass.
+                return {"ok": True, "key": key, "requested": True}
             return {"ok": False, "error": "no job to cancel"}
         if job.proc.poll() is not None:
             return {"ok": True, "already_finished": True}
@@ -2157,6 +2165,10 @@ def _detect_process_running(rdir: Path) -> bool:
 
 def sync_jobs() -> None:
     store = get_job_store()
+    jobs.apply_cancel_requests(
+        store, "photometry", current_instance_id(),
+        lambda r: cancel_run(r["inst"], r["date"], r["target"], r.get("run_id") or ""),
+    )
     with _LOCK:
         # Watchdog: kill runs that have hung (no log output, or past the absolute
         # cap) and record them as errors. This frees the single full-job slot so the
