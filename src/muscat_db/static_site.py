@@ -398,8 +398,8 @@ def _install_scrub(
         # otherwise-safe example page.
         return orig["_get_dates"](db, instrument, denied=_build_denied(denied))
 
-    def objects_scrubbed(db, instrument, obsdate):
-        names = orig["_get_objects"](db, instrument, obsdate)
+    def objects_scrubbed(db, instrument, obsdate, *, denied=frozenset()):
+        names = orig["_get_objects"](db, instrument, obsdate, denied=_build_denied(denied))
         return [n for n in names if not _object_restricted(n)]
 
     web._get_targets = targets_scrubbed
