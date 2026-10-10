@@ -163,6 +163,17 @@ class NightVisibility:
             matched = [visible for obj, visible in rows if self.normalize(obj) == norm]
         return not any(matched)
 
+    def night_has_denied(self, instrument: str, obsdate: str) -> bool:
+        """True when any object on this night is under a denied proposal.
+
+        For whole-night actions that name no target (scan, ingest): such an
+        action touches every object on the night, so it is refused when any
+        one of them is restricted.
+        """
+        if not self.denied:
+            return False
+        return any(not visible for _, visible in self._night(instrument, obsdate))
+
     def hidden_objects(self, instrument: str, obsdate: str) -> set[str]:
         """Compact names of the objects on this night with nothing visible."""
         if not self.denied:

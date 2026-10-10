@@ -658,6 +658,15 @@ def _require_visible_night(inst: str, date: str, target: str) -> None:
         raise HTTPException(404, f"target {target!r} not found")
 
 
+def _require_no_denied_night(inst: str, date: str) -> None:
+    """404 a whole-night action (LCO archive scan or ingest) when any object on
+    the night is under a proposal the viewer may not see: the action touches
+    every object on the night, and its raw-file counts would reveal the night's
+    existence and size. Same 404 as a night that was never observed."""
+    if _night_visibility().night_has_denied(inst, date):
+        raise HTTPException(404, f"night {inst} {date} not found")
+
+
 def _ttv_target_hidden(target: str, denied: frozenset[str] | None = None) -> bool:
     """A TTV fit combines transit times from many nights, and no run records
     which ones it used (#208). It is therefore hidden when *any* night of its
@@ -6459,6 +6468,7 @@ def _validate_lco_dataset_action(payload: dict) -> tuple[str, str]:
 @jobs_router.post("/lco-archive/scan", response_class=JSONResponse)
 def jobs_lco_archive_scan(payload: dict = Body(...)):
     inst, obsdate = _validate_lco_dataset_action(payload)
+    _require_no_denied_night(inst, obsdate)
     try:
         from muscat_db.scanner import scan_date as _scan_date
 
@@ -6475,6 +6485,7 @@ def jobs_lco_archive_scan(payload: dict = Body(...)):
 @jobs_router.post("/lco-archive/ingest-date", response_class=JSONResponse)
 def jobs_lco_archive_ingest_date(payload: dict = Body(...)):
     inst, obsdate = _validate_lco_dataset_action(payload)
+    _require_no_denied_night(inst, obsdate)
     try:
         from muscat_db.database import ingest_date as _ingest_date
 

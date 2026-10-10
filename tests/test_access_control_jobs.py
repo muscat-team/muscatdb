@@ -280,11 +280,64 @@ _NIGHT = {"inst": INST, "date": "260103", "target": "HIDDENTGT", "run": RUN, "ru
     "/api/transit-fit/logp",
     "/api/transit-fit/cancel",
     "/api/transit-fit/delete",
+    "/api/jobs/lco-archive/scan",
+    "/api/jobs/lco-archive/ingest-date",
 ])
 def test_writes_on_hidden_run_are_404_and_touch_nothing(client, path):
     assert _post(client, path, _NIGHT).status_code == 404
     assert phot.run_output_dir(INST, "260103", "HIDDENTGT", RUN).is_dir()
     assert fit.fit_output_dir(INST, "260103", "HIDDENTGT", RUN).is_dir()
+
+
+@pytest.fixture
+def lco_calls(monkeypatch):
+    """Record what the LCO archive scan/ingest would have run, without running it."""
+    calls: list[tuple[str, str, str]] = []
+
+    def _scan(inst, obsdate, *a, **k):
+        calls.append(("scan", inst, obsdate))
+        return {}
+
+    def _ingest(db_path, inst, obsdate, *a, **k):
+        calls.append(("ingest", inst, obsdate))
+        return 0
+
+    monkeypatch.setattr("muscat_db.scanner.scan_date", _scan)
+    monkeypatch.setattr("muscat_db.database.ingest_date", _ingest)
+    return calls
+
+
+@pytest.mark.parametrize("path", [
+    "/api/jobs/lco-archive/scan",
+    "/api/jobs/lco-archive/ingest-date",
+])
+@pytest.mark.parametrize("date", ["260102", "260103", "260104"])
+def test_lco_archive_write_refused_on_night_with_any_denied_object(client, lco_calls, path, date):
+    """Whole-night actions 404 when any object on the night is restricted:
+    fully restricted (260102), mixed (260103), or a restricted target whose
+    later night is open (260104). Nothing runs."""
+    resp = _post(client, path, {"inst": INST, "date": date})
+    assert resp.status_code == 404
+    assert lco_calls == []
+
+
+@pytest.mark.parametrize("path", [
+    "/api/jobs/lco-archive/scan",
+    "/api/jobs/lco-archive/ingest-date",
+])
+def test_lco_archive_write_allowed_on_fully_open_night(client, lco_calls, path):
+    assert _post(client, path, {"inst": INST, "date": "260101"}).status_code == 200
+    assert _post(client, path, {"inst": INST, "date": "260105"}).status_code == 200
+    assert len(lco_calls) == 2
+
+
+@pytest.mark.parametrize("path", [
+    "/api/jobs/lco-archive/scan",
+    "/api/jobs/lco-archive/ingest-date",
+])
+def test_lco_archive_write_admin_gets_any_night(client, lco_calls, path):
+    assert _post(client, path, {"inst": INST, "date": "260102"}, user="root").status_code == 200
+    assert lco_calls and lco_calls[-1][2] == "260102"
 
 
 def test_photometry_command_preview_skips_obslog_checks_for_hidden(client):
