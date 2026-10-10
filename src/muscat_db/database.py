@@ -871,34 +871,41 @@ def _page_size(db_path: str) -> int:
 
 def _read_app_owned_tables(db_path: str) -> dict[str, list[dict]]:
     """Every row of every app-owned table in *db_path*. Rows are copied
-    verbatim (all columns) so nothing is silently dropped; missing tables or
-    an absent file read as empty, for older or fresh databases.
+    verbatim (all columns) so nothing is silently dropped; a missing table or
+    an absent file reads as empty, for older or fresh databases.
+
+    Any other error propagates. Reporting it as "empty" would let build_db
+    restore nothing and copy an empty image over the live file (#204).
 
     All tables are read inside one read transaction, so they come from a single
     snapshot. Read one by one, the server could save a parent row and its
     children between two reads (an LCO request and its frames, #184), and the
     rebuild would restore the children without their parent.
+
+    The schema is not migrated here. _restore_table keeps only the columns the
+    rebuilt schema has, so an older table reads fine, and skipping the
+    migration keeps this read from taking the live file's write lock.
     """
     preserved: dict[str, list[dict]] = {t: [] for t in _APP_OWNED_TABLES}
     if not os.path.exists(db_path):
         return preserved
-    try:
-        with get_conn(db_path, row_factory=sqlite3.Row) as old_conn:
-            _apply_schema(old_conn)
-            if old_conn.in_transaction:
-                old_conn.commit()
-            old_conn.execute("BEGIN")
-            try:
-                for table in _APP_OWNED_TABLES:
-                    try:
-                        rows = old_conn.execute(f"SELECT * FROM {table}").fetchall()
-                        preserved[table] = [dict(r) for r in rows]
-                    except sqlite3.OperationalError:
-                        pass
-            finally:
-                old_conn.rollback()
-    except sqlite3.OperationalError:
-        pass
+    with get_conn(db_path, row_factory=sqlite3.Row) as old_conn:
+        if old_conn.in_transaction:
+            old_conn.commit()
+        old_conn.execute("BEGIN")
+        try:
+            existing = {
+                r[0] for r in old_conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+            for table in _APP_OWNED_TABLES:
+                if table not in existing:
+                    continue
+                rows = old_conn.execute(f"SELECT * FROM {table}").fetchall()
+                preserved[table] = [dict(r) for r in rows]
+        finally:
+            old_conn.rollback()
     return preserved
 
 
