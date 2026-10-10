@@ -1203,10 +1203,23 @@ def sync_jobs() -> None:
         running_keys = {j["key"] for j in db_jobs if j["state"] == "running" and j["type"] == "ttv_fit"}
         db_by_key = {j["key"]: j for j in db_jobs}
 
+        def _db_key(j) -> str:
+            k = f"ttv_fit:{j.inst}/{j.date}/{j.target.replace(' ', '')}"
+            return f"{k}/{j.run_id}" if j.run_id else k
+
+        # Drop finished jobs a newer queued run has replaced (same key) so their
+        # terminal state is not written over the pending row below.
+        for key in list(_TTV_JOBS.keys()):
+            stale = _TTV_JOBS[key]
+            if jobs.superseded_by_queued_row(db_by_key.get(_db_key(stale)), stale.started_at, stale.proc):
+                try:
+                    stale.logf.close()
+                except OSError:
+                    pass
+                _TTV_JOBS.pop(key, None)
+
         for key, job in _TTV_JOBS.items():
-            db_key = f"ttv_fit:{job.inst}/{job.date}/{job.target.replace(' ', '')}"
-            if job.run_id:
-                db_key = f"{db_key}/{job.run_id}"
+            db_key = _db_key(job)
             state, rc, is_terminal = jobs.resolve_job_state(job, _finalize_config())
             if is_terminal and job.state == "running":
                 job.state = state

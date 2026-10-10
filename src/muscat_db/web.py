@@ -6556,6 +6556,18 @@ def jobs_rerun(request: Request, payload: dict = Body(...)):
     options = dict(p.get("options") or {})
     for field in ("run_name", "site", "telescope", "mode"):
         value = p.get(field) or job.get(field)
+        if (
+            field == "run_name"
+            and value
+            and not p.get("run_name")
+            and value == job.get("run_id")
+            and any(p.get(f) for f in ("site", "telescope", "mode"))
+        ):
+            # An unnamed run's row reports run_id as its run_name (a display
+            # fallback). run_id already carries the site/telescope/mode prefix,
+            # so feeding it back as the name re-prefixes it and forks a new
+            # run_id (and a second row) on every re-run.
+            value = None
         if value and not options.get(field):
             options[field] = value
     user_name = request.state.user

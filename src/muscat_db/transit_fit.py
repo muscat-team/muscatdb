@@ -2306,6 +2306,18 @@ def sync_jobs() -> None:
         running_keys = {j["key"] for j in db_jobs if j["state"] == "running" and j["type"] == "transit_fit"}
         db_by_key = {j["key"]: j for j in db_jobs}
 
+        # Drop finished jobs a newer queued run has replaced (same key) so their
+        # terminal state is not written over the pending row below.
+        for key in list(_FIT_JOBS.keys()):
+            stale = _FIT_JOBS[key]
+            stale_key = f"transit_fit:{fit_job_key(stale.inst, stale.date, stale.target, stale.run_id)}"
+            if jobs.superseded_by_queued_row(db_by_key.get(stale_key), stale.started_at, stale.proc):
+                try:
+                    stale.logf.close()
+                except OSError:
+                    pass
+                _FIT_JOBS.pop(key, None)
+
         for key, job in _FIT_JOBS.items():
             db_key = f"transit_fit:{fit_job_key(job.inst, job.date, job.target, job.run_id)}"
             state, rc, is_terminal = jobs.resolve_job_state(job, _finalize_config())

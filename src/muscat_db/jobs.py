@@ -362,6 +362,23 @@ CANCELLED_RC = -1
 PIPELINE_JOB_TYPES = ("photometry", "transit_fit", "ttv_fit")
 
 
+def superseded_by_queued_row(row: dict | None, started_at: float | None, proc) -> bool:
+    """True when a finished in-memory job has been replaced by a newer queued row.
+
+    A test run and a full run share one job key, and the registry keeps a
+    finished job so its page can keep showing the log. Enqueueing the next run
+    under that key writes a ``pending`` row with a later ``started_at``; syncing
+    the stale registry entry would then persist its terminal state over the
+    queued row and the worker would never see it. A process that is still alive
+    is never superseded -- ``start_run``'s overwrite/reuse paths own that case.
+    """
+    if row is None or row.get("state") != "pending":
+        return False
+    if proc is not None and proc.poll() is None:
+        return False
+    return float(row.get("started_at") or 0) > float(started_at or 0)
+
+
 def persisted_state(state: str, returncode: int | None) -> tuple[str, int | None]:
     """Map a live :func:`resolve_job_state` state to what the jobs table stores.
 
