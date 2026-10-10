@@ -5,6 +5,7 @@
     .venv/bin/python deploy/workers.py ...                                  down [--force] [HOST ...]
     .venv/bin/python deploy/workers.py ...                                  status [HOST ...]
     eval "$(.venv/bin/python deploy/workers.py web-env)"      # before starting the web app
+    .venv/bin/python deploy/workers.py --profile prod ...     # a named [profiles.*] set
 
 Run it from the control host (ut2): it needs Python >= 3.11 for ``tomllib``
 (the workers' system python is older) and only sends shell commands over ssh.
@@ -24,6 +25,18 @@ How it works
   running (``KillMode=control-group``), because a surviving fit would race the
   reclaim of its own row. ``down`` therefore refuses while jobs are running on
   the host unless ``--force``; a forced job is requeued by the orphan reclaim.
+
+Profiles
+--------
+``[profiles.<name>]`` overrides ``[defaults]`` keys that must change together
+(database and repo, chiefly), so one fleet and one set of unit names serves dev
+or production, never both. ``--profile`` (or ``MUSCAT_WORKERS_PROFILE``) picks
+one; otherwise ``[defaults] profile`` applies. The workers run the checkout in
+``repo``, so a production database needs the deploy checkout, not the dev tree.
+Switch by stopping under the old profile, then starting under the new one::
+
+    workers.py --profile dev  down     # refuses while jobs run
+    workers.py --profile prod up       # env text changed: units restart
 
 Needs on each host: ``loginctl enable-linger <user>`` so user units survive the
 last logout (``status`` reports it; ``up`` only warns).
@@ -72,6 +85,7 @@ class Config:
     queue_only_web: bool
     stagger_s: float
     max_full_jobs: int | None = None
+    profile: str | None = None
     hosts: dict[str, HostSpec] = field(default_factory=dict)
 
 
@@ -81,8 +95,44 @@ def _int(value, where: str, minimum: int = 0) -> int:
     return value
 
 
-def parse_config(data: dict) -> Config:
-    d = data.get("defaults") or {}
+# Keys a [profiles.<name>] table may override from [defaults] (plus queue_only,
+# which otherwise lives under [web]).
+_PROFILE_KEYS = frozenset({
+    "repo", "env_file", "pg_host", "database", "control_plane", "max_slots",
+    "job_threads", "notify", "stagger_s", "max_full_jobs", "queue_only",
+})
+
+
+def _apply_profile(data: dict, profile: str | None) -> tuple[dict, dict, str | None]:
+    """Return (defaults, web, profile name) with the selected profile merged in.
+
+    A profile switches the things that must change together -- which database
+    the workers claim from and which checkout they run -- so a half-switched
+    fleet (production database, dev code) cannot be configured by hand.
+    """
+    d = dict(data.get("defaults") or {})
+    web = dict(data.get("web") or {})
+    profiles = data.get("profiles") or {}
+    default = d.pop("profile", None)
+    name = profile or default
+    if name is None:
+        return d, web, None
+    if not profiles:
+        raise ConfigError(f"profile {name!r} requested but the config has no [profiles.*] tables")
+    if name not in profiles:
+        raise ConfigError(f"unknown profile {name!r}; defined: {sorted(profiles)}")
+    over = dict(profiles[name] or {})
+    unknown = sorted(set(over) - _PROFILE_KEYS)
+    if unknown:
+        raise ConfigError(f"[profiles.{name}] unknown key(s) {unknown}; allowed: {sorted(_PROFILE_KEYS)}")
+    if "queue_only" in over:
+        web["queue_only"] = over.pop("queue_only")
+    d.update(over)
+    return d, web, name
+
+
+def parse_config(data: dict, profile: str | None = None) -> Config:
+    d, web, profile = _apply_profile(data, profile)
     for need in ("pg_host", "database"):
         if not d.get(need):
             raise ConfigError(f"[defaults] {need} is required")
@@ -115,18 +165,19 @@ def parse_config(data: dict) -> Config:
         pg_host=str(d["pg_host"]),
         database=str(d["database"]),
         control_plane=str(d.get("control_plane") or "postgres"),
-        queue_only_web=bool((data.get("web") or {}).get("queue_only", False)),
+        queue_only_web=bool(web.get("queue_only", False)),
         stagger_s=float(d.get("stagger_s", 3)),
         max_full_jobs=(
-            _int(d["max_full_jobs"], "[defaults] max_full_jobs", 1) if "max_full_jobs" in d else None
+            _int(d["max_full_jobs"], "max_full_jobs", 1) if "max_full_jobs" in d else None
         ),
+        profile=profile,
         hosts=hosts,
     )
 
 
-def load_config(path: Path) -> Config:
+def load_config(path: Path, profile: str | None = None) -> Config:
     with open(path, "rb") as f:
-        return parse_config(tomllib.load(f))
+        return parse_config(tomllib.load(f), profile)
 
 
 # ----------------------------------------------------------------- rendering
@@ -177,11 +228,16 @@ def render_env(cfg: Config, host: HostSpec, hostname: str) -> str:
     }
     if cfg.max_full_jobs is not None:
         lines["MUSCAT_MAX_FULL_JOBS"] = str(cfg.max_full_jobs)
+    if cfg.profile:
+        # Also makes a profile switch change the env text, so `up` restarts the units.
+        lines["MUSCAT_WORKER_PROFILE"] = cfg.profile
     return "".join(f"{k}={v}\n" for k, v in lines.items())
 
 
 def web_env(cfg: Config) -> str:
     out = []
+    if cfg.profile:
+        out.append(f"# profile {cfg.profile}: database {cfg.database}, repo {cfg.repo}\n")
     if cfg.queue_only_web:
         out.append("# [web] queue_only = true: full runs are queued for the workers\n")
         out.append("export MUSCAT_WORKER_MAX_SLOTS=0\n")
@@ -389,6 +445,11 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("-c", "--config", type=Path, default=DEFAULT_CONFIG)
     ap.add_argument("--dry-run", action="store_true", help="print what would change, touch nothing")
+    ap.add_argument(
+        "-p", "--profile",
+        default=os.environ.get("MUSCAT_WORKERS_PROFILE"),
+        help="[profiles.<name>] to apply (default: [defaults] profile, env MUSCAT_WORKERS_PROFILE)",
+    )
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name in ("up", "status"):
         sub.add_parser(name).add_argument("hosts", nargs="*")
@@ -398,7 +459,9 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("web-env")
     args = ap.parse_args(argv)
     try:
-        cfg = load_config(args.config)
+        cfg = load_config(args.config, args.profile)
+        if cfg.profile and args.cmd != "web-env":
+            print(f"profile {cfg.profile}: database {cfg.database}, repo {cfg.repo}", file=sys.stderr)
         if args.cmd == "web-env":
             sys.stdout.write(web_env(cfg))
             return 0

@@ -69,6 +69,78 @@ def test_shipped_config_parses():
     assert cfg.hosts, "deploy/workers.toml must define at least one host"
 
 
+# -- profiles -----------------------------------------------------------------
+
+
+def _profiled(**over):
+    data = _data()
+    data["defaults"]["profile"] = "dev"
+    data["profiles"] = {
+        "dev": {},
+        "prod": {"database": "muscatdb_control", "repo": "/srv/deploy/main", "queue_only": False},
+    }
+    data.update(over)
+    return data
+
+
+def test_profile_overrides_defaults_as_one_unit():
+    cfg = w.parse_config(_profiled(), profile="prod")
+    assert (cfg.profile, cfg.database, cfg.repo) == ("prod", "muscatdb_control", Path("/srv/deploy/main"))
+    assert cfg.queue_only_web is False
+    assert cfg.pg_host == "10.0.0.1"  # not overridden: inherited from [defaults]
+
+
+def test_default_profile_applies_when_none_is_selected():
+    cfg = w.parse_config(_profiled())
+    assert (cfg.profile, cfg.database, cfg.repo) == ("dev", "muscatdb_test", Path("/srv/muscat"))
+    assert cfg.queue_only_web is True
+
+
+def test_no_profiles_keeps_the_flat_config_working():
+    cfg = w.parse_config(_data())
+    assert cfg.profile is None
+
+
+@pytest.mark.parametrize(
+    ("profile", "mutate", "message"),
+    [
+        ("staging", lambda d: None, "unknown profile 'staging'"),
+        (None, lambda d: d["defaults"].update(profile="nope"), "unknown profile 'nope'"),
+        ("prod", lambda d: d["profiles"]["prod"].update(databse="x"), "unknown key"),
+        ("prod", lambda d: d["profiles"]["prod"].update(max_full_jobs=0), "max_full_jobs"),
+    ],
+)
+def test_profile_rejects_bad_selection_or_keys(profile, mutate, message):
+    data = _profiled()
+    mutate(data)
+    with pytest.raises(w.ConfigError, match=message):
+        w.parse_config(data, profile=profile)
+
+
+def test_profile_without_any_profiles_table_is_an_error():
+    with pytest.raises(w.ConfigError, match="no \\[profiles"):
+        w.parse_config(_data(), profile="prod")
+
+
+def test_profile_switch_changes_the_worker_env_so_up_restarts_units():
+    dev = w.parse_config(_profiled(), profile="dev")
+    prod = w.parse_config(_profiled(), profile="prod")
+    a = w.render_env(dev, dev.hosts["ut3"], "muscat-ut3")
+    b = w.render_env(prod, prod.hosts["ut3"], "muscat-ut3")
+    assert "MUSCAT_WORKER_PG_DATABASE=muscatdb_control\n" in b
+    assert "MUSCAT_WORKER_PROFILE=prod\n" in b and "MUSCAT_WORKER_PROFILE=dev\n" in a
+    assert a != b
+
+
+def test_shipped_prod_profile_pairs_control_database_with_the_deploy_checkout():
+    dev = w.load_config(w.DEFAULT_CONFIG, profile="dev")
+    prod = w.load_config(w.DEFAULT_CONFIG, profile="prod")
+    assert dev.database == "muscatdb_test"
+    assert prod.database == "muscatdb_control"
+    assert prod.repo.parts[-3:] == ("deploy", "main", "app")
+    assert prod.repo != dev.repo
+
+
 # -- rendering ----------------------------------------------------------------
 
 

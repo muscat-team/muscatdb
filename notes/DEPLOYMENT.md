@@ -281,6 +281,16 @@ pipelines = ["transit_fit", "ttv_fit", "photometry"]
 eval "$(.venv/bin/python deploy/workers.py web-env)"   # in the shell that starts the web app
 ```
 
+Dev and production share this one fleet and one set of unit names; they rarely run together, so `[profiles.dev]` and `[profiles.prod]` in `workers.toml` switch the keys that must change as a pair. `prod` sets `database = "muscatdb_control"` **and** `repo = /ut2/jerome/deploy/main/app`, because the workers run the code in `repo`: a production database with the dev checkout would run dev code on production jobs. `--profile NAME` (or `MUSCAT_WORKERS_PROFILE`) selects one; `[defaults] profile` is used otherwise, and every command prints the active profile, database and repo. To switch:
+
+```bash
+.venv/bin/python deploy/workers.py --profile dev  down    # refuses while jobs run on a host
+.venv/bin/python deploy/workers.py --profile prod up      # env text changed, so the units restart
+eval "$(.venv/bin/python deploy/workers.py --profile prod web-env)"   # in the shell that starts :8001
+```
+
+Before the first `prod` switch: allow `muscatdb_control` for each worker host in `pg_hba.conf` (it is refused today), and decide `max_full_jobs` (production currently documents `1`; the fleet default is hosts + 1). While `prod` is active, the dev server on `:8888` has no worker claiming from `muscatdb_test`, so run it with `queue_only = false` or switch back.
+
 Run it from ut2 (it needs Python >= 3.11; the workers' system python is 3.10). Once per host, `loginctl enable-linger $USER` so the units survive the last logout; `up` warns when it is off.
 
 Adding another host takes two steps on ut2 that need `sudo` in a real terminal, then one command:
