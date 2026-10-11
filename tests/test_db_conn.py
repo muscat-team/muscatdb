@@ -5,6 +5,7 @@ whenever the body raised between the two. get_conn() is a contextmanager that
 guarantees close on every path and standardizes timeout/row_factory.
 """
 
+import contextlib
 import os
 import sqlite3
 
@@ -243,6 +244,82 @@ def test_migrations_surface_real_failures(tmp_path, monkeypatch):
     with get_conn(str(tmp_path / "m.db")) as conn:
         with pytest.raises(sqlite3.OperationalError, match="no such table"):
             database._apply_schema(conn)
+
+
+class _LockedReads:
+    """Connection proxy whose app-owned table SELECTs fail as if the database
+    were locked. Everything else passes through to the real connection."""
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def execute(self, sql, *args):
+        if sql.startswith("SELECT * FROM"):
+            raise sqlite3.OperationalError("database is locked")
+        return self._conn.execute(sql, *args)
+
+
+def _fail_reads_of(monkeypatch, live_path):
+    import muscat_db.database as database
+
+    real_get_conn = database.get_conn
+
+    @contextlib.contextmanager
+    def get_conn(path=None, **kwargs):
+        if path != live_path:
+            with real_get_conn(path, **kwargs) as conn:
+                yield conn
+            return
+        with real_get_conn(path, **kwargs) as conn:
+            yield _LockedReads(conn)
+
+    monkeypatch.setattr(database, "get_conn", get_conn)
+
+
+def _seed_live_notes(path):
+    from muscat_db.database import SCHEMA
+
+    with sqlite3.connect(path) as c:
+        c.executescript(SCHEMA)
+        c.execute(
+            "INSERT INTO target_notes(object, obsdate, instrument, note) "
+            "VALUES ('KEEP', '', '', 'x')"
+        )
+
+
+def test_read_app_owned_tables_raises_when_the_read_fails(tmp_path, monkeypatch):
+    """A failed read of the live file must not read as "every app-owned table
+    is empty". build_db would then restore nothing and copy the empty image
+    over the live file (#204)."""
+    from muscat_db.database import _read_app_owned_tables
+
+    target = str(tmp_path / "muscat.db")
+    _seed_live_notes(target)
+    _fail_reads_of(monkeypatch, target)
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        _read_app_owned_tables(target)
+
+
+def test_build_db_aborts_and_keeps_live_notes_when_the_read_fails(
+    tmp_path, monkeypatch, no_real_obslog_scan,
+):
+    """End to end: a failed read of the live file aborts the rebuild and the
+    live file keeps its notes (#204)."""
+    from muscat_db.database import build_db
+
+    target = str(tmp_path / "muscat.db")
+    monkeypatch.setenv("MUSCAT_DB_PATH", target)
+    _seed_live_notes(target)
+    _fail_reads_of(monkeypatch, target)
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        build_db(target)
+    with sqlite3.connect(target) as c:
+        assert c.execute(
+            "SELECT COUNT(*) FROM target_notes WHERE object = 'KEEP'"
+        ).fetchone()[0] == 1
 
 
 def test_build_db_writes_on_a_connection_open_across_the_swap_are_kept(
