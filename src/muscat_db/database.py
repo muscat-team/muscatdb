@@ -1399,16 +1399,20 @@ def objects_with_restricted_proposal(
         return {r[0] for r in cur.fetchall() if r[0]}
 
 
-def get_objects(db_path: str, instrument: str, obsdate: str) -> list[str]:
+def get_objects(
+    db_path: str, instrument: str, obsdate: str, *, denied: frozenset[str] = frozenset()
+) -> list[str]:
     """Distinct real-target object names observed on one instrument/date.
 
     Reuses the same calibration/junk exclusions as the materialized targets
     table so the photometry picker only offers genuine science targets.
+    Objects seen only under a *denied* proposal (issue #144) are left out.
     """
+    visible, visible_params = sql_not_denied(denied)
     with get_conn(db_path) as conn:
         cur = conn.execute(
             """SELECT DISTINCT object FROM summaries
-               WHERE instrument = ? AND obsdate = ?
+               WHERE instrument = ? AND obsdate = ? AND {visible}
                  AND object IS NOT NULL AND TRIM(object) <> ''
                  AND LOWER(TRIM(object)) NOT IN ({exact})
                  AND LOWER(TRIM(object)) NOT LIKE '%flat%'
@@ -1418,8 +1422,9 @@ def get_objects(db_path: str, instrument: str, obsdate: str) -> list[str]:
                  AND TRIM(object) NOT GLOB '*:*:*'
                ORDER BY object COLLATE NOCASE""".format(
                 exact=", ".join(f"'{s}'" for s in _TARGET_EXCLUDE_EXACT),
+                visible=visible,
             ),
-            (instrument, obsdate),
+            (instrument, obsdate, *visible_params),
         )
         return [r[0] for r in cur.fetchall()]
 

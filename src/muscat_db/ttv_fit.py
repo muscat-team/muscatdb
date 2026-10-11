@@ -875,11 +875,9 @@ def read_fit_stats(rdir: pathlib.Path) -> dict | None:
     return {key: _finite(value) for key, value in stats.items()}
 
 
-@_ttv_outputs_cache
-def _get_ttv_outputs_mtime(
-    target: str, run_name: str, _cache_mtime: float
-) -> dict:
-    outputs: dict = {
+def empty_ttv_outputs() -> dict:
+    """What :func:`get_ttv_outputs` returns for a run with no output."""
+    return {
         "has_any": False,
         "plots": [],
         "has_log": False,
@@ -891,6 +889,13 @@ def _get_ttv_outputs_mtime(
         "extra_files": [],
         "input_snapshot": None,
     }
+
+
+@_ttv_outputs_cache
+def _get_ttv_outputs_mtime(
+    target: str, run_name: str, _cache_mtime: float
+) -> dict:
+    outputs = empty_ttv_outputs()
     try:
         rdir = ttv_output_dir(target, run_name)
     except ValueError:
