@@ -285,6 +285,57 @@ def test_lco_clone_declares_muscat_branch_flag_before_use():
     assert "isSingleFilterKind(p.kind)" in decl.group(1)
 
 
+def test_lco_site_availability_annotates_without_removing_elp():
+    """A temporarily-offline site is annotated, never dropped from the lists.
+
+    ELP is a Sinistro site whose 1 m unit is down for the Sophia upgrade. The
+    schedule page must keep elp selectable (so it returns with no code change)
+    while refusing to auto-pin an instrument that is not currently schedulable
+    there; availability comes from the live /api/lco/instruments endpoint.
+    """
+    html = _read_template("lco_schedule.html")
+
+    # elp stays a listed Sinistro site.
+    sin_start = html.index("sinistro: [")
+    sin_sites = html[sin_start : html.index("qhy600: [", sin_start)]
+    assert "'elp'" in sin_sites
+
+    # State + helpers exist.
+    assert "var siteAvailability = null" in html
+    assert "var KIND_INSTRUMENT_TYPE = {" in html
+    for fn in (
+        "kindAvailableAt", "annotateSiteOptions", "showSiteNote",
+        "clearSiteNote", "loadSiteAvailability",
+    ):
+        assert f"function {fn}(" in html, f"missing helper: {fn}"
+
+    # Availability is fetched from the read-only endpoint, with a refresh hatch.
+    load = _function_body(html, "loadSiteAvailability")
+    assert "'/api/lco/instruments'" in load
+    assert "'?refresh=1'" in load
+
+    # Annotation only appends a suffix; it must never disable or remove options.
+    annotate = _function_body(html, "annotateSiteOptions")
+    assert "data-base-label" in annotate
+    assert "SITE_OFFLINE_SUFFIX" in annotate
+    assert ".disabled" not in annotate
+    assert "removeChild" not in annotate
+
+    # applyKind re-annotates for the newly selected kind, and init loads once.
+    assert "annotateSiteOptions();" in _function_body(html, "applyKind")
+    assert "loadSiteAvailability();" in html
+
+    # applyAutoConfig leaves the site unset + explains instead of pinning a site
+    # whose instrument is currently unschedulable there.
+    auto = _function_body(html, "applyAutoConfig")
+    assert "kindAvailableAt(kind, site)" in auto
+    assert "showSiteNote(site, kind)" in auto
+
+    # The note is a live-message div, not a form control (so it needs no
+    # persistence wiring and is not caught by the input audit).
+    assert 'id="sch-site-note"' in html
+
+
 def test_lco_submit_confirmation_uses_message_modal():
     """Live LCO submission must use the styled app modal, not a browser popup."""
     base = _read_template("base.html")
@@ -1057,6 +1108,7 @@ class TestBackendEndpoints:
             "api_fov_optimize",
             "api_lco_ipp",
             "api_lco_submit",
+            "api_lco_instruments",
         ):
             assert handler in handler_names, f"missing handler: {handler}"
 
