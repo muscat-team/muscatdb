@@ -500,17 +500,20 @@ Single-host = one worker process on ut2. Multi-host = the same worker on more ho
 **no `LocalDispatcher`/`CeleryDispatcher` fork and no `MUSCAT_CELERY_ENABLED` flag** — the only
 variable is how many workers run and where.
 
-**Known gap — cancel does not yet cross the process boundary.** A job still in the durable
-queue cancels cleanly from any process (it only touches the `jobs` table row). Once a worker
-has claimed and launched it, the running job lives solely in *that* worker's in-memory
-registry (prose/timer/harmonic subprocess handle + process group) — a different process
-(e.g. the web server handling a user's Cancel click) has no handle to signal and today gets
-back `{"ok": False, "error": "no job to cancel"}`, leaving the real subprocess running
-unsupervised. Proven (not fixed) by
-`TestCancelBoundary::test_worker_claimed_running_job_cannot_be_cancelled_from_the_web_process`
-in `tests/test_worker_p2_proof.py`. Closing it needs a cross-process cancel-request channel —
-e.g. a `cancel_requested` column the owning worker's own polling pass checks and acts on —
-not yet designed; out of scope for the single-host proof above.
+**Cancel crosses the process boundary through a request on the job row.** A job still in the
+durable queue cancels cleanly from any process (it only touches the `jobs` table row). Once a
+worker has claimed and launched it, the running job lives solely in *that* worker's in-memory
+registry (prose/timer/harmonic subprocess handle + process group), so another process cannot
+signal it. The web process therefore sets `jobs.cancel_requested_at` on the running row
+(`JobRepository.request_cancel`, returns `{"ok": True, "requested": True}`) and leaves the state
+`running`. The owning instance's own `sync_jobs` pass reads its requests
+(`JobRepository.cancel_requested(type, instance_id)`), runs the pipeline's ordinary local cancel
+and records `cancelled` itself. A request only counts when it is newer than the row's
+`started_at`, so a stale flag never cancels a later re-run of the same key. Latency is one
+reconcile interval (`MUSCAT_JOB_RECONCILE_INTERVAL_S`, default 2 s). Covered by
+`tests/test_remote_cancel.py` and
+`TestCancelBoundary::test_worker_claimed_running_job_is_cancelled_from_the_web_process` in
+`tests/test_worker_p2_proof.py`.
 
 ### Two stores, cleanly split (a robustness win, not just scale)
 

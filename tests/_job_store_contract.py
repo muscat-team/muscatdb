@@ -293,6 +293,55 @@ class JobStoreContractTests:
         save(store, target="HIP1", state="error", started_at=100.0)
         assert store.all()[0]["owner"] == "worker"
 
+    # --- cross-process cancel request -----------------------------------
+    #
+    # A job launched by a worker lives in that worker's in-memory registry, so
+    # the web process cannot signal it. request_cancel() records the intent on
+    # the durable row; the owning instance reads it back with
+    # cancel_requested() on its next pass and runs its own local cancel.
+
+    def test_request_cancel_flags_only_a_running_row(self, store):
+        save(store, target="RUN", state="running", started_at=100.0, instance_id="h:1:a")
+        save(store, target="PEND", state="pending", started_at=101.0)
+        save(store, target="DONE", state="done", started_at=102.0)
+
+        assert store.request_cancel("photometry:muscat4/260101/RUN") is True
+        assert store.request_cancel("photometry:muscat4/260101/PEND") is False
+        assert store.request_cancel("photometry:muscat4/260101/DONE") is False
+        assert store.request_cancel("photometry:muscat4/260101/NOPE") is False
+
+    def test_cancel_requested_is_scoped_to_type_and_holding_instance(self, store):
+        save(store, target="MINE", state="running", started_at=100.0, instance_id="h:1:a")
+        save(store, target="THEIRS", state="running", started_at=101.0, instance_id="h:2:b")
+        save(store, target="FIT", state="running", started_at=102.0, instance_id="h:1:a",
+             type_="transit_fit")
+        for t, ty in (("MINE", "photometry"), ("THEIRS", "photometry"), ("FIT", "transit_fit")):
+            store.request_cancel(f"{ty}:muscat4/260101/{t}")
+
+        rows = store.cancel_requested("photometry", "h:1:a")
+
+        assert [r["target"] for r in rows] == ["MINE"]
+
+    def test_cancel_requested_is_empty_until_requested(self, store):
+        save(store, target="RUN", state="running", started_at=100.0, instance_id="h:1:a")
+        assert store.cancel_requested("photometry", "h:1:a") == []
+
+    def test_cancel_requested_clears_once_the_row_leaves_running(self, store):
+        save(store, target="RUN", state="running", started_at=100.0, instance_id="h:1:a")
+        store.request_cancel("photometry:muscat4/260101/RUN")
+        save(store, target="RUN", state="cancelled", started_at=100.0, instance_id="h:1:a")
+
+        assert store.cancel_requested("photometry", "h:1:a") == []
+
+    def test_a_stale_request_does_not_cancel_a_later_run_of_the_same_key(self, store, monkeypatch):
+        save(store, target="RUN", state="running", started_at=100.0, instance_id="h:1:a")
+        store.request_cancel("photometry:muscat4/260101/RUN")
+        # the same key is re-run later: started_at is newer than the old request
+        save(store, target="RUN", state="running", started_at=time.time() + 60,
+             instance_id="h:1:a")
+
+        assert store.cancel_requested("photometry", "h:1:a") == []
+
     # --- instance_id tagging + heartbeat (architecture issue #51 step 3) --
     #
     # instance_id records which *process* (job_store.current_instance_id())

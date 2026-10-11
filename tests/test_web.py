@@ -1275,6 +1275,59 @@ def test_jobs_rerun_restores_persisted_run_identity(mock_db, monkeypatch):
     assert captured["test_run"] is False
 
 
+def test_jobs_rerun_of_unnamed_run_keeps_its_run_id(mock_db, monkeypatch):
+    """A run with no explicit name has ``run_name == run_id`` only as a display
+    fallback in the job rows. Feeding that back as the run name re-prefixed the
+    site/telescope/mode and forked a second row on every re-run."""
+    import json
+
+    from muscat_db.jobs import build_run_id
+
+    run_id = build_run_id("tfn", "full_frame", "", telescope="1m0-14")
+    assert run_id == "tfn-tel14-full_frame-default"
+    save_job(
+        type_="photometry",
+        inst="sinistro",
+        date="230618",
+        target="TOI-1404.01",
+        state="done",
+        returncode=0,
+        elapsed=100,
+        started_at=1700000300.0,
+        run_type="full",
+        params=json.dumps(
+            {
+                "test_run": False,
+                "options": {"bands": ["zs"]},
+                "run_id": run_id,
+                "site": "tfn",
+                "telescope": "1m0-14",
+                "mode": "full_frame",
+                "run_name": "",
+            }
+        ),
+        run_id=run_id,
+        run_name="",
+    )
+    row = get_persisted_jobs()[0]
+    assert row["run_name"] == run_id  # the display fallback the bug fed back in
+    captured = {}
+
+    def fake_start_run(inst, date, target, options, test_run, user_name=None):
+        captured["options"] = options
+        return {"ok": True, "key": "rerun-key"}
+
+    monkeypatch.setattr("muscat_db.web.phot.start_run", fake_start_run)
+
+    response = TestClient(app).post("/api/jobs/rerun", json={"key": row["key"]})
+
+    assert response.status_code == 200
+    opts = captured["options"]
+    assert build_run_id(
+        opts.get("site"), opts.get("mode"), opts.get("run_name"), telescope=opts.get("telescope")
+    ) == run_id
+
+
 def test_validate_no_duplicate_datasets():
     import pathlib
     from muscat_db.transit_fit import validate_no_duplicate_datasets
