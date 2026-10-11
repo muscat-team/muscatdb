@@ -105,6 +105,12 @@ def _isolate_db_backup_dir(monkeypatch, tmp_path_factory):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_gaia_disk_cache(monkeypatch, tmp_path_factory):
+    """Keep the persistent Gaia cone-search cache out of the real cache dir."""
+    monkeypatch.setenv("MUSCAT_GAIA_CACHE_DIR", str(tmp_path_factory.mktemp("gaia-cache")))
+
+
+@pytest.fixture(autouse=True)
 def _browser_request_headers(monkeypatch):
     """Make unsafe TestClient calls match real same-origin browser requests.
 

@@ -528,8 +528,10 @@ def _query_gaia_esa(
     """Cone-search Gaia DR3 via the official ESA archive (TAP/ADQL).
 
     This is independent of CDS/VizieR, so it stays available during a VizieR
-    outage (and vice versa). Slower than the VizieR cone-search (a TAP job
-    round trip typically takes several seconds to tens of seconds).
+    outage (and vice versa). Uses the synchronous TAP endpoint: a cone search
+    this small returns in a few seconds, whereas ``launch_job_async`` queues
+    a server-side job that took ~90 s and outlived the reverse proxy's read
+    timeout (the browser then received an HTML 504 instead of JSON).
     """
     empty = StarField(
         np.array([]), np.array([]), np.array([]), np.array([]), "Gaia DR3 (ESA)"
@@ -554,7 +556,7 @@ def _query_gaia_esa(
         "ORDER BY phot_g_mean_mag"
     )
     try:
-        tab = Gaia.launch_job_async(query).get_results()
+        tab = Gaia.launch_job(query).get_results()
     except Exception as exc:
         empty.error = f"ESA Gaia query failed: {exc}"
         logger.warning("ESA Gaia query failed for (%.4f, %.4f): %s", ra, dec, exc)
@@ -643,7 +645,7 @@ def query_gaia_field(
 ) -> StarField:
     """Cone-search Gaia DR3 around (ra, dec).
 
-    Tries the official ESA archive first (authoritative, but a TAP job round
+    Tries the official ESA archive first (authoritative, but a TAP round
     trip can take several seconds); falls back to the VizieR mirror
     (I/355/gaiadr3) if the ESA archive is unavailable. Returns a
     :class:`StarField`; on failure the arrays are empty and ``error``
@@ -693,6 +695,59 @@ def _gaia_cache_key(
     )
 
 
+# Persistent layer under the in-memory LRU: the Gaia archive can be slow or
+# down, and the in-memory cache is lost on every server restart. One .npz per
+# cone-search key; a missing, unreadable or corrupt file is simply a miss.
+_GAIA_DISK_COLUMNS = ("ra", "dec", "gmag", "bp_rp", "pmra", "pmdec")
+
+
+def _gaia_disk_dir() -> Path:
+    root = os.environ.get("MUSCAT_GAIA_CACHE_DIR")
+    return Path(root) if root else Path.home() / ".cache" / "muscat-db" / "gaia"
+
+
+def _gaia_disk_path(key: tuple) -> Path:
+    name = "_".join(f"{v:.4f}" for v in key).replace("-", "m").replace(".", "p")
+    return _gaia_disk_dir() / f"gaia_{name}.npz"
+
+
+def _gaia_disk_load(key: tuple) -> StarField | None:
+    path = _gaia_disk_path(key)
+    try:
+        with np.load(path, allow_pickle=False) as data:
+            arrays = {col: np.asarray(data[col], dtype=float) for col in _GAIA_DISK_COLUMNS}
+            source = str(data["source"])
+    except FileNotFoundError:
+        return None
+    except Exception as exc:
+        logger.warning("Ignoring unreadable Gaia cache file %s: %s", path, exc)
+        return None
+    return StarField(
+        ra=arrays["ra"], dec=arrays["dec"], gmag=arrays["gmag"],
+        bp_rp=arrays["bp_rp"], source=source,
+        pmra=arrays["pmra"], pmdec=arrays["pmdec"],
+    )
+
+
+def _gaia_disk_store(key: tuple, stars: StarField) -> None:
+    """Best-effort write; a read-only or full disk must not fail the request."""
+    path = _gaia_disk_path(key)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(tmp, "wb") as fh:
+            np.savez(
+                fh,
+                ra=stars.ra, dec=stars.dec, gmag=stars.gmag, bp_rp=stars.bp_rp,
+                pmra=stars.pmra, pmdec=stars.pmdec, source=np.array(stars.source),
+            )
+        os.replace(tmp, path)  # atomic: concurrent readers never see a partial file
+    except OSError as exc:
+        logger.warning("Could not write Gaia cache file %s: %s", path, exc)
+        tmp.unlink(missing_ok=True)
+
+
+
 def cached_query_gaia_field(
     ra: float,
     dec: float,
@@ -714,9 +769,14 @@ def cached_query_gaia_field(
     cached = _gaia_cache.get(key)
     if cached is not None:
         return cached
+    cached = _gaia_disk_load(key)
+    if cached is not None:
+        _gaia_cache[key] = cached
+        return cached
     result = query_gaia_field(ra, dec, radius_arcsec, min_mag=min_mag, max_mag=max_mag)
     if result.error is None:
         _gaia_cache[key] = result
+        _gaia_disk_store(key, result)
     return result
 
 
