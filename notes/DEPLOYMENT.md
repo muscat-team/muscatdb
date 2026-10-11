@@ -297,14 +297,14 @@ pipelines = ["transit_fit", "ttv_fit", "photometry"]
 .venv/bin/python deploy/workers.py --dry-run up   # read-only probes; changes nothing
 .venv/bin/python deploy/workers.py up ut5         # one host; workers start one at a time
 .venv/bin/python deploy/workers.py status
-.venv/bin/python deploy/workers.py down ut5       # refuses while jobs run there; --force to override
+.venv/bin/python deploy/workers.py down ut5       # refuses while jobs run there or under another profile; --force to override
 eval "$(.venv/bin/python deploy/workers.py web-env)"   # in the shell that starts the web app
 ```
 
 Dev and production share this one fleet and one set of unit names; they rarely run together, so `[profiles.dev]` and `[profiles.prod]` in `workers.toml` switch the keys that must change as a pair. `prod` sets `database = "muscatdb_prod"` **and** `repo = /ut2/jerome/deploy/main/app`, because the workers run the code in `repo`: a production database with the dev checkout would run dev code on production jobs. `--profile NAME` (or `MUSCAT_WORKERS_PROFILE`) selects one; `[defaults] profile` is used otherwise, and every command prints the active profile, database and repo. To switch:
 
 ```bash
-.venv/bin/python deploy/workers.py --profile dev  down    # refuses while jobs run on a host
+.venv/bin/python deploy/workers.py --profile dev  down    # refuses while jobs run on a host; up skips busy workers likewise
 .venv/bin/python deploy/workers.py --profile prod up      # env text changed, so the units restart
 eval "$(.venv/bin/python deploy/workers.py --profile prod web-env)"   # in the shell that starts :8001
 ```

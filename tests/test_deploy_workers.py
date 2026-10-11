@@ -236,11 +236,41 @@ def conf(tmp_path, monkeypatch):
     return tmp_path
 
 
+class FakeDb:
+    """Stands in for ``make_db_query``: running rows per database name."""
+
+    def __init__(self, **rows_by_database):
+        self.rows = rows_by_database
+        self.queried: list[str | None] = []
+
+    def __call__(self, database=None):
+        self.queried.append(database)
+        if database not in self.rows:
+            raise RuntimeError(f"job query failed: no database {database!r}")
+        return self.rows[database]
+
+
+def no_db(database=None):
+    raise AssertionError(f"the database must not be queried here (asked for {database!r})")
+
+
+def install(cfg, host_key, hostname, conf):
+    """Write the env files ``up`` would have, as an earlier run under *cfg*."""
+    for pipe in cfg.hosts[host_key].pipelines:
+        path = conf / "muscatdb" / "workers" / f"{w.instance(host_key, pipe)}.env"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(w.render_env(cfg, cfg.hosts[host_key], hostname))
+
+
+def job(host, type_, n=1):
+    return {"instance_id": f"{host}:{n}:abcd", "type": type_}
+
+
 def test_up_installs_unit_and_env_then_starts_each_pipeline_staggered(conf):
     cfg = w.parse_config(_data())
     runner = RecordingRunner({"muscat-ut3": "muscat-ut3"})
 
-    rc = w.cmd_up(cfg, [cfg.hosts["ut3"]], runner)
+    rc = w.cmd_up(cfg, [cfg.hosts["ut3"]], runner, no_db)
 
     assert rc == 0
     assert (conf / "systemd/user/muscatdb-worker@.service").is_file()
@@ -256,16 +286,16 @@ def test_up_installs_unit_and_env_then_starts_each_pipeline_staggered(conf):
 
 def test_up_restarts_only_workers_whose_env_changed(conf):
     cfg = w.parse_config(_data())
-    w.cmd_up(cfg, [cfg.hosts["ut5"]], RecordingRunner({"ut5": "muscat-ut5"}))
+    w.cmd_up(cfg, [cfg.hosts["ut5"]], RecordingRunner({"ut5": "muscat-ut5"}), no_db)
 
     second = RecordingRunner({"ut5": "muscat-ut5"})
-    w.cmd_up(cfg, [cfg.hosts["ut5"]], second)
+    w.cmd_up(cfg, [cfg.hosts["ut5"]], second, no_db)
     assert any(" start muscatdb-worker@ut5-ttv_fit.service" in c for c in second.mutating("ut5"))
     assert not any(" restart " in c for c in second.mutating("ut5"))
 
     changed = w.parse_config(_data(hosts={"ut5": {"pipelines": ["ttv_fit"], "max_slots": 3}}))
     third = RecordingRunner({"ut5": "muscat-ut5"})
-    w.cmd_up(changed, [changed.hosts["ut5"]], third)
+    w.cmd_up(changed, [changed.hosts["ut5"]], third, FakeDb(muscatdb_dev=[]))
     assert any(" restart muscatdb-worker@ut5-ttv_fit.service" in c for c in third.mutating("ut5"))
 
 
@@ -276,7 +306,7 @@ def test_up_stops_instances_no_longer_in_the_config(conf):
         existing={"muscat-ut3": ["muscatdb-worker@ut3-ttv_fit.service", "muscatdb-worker@ut3-photometry.service"]},
     )
 
-    w.cmd_up(cfg, [cfg.hosts["ut3"]], runner)
+    w.cmd_up(cfg, [cfg.hosts["ut3"]], runner, FakeDb(muscatdb_dev=[]))
 
     stops = [c for c in runner.mutating("muscat-ut3") if "disable --now" in c]
     assert stops == ["systemctl --user disable --now muscatdb-worker@ut3-ttv_fit.service"]
@@ -292,7 +322,7 @@ def test_up_reports_an_unreachable_host_and_continues(conf):
             return super().run(ssh, script, readonly)
 
     runner = Down({"ut5": "muscat-ut5"})
-    rc = w.cmd_up(cfg, [cfg.hosts["ut3"], cfg.hosts["ut5"]], runner)
+    rc = w.cmd_up(cfg, [cfg.hosts["ut3"], cfg.hosts["ut5"]], runner, no_db)
 
     assert rc == 1
     assert any("ut5-ttv_fit" in c for c in runner.mutating("ut5"))
@@ -302,7 +332,7 @@ def test_up_reports_an_unreachable_host_and_continues(conf):
 def test_down_refuses_while_jobs_run_on_the_host(conf, capsys):
     cfg = w.parse_config(_data())
     runner = RecordingRunner({"muscat-ut3": "muscat-ut3"})
-    rows = lambda: [{"instance_id": "muscat-ut3:123:abcd", "type": "transit_fit"}]  # noqa: E731
+    rows = lambda database=None: [{"instance_id": "muscat-ut3:123:abcd", "type": "transit_fit"}]  # noqa: E731
 
     rc = w.cmd_down(cfg, [cfg.hosts["ut3"]], runner, rows, force=False)
 
@@ -314,7 +344,7 @@ def test_down_refuses_while_jobs_run_on_the_host(conf, capsys):
 def test_down_ignores_jobs_on_other_hosts_and_stops_every_instance(conf):
     cfg = w.parse_config(_data())
     runner = RecordingRunner({"muscat-ut3": "muscat-ut3"})
-    rows = lambda: [{"instance_id": "muscat-ut5:9:ffff", "type": "ttv_fit"}]  # noqa: E731
+    rows = lambda database=None: [{"instance_id": "muscat-ut5:9:ffff", "type": "ttv_fit"}]  # noqa: E731
 
     rc = w.cmd_down(cfg, [cfg.hosts["ut3"]], runner, rows, force=False)
 
@@ -329,7 +359,7 @@ def test_down_ignores_jobs_on_other_hosts_and_stops_every_instance(conf):
 def test_down_force_stops_despite_running_jobs(conf):
     cfg = w.parse_config(_data())
     runner = RecordingRunner({"muscat-ut3": "muscat-ut3"})
-    rows = lambda: [{"instance_id": "muscat-ut3:123:abcd", "type": "transit_fit"}]  # noqa: E731
+    rows = lambda database=None: [{"instance_id": "muscat-ut3:123:abcd", "type": "transit_fit"}]  # noqa: E731
 
     assert w.cmd_down(cfg, [cfg.hosts["ut3"]], runner, rows, force=True) == 0
     assert runner.mutating("muscat-ut3")
@@ -340,7 +370,7 @@ def test_down_force_does_not_need_the_database(conf):
     cfg = w.parse_config(_data())
     runner = RecordingRunner({"muscat-ut3": "muscat-ut3"})
 
-    def unreachable():
+    def unreachable(database=None):
         raise RuntimeError("database does not exist")
 
     assert w.cmd_down(cfg, [cfg.hosts["ut3"]], runner, unreachable, force=True) == 0
@@ -361,3 +391,166 @@ def test_dry_run_writes_nothing(tmp_path, monkeypatch, capsys):
     assert not (tmp_path / "x").exists()
     assert r.run("host", "systemctl --user stop x") == (0, "")
     assert "[dry-run]" in capsys.readouterr().out
+
+
+# -- safety guards: the installed fleet, not the selected profile, decides -------
+
+
+def _prod_installed(conf):
+    prod = w.parse_config(_profiled(), profile="prod")
+    install(prod, "ut3", "muscat-ut3", conf)
+    return prod
+
+
+def test_down_refuses_when_the_installed_profile_is_not_the_selected_one(conf, capsys):
+    _prod_installed(conf)
+    dev = w.parse_config(_profiled(), profile="dev")
+    runner = RecordingRunner({"muscat-ut3": "muscat-ut3"})
+    db = FakeDb(muscatdb_dev=[], muscatdb_prod=[job("muscat-ut3", "photometry")])
+
+    rc = w.cmd_down(dev, [dev.hosts["ut3"]], runner, db, force=False)
+
+    assert rc == 1
+    assert runner.mutating("muscat-ut3") == []
+    err = capsys.readouterr().err
+    assert "prod" in err and "--profile prod" in err and "--force" in err
+
+
+def test_down_checks_the_database_the_workers_are_installed_against(conf, capsys):
+    prod = _prod_installed(conf)
+    runner = RecordingRunner({"muscat-ut3": "muscat-ut3"})
+    # same profile name, config since pointed elsewhere: the running job is in the old database
+    moved = w.parse_config(_profiled(profiles={
+        "dev": {}, "prod": {"database": "muscatdb_prod2", "repo": "/srv/deploy/main"},
+    }), profile="prod")
+    assert moved.database != prod.database
+    db = FakeDb(muscatdb_prod=[job("muscat-ut3", "photometry")], muscatdb_prod2=[])
+
+    rc = w.cmd_down(moved, [moved.hosts["ut3"]], runner, db, force=False)
+
+    assert rc == 1
+    assert runner.mutating("muscat-ut3") == []
+    assert set(db.queried) == {"muscatdb_prod"}
+
+
+def test_down_force_stops_a_mismatched_fleet_without_the_database(conf):
+    _prod_installed(conf)
+    dev = w.parse_config(_profiled(), profile="dev")
+    runner = RecordingRunner({"muscat-ut3": "muscat-ut3"})
+
+    assert w.cmd_down(dev, [dev.hosts["ut3"]], runner, no_db, force=True) == 0
+    assert runner.mutating("muscat-ut3")
+
+
+def test_down_reports_an_unverifiable_host_instead_of_stopping_it(conf, capsys):
+    prod = _prod_installed(conf)
+    runner = RecordingRunner({"muscat-ut3": "muscat-ut3"})
+
+    rc = w.cmd_down(prod, [prod.hosts["ut3"]], runner, FakeDb(), force=False)
+
+    assert rc == 1
+    assert runner.mutating("muscat-ut3") == []
+    assert "--force" in capsys.readouterr().err
+
+
+def test_status_counts_jobs_in_the_installed_database_and_flags_a_mismatch(conf, capsys):
+    _prod_installed(conf)
+    dev = w.parse_config(_profiled(), profile="dev")
+    runner = RecordingRunner({"muscat-ut3": "muscat-ut3"})
+    db = FakeDb(muscatdb_dev=[], muscatdb_prod=[job("muscat-ut3", "photometry")])
+
+    assert w.cmd_status(dev, [dev.hosts["ut3"]], runner, db) == 0
+
+    out = capsys.readouterr().out
+    assert "running jobs on this host: 1" in out
+    assert "installed profile prod" in out and "selected dev" in out
+    assert "muscatdb_dev" not in db.queried
+
+
+def _changed(cfg):
+    """*cfg* with a different job_threads, so ``up`` sees new env text."""
+    data = _data(hosts={"ut3": {"ssh": "muscat-ut3", "pipelines": ["transit_fit", "photometry"], "job_threads": 4}})
+    return w.parse_config(data)
+
+
+def test_up_keeps_a_busy_worker_running_and_leaves_its_env_for_the_next_run(conf, capsys):
+    cfg = w.parse_config(_data())
+    install(cfg, "ut3", "muscat-ut3", conf)
+    new = _changed(cfg)
+    env = conf / "muscatdb/workers/ut3-photometry.env"
+    before = env.read_text()
+    runner = RecordingRunner({"muscat-ut3": "muscat-ut3"})
+    db = FakeDb(muscatdb_dev=[job("muscat-ut3", "photometry")])
+
+    rc = w.cmd_up(new, [new.hosts["ut3"]], runner, db)
+
+    cmds = runner.mutating("muscat-ut3")
+    assert rc == 1
+    assert not any("ut3-photometry" in c for c in cmds)  # not restarted, not even started
+    assert any(" restart muscatdb-worker@ut3-transit_fit.service" in c for c in cmds)  # idle: restarted
+    assert env.read_text() == before  # unchanged on disk, so the next `up` still sees the diff
+    assert "restart pending" in capsys.readouterr().err
+
+    later = RecordingRunner({"muscat-ut3": "muscat-ut3"})
+    w.cmd_up(new, [new.hosts["ut3"]], later, FakeDb(muscatdb_dev=[]))
+    assert any(" restart muscatdb-worker@ut3-photometry.service" in c for c in later.mutating("muscat-ut3"))
+
+
+def test_up_force_restarts_a_busy_worker(conf):
+    cfg = w.parse_config(_data())
+    install(cfg, "ut3", "muscat-ut3", conf)
+    new = _changed(cfg)
+    runner = RecordingRunner({"muscat-ut3": "muscat-ut3"})
+    db = FakeDb(muscatdb_dev=[job("muscat-ut3", "photometry")])
+
+    assert w.cmd_up(new, [new.hosts["ut3"]], runner, db, force=True) == 0
+    assert any(" restart muscatdb-worker@ut3-photometry.service" in c for c in runner.mutating("muscat-ut3"))
+
+
+def test_up_profile_switch_checks_the_database_being_left(conf):
+    cfg = w.parse_config(_profiled(), profile="dev")
+    install(cfg, "ut3", "muscat-ut3", conf)
+    prod = w.parse_config(_profiled(), profile="prod")
+    runner = RecordingRunner({"muscat-ut3": "muscat-ut3"})
+    db = FakeDb(muscatdb_dev=[job("muscat-ut3", "transit_fit")], muscatdb_prod=[])
+
+    rc = w.cmd_up(prod, [prod.hosts["ut3"]], runner, db)
+
+    cmds = runner.mutating("muscat-ut3")
+    assert rc == 1
+    assert not any("ut3-transit_fit" in c for c in cmds)
+    assert "muscatdb_dev" in db.queried and "muscatdb_prod" not in db.queried
+
+
+def test_up_does_not_stop_a_stale_unit_that_is_running_a_job(conf, capsys):
+    cfg = w.parse_config(_data())
+    runner = RecordingRunner(
+        {"muscat-ut3": "muscat-ut3"},
+        existing={"muscat-ut3": ["muscatdb-worker@ut3-ttv_fit.service"]},
+    )
+    db = FakeDb(muscatdb_dev=[job("muscat-ut3", "ttv_fit")])
+
+    rc = w.cmd_up(cfg, [cfg.hosts["ut3"]], runner, db)
+
+    assert rc == 1
+    assert not any("disable --now" in c for c in runner.mutating("muscat-ut3"))
+    assert "ut3-ttv_fit" in capsys.readouterr().err
+
+    forced = RecordingRunner(
+        {"muscat-ut3": "muscat-ut3"},
+        existing={"muscat-ut3": ["muscatdb-worker@ut3-ttv_fit.service"]},
+    )
+    w.cmd_up(cfg, [cfg.hosts["ut3"]], forced, db, force=True)
+    assert any("disable --now muscatdb-worker@ut3-ttv_fit.service" in c for c in forced.mutating("muscat-ut3"))
+
+
+def test_up_fails_closed_when_it_cannot_check_for_jobs(conf):
+    cfg = w.parse_config(_data())
+    install(cfg, "ut3", "muscat-ut3", conf)
+    new = _changed(cfg)
+    runner = RecordingRunner({"muscat-ut3": "muscat-ut3"})
+
+    rc = w.cmd_up(new, [new.hosts["ut3"]], runner, FakeDb())
+
+    assert rc == 1
+    assert not any(" restart " in c for c in runner.mutating("muscat-ut3"))

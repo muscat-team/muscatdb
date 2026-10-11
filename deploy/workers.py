@@ -25,6 +25,13 @@ How it works
   running (``KillMode=control-group``), because a surviving fit would race the
   reclaim of its own row. ``down`` therefore refuses while jobs are running on
   the host unless ``--force``; a forced job is requeued by the orphan reclaim.
+  ``up`` applies the same guard before it restarts a worker whose env changed
+  or stops a stale unit: a busy pipeline is skipped with "restart pending" and
+  its env file is left alone, so the next ``up`` retries it.
+* The guard reads the profile and database back from the installed env files,
+  not from the selected profile. ``down`` refuses when the fleet was installed
+  under another profile (re-run with that ``--profile``), and ``status`` and
+  ``up`` count jobs in the database the workers actually use.
 
 Profiles
 --------
@@ -45,7 +52,9 @@ last logout (``status`` reports it; ``up`` only warns).
 from __future__ import annotations
 
 import argparse
+import functools
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -59,6 +68,7 @@ UNIT_NAME = "muscatdb-worker@.service"
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "workers.toml"
 _XDG = "export XDG_RUNTIME_DIR=/run/user/$(id -u); "
+_DB_NAME = re.compile(r"[A-Za-z0-9_]+\Z")
 
 
 class ConfigError(ValueError):
@@ -304,15 +314,74 @@ def _listed(rc_out: tuple[int, str]) -> list[str]:
     return [line.split()[0] for line in out.splitlines() if line.startswith("muscatdb-worker@")] if rc == 0 else []
 
 
-def running_jobs(host_name: str, db_query) -> int:
-    """Number of ``running`` job rows whose instance_id belongs to *host_name*."""
-    return sum(1 for r in db_query() if str(r.get("instance_id", "")).startswith(f"{host_name}:"))
+@dataclass(frozen=True)
+class Installed:
+    """What a worker's env file on disk says it was installed with."""
+
+    profile: str | None
+    database: str | None
+
+
+def installed_state(host_key: str, pipeline: str) -> Installed | None:
+    """Read the profile and database back from the env file ``up`` wrote.
+
+    The unit runs from that file, so it -- not the selected profile -- says which
+    database a running worker is using. None when no env file exists.
+    """
+    path = _conf_dir() / "muscatdb" / "workers" / f"{instance(host_key, pipeline)}.env"
+    try:
+        text = path.read_text()
+    except FileNotFoundError:
+        return None
+    values = dict(line.split("=", 1) for line in text.splitlines() if "=" in line and not line.startswith("#"))
+    return Installed(values.get("MUSCAT_WORKER_PROFILE"), values.get("MUSCAT_WORKER_PG_DATABASE"))
+
+
+def _pipeline_of(unit: str) -> str:
+    """``muscatdb-worker@ut3-ttv_fit.service`` -> ``ttv_fit``."""
+    return unit.removeprefix("muscatdb-worker@").removesuffix(".service").split("-", 1)[-1]
+
+
+def _database_of(cfg: Config, state: Installed | None) -> str:
+    return state.database if state and state.database else cfg.database
+
+
+def _jobs_on(hostname: str, databases: set[str], db_query) -> list[dict]:
+    """``running`` job rows, in any of *databases*, owned by an instance on *hostname*."""
+    rows: list[dict] = []
+    for database in sorted(databases):
+        rows += [r for r in db_query(database) if str(r.get("instance_id", "")).startswith(f"{hostname}:")]
+    return rows
+
+
+def _hold_reason(cfg: Config, host_key: str, hostname: str, pipeline: str, db_query) -> str | None:
+    """Why stopping or restarting *pipeline*'s worker now is unsafe, else None.
+
+    Checked against the database the worker was installed with. A row whose type
+    is not a known pipeline counts for every pipeline, and a failed query counts
+    as busy: this errs towards leaving a worker alone.
+    """
+    database = _database_of(cfg, installed_state(host_key, pipeline))
+    try:
+        rows = _jobs_on(hostname, {database}, db_query)
+    except RuntimeError as exc:
+        return f"cannot check for running jobs in {database} ({exc})"
+    busy = sum(1 for r in rows if r.get("type") == pipeline or r.get("type") not in PIPELINES)
+    return f"{busy} {pipeline} job(s) running on {hostname} (database {database})" if busy else None
 
 
 # ------------------------------------------------------------------- commands
 
 
-def cmd_up(cfg: Config, hosts: list[HostSpec], runner: Runner) -> int:
+def cmd_up(cfg: Config, hosts: list[HostSpec], runner: Runner, db_query, force: bool = False) -> int:
+    """Install and (re)start workers.
+
+    A worker is restarted only when its env text changed, and a restart or a
+    stale-unit stop kills the job it is running, so both are skipped for a busy
+    pipeline unless *force*. A skipped pipeline's env file is left untouched so
+    the next ``up`` still sees the difference. The job query runs only when such
+    a change is actually pending (never on a first install).
+    """
     conf = _conf_dir()
     runner.write(conf / "systemd" / "user" / UNIT_NAME, render_unit(cfg.repo))
     worker_run = cfg.repo / "deploy" / "worker-run.sh"
@@ -324,9 +393,21 @@ def cmd_up(cfg: Config, hosts: list[HostSpec], runner: Runner) -> int:
             rc_total = 1
             continue
         changed: set[str] = set()
+        held: set[str] = set()
         for pipe in host.pipelines:
             env_path = conf / "muscatdb" / "workers" / f"{instance(host.key, pipe)}.env"
-            if runner.write(env_path, render_env(cfg, host, hostname)):
+            text = render_env(cfg, host, hostname)
+            if env_path.exists() and env_path.read_text() != text and not force:
+                reason = _hold_reason(cfg, host.key, hostname, pipe, db_query)
+                if reason:
+                    print(
+                        f"{host.key}: {pipe}: {reason}; restart pending, re-run up when idle or with --force",
+                        file=sys.stderr,
+                    )
+                    held.add(pipe)
+                    rc_total = 1
+                    continue
+            if runner.write(env_path, text):
                 changed.add(pipe)
         probe = f"test -r {shlex.quote(str(worker_run))} && test -d ~/.config/muscatdb/workers"
         if runner.run(host.ssh, probe, readonly=True)[0] != 0:
@@ -346,10 +427,17 @@ def cmd_up(cfg: Config, hosts: list[HostSpec], runner: Runner) -> int:
             host.ssh, f"systemctl --user list-units 'muscatdb-worker@{host.key}-*' --plain --no-legend --all", readonly=True
         ))
         for stale in sorted(set(existing) - wanted):
+            reason = None if force else _hold_reason(cfg, host.key, hostname, _pipeline_of(stale), db_query)
+            if reason:
+                print(f"{host.key}: {stale}: {reason}; not stopped, re-run up when idle or with --force", file=sys.stderr)
+                rc_total = 1
+                continue
             runner.run(host.ssh, f"systemctl --user disable --now {shlex.quote(stale)}")
             print(f"{host.key}: stopped {stale} (no longer in config)")
         runner.run(host.ssh, "systemctl --user daemon-reload")
         for i, pipe in enumerate(host.pipelines):
+            if pipe in held:
+                continue
             unit = unit_name(host.key, pipe)
             verb = "restart" if pipe in changed else "start"
             rc, out = runner.run(
@@ -364,6 +452,29 @@ def cmd_up(cfg: Config, hosts: list[HostSpec], runner: Runner) -> int:
     return rc_total
 
 
+def _down_refusal(cfg: Config, host: HostSpec, hostname: str, units: list[str], db_query) -> str | None:
+    """Why ``down`` must not stop *units* on *host*, else None."""
+    states = [installed_state(host.key, _pipeline_of(u)) for u in units]
+    others = sorted({s.profile for s in states if s and s.profile and s.profile != cfg.profile})
+    if others:
+        return (
+            f"installed under profile {', '.join(others)} but {cfg.profile or '(no profile)'} is selected, "
+            f"so the wrong database would be checked for jobs. "
+            f"Re-run with --profile {others[0]}, or --force to stop anyway."
+        )
+    databases = {_database_of(cfg, s) for s in states}
+    try:
+        busy = _jobs_on(hostname, databases, db_query)
+    except RuntimeError as exc:
+        return f"cannot check for running jobs ({exc}). Re-run with --force to stop anyway."
+    if busy:
+        return (
+            f"{len(busy)} job(s) running on {hostname}; stopping kills them "
+            f"(they are requeued by orphan reclaim). Re-run with --force."
+        )
+    return None
+
+
 def cmd_down(cfg: Config, hosts: list[HostSpec], runner: Runner, db_query, force: bool) -> int:
     rc_total = 0
     for host in hosts:
@@ -372,20 +483,16 @@ def cmd_down(cfg: Config, hosts: list[HostSpec], runner: Runner, db_query, force
             print(f"{host.key}: cannot reach {host.ssh}: {hostname}", file=sys.stderr)
             rc_total = 1
             continue
-        # --force must work when the database is unreachable or renamed: skip the check
-        busy = 0 if force else running_jobs(hostname, db_query)
-        if busy and not force:
-            print(
-                f"{host.key}: {busy} job(s) running on {hostname}; stopping kills them "
-                f"(they are requeued by orphan reclaim). Re-run with --force.",
-                file=sys.stderr,
-            )
-            rc_total = 1
-            continue
         existing = _listed(runner.run(
             host.ssh, f"systemctl --user list-units 'muscatdb-worker@{host.key}-*' --plain --no-legend --all", readonly=True
         ))
         units = sorted(set(existing) | {unit_name(host.key, p) for p in host.pipelines})
+        # --force must work when the database is unreachable or renamed: skip every check
+        refusal = None if force else _down_refusal(cfg, host, hostname, units, db_query)
+        if refusal:
+            print(f"{host.key}: {refusal}", file=sys.stderr)
+            rc_total = 1
+            continue
         for unit in units:
             rc, out = runner.run(host.ssh, f"systemctl --user disable --now {shlex.quote(unit)}")
             print(f"{host.key}: {unit}: {'stopped' if rc == 0 else out}")
@@ -393,7 +500,6 @@ def cmd_down(cfg: Config, hosts: list[HostSpec], runner: Runner, db_query, force
 
 
 def cmd_status(cfg: Config, hosts: list[HostSpec], runner: Runner, db_query) -> int:
-    rows = db_query()
     for host in hosts:
         rc, hostname = runner.run(host.ssh, "hostname", readonly=True)
         if rc != 0:
@@ -401,19 +507,26 @@ def cmd_status(cfg: Config, hosts: list[HostSpec], runner: Runner, db_query) -> 
             continue
         _, linger = runner.run(host.ssh, 'loginctl show-user "$USER" -p Linger --value', readonly=True)
         print(f"{host.key} ({hostname})  linger={linger.strip() or '?'}")
+        states = [installed_state(host.key, p) for p in host.pipelines]
         for pipe in host.pipelines:
             unit = unit_name(host.key, pipe)
             _, state = runner.run(host.ssh, f"systemctl --user is-active {shlex.quote(unit)}", readonly=True)
             print(f"  {pipe:<12} {state.strip() or '?'}")
-        mine = [r for r in rows if str(r.get("instance_id", "")).startswith(f"{hostname}:")]
-        print(f"  running jobs on this host: {len(mine)}")
+        others = sorted({s.profile for s in states if s and s.profile and s.profile != cfg.profile})
+        if others:
+            print(f"  installed profile {', '.join(others)} but selected {cfg.profile or '(no profile)'}")
+        databases = {_database_of(cfg, s) for s in states}
+        print(f"  running jobs on this host: {len(_jobs_on(hostname, databases, db_query))}")
     return 0
 
 
 def make_db_query(cfg: Config):
-    """Return a callable listing running job rows, via the repo venv's psycopg."""
+    """Return ``query(database=None)`` listing running job rows, via the repo venv's psycopg."""
 
-    def query() -> list[dict]:
+    def query(database: str | None = None) -> list[dict]:
+        database = database or cfg.database
+        if not _DB_NAME.match(database):
+            raise ConfigError(f"unusable database name {database!r}")
         env_path = Path(os.path.expanduser(cfg.env_file))
         dsn = ""
         for line in env_path.read_text().splitlines():
@@ -422,7 +535,7 @@ def make_db_query(cfg: Config):
                 dsn = line.split("=", 1)[1].strip("'\"")
         if not dsn:
             raise ConfigError(f"MUSCAT_POSTGRES_DSN not found in {env_path}")
-        dsn = dsn.rsplit("/", 1)[0] + "/" + cfg.database
+        dsn = dsn.rsplit("/", 1)[0] + "/" + database
         code = (
             "import os,json,psycopg;"
             "c=psycopg.connect(os.environ['D'],connect_timeout=8);"
@@ -452,8 +565,10 @@ def main(argv: list[str] | None = None) -> int:
         help="[profiles.<name>] to apply (default: [defaults] profile, env MUSCAT_WORKERS_PROFILE)",
     )
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("up", "status"):
-        sub.add_parser(name).add_argument("hosts", nargs="*")
+    sub.add_parser("status").add_argument("hosts", nargs="*")
+    u = sub.add_parser("up")
+    u.add_argument("hosts", nargs="*")
+    u.add_argument("--force", action="store_true", help="restart or stop workers even if they are running jobs")
     d = sub.add_parser("down")
     d.add_argument("hosts", nargs="*")
     d.add_argument("--force", action="store_true", help="stop even if jobs are running on the host")
@@ -468,9 +583,9 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         runner = Runner(dry_run=args.dry_run)
         hosts = _select(cfg, args.hosts)
+        query = functools.cache(make_db_query(cfg))  # one query per database per run
         if args.cmd == "up":
-            return cmd_up(cfg, hosts, runner)
-        query = make_db_query(cfg)
+            return cmd_up(cfg, hosts, runner, query, args.force)
         if args.cmd == "down":
             return cmd_down(cfg, hosts, runner, query, args.force)
         return cmd_status(cfg, hosts, runner, query)

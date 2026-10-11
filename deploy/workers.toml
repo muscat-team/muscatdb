@@ -2,7 +2,7 @@
 #
 #   .venv/bin/python deploy/workers.py up            # all hosts below
 #   .venv/bin/python deploy/workers.py up ut5        # one host
-#   .venv/bin/python deploy/workers.py down ut5      # refuses while jobs run; --force to override
+#   .venv/bin/python deploy/workers.py down ut5      # refuses while jobs run or under another profile; --force to override
 #   .venv/bin/python deploy/workers.py status
 #   eval "$(.venv/bin/python deploy/workers.py web-env)"   # in the shell that starts the web app
 #
