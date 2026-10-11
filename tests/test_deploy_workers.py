@@ -554,3 +554,85 @@ def test_up_fails_closed_when_it_cannot_check_for_jobs(conf):
 
     assert rc == 1
     assert not any(" restart " in c for c in runner.mutating("muscat-ut3"))
+
+
+# -- an unreachable or hung host must not stall or silently pass the run --------
+
+
+def test_ssh_calls_are_bounded_in_connect_and_in_total(monkeypatch):
+    seen = {}
+
+    def fake_run(argv, **kw):
+        seen["argv"], seen["timeout"] = argv, kw.get("timeout")
+        return type("P", (), {"returncode": 0, "stdout": "ok", "stderr": ""})()
+
+    monkeypatch.setattr(w.subprocess, "run", fake_run)
+
+    assert w.Runner().run("ut3", "hostname") == (0, "ok")
+
+    assert "ConnectTimeout=%d" % w.SSH_CONNECT_TIMEOUT_S in seen["argv"]
+    assert any(a.startswith("ServerAliveInterval=") for a in seen["argv"])
+    assert seen["timeout"] == w.SSH_COMMAND_TIMEOUT_S
+
+
+def test_a_hung_ssh_is_reported_as_a_failure_not_raised(monkeypatch):
+    def hang(argv, **kw):
+        raise w.subprocess.TimeoutExpired(argv, kw["timeout"])
+
+    monkeypatch.setattr(w.subprocess, "run", hang)
+
+    rc, out = w.Runner().run("ut3", "hostname")
+
+    assert rc != 0 and "timed out" in out
+
+
+def test_up_skips_a_hung_host_and_still_serves_the_rest(conf, monkeypatch):
+    cfg = w.parse_config(_data())
+
+    class Hung(RecordingRunner):
+        def run(self, ssh, script, readonly=False):
+            if ssh == "muscat-ut3":
+                return 255, "ssh timed out after 10s"
+            return super().run(ssh, script, readonly)
+
+    runner = Hung({"ut5": "muscat-ut5"})
+    rc = w.cmd_up(cfg, [cfg.hosts["ut3"], cfg.hosts["ut5"]], runner, no_db)
+
+    assert rc == 1
+    assert not (conf / "muscatdb/workers/ut3-photometry.env").exists()  # nothing written for it
+    assert any("ut5-ttv_fit" in c for c in runner.mutating("ut5"))
+
+
+def test_status_exits_nonzero_when_a_host_is_unreachable(conf, capsys):
+    cfg = w.parse_config(_data())
+
+    class Down(RecordingRunner):
+        def run(self, ssh, script, readonly=False):
+            if ssh == "muscat-ut3":
+                return 255, "ssh: connect timed out"
+            return super().run(ssh, script, readonly)
+
+    rc = w.cmd_status(cfg, [cfg.hosts["ut3"], cfg.hosts["ut5"]], Down({"ut5": "muscat-ut5"}), FakeDb(muscatdb_dev=[]))
+
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "UNREACHABLE" in out and "ut5" in out  # the reachable host is still reported
+
+
+def test_a_stalled_job_query_is_an_error_not_a_hang(tmp_path, monkeypatch):
+    env = tmp_path / "pg.env"
+    env.write_text("MUSCAT_POSTGRES_DSN=postgresql://u:p@h:5432/muscatdb_dev\n")
+    data = _data()
+    data["defaults"]["env_file"] = str(env)
+    query = w.make_db_query(w.parse_config(data))
+    seen = {}
+
+    def stall(argv, **kw):
+        seen["timeout"] = kw.get("timeout")
+        raise w.subprocess.TimeoutExpired(argv, kw["timeout"])
+
+    monkeypatch.setattr(w.subprocess, "run", stall)
+
+    with pytest.raises(RuntimeError, match="timed out"):
+        query()
+    assert seen["timeout"] == w.DB_QUERY_TIMEOUT_S

@@ -45,6 +45,10 @@ Switch by stopping under the old profile, then starting under the new one::
     workers.py --profile dev  down     # refuses while jobs run
     workers.py --profile prod up       # env text changed: units restart
 
+An unreachable or hung host is reported and skipped, never waited on: every ssh
+call has a connect and a total timeout, and a stalled job query is an error.
+``up`` and ``down`` exit 1 for it, and so does ``status``.
+
 Needs on each host: ``loginctl enable-linger <user>`` so user units survive the
 last logout (``status`` reports it; ``up`` only warns).
 """
@@ -69,6 +73,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "workers.toml"
 _XDG = "export XDG_RUNTIME_DIR=/run/user/$(id -u); "
 _DB_NAME = re.compile(r"[A-Za-z0-9_]+\Z")
+# A host that drops packets would otherwise hold the run for the OS TCP timeout,
+# and the hosts are visited one after another.
+SSH_CONNECT_TIMEOUT_S = 10
+SSH_COMMAND_TIMEOUT_S = 180  # covers a restart: TimeoutStopSec=60 plus the start
+DB_QUERY_TIMEOUT_S = 30
 
 
 class ConfigError(ValueError):
@@ -273,10 +282,18 @@ class Runner:
         if self.dry_run and not readonly:
             print(f"[dry-run] ssh {ssh}: {script.strip()}")
             return 0, ""
-        p = subprocess.run(
-            ["ssh", "-o", "BatchMode=yes", ssh, "bash", "-s"],
-            input=_XDG + script, capture_output=True, text=True,
-        )
+        argv = [
+            "ssh", "-o", "BatchMode=yes",
+            "-o", f"ConnectTimeout={SSH_CONNECT_TIMEOUT_S}",
+            "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2",
+            ssh, "bash", "-s",
+        ]
+        try:
+            p = subprocess.run(
+                argv, input=_XDG + script, capture_output=True, text=True, timeout=SSH_COMMAND_TIMEOUT_S
+            )
+        except subprocess.TimeoutExpired:
+            return 255, f"ssh timed out after {SSH_COMMAND_TIMEOUT_S}s"
         return p.returncode, (p.stdout + p.stderr).strip()
 
     def write(self, path: Path, content: str) -> bool:
@@ -500,10 +517,12 @@ def cmd_down(cfg: Config, hosts: list[HostSpec], runner: Runner, db_query, force
 
 
 def cmd_status(cfg: Config, hosts: list[HostSpec], runner: Runner, db_query) -> int:
+    rc_total = 0
     for host in hosts:
         rc, hostname = runner.run(host.ssh, "hostname", readonly=True)
         if rc != 0:
             print(f"{host.key}: UNREACHABLE ({hostname})")
+            rc_total = 1  # a script must not read a partial picture as a healthy fleet
             continue
         _, linger = runner.run(host.ssh, 'loginctl show-user "$USER" -p Linger --value', readonly=True)
         print(f"{host.key} ({hostname})  linger={linger.strip() or '?'}")
@@ -517,7 +536,7 @@ def cmd_status(cfg: Config, hosts: list[HostSpec], runner: Runner, db_query) -> 
             print(f"  installed profile {', '.join(others)} but selected {cfg.profile or '(no profile)'}")
         databases = {_database_of(cfg, s) for s in states}
         print(f"  running jobs on this host: {len(_jobs_on(hostname, databases, db_query))}")
-    return 0
+    return rc_total
 
 
 def make_db_query(cfg: Config):
@@ -542,10 +561,13 @@ def make_db_query(cfg: Config):
             "print(json.dumps([dict(instance_id=r[0],type=r[1]) for r in c.execute("
             "\"select instance_id,type from jobs where state='running'\")]))"
         )
-        p = subprocess.run(
-            [str(cfg.repo / ".venv" / "bin" / "python"), "-I", "-c", code],
-            env={**os.environ, "D": dsn}, capture_output=True, text=True,
-        )
+        try:
+            p = subprocess.run(
+                [str(cfg.repo / ".venv" / "bin" / "python"), "-I", "-c", code],
+                env={**os.environ, "D": dsn}, capture_output=True, text=True, timeout=DB_QUERY_TIMEOUT_S,
+            )
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"job query timed out after {DB_QUERY_TIMEOUT_S}s") from None
         if p.returncode != 0:
             raise RuntimeError(f"job query failed: {p.stderr.strip().splitlines()[-1:]}")
         import json
