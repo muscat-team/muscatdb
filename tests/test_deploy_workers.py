@@ -335,6 +335,18 @@ def test_down_force_stops_despite_running_jobs(conf):
     assert runner.mutating("muscat-ut3")
 
 
+def test_down_force_does_not_need_the_database(conf):
+    # the database may be gone or renamed, which is exactly when --force is wanted
+    cfg = w.parse_config(_data())
+    runner = RecordingRunner({"muscat-ut3": "muscat-ut3"})
+
+    def unreachable():
+        raise RuntimeError("database does not exist")
+
+    assert w.cmd_down(cfg, [cfg.hosts["ut3"]], runner, unreachable, force=True) == 0
+    assert runner.mutating("muscat-ut3")
+
+
 def test_select_rejects_unknown_host():
     cfg = w.parse_config(_data())
     with pytest.raises(w.ConfigError, match="unknown host"):

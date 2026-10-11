@@ -372,7 +372,8 @@ def cmd_down(cfg: Config, hosts: list[HostSpec], runner: Runner, db_query, force
             print(f"{host.key}: cannot reach {host.ssh}: {hostname}", file=sys.stderr)
             rc_total = 1
             continue
-        busy = running_jobs(hostname, db_query)
+        # --force must work when the database is unreachable or renamed: skip the check
+        busy = 0 if force else running_jobs(hostname, db_query)
         if busy and not force:
             print(
                 f"{host.key}: {busy} job(s) running on {hostname}; stopping kills them "
