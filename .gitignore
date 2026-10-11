@@ -33,6 +33,7 @@ data/LAMA_spec_Readme.txt
 data/HARPS_RVBank_ver02.csv.zip
 
 # Local DB and data artifacts
+muscat.db.*
 *.db
 *.db-journal
 *.db-wal
