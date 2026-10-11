@@ -5,6 +5,7 @@ whenever the body raised between the two. get_conn() is a contextmanager that
 guarantees close on every path and standardizes timeout/row_factory.
 """
 
+import contextlib
 import os
 import sqlite3
 
@@ -186,6 +187,7 @@ def test_build_db_with_live_connection_every_reader_sees_rebuilt_data(
 # -- connection policy (issue #182, finding 5) --------------------------------
 
 _SYNCHRONOUS_NORMAL = 1
+_FOREIGN_KEYS_ON = 1
 
 
 def _policy(conn):
@@ -196,9 +198,9 @@ def _policy(conn):
     )
 
 
-def test_get_conn_applies_wal_and_synchronous_normal(tmp_path):
+def test_get_conn_applies_wal_synchronous_normal_and_foreign_keys(tmp_path):
     with get_conn(str(tmp_path / "fresh.db")) as conn:
-        assert _policy(conn) == ("wal", _SYNCHRONOUS_NORMAL, 0)
+        assert _policy(conn) == ("wal", _SYNCHRONOUS_NORMAL, _FOREIGN_KEYS_ON)
 
 
 def test_connect_applies_the_same_policy(tmp_path):
@@ -206,7 +208,7 @@ def test_connect_applies_the_same_policy(tmp_path):
 
     conn = connect(str(tmp_path / "fresh.db"))
     try:
-        assert _policy(conn) == ("wal", _SYNCHRONOUS_NORMAL, 0)
+        assert _policy(conn) == ("wal", _SYNCHRONOUS_NORMAL, _FOREIGN_KEYS_ON)
     finally:
         conn.close()
 
@@ -217,7 +219,7 @@ def test_exposure_connection_uses_the_policy(tmp_path, monkeypatch):
     monkeypatch.setenv("MUSCAT_DB_PATH", str(tmp_path / "exp.db"))
     conn = exposure._conn()
     try:
-        assert _policy(conn) == ("wal", _SYNCHRONOUS_NORMAL, 0)
+        assert _policy(conn) == ("wal", _SYNCHRONOUS_NORMAL, _FOREIGN_KEYS_ON)
     finally:
         conn.close()
 
@@ -242,6 +244,82 @@ def test_migrations_surface_real_failures(tmp_path, monkeypatch):
     with get_conn(str(tmp_path / "m.db")) as conn:
         with pytest.raises(sqlite3.OperationalError, match="no such table"):
             database._apply_schema(conn)
+
+
+class _LockedReads:
+    """Connection proxy whose app-owned table SELECTs fail as if the database
+    were locked. Everything else passes through to the real connection."""
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def execute(self, sql, *args):
+        if sql.startswith("SELECT * FROM"):
+            raise sqlite3.OperationalError("database is locked")
+        return self._conn.execute(sql, *args)
+
+
+def _fail_reads_of(monkeypatch, live_path):
+    import muscat_db.database as database
+
+    real_get_conn = database.get_conn
+
+    @contextlib.contextmanager
+    def get_conn(path=None, **kwargs):
+        if path != live_path:
+            with real_get_conn(path, **kwargs) as conn:
+                yield conn
+            return
+        with real_get_conn(path, **kwargs) as conn:
+            yield _LockedReads(conn)
+
+    monkeypatch.setattr(database, "get_conn", get_conn)
+
+
+def _seed_live_notes(path):
+    from muscat_db.database import SCHEMA
+
+    with sqlite3.connect(path) as c:
+        c.executescript(SCHEMA)
+        c.execute(
+            "INSERT INTO target_notes(object, obsdate, instrument, note) "
+            "VALUES ('KEEP', '', '', 'x')"
+        )
+
+
+def test_read_app_owned_tables_raises_when_the_read_fails(tmp_path, monkeypatch):
+    """A failed read of the live file must not read as "every app-owned table
+    is empty". build_db would then restore nothing and copy the empty image
+    over the live file (#204)."""
+    from muscat_db.database import _read_app_owned_tables
+
+    target = str(tmp_path / "muscat.db")
+    _seed_live_notes(target)
+    _fail_reads_of(monkeypatch, target)
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        _read_app_owned_tables(target)
+
+
+def test_build_db_aborts_and_keeps_live_notes_when_the_read_fails(
+    tmp_path, monkeypatch, no_real_obslog_scan,
+):
+    """End to end: a failed read of the live file aborts the rebuild and the
+    live file keeps its notes (#204)."""
+    from muscat_db.database import build_db
+
+    target = str(tmp_path / "muscat.db")
+    monkeypatch.setenv("MUSCAT_DB_PATH", target)
+    _seed_live_notes(target)
+    _fail_reads_of(monkeypatch, target)
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        build_db(target)
+    with sqlite3.connect(target) as c:
+        assert c.execute(
+            "SELECT COUNT(*) FROM target_notes WHERE object = 'KEEP'"
+        ).fetchone()[0] == 1
 
 
 def test_build_db_writes_on_a_connection_open_across_the_swap_are_kept(
@@ -358,4 +436,111 @@ def test_build_db_copies_into_live_through_the_connection_policy(
     monkeypatch.setattr(database, "connect", recording_connect)
     database.build_db(str(target))
 
-    assert (str(target), ("wal", _SYNCHRONOUS_NORMAL, 0)) in opened
+    assert (str(target), ("wal", _SYNCHRONOUS_NORMAL, _FOREIGN_KEYS_ON)) in opened
+
+
+# -- foreign keys (issue #184) ------------------------------------------------
+
+
+def _add_request_with_frame(path, request_id):
+    with sqlite3.connect(path) as c:
+        c.execute(
+            "INSERT INTO lco_observation_requests (request_id, requestgroup_id, created_at, "
+            "updated_at) VALUES (?, 1, 0, 0)",
+            (request_id,),
+        )
+        c.execute(
+            "INSERT INTO lco_observation_frames (request_id, frame_id, filename, instrument, "
+            "obsdate, metadata_json, updated_at) VALUES (?, 'f1', 'x.fits', 'sinistro', "
+            "'260101', '{}', 0)",
+            (request_id,),
+        )
+
+
+def test_app_owned_tables_are_read_as_one_snapshot(tmp_path, monkeypatch):
+    """The LCO monitor can save a request and its frames between the rebuild's
+    read of lco_observation_requests and its read of lco_observation_frames.
+    Read without one transaction, that captures the frame but not its request;
+    restoring the orphan then fails under foreign_keys=ON and aborts the
+    nightly rebuild."""
+    import muscat_db.database as database
+
+    path = str(tmp_path / "live.db")
+    with get_conn(path) as conn:
+        database._apply_schema(conn)
+    _add_request_with_frame(path, 1)
+
+    real_get_conn = database.get_conn
+    injected = []
+
+    def trace(statement):
+        if not injected and "FROM lco_observation_frames" in statement:
+            injected.append(True)
+            _add_request_with_frame(path, 2)
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def tracing_get_conn(*args, **kwargs):
+        with real_get_conn(*args, **kwargs) as conn:
+            conn.set_trace_callback(trace)
+            yield conn
+
+    monkeypatch.setattr(database, "get_conn", tracing_get_conn)
+    preserved = database._read_app_owned_tables(path)
+
+    assert injected, "the concurrent write was never injected"
+    request_ids = {r["request_id"] for r in preserved["lco_observation_requests"]}
+    frame_parents = {f["request_id"] for f in preserved["lco_observation_frames"]}
+    assert frame_parents <= request_ids
+
+
+def test_app_owned_tables_restore_parents_before_children():
+    """build_db restores app-owned tables in _APP_OWNED_TABLES order; with
+    foreign keys enforced every parent table has to come first."""
+    import muscat_db.database as database
+
+    conn = sqlite3.connect(":memory:")
+    database._apply_schema(conn)
+    order = list(database._APP_OWNED_TABLES)
+    for child in order:
+        for fk in conn.execute(f"PRAGMA foreign_key_list('{child}')"):
+            parent = fk[2]
+            assert parent in order, f"{child} references non-preserved {parent}"
+            assert order.index(parent) < order.index(child), f"{parent} restored after {child}"
+
+
+def test_connect_rejects_an_orphan_frame(tmp_path):
+    from muscat_db.database import _apply_schema, connect
+
+    conn = connect(str(tmp_path / "fk.db"))
+    try:
+        _apply_schema(conn)
+        with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
+            conn.execute(
+                "INSERT INTO lco_observation_frames (request_id, frame_id, filename, "
+                "instrument, obsdate, metadata_json, updated_at) "
+                "VALUES (99, 'f', 'x.fits', 'sinistro', '260101', '{}', 0)"
+            )
+    finally:
+        conn.close()
+
+
+def test_build_db_keeps_lco_requests_and_frames_under_foreign_keys(
+    tmp_path, monkeypatch, no_real_obslog_scan,
+):
+    """The rebuild restores LCO requests and their frames intact with
+    enforcement on, and the rebuilt image has no FK violations."""
+    from muscat_db.database import _apply_schema, build_db
+
+    target = tmp_path / "muscat.db"
+    monkeypatch.setenv("MUSCAT_DB_PATH", str(target))
+    with get_conn(str(target)) as conn:
+        _apply_schema(conn)
+    _add_request_with_frame(str(target), 7)
+
+    build_db(str(target))
+
+    with sqlite3.connect(str(target)) as c:
+        assert c.execute("SELECT COUNT(*) FROM lco_observation_frames WHERE request_id = 7").fetchone()[0] == 1
+        assert c.execute("PRAGMA foreign_key_check").fetchall() == []

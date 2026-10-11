@@ -546,27 +546,27 @@
           <summary>Sigma Clipping <span class="help-tooltip" title="Sigma threshold parameters for sky background, FWHM, X/Y target drift, and raw-target-flux outlier clipping. Clipped frames are removed before autodiff(), so they change which comparison stars (cIDs) and aperture autodiff() picks as optimal. To sigma-clip the final differential flux after autodiff() instead, run full photometry first and use the Post-processing card below.">?</span></summary>
           <div style="grid-column: 1 / -1; display: grid; grid-template-columns: repeat(6, 1fr); gap: 1.25rem;">
             <div class="opt">
-              <label for="opt-sig_bkg">SIGMA_BKG <span class="help-tooltip" title="Sigma threshold for sky background outlier clipping (corresponds to --sig_bkg).">?</span></label>
+              <label for="opt-sig_bkg">Sigma bkg <span class="help-tooltip" title="Sigma threshold for sky background outlier clipping (corresponds to --sig_bkg).">?</span></label>
               <input type="number" id="opt-sig_bkg" value="{{ run_defaults.sig_bkg }}" step="0.1" min="0" style="width: 100%;">
             </div>
             <div class="opt">
-              <label for="opt-sig_fwhm">SIGMA_FWHM <span class="help-tooltip" title="Sigma threshold for FWHM outlier clipping (corresponds to --sig_fwhm).">?</span></label>
+              <label for="opt-sig_fwhm">Sigma FWHM <span class="help-tooltip" title="Sigma threshold for FWHM outlier clipping (corresponds to --sig_fwhm).">?</span></label>
               <input type="number" id="opt-sig_fwhm" value="{{ run_defaults.sig_fwhm }}" step="0.1" min="0" style="width: 100%;">
             </div>
             <div class="opt">
-              <label for="opt-sig_dx">SIGMA_DX <span class="help-tooltip" title="Sigma threshold for drift X outlier clipping (corresponds to --sig_dx).">?</span></label>
+              <label for="opt-sig_dx">Sigma dx <span class="help-tooltip" title="Sigma threshold for drift X outlier clipping (corresponds to --sig_dx).">?</span></label>
               <input type="number" id="opt-sig_dx" value="{{ run_defaults.sig_dx }}" step="0.1" min="0" style="width: 100%;">
             </div>
             <div class="opt">
-              <label for="opt-sig_dy">SIGMA_DY <span class="help-tooltip" title="Sigma threshold for drift Y outlier clipping (corresponds to --sig_dy).">?</span></label>
+              <label for="opt-sig_dy">Sigma dy <span class="help-tooltip" title="Sigma threshold for drift Y outlier clipping (corresponds to --sig_dy).">?</span></label>
               <input type="number" id="opt-sig_dy" value="{{ run_defaults.sig_dy }}" step="0.1" min="0" style="width: 100%;">
             </div>
             <div class="opt">
-              <label for="opt-sig_flux">SIGMA_FLUX <span class="help-tooltip" title="Sigma threshold for outlier clipping of the raw target flux time series (corresponds to --sig_flux): a polynomial (see FLUX_POLY_DEG) is fitted to flux vs time, and frames whose residual deviates by more than this many standard deviations are rejected. This runs on the raw target flux before autodiff() selects comparison stars and aperture, so it affects that selection. The Post-processing card's sigma-clip uses the same method but runs on the finished differential flux after a full reduction, without changing cIDs/aperture.">?</span></label>
+              <label for="opt-sig_flux">Sigma flux <span class="help-tooltip" title="Sigma threshold for outlier clipping of the raw target flux time series (corresponds to --sig_flux): a polynomial (see Flux poly deg) is fitted to flux vs time, and frames whose residual deviates by more than this many standard deviations are rejected. This runs on the raw target flux before autodiff() selects comparison stars and aperture, so it affects that selection. The Post-processing card's sigma-clip uses the same method but runs on the finished differential flux after a full reduction, without changing cIDs/aperture.">?</span></label>
               <input type="number" id="opt-sig_flux" value="{{ run_defaults.sig_flux }}" step="0.1" min="0" style="width: 100%;">
             </div>
             <div class="opt">
-              <label for="opt-flux_poly_deg">FLUX_POLY_DEG <span class="help-tooltip" title="Degree of the polynomial fitted to the raw target flux before residual sigma clipping (corresponds to --flux_poly_deg; only used when SIGMA_FLUX is set).">?</span></label>
+              <label for="opt-flux_poly_deg">Flux poly deg <span class="help-tooltip" title="Degree of the polynomial fitted to the raw target flux before residual sigma clipping (corresponds to --flux_poly_deg; only used when Sigma flux is set).">?</span></label>
               <input type="number" id="opt-flux_poly_deg" value="{{ run_defaults.flux_poly_deg }}" step="1" min="0" style="width: 100%;">
             </div>
           </div>
@@ -632,7 +632,7 @@
       Run post-processing on optimized relative light-curves
     </span>
   </h2>
-  <details class="phot-section phot-fold" id="postproc-section" open style="margin: 0 0 1rem; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 1rem 1.25rem;">
+  <details class="phot-section phot-fold" id="postproc-section" style="margin: 0 0 1rem; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 1rem 1.25rem;">
     <summary>
       <span style="font-size: 0.9rem; color: var(--text-dim);">Post-processing options</span>
     </summary>
@@ -643,14 +643,40 @@
       <summary>Sigma Clipping <span class="help-tooltip" title="Sigma threshold parameters applied to the finished differential flux CSV, after autodiff() has already picked comparison stars and aperture. Unlike the Sigma Clipping options in Configure &amp; Run Photometry (which run before autodiff() and can change that selection), this pass only rejects outlier frames from the final light curve and never changes cIDs or aperture.">?</span></summary>
       <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 1.25rem; margin: 0.75rem 0 0.5rem; max-width: 420px;">
         <div class="opt">
-          <label for="opt-post_sigma">SIGMA FLUX <span class="help-tooltip" title="Reject frames whose residual from the fitted flux-vs-time polynomial deviates by more than this many standard deviations. Applied after photometry finishes, directly to the saved CSV rows.">?</span></label>
-          <input type="number" id="opt-post_sigma" value="{{ postproc_defaults['post_sigma'] }}" step="0.1" min="0" max="100" style="width: 100%;" {% if not sel_run %}disabled{% endif %}>
+          <label for="opt-post_sigma">Sigma flux <span class="help-tooltip" title="Reject frames whose residual from the fitted flux-vs-time polynomial deviates by more than this many standard deviations. Applied after photometry finishes, directly to the saved CSV rows. Blank -> skip sigma-clipping entirely (e.g. to only apply the Exclude JD Range cut below).">?</span></label>
+          <input type="number" id="opt-post_sigma" placeholder="none" value="{{ postproc_defaults['post_sigma'] }}" step="0.1" min="0" max="100" style="width: 100%;" {% if not sel_run %}disabled{% endif %}>
         </div>
         <div class="opt">
-          <label for="opt-post_poly_deg">POLY DEG <span class="help-tooltip" title="Degree of the polynomial fitted to flux vs time before residual sigma clipping.">?</span></label>
+          <label for="opt-post_poly_deg">Poly deg <span class="help-tooltip" title="Degree of the polynomial fitted to flux vs time before residual sigma clipping.">?</span></label>
           <input type="number" id="opt-post_poly_deg" value="{{ postproc_defaults['post_poly_deg'] }}" step="1" min="0" max="6" style="width: 100%;" {% if not sel_run %}disabled{% endif %}>
         </div>
       </div>
+    </details>
+    <details class="opt-collapse" open>
+      <summary>Exclude JD Range <span class="help-tooltip" title="Drop rows outside this window from the finished differential-flux CSV before the sigma-clip trend is fitted, so a gap or a bad head/tail segment (clouds, a meridian flip, guiding loss) cannot skew the fit used to reject the rest. Compares against the light curve's own BJD_TDB column -- not the raw header JD used by the 'Exclude after/before JD' options in Configure &amp; Run Photometry above, which run before autodiff() on the raw frames.">?</span></summary>
+      <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 1.25rem; margin: 0.75rem 0 0.5rem; max-width: 420px;">
+        <div class="opt">
+          <label for="opt-post_exclude_before_jd">Exclude before JD <span class="help-tooltip" title="Drop rows with BJD_TDB less than this value. Blank -> no lower cut.">?</span></label>
+          {% if post_jd_range %}
+          <div style="display:flex; align-items:center; gap:0.5rem;">
+            <input type="range" id="jdslider-post_exclude_before_jd" min="{{ post_jd_range.min }}" max="{{ post_jd_range.max }}" step="0.0001" value="{{ post_jd_range.min }}" style="flex:1;" title="drag to set the lower BJD_TDB cut; at the left end means no cut" {% if not sel_run %}disabled{% endif %}>
+            <span class="hint" id="jdslider-post_exclude_before_jd-label" style="white-space:nowrap;">≈ {{ post_jd_range.min_utc }}</span>
+          </div>
+          {% endif %}
+          <input type="number" id="opt-post_exclude_before_jd" placeholder="none" value="{{ postproc_defaults['post_exclude_before_jd'] }}" step="0.0001" style="width: 100%;" {% if not sel_run %}disabled{% endif %}>
+        </div>
+        <div class="opt">
+          <label for="opt-post_exclude_after_jd">Exclude after JD <span class="help-tooltip" title="Drop rows with BJD_TDB greater than this value. Blank -> no upper cut.">?</span></label>
+          {% if post_jd_range %}
+          <div style="display:flex; align-items:center; gap:0.5rem;">
+            <input type="range" id="jdslider-post_exclude_after_jd" min="{{ post_jd_range.min }}" max="{{ post_jd_range.max }}" step="0.0001" value="{{ post_jd_range.max }}" style="flex:1;" title="drag to set the upper BJD_TDB cut; at the right end means no cut" {% if not sel_run %}disabled{% endif %}>
+            <span class="hint" id="jdslider-post_exclude_after_jd-label" style="white-space:nowrap;">≈ {{ post_jd_range.max_utc }}</span>
+          </div>
+          {% endif %}
+          <input type="number" id="opt-post_exclude_after_jd" placeholder="none" value="{{ postproc_defaults['post_exclude_after_jd'] }}" step="0.0001" style="width: 100%;" {% if not sel_run %}disabled{% endif %}>
+        </div>
+      </div>
+      <p style="color: var(--text-dim); font-size: 0.78rem; margin: 0 0 0.5rem;">BJD_TDB, the light curve's own time column; blank means no cut. Both set requires before &lt; after.{% if post_jd_range %} Light curve spans ≈ {{ post_jd_range.min_utc }}–{{ post_jd_range.max_utc }}.{% endif %}</p>
     </details>
     <div class="run-actions">
       <button class="btn primary" type="button" id="postproc-test-btn" {% if not sel_run %}disabled{% endif %}>Test post-process</button>
@@ -946,7 +972,9 @@
       exclude_after_jd: val('opt-exclude_after_jd'),
       exclude_before_jd: val('opt-exclude_before_jd'),
       post_sigma: val('opt-post_sigma'),
-      post_poly_deg: val('opt-post_poly_deg')
+      post_poly_deg: val('opt-post_poly_deg'),
+      post_exclude_before_jd: val('opt-post_exclude_before_jd'),
+      post_exclude_after_jd: val('opt-post_exclude_after_jd')
     };
   }
   function saveOptions() {
@@ -967,7 +995,7 @@
     });
     ['run_name','ref_band','refid','ref_select','ref_select_top_k','aper_unit','aper_radii','annulus',
      'target_id','comparison_ids','avoid_comparison_ids','avoid_nearby_star_mode','avoid_nearby_star','target_coord','test_run_frames','min_star_separation','max_num_stars',
-       'n_stars_align','cutout_size','display_stack_nframes','ccd_trim','edge_margin','bin_size_minutes','nan_imputation_method','sig_bkg','sig_fwhm','sig_dx','sig_dy','sig_flux','flux_poly_deg','min_star_area','wcs_method','centroid_method','cmap','site','telescope','mode','exclude_after_jd','exclude_before_jd','post_sigma','post_poly_deg'].forEach(function (id) {
+       'n_stars_align','cutout_size','display_stack_nframes','ccd_trim','edge_margin','bin_size_minutes','nan_imputation_method','sig_bkg','sig_fwhm','sig_dx','sig_dy','sig_flux','flux_poly_deg','min_star_area','wcs_method','centroid_method','cmap','site','telescope','mode','exclude_after_jd','exclude_before_jd','post_sigma','post_poly_deg','post_exclude_before_jd','post_exclude_after_jd'].forEach(function (id) {
       var el = document.getElementById('opt-'+id);
       if (el && saved[id] !== undefined) el.value = saved[id];
     });
@@ -1028,19 +1056,21 @@
     return d.getUTCFullYear() + '-' + pad(d.getUTCMonth() + 1) + '-' + pad(d.getUTCDate()) +
       ' ' + pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes()) + ' UTC';
   }
-  function jdSliderEls(mode) {
-    var key = mode === 'after' ? 'exclude_after_jd' : 'exclude_before_jd';
+  // key: the option id ('exclude_after_jd', 'post_exclude_before_jd', ...).
+  // An *_after_* slider rests at its max and a *_before_* one at its min,
+  // i.e. the end where the cut keeps every row.
+  function jdSliderEls(key) {
     return {
       slider: document.getElementById('jdslider-' + key),
       field: document.getElementById('opt-' + key),
       label: document.getElementById('jdslider-' + key + '-label'),
     };
   }
-  function syncJdSliderFromField(mode) {
-    var els = jdSliderEls(mode);
+  function syncJdSliderFromField(key, labelPrefix) {
+    var els = jdSliderEls(key);
     if (!els.slider || !els.field) return;
     var lo = parseFloat(els.slider.min), hi = parseFloat(els.slider.max);
-    var neutral = mode === 'after' ? hi : lo;
+    var neutral = key.indexOf('_after_') !== -1 ? hi : lo;
     var raw = (els.field.value || '').trim();
     var isMulti = raw.indexOf(',') !== -1;
     // A single-thumb slider can't represent a comma-separated list, and
@@ -1060,21 +1090,25 @@
     var v = parseFloat(raw);
     var pos = (raw !== '' && isFinite(v) && v >= lo && v <= hi) ? v : neutral;
     els.slider.value = pos;
-    if (els.label) els.label.textContent = jdToUtcMinuteLabel(pos);
+    if (els.label) els.label.textContent = labelPrefix + jdToUtcMinuteLabel(pos);
   }
-  function initJdSlider(mode) {
-    var els = jdSliderEls(mode);
+  // labelPrefix: '' for header JD (UTC); '≈ ' for BJD_TDB, which is offset
+  // from UTC by up to ~9 min (TDB-UTC plus the barycentric light-time).
+  function initJdSlider(key, labelPrefix) {
+    var els = jdSliderEls(key);
     if (!els.slider || !els.field) return;
     els.slider.addEventListener('input', function () {
       var v = parseFloat(els.slider.value);
       els.field.value = v.toFixed(4);
-      if (els.label) els.label.textContent = jdToUtcMinuteLabel(v);
+      if (els.label) els.label.textContent = labelPrefix + jdToUtcMinuteLabel(v);
     });
-    els.field.addEventListener('input', function () { syncJdSliderFromField(mode); });
-    syncJdSliderFromField(mode);
+    els.field.addEventListener('input', function () { syncJdSliderFromField(key, labelPrefix); });
+    syncJdSliderFromField(key, labelPrefix);
   }
-  initJdSlider('after');
-  initJdSlider('before');
+  initJdSlider('exclude_after_jd', '');
+  initJdSlider('exclude_before_jd', '');
+  initJdSlider('post_exclude_after_jd', '≈ ');
+  initJdSlider('post_exclude_before_jd', '≈ ');
 
   function updateWcsMethod() {
     var el = document.getElementById('opt-wcs_method');
@@ -1109,7 +1143,7 @@
       });
       ['run_name','ref_band','refid','ref_select','ref_select_top_k','aper_unit','aper_radii','annulus',
        'target_id','comparison_ids','avoid_comparison_ids','avoid_nearby_star_mode','avoid_nearby_star','target_coord','test_run_frames','min_star_separation','max_num_stars',
-     'n_stars_align','cutout_size','display_stack_nframes','ccd_trim','edge_margin','bin_size_minutes','nan_imputation_method','sig_bkg','sig_fwhm','sig_dx','sig_dy','sig_flux','flux_poly_deg','min_star_area','wcs_method','centroid_method','cmap','site','telescope','mode','exclude_after_jd','exclude_before_jd','post_sigma','post_poly_deg'].forEach(function (id) {
+     'n_stars_align','cutout_size','display_stack_nframes','ccd_trim','edge_margin','bin_size_minutes','nan_imputation_method','sig_bkg','sig_fwhm','sig_dx','sig_dy','sig_flux','flux_poly_deg','min_star_area','wcs_method','centroid_method','cmap','site','telescope','mode','exclude_after_jd','exclude_before_jd','post_sigma','post_poly_deg','post_exclude_before_jd','post_exclude_after_jd'].forEach(function (id) {
         var el = document.getElementById('opt-'+id);
         if (el) {
           var d = POSTPROC_DEFAULTS[id] !== undefined ? POSTPROC_DEFAULTS[id] : DEFAULTS[id];
@@ -1122,8 +1156,10 @@
       });
       saveOptions();
       updateApertureHints();
-      syncJdSliderFromField('after');
-      syncJdSliderFromField('before');
+      syncJdSliderFromField('exclude_after_jd', '');
+      syncJdSliderFromField('exclude_before_jd', '');
+      syncJdSliderFromField('post_exclude_after_jd', '≈ ');
+      syncJdSliderFromField('post_exclude_before_jd', '≈ ');
       refreshCmd();
     });
   }
@@ -1722,18 +1758,28 @@
       sigma: val('opt-post_sigma'),
       degree: val('opt-post_poly_deg'),
       iterations: 5,
+      exclude_before_jd: val('opt-post_exclude_before_jd'),
+      exclude_after_jd: val('opt-post_exclude_after_jd'),
       apply: apply
     };
   }
   function postprocReport(d) {
     var rows = (d.files || []).map(function (f) {
-      return f.file + ': ' + f.n_clipped + ' clipped / ' + f.n_kept + ' kept';
+      var row = f.file + ': ' + f.n_clipped + ' clipped / ' + f.n_kept + ' kept';
+      if (f.n_excluded_range) row += ' (' + f.n_excluded_range + ' outside JD range)';
+      return row;
     });
+    var sigmaLabel = d.sigma == null ? 'off' : d.sigma;
     var html = '<div>';
     if (d.applied) {
       html += '<p style="font-weight:600;color:var(--green);margin:0 0 0.4rem;">Applied — ' + d.n_files + ' band CSV(s) clipped in place into ' + (d.summary_png || 'summary figure') + '.</p>';
     } else {
-      html += '<p style="font-weight:600;margin:0 0 0.4rem;">Outlier preview (sigma=' + d.sigma + ', deg=' + d.degree + '):</p>';
+      html += '<p style="font-weight:600;margin:0 0 0.4rem;">Outlier preview (sigma=' + sigmaLabel + ', deg=' + d.degree + '):</p>';
+    }
+    if (d.exclude_before_jd != null || d.exclude_after_jd != null) {
+      html += '<p style="color:var(--text-dim);margin:0 0 0.4rem;">JD range: ' +
+        (d.exclude_before_jd != null ? '≥ ' + d.exclude_before_jd : 'no lower cut') + ', ' +
+        (d.exclude_after_jd != null ? '≤ ' + d.exclude_after_jd : 'no upper cut') + '</p>';
     }
     html += '<ul style="margin:0 0 0.5rem;padding-left:1.25rem;line-height:1.6;">';
     rows.forEach(function (r) { html += '<li class="mono">' + r + '</li>'; });

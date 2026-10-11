@@ -4,13 +4,16 @@ import unittest
 from unittest.mock import patch, MagicMock
 import datetime
 import io
+import json
 import os
 import socket
+import subprocess
 import shutil
 import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -1031,7 +1034,29 @@ class DownloadToFileTest(unittest.TestCase):
         self.assertEqual(result["status"], "unpacked")
         self.assertEqual(result["dest"], str(Path(self.dir) / "frame.fits"))
         self.assertTrue(src.exists())
-        self.assertEqual(calls[0][0], ["/usr/bin/funpack", "-O", str(Path(self.dir) / "frame.fits"), str(src)])
+        self.assertEqual((Path(self.dir) / "frame.fits").read_bytes(), b"fits")
+        self.assertFalse((Path(self.dir) / "frame.fits.part").exists())
+        self.assertEqual(calls[0][0], ["/usr/bin/funpack", "-O", str(Path(self.dir) / "frame.fits.part"), str(src)])
+
+    def _funpack_that_dies(self, error):
+        def fake_run(cmd, **kwargs):
+            Path(cmd[2]).write_bytes(b"trunc")  # partial output, then the failure
+            if isinstance(error, BaseException):
+                raise error
+            return MagicMock(returncode=error, stdout="", stderr="boom")
+        return fake_run
+
+    def test_funpack_file_failure_never_leaves_a_partial_fits(self):
+        """A truncated .fits would read as 'already unpacked' on every retry."""
+        src = Path(self.dir) / "frame.fits.fz"
+        for error in (1, subprocess.TimeoutExpired("funpack", 1), OSError("killed")):
+            src.write_bytes(b"packed")
+            with patch("muscat_db.lco.shutil.which", return_value="/usr/bin/funpack"), \
+                    patch("muscat_db.lco.subprocess.run", side_effect=self._funpack_that_dies(error)):
+                result = lco._funpack_file(src)
+            self.assertEqual(result["status"], "error")
+            self.assertFalse((Path(self.dir) / "frame.fits").exists(), error)
+            self.assertFalse((Path(self.dir) / "frame.fits.part").exists(), error)
 
 
 class ArchiveDownloadJobTest(unittest.TestCase):
@@ -1647,6 +1672,71 @@ class ExofopTimeSeriesTest(unittest.TestCase):
         self.assertNotEqual(lco._target_identifiers("TOI-2876"), lco._target_identifiers("TIC 2876"))
         self.assertFalse(lco._target_identifiers("TOI-2876") & lco._target_identifiers("TIC 2876"))
 
+    def _make_proposal_db(self):
+        """A frames table with the ``proposal_id`` column (issue #144)."""
+        import sqlite3
+        db = self._make_db()
+        conn = sqlite3.connect(db)
+        conn.execute("ALTER TABLE frames ADD COLUMN proposal_id TEXT NOT NULL DEFAULT ''")
+        conn.execute(
+            "INSERT INTO frames (instrument, obsdate, ccd, filename, object, ra, declination, proposal_id)"
+            " VALUES ('sinistro','240513',0,'cpt1m010-fa03-20240513-0001-e91.fits',"
+            "'TIC 460950389','10:36:37.96','-64:47:53.0','KEY2026B-001')"
+        )
+        conn.commit()
+        conn.close()
+        return db
+
+    def test_local_lco_datasets_hides_denied_proposals(self):
+        """#144: a night under a restricted proposal must not surface in
+        archive-search annotation or the ExoFOP cross-check for a denied viewer."""
+        db = self._make_proposal_db()
+        self.addCleanup(os.unlink, db)
+        with patch("muscat_db.lco._db_path", return_value=db):
+            open_view = lco._local_lco_datasets("sinistro", "240513", "cpt")
+            hidden = lco._local_lco_datasets(
+                "sinistro", "240513", "cpt", denied=frozenset({"KEY2026B-001"}),
+            )
+            other = lco._local_lco_datasets(
+                "sinistro", "240513", "cpt", denied=frozenset({"OTHER-001"}),
+            )
+        self.assertEqual([d["object"] for d in open_view], ["TIC 460950389"])
+        self.assertEqual(hidden, [])
+        self.assertEqual(len(other), 1)
+
+    def test_local_lco_dataset_match_hides_denied_proposals(self):
+        db = self._make_proposal_db()
+        self.addCleanup(os.unlink, db)
+        args = ("sinistro", ["240513"], "cpt", 159.15817, -64.79805)
+        with patch("muscat_db.lco._db_path", return_value=db):
+            self.assertIsNotNone(lco.local_lco_dataset_match(*args, object_name="TOI-6715"))
+            self.assertIsNone(
+                lco.local_lco_dataset_match(
+                    *args, object_name="TIC 460950389", denied=frozenset({"KEY2026B-001"}),
+                )
+            )
+
+    def test_annotate_archive_results_hides_denied_local_frames(self):
+        """#144: ``dataset_exists`` / ``matched_object`` / the frame count in
+        archive search results must not reveal a restricted proposal's frames."""
+        db = self._make_proposal_db()
+        self.addCleanup(os.unlink, db)
+        rows = [{
+            "filename": "cpt1m010-fa03-20240513-0002-e91.fits",
+            "OBJECT": "TIC 460950389", "SITEID": "cpt", "TELID": "1m0a", "INSTRUME": "fa03",
+            "DATE_OBS": "2024-05-13T10:00:00Z", "RA": 159.15817, "DEC": -64.79805,
+        }]
+        with patch("muscat_db.lco._db_path", return_value=db):
+            open_out, _ = lco._annotate_lco_archive_results("sinistro", rows)
+            hidden_out, _ = lco._annotate_lco_archive_results(
+                "sinistro", rows, denied=frozenset({"KEY2026B-001"}),
+            )
+        self.assertTrue(open_out[0]["dataset_exists"])
+        self.assertEqual(open_out[0]["dataset_matched_object"], "TIC 460950389")
+        self.assertFalse(hidden_out[0]["dataset_exists"])
+        self.assertEqual(hidden_out[0]["dataset_existing_count"], 0)
+        self.assertNotIn("TIC 460950389", str(hidden_out[0].get("dataset_matched_object") or ""))
+
     def test_local_lco_dataset_match_does_not_pool_tic_and_toi(self):
         """Regression (PR #121 review): with a candidate dataset whose OBJECT
         is ``TIC 2876`` sitting many degrees from the query coordinates,
@@ -1868,3 +1958,293 @@ class ToiResolutionTest(unittest.TestCase):
         self.assertIsNone(exofop.resolve_toi_number("WASP-12"))
         self.assertIsNone(exofop.resolve_toi_number(""))
         self.assertIsNone(exofop.resolve_toi_number("   "))
+
+
+class SiteInstrumentsTest(unittest.TestCase):
+    """Per-site instrument availability behind the schedule page's annotation.
+
+    The page must never hardcode elp out of the Sinistro/QHY600 lists: ELP is a
+    Sinistro site whose 1 m unit is temporarily offline (Sophia upgrade), so the
+    UI annotates it "currently unavailable" from live data and drops the
+    auto-pin, letting it return on its own when LCO re-lists the instrument.
+    """
+
+    def setUp(self):
+        lco._site_instruments_cache.clear()
+
+    @staticmethod
+    def _opener(by_site):
+        """A fake ``_API_OPENER.open`` that answers /api/instruments/?site=<s>."""
+        from urllib.parse import urlparse, parse_qs
+
+        def _open(req, timeout=None):
+            site = parse_qs(urlparse(req.full_url).query).get("site", [None])[0]
+            resp = MagicMock()
+            resp.status = 200
+            resp.read.return_value = json.dumps(by_site.get(site, {})).encode()
+            cm = MagicMock()
+            cm.__enter__.return_value = resp
+            return cm
+
+        return _open
+
+    @patch.dict(os.environ, {"LCO_API_TOKEN": "test-token"})
+    @patch("muscat_db.lco._API_OPENER")
+    def test_site_instruments_maps_each_site_to_its_codes(self, mock_opener):
+        from muscat_db import transit_obs
+
+        by_site = {s: {} for s in transit_obs.LCO_SITES}
+        by_site["ogg"] = {"2M0-SCICAM-MUSCAT": {}, "1M0-SCICAM-SINISTRO": {}}
+        by_site["elp"] = {"0M4-SCICAM-QHY600": {}}
+        mock_opener.open.side_effect = self._opener(by_site)
+
+        result = lco.site_instruments()
+
+        self.assertEqual(result["elp"], ["0M4-SCICAM-QHY600"])
+        self.assertEqual(
+            result["ogg"], ["1M0-SCICAM-SINISTRO", "2M0-SCICAM-MUSCAT"]
+        )
+        self.assertEqual(result["coj"], [])
+        # One request per LCO site.
+        self.assertEqual(mock_opener.open.call_count, len(transit_obs.LCO_SITES))
+
+    @patch.dict(os.environ, {"LCO_API_TOKEN": "test-token"})
+    @patch("muscat_db.lco._API_OPENER")
+    def test_site_instruments_cache_hit_skips_refetch(self, mock_opener):
+        from muscat_db import transit_obs
+
+        by_site = {s: {} for s in transit_obs.LCO_SITES}
+        by_site["elp"] = {"0M4-SCICAM-QHY600": {}}
+        mock_opener.open.side_effect = self._opener(by_site)
+
+        first = lco.site_instruments()
+        calls = mock_opener.open.call_count
+        second = lco.site_instruments()
+
+        self.assertEqual(mock_opener.open.call_count, calls)
+        self.assertEqual(second, first)
+        # A caller mutating its copy must not corrupt the cache.
+        second["elp"].append("BOGUS")
+        self.assertEqual(lco.site_instruments()["elp"], ["0M4-SCICAM-QHY600"])
+
+    @staticmethod
+    def _age_cache(seconds):
+        """Pretend every cached fetch timestamp happened *seconds* ago."""
+        for key, value in list(lco._site_instruments_cache.items()):
+            if key == "value":
+                ts, result = value
+                lco._site_instruments_cache[key] = (ts - seconds, result)
+            elif key == "attempt":
+                lco._site_instruments_cache[key] = value - seconds
+
+    @patch.dict(os.environ, {"LCO_API_TOKEN": "test-token"})
+    @patch("muscat_db.lco._API_OPENER")
+    def test_force_refetches_once_the_floor_has_passed(self, mock_opener):
+        from muscat_db import transit_obs
+
+        by_site = {s: {} for s in transit_obs.LCO_SITES}
+        mock_opener.open.side_effect = self._opener(by_site)
+
+        lco.site_instruments()
+        calls = mock_opener.open.call_count
+        self._age_cache(lco._SITE_INSTRUMENTS_MIN_FETCH_INTERVAL_S + 1)
+        lco.site_instruments(force=True)
+        self.assertEqual(mock_opener.open.call_count, 2 * calls)
+
+    @patch.dict(os.environ, {"LCO_API_TOKEN": "test-token"})
+    @patch("muscat_db.lco._API_OPENER")
+    def test_force_within_the_floor_does_not_hit_the_portal(self, mock_opener):
+        """``refresh=1`` is anonymous, so a burst of forced refreshes must not
+        turn into a burst of six-site fetches against LCO."""
+        from muscat_db import transit_obs
+
+        by_site = {s: {} for s in transit_obs.LCO_SITES}
+        mock_opener.open.side_effect = self._opener(by_site)
+
+        lco.site_instruments()
+        calls = mock_opener.open.call_count
+        for _ in range(5):
+            lco.site_instruments(force=True)
+        self.assertEqual(mock_opener.open.call_count, calls)
+
+    @patch.dict(os.environ, {"LCO_API_TOKEN": "test-token"})
+    @patch("muscat_db.lco._API_OPENER")
+    def test_failure_serves_stale_snapshot(self, mock_opener):
+        from muscat_db import transit_obs
+
+        by_site = {s: {} for s in transit_obs.LCO_SITES}
+        by_site["elp"] = {"0M4-SCICAM-QHY600": {}}
+        mock_opener.open.side_effect = self._opener(by_site)
+        good = lco.site_instruments()
+
+        # Force a refresh that fails once the floor has passed: the last good
+        # snapshot must survive.
+        self._age_cache(lco._SITE_INSTRUMENTS_MIN_FETCH_INTERVAL_S + 1)
+        mock_opener.open.side_effect = lco.LcoError("portal down", detail="boom")
+        self.assertEqual(lco.site_instruments(force=True), good)
+
+    @patch.dict(os.environ, {"LCO_API_TOKEN": "test-token"})
+    @patch("muscat_db.lco._API_OPENER")
+    def test_failure_without_cache_propagates(self, mock_opener):
+        mock_opener.open.side_effect = lco.LcoError("portal down", detail="boom")
+        with self.assertRaises(lco.LcoError):
+            lco.site_instruments()
+
+    @patch.dict(os.environ, {"LCO_API_TOKEN": "test-token"})
+    @patch("muscat_db.lco._API_OPENER")
+    def test_failed_fetch_is_not_retried_within_the_floor(self, mock_opener):
+        """During an outage every page load would otherwise block on the 15 s
+        timeout of each of six sites before falling back."""
+        mock_opener.open.side_effect = lco.LcoError("portal down", detail="boom")
+        with self.assertRaises(lco.LcoError):
+            lco.site_instruments()
+        calls = mock_opener.open.call_count
+
+        with self.assertRaises(lco.LcoError):
+            lco.site_instruments()
+        self.assertEqual(mock_opener.open.call_count, calls)
+
+    @patch.dict(os.environ, {"LCO_API_TOKEN": "test-token"})
+    @patch("muscat_db.lco._API_OPENER")
+    def test_failed_fetch_with_stale_cache_is_not_retried_within_the_floor(
+        self, mock_opener
+    ):
+        from muscat_db import transit_obs
+
+        by_site = {s: {} for s in transit_obs.LCO_SITES}
+        by_site["elp"] = {"0M4-SCICAM-QHY600": {}}
+        mock_opener.open.side_effect = self._opener(by_site)
+        good = lco.site_instruments()
+
+        # The TTL has expired and the portal is down.
+        self._age_cache(lco._SITE_INSTRUMENTS_TTL_S + 1)
+        mock_opener.open.side_effect = lco.LcoError("portal down", detail="boom")
+        self.assertEqual(lco.site_instruments(), good)
+        calls = mock_opener.open.call_count
+        self.assertEqual(lco.site_instruments(), good)
+        self.assertEqual(mock_opener.open.call_count, calls)
+
+    @patch.dict(os.environ, {"LCO_API_TOKEN": "test-token"})
+    @patch("muscat_db.lco._API_OPENER")
+    def test_failed_fetch_is_retried_after_the_floor(self, mock_opener):
+        from muscat_db import transit_obs
+
+        mock_opener.open.side_effect = lco.LcoError("portal down", detail="boom")
+        with self.assertRaises(lco.LcoError):
+            lco.site_instruments()
+
+        self._age_cache(lco._SITE_INSTRUMENTS_MIN_FETCH_INTERVAL_S + 1)
+        by_site = {s: {} for s in transit_obs.LCO_SITES}
+        mock_opener.open.side_effect = self._opener(by_site)
+        self.assertEqual(lco.site_instruments()["elp"], [])
+        self.assertEqual(mock_opener.open.call_count, len(transit_obs.LCO_SITES) + 1)
+
+    @patch.dict(os.environ, {"LCO_API_TOKEN": "test-token"})
+    @patch("muscat_db.lco._API_OPENER")
+    def test_concurrent_cold_cache_fetches_the_portal_once(self, mock_opener):
+        """Single-flight: two callers on a cold cache share one six-site fetch
+        instead of each issuing their own."""
+        import threading as _threading
+        from muscat_db import transit_obs
+
+        by_site = {s: {} for s in transit_obs.LCO_SITES}
+        base = self._opener(by_site)
+
+        def slow_open(req, timeout=None):
+            time.sleep(0.02)
+            return base(req, timeout=timeout)
+
+        mock_opener.open.side_effect = slow_open
+        barrier = _threading.Barrier(2)
+        errors = []
+
+        def call():
+            try:
+                barrier.wait()
+                lco.site_instruments()
+            except Exception as exc:  # pragma: no cover - surfaced below
+                errors.append(exc)
+
+        threads = [_threading.Thread(target=call) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [])
+        self.assertEqual(mock_opener.open.call_count, len(transit_obs.LCO_SITES))
+
+    @patch.dict(os.environ, {"LCO_API_TOKEN": "test-token"})
+    @patch("muscat_db.lco._API_OPENER")
+    def test_availability_rollup_excludes_offline_elp_sinistro(self, mock_opener):
+        """elp must not be reported as a schedulable Sinistro site while down."""
+        from muscat_db import transit_obs
+
+        by_site = {s: {} for s in transit_obs.LCO_SITES}
+        for site in ("coj", "lsc", "cpt", "tfn"):
+            by_site[site] = {"1M0-SCICAM-SINISTRO": {}}
+        by_site["ogg"] = {"2M0-SCICAM-MUSCAT": {}}
+        by_site["elp"] = {"0M4-SCICAM-QHY600": {}}
+        mock_opener.open.side_effect = self._opener(by_site)
+
+        result = lco.instrument_availability()
+
+        self.assertNotIn("elp", result["by_kind"]["sinistro"])
+        self.assertEqual(
+            result["by_kind"]["sinistro"], ["coj", "cpt", "lsc", "tfn"]
+        )
+        self.assertEqual(result["by_kind"]["qhy600"], ["elp"])
+        self.assertEqual(result["by_kind"]["muscat"], ["ogg"])
+
+    def test_kind_instrument_type_maps_schedule_kinds(self):
+        self.assertEqual(lco.kind_instrument_type("sinistro"), "1M0-SCICAM-SINISTRO")
+        self.assertEqual(lco.kind_instrument_type("Sinistro"), "1M0-SCICAM-SINISTRO")
+        self.assertEqual(lco.kind_instrument_type("muscat4"), "2M0-SCICAM-MUSCAT")
+        self.assertEqual(lco.kind_instrument_type("qhy600"), "0M4-SCICAM-QHY600")
+        # sbig is retired: no live instrument_type, so never availability-checked.
+        self.assertIsNone(lco.kind_instrument_type("sbig"))
+
+
+def _archive_pages(monkeypatch, pages):
+    """Serve *pages* keyed by offset, recording every URL requested."""
+    seen = []
+
+    def fake_request(url, user_name=None, token=None, **kwargs):
+        seen.append(url)
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+        return pages[int(query.get("offset", ["0"])[0])]
+
+    monkeypatch.setattr(lco, "_lco_api_request", fake_request)
+    return seen
+
+
+def test_archive_search_all_pages_by_offset_when_count_is_estimated(monkeypatch):
+    # The live archive answers a large query with count_estimated and no `next`.
+    rows = [{"id": i} for i in range(5)]
+    seen = _archive_pages(monkeypatch, {
+        0: {"count": 128, "count_estimated": True, "next": None, "results": rows[:2]},
+        2: {"count": 128, "count_estimated": True, "next": None, "results": rows[2:4]},
+        4: {"count": 128, "count_estimated": True, "next": None, "results": rows[4:]},
+    })
+    result = lco.archive_search_all({"proposal_id": "KEY2026B-001", "limit": "2"})
+    assert [r["id"] for r in result["results"]] == [0, 1, 2, 3, 4]
+    assert result["count"] == 5 and result["truncated"] is False
+    assert len(seen) == 3
+
+
+def test_archive_search_all_follows_next_for_exact_counts(monkeypatch):
+    seen = _archive_pages(monkeypatch, {
+        0: {"count": 3, "next": "https://archive-api.lco.global/frames/?limit=2&offset=2",
+            "results": [{"id": 0}, {"id": 1}]},
+        2: {"count": 3, "next": None, "results": [{"id": 2}]},
+    })
+    result = lco.archive_search_all({"limit": "2"})
+    assert (result["count"], len(result["results"]), result["truncated"]) == (3, 3, False)
+    assert len(seen) == 2
+
+
+def test_archive_search_all_reports_truncation_of_estimated_listing(monkeypatch):
+    full = {"count": 128, "count_estimated": True, "next": None, "results": [{"id": 0}, {"id": 1}]}
+    _archive_pages(monkeypatch, {0: full, 2: full, 4: full})
+    result = lco.archive_search_all({"limit": "2"}, max_frames=4)
+    assert result["truncated"] is True and len(result["results"]) == 4

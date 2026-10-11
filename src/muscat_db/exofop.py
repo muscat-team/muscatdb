@@ -337,7 +337,9 @@ def archive_search_by_target_date(
 # Existence cross-check against muscat-db
 # --------------------------------------------------------------------------- #
 
-def check_time_series_exists(entry: dict, *, target: str = "") -> dict:
+def check_time_series_exists(
+    entry: dict, *, target: str = "", denied: frozenset[str] = frozenset()
+) -> dict:
     """Return whether an ExoFOP time-series entry is already in muscat-db.
 
     The check is entirely local (no LCO call): infer the instrument and site,
@@ -372,6 +374,7 @@ def check_time_series_exists(entry: dict, *, target: str = "") -> dict:
         ra_deg,
         dec_deg,
         object_name=target,
+        denied=denied,
     )
     if matching:
         result["exists"] = True
@@ -384,7 +387,9 @@ def check_time_series_exists(entry: dict, *, target: str = "") -> dict:
     return result
 
 
-def build_time_series_report(target: str, *, _now: float | None = None) -> dict:
+def build_time_series_report(
+    target: str, *, _now: float | None = None, denied: frozenset[str] = frozenset()
+) -> dict:
     """Fetch ExoFOP time series for *target* and annotate db existence.
 
     Returns ``{"ok": True, "toi": <num>, "time_series": [...], "total": N}``
@@ -395,7 +400,7 @@ def build_time_series_report(target: str, *, _now: float | None = None) -> dict:
     if toi is None:
         return {"ok": False, "error": "Target does not resolve to a known TOI"}
     entries = fetch_time_series(toi, _now=_now)
-    rows = [check_time_series_exists(e, target=target) for e in entries]
+    rows = [check_time_series_exists(e, target=target, denied=denied) for e in entries]
     return {
         "ok": True,
         "toi": toi,

@@ -31,6 +31,9 @@ from muscat_db.obsdate_normalize import (
     plan_all,
 )
 from muscat_db.propid_backfill import PROPID_INSTRUMENTS
+from muscat_db import scan_failures, scanner
+from muscat_db.audit import DEFAULT_MIN_AGE_DAYS
+from muscat_db.sweep import DEFAULT_WORKERS as SWEEP_DEFAULT_WORKERS
 from muscat_db.scanner import scan_date, scan_missing_dates, scan_yesterday
 from muscat_db.summarizer import summarize_csv
 
@@ -288,11 +291,41 @@ def scan_yesterday_cmd(
 ):
     """Scan yesterday's data for all instruments (cron-friendly)."""
     _log_startup_banner("scan-yesterday")
+    obsdate = scanner.yesterday_obsdate()
     scanned = scan_yesterday(max_workers=workers)
     if scanned:
         console.print(f"[green]Scanned yesterday for: {', '.join(scanned)}[/]")
     else:
         console.print("[yellow]No data found for yesterday[/]")
+    # Exit 0 regardless: the cron runs `scan-yesterday && build-db`, and one
+    # instrument's failure must not also skip everyone else's rebuild (#196).
+    failed = sorted(
+        e["instrument"] for e in scan_failures.pending(scanner.OBSLOG_BASE)
+        if e["obsdate"] == obsdate
+    )
+    if failed:
+        console.print(
+            f"[red]Scan failed for {obsdate}: {', '.join(failed)} "
+            "-- recorded for retry; see `muscat-db scan-failures`[/]"
+        )
+
+
+@app.command(name="scan-failures", cls=_Cmd)
+def scan_failures_cmd():
+    """List obslog scans that failed and have not since succeeded."""
+    entries = scan_failures.pending(scanner.OBSLOG_BASE)
+    if not entries:
+        console.print("[green]No open scan failures[/]")
+        return
+    table = Table(title=f"Open scan failures ({scan_failures.ledger_path(scanner.OBSLOG_BASE)})")
+    for col in ("instrument", "obsdate", "attempts", "first failed", "last failed", "reason"):
+        table.add_column(col)
+    for e in sorted(entries, key=lambda e: (e["instrument"], e["obsdate"])):
+        table.add_row(
+            e["instrument"], e["obsdate"], str(e.get("attempts", 1)),
+            e.get("first_failed", ""), e.get("last_failed", ""), e.get("reason", ""),
+        )
+    console.print(table)
 
 
 @app.command(cls=_Cmd)
@@ -342,6 +375,10 @@ def build_db(
     """Build SQLite database from all CSV observation logs."""
     _log_startup_banner(f"build-db --db {db}")
     _require_existing_db(ctx, db, "build")
+    _run_build_db(db)
+
+
+def _run_build_db(db: str) -> None:
     from muscat_db.database import build_db as _build_db
     console.print("[cyan]Scanning observation logs...[/]")
     with Progress(
@@ -353,6 +390,83 @@ def build_db(
     ) as progress:
         count = _build_db(db, progress=progress)
     console.print(f"[green]Database built: {count} frames indexed in {db}[/]")
+
+
+@app.command(name="sweep", cls=_Cmd)
+def sweep_cmd(
+    ctx: typer.Context,
+    workers: int = typer.Option(
+        SWEEP_DEFAULT_WORKERS, "--workers", "-w",
+        help="Parallel worker count (default leaves most of the host to photometry)",
+    ),
+    build: bool = typer.Option(
+        False, "--build-db",
+        help="Rebuild the database afterwards, only if the sweep wrote any obslog CSVs",
+    ),
+    db: str = _db_option(),
+):
+    """Backfill: scan every missing date of every instrument, then retry open scan failures.
+
+    Meant for a weekly cron entry. Skips itself while photometry/fit jobs are
+    active. Never rescans a date with a known cause (see `audit`) or one where
+    it would leave fewer rows than the existing CSV, and skips incomplete dates
+    whose raw files have not changed since the last sweep.
+    """
+    from muscat_db.sweep import run_sweep
+
+    _log_startup_banner(f"sweep --workers {workers}{' --build-db' if build else ''}")
+    if build:
+        _require_existing_db(ctx, db, "build")
+    with Progress(
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("[bold]{task.fields[filename]}"),
+        TimeRemainingColumn(),
+        console=console,
+    ) as progress:
+        result = run_sweep(max_workers=workers, progress=progress)
+    if result.skipped:
+        console.print(f"[yellow]Sweep skipped: {result.skipped}[/]")
+        return
+    for name, dates in result.scanned.items():
+        console.print(f"[green]Scanned {len(dates)} missing date(s) for {name}: {', '.join(dates)}[/]")
+    for inst, obsdate in result.retried:
+        console.print(f"[green]Retried {inst} {obsdate}: scanned cleanly[/]")
+    for inst, obsdate in result.failed:
+        console.print(f"[red]Retried {inst} {obsdate}: still failing (see `muscat-db scan-failures`)[/]")
+    for inst, obsdate, why in result.held:
+        console.print(f"[yellow]Held {inst} {obsdate}, not rescanned: {why}[/]")
+    if result.unchanged:
+        console.print(f"[dim]{result.unchanged} incomplete date(s) skipped: raw files unchanged since the last sweep[/]")
+    if not result.changed:
+        console.print("[green]Nothing to rescan[/]")
+        return
+    if build:
+        _run_build_db(db)
+
+
+@app.command(name="audit", cls=_Cmd)
+def audit_cmd(
+    db: str = _db_option(),
+    min_age_days: int = typer.Option(
+        DEFAULT_MIN_AGE_DAYS, "--min-age-days", help="Skip dates younger than this; their delivery may still be arriving",
+    ),
+    notify: bool = typer.Option(
+        True, "--notify/--no-notify",
+        help="Post new or changed mismatches to Slack and remember them for the next run",
+    ),
+):
+    """Compare raw files on disk with database rows per instrument/date/CCD; report differences.
+
+    Read-only: never rescans. Known causes (#197, #198) are tagged and never alert.
+    """
+    from muscat_db.audit import report, run_audit
+
+    _log_startup_banner(f"audit --db {db}")
+    if not os.path.exists(db):
+        console.print(f"[red]No database at {db}; nothing to audit against.[/]")
+        raise typer.Exit(1)
+    report(run_audit(db, min_age_days=min_age_days), notify=notify)
 
 
 @app.command(cls=_Cmd, name="build-static-site")
@@ -435,6 +549,111 @@ def ingest_date(
         console.print(f"[red]Error: {e}[/]")
         raise typer.Exit(1)
     console.print(f"[green]Ingested {count} frames for {instrument} {obsdate} into {db}[/]")
+
+
+@app.command(name="lco-sync", cls=_Cmd)
+def lco_sync_cmd(
+    ctx: typer.Context,
+    proposal_ids: list[str] = typer.Argument(
+        ..., help="LCO proposal ID(s), e.g. KEY2026B-001",
+    ),
+    days: int = typer.Option(
+        7, "--days", min=1,
+        help="Sync nights with frames in the last N days of DATE_OBS (overlap catches late reductions)",
+    ),
+    start: str = typer.Option("", "--start", help="Window start, ISO UTC (overrides --days)"),
+    end: str = typer.Option("", "--end", help="Window end, ISO UTC (default: now)"),
+    user: str = typer.Option(
+        "", "--user",
+        help="Use this muscat-db user's saved LCO token instead of $LCO_API_TOKEN",
+    ),
+    workers: int = typer.Option(4, "--workers", "-w", min=1, max=16, help="Concurrent downloads"),
+    max_nights: int = typer.Option(
+        0, "--max-nights", min=0,
+        help="Download at most N incomplete nights per proposal per run, oldest first (0 = no cap)",
+    ),
+    ingest: bool = typer.Option(
+        True, "--ingest/--no-ingest",
+        help="Ingest scanned nights now; --no-ingest leaves it to a following build-db",
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Query and plan only; download nothing"),
+    db: str = _db_option(),
+):
+    """Download LCO proposal datasets (whole nights), then scan and ingest them (cron-friendly).
+
+    Any night with a frame in the window is synced whole. Re-running resumes:
+    each night's missing frames are fetched and stale obslogs rescanned.
+    """
+    from rich.markup import escape
+
+    from muscat_db import lco_sync
+
+    window_args = f"--start {start}" if start else f"--days {days}"
+    if end:
+        window_args += f" --end {end}"
+    flags = [
+        f"--user {user}" if user else "",
+        f"--max-nights {max_nights}" if max_nights else "",
+        "--no-ingest" if not ingest else "",
+        "--dry-run" if dry_run else "",
+    ]
+    _log_startup_banner(" ".join(["lco-sync", *proposal_ids, window_args, *filter(None, flags)]))
+    write_db = ingest and not dry_run
+    if write_db:
+        _require_existing_db(ctx, db, "ingest")
+    try:
+        window = lco_sync.archive_window(days, start, end)
+        proposals = [lco_sync.validate_proposal_id(p) for p in proposal_ids]
+        root = lco_sync.require_download_root()
+    except lco_sync.SyncError as e:
+        console.print(f"[red]Error: {escape(str(e))}[/]")
+        raise typer.Exit(1)
+
+    def log(message: str) -> None:
+        console.print(message, markup=False, soft_wrap=True)
+
+    failed = False
+    try:
+        with lco_sync.sync_lock(root):
+            for proposal_id in proposals:
+                try:
+                    report = lco_sync.sync_proposal(
+                        proposal_id,
+                        start=window[0],
+                        end=window[1],
+                        data_root=root,
+                        db=db if write_db else None,
+                        user_name=user or None,
+                        workers=workers,
+                        max_nights=max_nights,
+                        dry_run=dry_run,
+                        log=log,
+                    )
+                except Exception as e:  # keep going so one proposal can't block the rest
+                    failed = True
+                    console.print(f"[red]{proposal_id}: {escape(str(e))}[/]")
+                    continue
+                failed = failed or not report.ok
+                if dry_run:
+                    continue
+                color = "green" if report.ok else "yellow"
+                complete = sum(1 for d in report.datasets if d.complete)
+                scanned = sum(1 for d in report.datasets if d.scanned is not None)
+                console.print(
+                    f"[{color}]{proposal_id}: {complete}/{len(report.datasets)} nights complete, "
+                    f"{report.downloaded} frames downloaded, {report.failed} failed, "
+                    f"{scanned} nights scanned, {report.deferred} deferred[/]",
+                    soft_wrap=True,
+                )
+    except KeyboardInterrupt:
+        console.print("[yellow]Interrupted. Re-run the same command to resume; "
+                      "finished frames are kept and only missing ones are fetched.[/]")
+        raise typer.Exit(130)
+    except lco_sync.SyncError as e:
+        console.print(f"[red]Error: {escape(str(e))}[/]")
+        raise typer.Exit(1)
+    if failed:
+        raise typer.Exit(1)
 
 
 _PROPID_INST_CHOICES = click.Choice([*PROPID_INSTRUMENTS, "all"])

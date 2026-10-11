@@ -134,6 +134,8 @@ RUN_DEFAULTS: dict = {
 POSTPROCESS_DEFAULTS: dict = {
     "post_sigma": 5.0,
     "post_poly_deg": 2,
+    "post_exclude_before_jd": "",
+    "post_exclude_after_jd": "",
 }
 
 # LCO instruments deployed across multiple sites/telescope units, needing
@@ -479,6 +481,27 @@ def _telescope_token_to_value(digits: str | None, inst: str = "sinistro") -> str
     return f"{prefix}-{digits}"
 
 
+def empty_outputs() -> dict:
+    """What :func:`list_outputs` returns for a target with no products."""
+    return {
+        "summary": {},
+        "summary_items": [],
+        "bands": {},
+        "npz": None,
+        "log": None,
+        "has_any": False,
+        "masters": [],
+        "sites": [],
+        "site": None,
+        "telescopes": [],
+        "telescope": None,
+        "modes": [],
+        "mode": None,
+        "ref_header": None,
+        "ref_selection": None,
+    }
+
+
 def list_outputs(
     inst: str,
     date: str,
@@ -517,23 +540,7 @@ def list_outputs(
     therefore build regexes that accept any 6-digit date token instead of
     requiring an exact match against the passed-in ``date``.
     """
-    out: dict = {
-        "summary": {},
-        "summary_items": [],
-        "bands": {},
-        "npz": None,
-        "log": None,
-        "has_any": False,
-        "masters": [],
-        "sites": [],
-        "site": None,
-        "telescopes": [],
-        "telescope": None,
-        "modes": [],
-        "mode": None,
-        "ref_header": None,
-        "ref_selection": None,
-    }
+    out = empty_outputs()
     try:
         rdir = run_output_dir(inst, date, target, run_id)
     except ValueError:
@@ -827,6 +834,37 @@ def csv_preview(path: Path, n: int = 8) -> tuple[list[str], list[list[str]]]:
         return headers, rows
     except OSError:
         return [], []
+
+
+def lightcurve_time_range(paths) -> tuple[float, float] | None:
+    """Min/max finite ``BJD_TDB`` across band light-curve CSVs, or ``None``.
+
+    This is the time axis prose2's post-process JD-range cut compares
+    against -- not the raw header JD in ``frames.jd_start`` that the
+    run-time ``--exclude_after_jd``/``--exclude_before_jd`` use. A
+    zero-width span returns ``None`` (nothing to drag a slider across).
+    """
+    lo = hi = None
+    for path in paths:
+        try:
+            with open(path, newline="") as f:
+                reader = _csv.DictReader(f)
+                if "BJD_TDB" not in (reader.fieldnames or []):
+                    continue
+                for row in reader:
+                    try:
+                        t = float(row["BJD_TDB"])
+                    except (TypeError, ValueError):
+                        continue
+                    if not math.isfinite(t):
+                        continue
+                    lo = t if lo is None else min(lo, t)
+                    hi = t if hi is None else max(hi, t)
+        except OSError:
+            logger.debug("failed to read BJD_TDB span from %s", path, exc_info=True)
+    if lo is None or hi is None or not hi > lo:
+        return None
+    return lo, hi
 
 
 @dataclass
@@ -2065,6 +2103,14 @@ def cancel_run(inst: str, date: str, target: str, run_id: str = "") -> dict:
                     run_id=run_id,
                 )
                 return {"ok": True, "key": key}
+            if (
+                found and found[0]["state"] == "running"
+                and jobs.held_by_other_instance(found[0], current_instance_id())
+                and store.request_cancel(db_key)
+            ):
+                # A fleet worker launched it, so only that worker holds the
+                # process; it acts on this request from its own sync_jobs pass.
+                return {"ok": True, "key": key, "requested": True}
             return {"ok": False, "error": "no job to cancel"}
         if job.proc.poll() is not None:
             return {"ok": True, "already_finished": True}
@@ -2124,6 +2170,10 @@ def _detect_process_running(rdir: Path) -> bool:
 
 def sync_jobs() -> None:
     store = get_job_store()
+    jobs.apply_cancel_requests(
+        store, "photometry", current_instance_id(),
+        lambda r: cancel_run(r["inst"], r["date"], r["target"], r.get("run_id") or ""),
+    )
     with _LOCK:
         # Watchdog: kill runs that have hung (no log output, or past the absolute
         # cap) and record them as errors. This frees the single full-job slot so the
@@ -2153,6 +2203,18 @@ def sync_jobs() -> None:
         db_jobs = store.all()
         running_keys = {j["key"] for j in db_jobs if j["state"] == "running" and j["type"] == "photometry"}
         db_by_key = {j["key"]: j for j in db_jobs}
+
+        # Drop finished jobs a newer queued run has replaced (same key) so their
+        # terminal state is not written over the pending row below.
+        for key in list(_JOBS.keys()):
+            stale = _JOBS[key]
+            stale_key = f"photometry:{job_key(stale.inst, stale.date, stale.target, stale.run_id)}"
+            if jobs.superseded_by_queued_row(db_by_key.get(stale_key), stale.started_at, stale.proc):
+                try:
+                    stale.logf.close()
+                except OSError:
+                    pass
+                _JOBS.pop(key, None)
 
         for key, job in _JOBS.items():
             db_key = f"photometry:{job_key(job.inst, job.date, job.target, job.run_id)}"

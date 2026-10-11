@@ -176,6 +176,57 @@ runs with a minimal environment; pin it in `.env` too for manual/GUI runs (see
 day's obslog, so a one-off manual `build-db` or `scan` never gets silently
 overwritten by the next nightly run of this job.
 
+A scan that fails for one instrument is logged at WARNING with its traceback
+in `scan.log`, and `scan-yesterday` names it in its output. It is also
+recorded in `$MUSCAT_OBSLOG_DIR/.scan-failures.jsonl`, one entry per
+instrument and date, until a later scan of that date writes cleanly. The same
+happens for a CCD whose CSV could not be written, which would otherwise look
+complete to `scan-missing`. `muscat-db scan-failures` lists the open entries.
+`scan-yesterday` still exits 0 on such a failure, so the other instruments'
+`build-db` goes ahead.
+
+## Cron (weekly): backfill sweep and ingestion audit
+
+`scan-yesterday` looks at each date once, so a date that fails or arrives late
+is never revisited, and nothing used to notice. Two weekly jobs close that gap
+(#196). Run them at low priority, well clear of the 17:30 nightly:
+
+```
+0 3 * * 0 cd $MUSCATDB_ROOT && nice -n 19 ionice -c3 uv run muscat-db sweep --build-db >> $MUSCATDB_ROOT/logs/sweep.log 2>&1
+0 6 * * 0 cd $MUSCATDB_ROOT && nice -n 19 ionice -c3 uv run muscat-db audit >> $MUSCATDB_ROOT/logs/audit.log 2>&1
+```
+
+`sweep` rescans every date `scan-missing <inst> all` would pick up, for every
+instrument, then retries the open scan failures. With `--build-db` it rebuilds
+the database afterwards, but only if it rewrote any obslog CSVs. It stays out
+of the way of photometry: it does not start while any photometry/fit job is
+active, uses 8 workers by default (`--workers`), and a second sweep never runs
+alongside the first. It holds a date, rather than rescanning it, when:
+
+- the date has a known cause in `audit` (the #197 and #198 dates), or
+- any CCD has fewer raw files than its existing CSV has rows, so a rescan
+  would replace good rows with fewer or none.
+
+It also skips incomplete dates whose raw directory has not changed since the
+sweep last rescanned them (recorded in
+`$MUSCAT_OBSLOG_DIR/.sweep-state.json`). Some dates hold FITS files whose
+headers cannot be read, which keeps them "incomplete" however often they are
+rescanned; without this, every weekly run would redo them for nothing.
+
+`audit` compares, per instrument, date and CCD, the raw files `scan_date`
+would match with the rows in `frames`, and reports every difference as
+`missing` (an ingestion gap), `extra` (a rescan would lose rows) or `gone`
+(rows for a date whose raw directory no longer exists). It only reads. Dates
+younger than 3 days are skipped (`--min-age-days`), since their delivery may
+still be arriving. The full report goes to `audit.log`. Slack (the same
+`/etc/muscat-db/slack-webhook-url` as `deploy/pull-deploy.sh`, or
+`$SLACK_WEBHOOK_FILE`) gets only what is new or changed since the previous
+run, recorded in `$MUSCAT_OBSLOG_DIR/.audit-last.json`, plus any new open
+scan failures. Dates with a known cause are tagged with their issue and never
+alert; drop them from `audit._KNOWN_ISSUES` when the issue is fixed. Use
+`--no-notify` for a manual run that should neither post nor move that
+baseline.
+
 `build-db` snapshots the existing database before rebuilding it (SQLite backup
 API, safe while the server is running) to `$MUSCAT_DB_BACKUP_DIR` (default
 `$MUSCAT_TMPDIR`, i.e. `~/temp`) as `muscat.db.nightly-<stamp>.sqlite`, keeping
@@ -183,6 +234,59 @@ the newest `$MUSCAT_DB_BACKUP_KEEP` (default 2). It aborts, leaving the live
 file untouched, if either that snapshot or the freshly built database fails
 `PRAGMA integrity_check`; a failed snapshot is kept with a `.CORRUPT` suffix.
 The integrity checks add roughly 3-4 minutes to the nightly run.
+
+### LCO proposal sync
+
+`muscat-db lco-sync <PROPID>...` syncs a proposal's BANZAI final products
+(RLEVEL 91, `OBSTYPE=EXPOSE`, engineering frames such as auto-focus dropped)
+from the LCO archive into the download root (`MUSCAT_LCO_DIR`, else
+`MUSCAT_DATA_DIR`). It catches observations the UI's request monitor never
+saw, e.g. ones scheduled directly on the LCO portal. To run it in the same
+nightly job, put it ahead of `build-db` and join it with `;` so an archive
+outage cannot block the rebuild:
+
+```
+30 17 * * * cd $MUSCATDB_ROOT && uv run muscat-db lco-sync KEY2026B-001 --user <name> --no-ingest >> $MUSCATDB_ROOT/logs/lco-sync.log 2>&1; bash scripts/download_catalogs.sh >> $MUSCATDB_ROOT/logs/download_catalogs.log 2>&1 && uv run muscat-db scan-yesterday >> $MUSCATDB_ROOT/logs/scan.log 2>&1 && uv run muscat-db build-db >> $MUSCATDB_ROOT/logs/build-db.log 2>&1
+```
+
+- **Whole nights.** The unit of work is a dataset: one instrument night (the
+  `<Instrument>/<DAY-OBS>` directory). A night is selected when any of its
+  frames has a DATE_OBS in the window, and it is then synced whole, even when
+  `--start` or `--end` cuts through it. The archive is queried two days beyond
+  each edge, one day at a time, so a cut night comes back complete. Because
+  the window is DATE_OBS in UTC, a night can be labelled with the day before
+  `--start`.
+- **One night at a time.** Each night's missing frames are downloaded and
+  funpacked, and the night is rescanned (and ingested) before the next night
+  starts. An interrupted run therefore leaves at most one partial night.
+- **Resuming.** Nothing is recorded between runs. Each run compares every
+  night's archive listing with the unpacked files on disk, prints
+  `N frames, M missing` per night, and fetches only the missing frames. A
+  `.fz` whose funpack never finished is unpacked. `.part` files over an hour
+  old, left by a killed run, are removed. A night whose obslog is older than
+  its newest frame is rescanned. Ctrl-C stops after the in-flight downloads,
+  each of which is written atomically. After any interruption, re-run the
+  same command.
+- **Window.** `--days 7` (default) re-checks a week on every run. Nights that
+  are already complete cost only metadata queries, and the overlap is what
+  picks up reductions BANZAI publishes days late. Use `--start/--end` (ISO
+  UTC) for a one-off backfill.
+- **Token.** `--user <name>` uses that muscat-db user's LCO token saved in
+  Settings. Without it the command falls back to `$LCO_API_TOKEN`. The token
+  must belong to a member of the proposal, since unreleased frames are
+  proprietary.
+- **Volume.** A busy 0.4m key project can produce thousands of QHY600 frames a
+  night (about 67 MB each once the `.fz` and the unpacked `.fits` are both on
+  disk). Run `--dry-run` first to see the per-night counts. `--max-nights N`
+  downloads at most N incomplete nights per run, oldest first. The rest are
+  reported as deferred and picked up by later runs.
+- **Ingest.** `--no-ingest` stops after writing the obslog CSVs and leaves
+  ingestion to the `build-db` that follows. Without that flag, each night is
+  also ingested as soon as it is scanned.
+- **Safety.** A lock file (`.lco-sync.lock` in the download root) makes an
+  overlapping run exit instead of racing the first one. The lock is released
+  when the process dies, so a killed run never blocks the next. The exit
+  status is non-zero if any frame, scan, or proposal failed.
 
 ## Documentation
 

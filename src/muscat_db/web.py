@@ -70,7 +70,9 @@ from muscat_db import photometry as phot
 from muscat_db import postprocess as postproc
 from muscat_db import exposure as exp_calc
 from muscat_db.access import (
+    NightVisibility,
     denied_proposal_ids_for,
+    hidden_obsdates as _hidden_obsdates,
     object_hidden as _object_hidden,
     sql_not_denied as _sql_not_denied,
 )
@@ -159,6 +161,7 @@ from muscat_db.database import (
     get_targets as _get_targets,
     objects_with_restricted_proposal as _objects_with_restricted_proposal,
     visible_targets as _visible_target_rows,
+    visible_target_rollup as _visible_target_rollup,
     get_identified_overrides as _get_identified_overrides,
     get_norm_name_overrides as _get_norm_name_overrides,
     set_identified as _set_identified,
@@ -633,6 +636,102 @@ def _viewer_denied() -> frozenset[str]:
     """Restricted proposals the current request's viewer may not see (issue
     #144); empty for admins and whenever nothing is restricted."""
     return denied_proposal_ids_for(_db_path(), _CURRENT_USER.get())
+
+
+def _night_visibility(denied: frozenset[str] | None = None) -> NightVisibility:
+    """Per-request night/target visibility for photometry, transit-fit and job
+    resources (issue #144 PR5); see :class:`muscat_db.access.NightVisibility`."""
+    db = _db_path()
+    denied = _viewer_denied() if denied is None else denied
+    overrides = _get_norm_name_overrides(db) if denied else {}
+    return NightVisibility(db, denied, lambda name: _normalize_target_name(name, overrides))
+
+
+def _night_hidden(inst: str, date: str, target: str) -> bool:
+    return _night_visibility().hidden(inst, date, target)
+
+
+def _require_visible_night(inst: str, date: str, target: str) -> None:
+    """404 an action on a night's target the viewer may not see, as PR4 does
+    for note writes on a hidden object."""
+    if _night_hidden(inst, date, target):
+        raise HTTPException(404, f"target {target!r} not found")
+
+
+def _require_no_denied_night(inst: str, date: str) -> None:
+    """404 a whole-night action (LCO archive scan or ingest) when any object on
+    the night is under a proposal the viewer may not see: the action touches
+    every object on the night, and its raw-file counts would reveal the night's
+    existence and size. Same 404 as a night that was never observed."""
+    if _night_visibility().night_has_denied(inst, date):
+        raise HTTPException(404, f"night {inst} {date} not found")
+
+
+def _ttv_target_hidden(target: str, denied: frozenset[str] | None = None) -> bool:
+    """A TTV fit combines transit times from many nights, and no run records
+    which ones it used (#208). It is therefore hidden when *any* night of its
+    target is denied, not only when every night is (the /targets rule): a
+    model fitted to a denied night's timing would expose it."""
+    denied = _viewer_denied() if denied is None else denied
+    if not denied:
+        return False
+    db = _db_path()
+    norm_overrides = _get_norm_name_overrides(db)
+    norm_name = _normalize_target_name(target, norm_overrides)
+    return norm_name in {
+        _normalize_target_name(o, norm_overrides)
+        for o in _objects_with_restricted_proposal(db, denied)
+    }
+
+
+def _require_visible_ttv_target(target: str) -> None:
+    if _ttv_target_hidden(target):
+        raise HTTPException(404, f"target {target!r} not found")
+
+
+# What a job-status poll returns for a run that does not exist; a hidden run
+# answers the same.
+_NO_JOB_STATUS = {"state": "none", "log": "", "returncode": None, "elapsed": 0}
+
+
+def _job_hidden(job: dict, nights: NightVisibility) -> bool:
+    """Whether a Jobs-page row belongs to data the viewer may not see.
+
+    An LCO archive download lists every instrument, night and object it
+    fetched (comma-joined); it is hidden if any of those combinations is.
+    Nights not yet ingested have no summaries and so hide nothing.
+    """
+    job_type = job.get("type", "photometry")
+    target = str(job.get("target") or "")
+    if job_type == "ttv_fit":
+        return _ttv_target_hidden(target, nights.denied)
+    inst = str(job.get("inst") or job.get("instrument") or "")
+    date = str(job.get("date") or job.get("obsdate") or "")
+    if job_type != "lco_archive_download":
+        return nights.hidden(inst, date, target)
+    insts = [i.strip() for i in inst.split(",") if i.strip() in INSTRUMENTS]
+    dates = [d.strip() for d in date.split(",") if phot.valid_date(d.strip())]
+    objects = [o.strip() for o in target.split(",") if o.strip()]
+    return any(
+        nights.hidden(i, d, o) for i in insts for d in dates for o in objects
+    )
+
+
+def _visible_jobs(jobs: list[dict]) -> list[dict]:
+    denied = _viewer_denied()
+    if not denied:
+        return jobs
+    nights = _night_visibility(denied)
+    return [j for j in jobs if not _job_hidden(j, nights)]
+
+
+def _visible_obsdates(db: str, inst: str, denied: frozenset[str]) -> list[str]:
+    """Date picker for the photometry and transit-fit pages: obslog nights
+    plus nights with products on disk, minus nights the viewer may not see."""
+    date_set = {d["obsdate"] for d in _get_dates(db, inst, denied=denied)}
+    date_set.update(phot.output_dates(inst))
+    date_set -= _hidden_obsdates(db, inst, denied)
+    return sorted(date_set, reverse=True)
 
 
 def _visible_targets(db: str, denied: frozenset[str]) -> list[dict]:
@@ -2033,15 +2132,15 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
     sel_run: str | None = None
     previews: dict[str, dict] = {}
     nearby_preview: dict | None = None
+    post_jd_range: dict | None = None
     command = ""
     raw_missing = False
 
+    denied = _viewer_denied()
     if inst:
-        date_set = {d["obsdate"] for d in _get_dates(db, inst)}
-        date_set.update(phot.output_dates(inst))
-        dates = sorted(date_set, reverse=True)
+        dates = _visible_obsdates(db, inst, denied)
     if inst and date:
-        raw_targets = sorted(_get_objects(db, inst, date))
+        raw_targets = sorted(_get_objects(db, inst, date, denied=denied))
         target = _resolve_dataset_target(route_target, raw_targets)
         public_targets = {name.replace(" ", "") for name in raw_targets}
         if route_target and target in raw_targets:
@@ -2052,7 +2151,13 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
     is_narrowband = False
     available_bands: list[str] = []
     jd_range: dict[str, float] | None = None
-    if inst and date and target:
+    if inst and date and target and _night_visibility(denied).hidden(inst, date, target):
+        # Issue #144: render exactly what a never-observed name gets -- no
+        # runs, no products, no obslog metadata.
+        outputs = phot.empty_outputs()
+        command = phot.command_str(inst, date, target, test_run=False)
+        raw_missing = not phot.raw_data_dir(inst, date).is_dir()
+    elif inst and date and target:
         runs, run_outputs = phot.list_photometry_runs(inst, date, target)
         if inst in phot.MULTISITE_INSTRUMENTS:
             if site:
@@ -2161,6 +2266,19 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
                 if csv_info:
                     headers, rows = phot.csv_preview(rdir / csv_info["file"], n=8)
                     previews[band] = {"headers": headers, "rows": rows}
+            # Slider bounds for the post-processing Exclude JD Range: the
+            # band CSVs' own BJD_TDB, the axis prose2's cut compares against.
+            span = phot.lightcurve_time_range(
+                rdir / p["csv"]["file"] for p in outputs["bands"].values() if p.get("csv")
+            )
+            if span:
+                lo, hi = round(span[0], 6), round(span[1], 6)
+                post_jd_range = {
+                    "min": lo,
+                    "max": hi,
+                    "min_utc": _jd_to_utc_minute(lo),
+                    "max_utc": _jd_to_utc_minute(hi),
+                }
             nearby_info = outputs.get("summary", {}).get("nearby_stars")
             if nearby_info:
                 nb_headers, nb_rows = phot.csv_preview(rdir / nearby_info["file"], n=100)
@@ -2211,6 +2329,7 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
         available_telescopes=available_telescopes,
         available_modes=available_modes,
         jd_range=jd_range,
+        post_jd_range=post_jd_range,
     )
     # The run buttons' enabled/disabled state is JavaScript-driven and reflects
     # the live job state. A cached or back/forward-restored snapshot can show
@@ -2276,15 +2395,19 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
     runs: list = []
     sel_run = ""
 
+    denied = _viewer_denied()
+    nights = _night_visibility(denied)
     if inst:
-        date_set = {d["obsdate"] for d in _get_dates(db, inst)}
-        date_set.update(phot.output_dates(inst))
-        dates = sorted(date_set, reverse=True)
+        dates = _visible_obsdates(db, inst, denied)
     if inst and date:
-        obj_set = set(_get_objects(db, inst, date))
+        obj_set = set(_get_objects(db, inst, date, denied=denied))
         obj_set.update(phot.discovered_targets(inst, date))
-        targets = sorted({name.replace(" ", "") for name in obj_set})
-    if inst and date and target:
+        targets = sorted({
+            name.replace(" ", "") for name in obj_set if not nights.hidden(inst, date, name)
+        })
+    # Issue #144: a hidden target renders like a never-observed name, which
+    # has no lightcurves and no runs.
+    if inst and date and target and not nights.hidden(inst, date, target):
         import datetime
         rows = []
         for c in fit.get_csv_lightcurves(inst, date, target):
@@ -2369,6 +2492,8 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
             inst_dates = {d["obsdate"] for d in _get_dates(db, inst_name)}
             inst_dates.update(phot.output_dates(inst_name))
             for d in sorted(inst_dates, reverse=True):
+                if nights.hidden(inst_name, d, target):
+                    continue
                 for r in fit.list_fit_runs(inst_name, d, target):
                     key = (inst_name, d, r.run_id)
                     if key not in seen_run_keys:
@@ -2730,7 +2855,7 @@ async def transit_fit_query_archive(target: str, source: str = "nasa", inst: str
         import yaml
         from muscat_db.transit_fit import list_fit_runs, fit_output_dir
 
-        runs = list_fit_runs(inst, date, target)
+        runs = [] if _night_hidden(inst, date, target) else list_fit_runs(inst, date, target)
         if not runs:
             return JSONResponse({"ok": False, "error": f"No previous fit runs found for {target} at {inst}/{date}"})
 
@@ -3081,6 +3206,8 @@ async def transit_fit_query_archive(target: str, source: str = "nasa", inst: str
 @transit_fit_router.get("/status")
 def transit_fit_status(inst: str, date: str, target: str, run: str = ""):
     fit.sync_jobs()
+    if _night_hidden(inst, date, target):
+        return JSONResponse(dict(_NO_JOB_STATUS))
     return JSONResponse(fit.job_status(inst, date, target, run_id=(run or "").strip()))
 
 
@@ -3088,9 +3215,10 @@ def transit_fit_status(inst: str, date: str, target: str, run: str = ""):
 async def transit_fit_log_stream(request: Request, inst: str, date: str, target: str, run: str = ""):
     """SSE counterpart to ``/status`` (architecture issue #51, step 4)."""
     run_id = (run or "").strip()
+    hidden = _night_hidden(inst, date, target)
     return _sse_response(_sse_job_stream(
         request,
-        lambda: fit.job_status(inst, date, target, run_id=run_id),
+        lambda: dict(_NO_JOB_STATUS) if hidden else fit.job_status(inst, date, target, run_id=run_id),
         sync_fn=fit.sync_jobs,
     ))
 
@@ -3104,6 +3232,7 @@ def transit_fit_run(request: Request, payload: dict = Body(...)):
     test_run = bool(payload.get("test_run", False))
     selected_csvs = payload.get("selected_csvs") if "selected_csvs" in payload else None
     user_name = request.state.user
+    _require_visible_night(inst, date, target)
     result = fit.start_fit(inst, date, target, options, test_run=test_run, selected_csvs=selected_csvs, user_name=user_name)
     if not result.get("ok"):
         return JSONResponse(result, status_code=400)
@@ -3117,6 +3246,7 @@ def transit_fit_logp(payload: dict = Body(...)):
     target = (payload.get("target") or "").strip()
     options = payload.get("options") or {}
     selected_csvs = payload.get("selected_csvs") if "selected_csvs" in payload else None
+    _require_visible_night(inst, date, target)
     result = fit.compute_logp(inst, date, target, options, selected_csvs=selected_csvs)
     if not result.get("ok"):
         return JSONResponse(result, status_code=400)
@@ -3129,6 +3259,7 @@ def transit_fit_cancel(payload: dict = Body(...)):
     date = (payload.get("date") or "").strip()
     target = (payload.get("target") or "").strip()
     run_id = (payload.get("run_id") or payload.get("run") or "").strip()
+    _require_visible_night(inst, date, target)
     result = fit.cancel_fit(inst, date, target, run_id=run_id)
     if not result.get("ok"):
         return JSONResponse(result, status_code=400)
@@ -3147,6 +3278,7 @@ def transit_fit_delete(payload: dict = Body(...)):
         return JSONResponse({"ok": False, "error": "invalid date"}, status_code=400)
     if not (target or "").strip():
         return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
+    _require_visible_night(inst, date, target)
     result = fit.delete_fit(inst, date, target, run_id=run_id)
     return JSONResponse(result)
 
@@ -3163,6 +3295,8 @@ def _serve_transit_file(inst: str, date: str, target: str, name: str, run_id: st
         rdir = fit.fit_output_dir(inst, date, target, run_id or None)
     except ValueError:
         raise HTTPException(400, "invalid target")
+    if _night_hidden(inst, date, target):
+        raise HTTPException(404, "file not found")
     out_dir = rdir / "out"
 
     # ``name`` is already sanitized above (no "/" or ".."), so it can only
@@ -3285,7 +3419,7 @@ def _transit_fit_download_all(inst: str, date: str, target: str, run_id: str | N
     except ValueError:
         raise HTTPException(400, "invalid target")
 
-    if not rdir.is_dir():
+    if not rdir.is_dir() or _night_hidden(inst, date, target):
         raise HTTPException(404, "no fit directory found")
 
     files_to_zip = []
@@ -3567,24 +3701,23 @@ def api_exposure_target(target: str):
 
     try:
         db = _db_path()
+        # Frames under a proposal the viewer is denied are dropped, and a
+        # target with none left answers like an unknown name (issue #144).
+        denied = _viewer_denied()
+        visible_clause, visible_params = _sql_not_denied(denied)
         with get_conn(db, timeout=10, row_factory=sqlite3.Row) as conn:
-            # Get all frames for this target
             frames = conn.execute(
-                """
+                f"""
                 SELECT
                     instrument, obsdate, filter, exptime, read_mode,
                     ra, declination, airmass, focus, ccd
                 FROM frames
-                WHERE object = ?
+                WHERE object = ? AND {visible_clause}
                 ORDER BY obsdate DESC, instrument, filter, exptime
                 """,
-                (target,)
+                (target, *visible_params),
             ).fetchall()
-            # Get target info from targets table
-            target_info = conn.execute(
-                "SELECT n_dates, n_frames, ra, declination FROM targets WHERE object = ?",
-                (target,)
-            ).fetchone()
+        target_info = _visible_target_rollup(db, target, denied) if frames else None
 
         if not frames:
             return JSONResponse({
@@ -3745,6 +3878,7 @@ def api_fov_optimize(payload: dict = Body(...)):
             min_mag=min_mag,
             max_mag=max_mag,
             mag_delta=mag_delta,
+            avoid_mag=avoid_mag,
         )
         return JSONResponse(result.to_dict(), status_code=200)
     except Exception as exc:
@@ -3847,7 +3981,7 @@ def api_fov_observed_pointing(inst: str = "", obsdate: str = "", obj: str = ""):
             status_code=400,
         )
 
-    pointing = _get_observed_pointing(_db_path(), inst, obsdate, obj)
+    pointing = _get_observed_pointing(_db_path(), inst, obsdate, obj, denied=_viewer_denied())
     if pointing is None:
         return JSONResponse(
             {"ok": False, "error": f"No usable pointing found for {obj!r} on {inst}/{obsdate}."},
@@ -4277,6 +4411,25 @@ def api_lco_config(request: Request):
     return JSONResponse({"ok": True, **lco.config_state(_request_user(request))})
 
 
+@lco_router.get("/instruments", response_class=JSONResponse)
+def api_lco_instruments(refresh: int = 0):
+    """Currently schedulable instrument_type codes per LCO site.
+
+    Backs the schedule page's "currently unavailable" annotation: a site whose
+    instrument is temporarily offline (e.g. ELP's 1 m Sinistro during the Sophia
+    upgrade, or a telescope down for repairs) is annotated rather than removed,
+    so it reappears automatically once LCO re-lists the instrument. Cached
+    server-side for a short TTL; ``?refresh=1`` forces a re-fetch, but at most
+    once per minimum interval (the endpoint is anonymous, and each fetch is one
+    request per LCO site). A failure degrades to ``ok: false`` so the page leaves
+    every site enabled instead of hiding options.
+    """
+    try:
+        return JSONResponse({"ok": True, **lco.instrument_availability(force=bool(refresh))})
+    except lco.LcoError as e:
+        return JSONResponse({"ok": False, "error": e.message, "detail": e.detail})
+
+
 @lco_router.get("/proposals", response_class=JSONResponse)
 def api_lco_proposals(request: Request):
     try:
@@ -4658,8 +4811,12 @@ def api_lco_obslog_exposures(target: str):
     norm_overrides = _get_norm_name_overrides(db)
     norm = _normalize_target_name(target, norm_overrides)
     try:
-        objects = [o for o in _get_frame_objects(db) if _normalize_target_name(o, norm_overrides) == norm]
-        exposures = _get_exposure_log_for_objects(db, objects)
+        denied = _viewer_denied()
+        objects = [
+            o for o in _get_frame_objects(db, denied=denied)
+            if _normalize_target_name(o, norm_overrides) == norm
+        ]
+        exposures = _get_exposure_log_for_objects(db, objects, denied=denied)
     except Exception:
         logger.debug("obslog exposure lookup failed for %s", target, exc_info=True)
         return JSONResponse({"ok": False, "error": "obslog lookup failed"}, status_code=500)
@@ -4768,11 +4925,16 @@ def api_lco_test_plan(payload: dict = Body(...)):
     """Generate and persist a deterministic, observer-reviewable test plan."""
     try:
         if not payload.get("fov_candidates"):
-            result = fov_opt.optimize(
-                payload.get("kind"), target=payload.get("target_name") or "",
-                ra=payload.get("ra"), dec=payload.get("dec"),
-                sinistro_mode=payload.get("readout_mode"),
-            )
+            try:
+                result = fov_opt.optimize(
+                    payload.get("kind"), target=payload.get("target_name") or "",
+                    ra=payload.get("ra"), dec=payload.get("dec"),
+                    sinistro_mode=payload.get("readout_mode"),
+                )
+            except Exception as exc:
+                # Surface as JSON; an unhandled error would reach the browser as an HTML 500.
+                logger.error("FOV optimization failed during test plan: %s", exc, exc_info=True)
+                raise test_observations.TestObservationError(f"FOV optimization failed: {exc}") from exc
             if not result.ok:
                 raise test_observations.TestObservationError(result.error or "FOV optimization failed")
             best = result.to_dict()
@@ -4987,6 +5149,13 @@ def api_lco_monitored_requests():
     return JSONResponse({"ok": True, "requests": lco_monitor.list_requests()})
 
 
+def _require_own_archive_token(request: Request) -> None:
+    """Issue #210: a viewer denied any proposal reads the LCO archive with their
+    own token, never the shared one (which would bypass the proposal filters)."""
+    if _viewer_denied():
+        lco.require_own_token_for_archive(_request_user(request))
+
+
 @lco_router.get("/archive/frames", response_class=JSONResponse)
 def api_lco_archive_frames(
     request: Request,
@@ -5004,6 +5173,10 @@ def api_lco_archive_frames(
     fuzzy_name: str = "",
     request_id: str = "",
 ):
+    try:
+        _require_own_archive_token(request)
+    except lco.LcoError as e:
+        return _lco_error_response(e)
     # Request-id path: a single observation request (e.g. the id in
     # https://observe.lco.global/requests/4236675) fully specifies a dataset on
     # its own, so it short-circuits the coordinate/name search and pulls every
@@ -5022,7 +5195,7 @@ def api_lco_archive_frames(
             result = lco.archive_search_all(req_filters, _request_user(request))
             rows = result.get("results") or []
             if isinstance(rows, list):
-                annotated, dataset_count = _annotate_lco_archive_results(instrument, rows)
+                annotated, dataset_count = _annotate_lco_archive_results(instrument, rows, denied=_viewer_denied())
                 result = dict(result)
                 result["results"] = annotated
                 result["dataset_count"] = dataset_count
@@ -5109,7 +5282,7 @@ def api_lco_archive_frames(
             result = dict(result)
             result["results"] = rows
         if isinstance(rows, list):
-            annotated, dataset_count = _annotate_lco_archive_results(instrument, rows)
+            annotated, dataset_count = _annotate_lco_archive_results(instrument, rows, denied=_viewer_denied())
             result = dict(result)
             result["results"] = annotated
             result["dataset_count"] = dataset_count
@@ -5141,7 +5314,7 @@ def api_lco_archive_exofop(
             {"ok": False, "error": "Enter a target name to check ExoFOP time series."},
             status_code=400,
         )
-    report = exofop.build_time_series_report(target)
+    report = exofop.build_time_series_report(target, denied=_viewer_denied())
     if not report.get("ok"):
         return JSONResponse({"ok": False, "error": report.get("error", "not a TOI")})
     return JSONResponse(
@@ -5169,6 +5342,7 @@ def api_lco_archive_exofop_download(request: Request, payload: dict = Body(...))
     download + ingest job, so a missing dataset can be fetched in one click.
     """
     try:
+        _require_own_archive_token(request)
         target = str(payload.get("target") or "").strip()
         tsdate = str(payload.get("tsdate") or "").strip()
         if not target or not tsdate:
@@ -5190,7 +5364,7 @@ def api_lco_archive_exofop_download(request: Request, payload: dict = Body(...))
                 status_code=404,
             )
         annotated, _dataset_count = _annotate_lco_archive_results(
-            str(payload.get("instrument") or ""), rows
+            str(payload.get("instrument") or ""), rows, denied=_viewer_denied()
         )
         frames = [dict(f) for f in annotated]
         job = lco.start_archive_download(
@@ -5208,6 +5382,7 @@ def api_lco_archive_exofop_download(request: Request, payload: dict = Body(...))
 @lco_router.post("/archive/download", response_class=JSONResponse)
 def api_lco_archive_download(request: Request, payload: dict = Body(...)):
     try:
+        _require_own_archive_token(request)
         frames = payload.get("frames")
         if not isinstance(frames, list) or not frames:
             return JSONResponse({"ok": False, "error": "no frames selected"}, status_code=400)
@@ -5582,6 +5757,7 @@ def api_ephemeris_targets():
         existing_keys = {j["key"] for j in all_jobs if j["type"] == "transit_fit"}
         orphan_fits = fit._discover_orphan_fits(existing_keys)
         all_jobs.extend(orphan_fits)
+        all_jobs = _visible_jobs(all_jobs)
         completed = [j for j in all_jobs if j["type"] == "transit_fit" and j["state"] == "done"]
         norm_overrides = _get_norm_name_overrides(_db_path())
         targets = sorted({_normalize_target_name(j["target"], norm_overrides) for j in completed if j.get("target")})
@@ -5699,7 +5875,8 @@ def api_ephemeris_target_info(target: str, request: Request):
         existing_keys = {j["key"] for j in all_jobs if j["type"] == "transit_fit"}
         orphan_fits = fit._discover_orphan_fits(existing_keys)
         all_jobs.extend(orphan_fits)
-        
+        all_jobs = _visible_jobs(all_jobs)
+
         norm_overrides = _get_norm_name_overrides(_db_path())
         norm_t = _normalize_target_name(target, norm_overrides)
         # A job can stay "done" in the DB after its fit outputs are deleted from
@@ -5980,7 +6157,8 @@ def api_ephemeris_calculate(payload: dict = Body(...)):
         existing_keys = {j["key"] for j in all_jobs if j["type"] == "transit_fit"}
         orphan_fits = fit._discover_orphan_fits(existing_keys)
         all_jobs.extend(orphan_fits)
-        
+        all_jobs = _visible_jobs(all_jobs)
+
         completed = []
         seen_keys = set()
         for target in targets:
@@ -6328,6 +6506,7 @@ def _validate_lco_dataset_action(payload: dict) -> tuple[str, str]:
 @jobs_router.post("/lco-archive/scan", response_class=JSONResponse)
 def jobs_lco_archive_scan(payload: dict = Body(...)):
     inst, obsdate = _validate_lco_dataset_action(payload)
+    _require_no_denied_night(inst, obsdate)
     try:
         from muscat_db.scanner import scan_date as _scan_date
 
@@ -6344,6 +6523,7 @@ def jobs_lco_archive_scan(payload: dict = Body(...)):
 @jobs_router.post("/lco-archive/ingest-date", response_class=JSONResponse)
 def jobs_lco_archive_ingest_date(payload: dict = Body(...)):
     inst, obsdate = _validate_lco_dataset_action(payload)
+    _require_no_denied_night(inst, obsdate)
     try:
         from muscat_db.database import ingest_date as _ingest_date
 
@@ -6367,6 +6547,7 @@ def jobs_page():
     orphan_fits = fit._discover_orphan_fits(existing_keys)
     if orphan_fits:
         all_jobs.extend(orphan_fits)
+    all_jobs = _visible_jobs(all_jobs)
     all_jobs.sort(key=lambda j: j.get("started_at", 0), reverse=True)
 
     for j in all_jobs:
@@ -6394,21 +6575,21 @@ def jobs_status(active_only: bool = False):
         # baseline — that diff belongs to the full Jobs-page poll, and letting
         # a second site-wide poller mutate it would steal `finished`
         # transitions from the Jobs page.
-        active_by_key = {}
-        for persisted in get_job_store().active():
-            row = (
-                _adapt_persisted_lco_archive_row(persisted)
-                if persisted.get("type") == "lco_archive_download"
-                else persisted
-            )
-            active_by_key[row["key"]] = {"key": row["key"], "state": row["state"]}
-        archive_active = [
-            {"key": j["key"], "state": j["state"]}
-            for j in (_lco_archive_download_row(job) for job in lco.archive_download_jobs())
-            if j["state"] in ("running", "cancelling", "pending")
+        rows = [
+            _adapt_persisted_lco_archive_row(persisted)
+            if persisted.get("type") == "lco_archive_download"
+            else persisted
+            for persisted in get_job_store().active()
         ]
-        for item in archive_active:
-            active_by_key[item["key"]] = item
+        rows.extend(
+            j for j in (_lco_archive_download_row(job) for job in lco.archive_download_jobs())
+            if j["state"] in ("running", "cancelling", "pending")
+        )
+        # Later rows win, so a live archive job overrides its persisted copy.
+        active_by_key = {
+            row["key"]: {"key": row["key"], "state": row["state"]}
+            for row in _visible_jobs(rows)
+        }
         return {"active": list(active_by_key.values())}
 
     all_jobs = _jobs_with_lco_archive_rows()
@@ -6421,6 +6602,9 @@ def jobs_status(active_only: bool = False):
 
     global _last_running
     current_running = {j["key"] for j in all_jobs if j["state"] in ("running", "cancelling", "pending")}
+    # _last_running is shared by every viewer's poll, so it tracks all jobs;
+    # only what this viewer is shown is narrowed (issue #144).
+    all_jobs = _visible_jobs(all_jobs)
     finished = {}
     for j in all_jobs:
         is_terminal_lco_archive = (
@@ -6490,7 +6674,7 @@ def job_log(type_: str, inst: str, date: str, target: str, run: str = ""):
         path = fit.log_path(inst, date, target, run_id=(run or "").strip())
     else:
         raise HTTPException(400, "unknown job type")
-    if path is None:
+    if path is None or _night_hidden(inst, date, target):
         raise HTTPException(404, "log not found")
     return FileResponse(str(path))
 
@@ -6500,7 +6684,7 @@ def ttv_job_log(target: str, run: str = ""):
     # `run` is the job's run_id (an already-slugified segment); log_path
     # validates it and resolves the default run when it is empty.
     path = ttv.log_path(target, (run or "").strip())
-    if path is None:
+    if path is None or _ttv_target_hidden(target):
         raise HTTPException(404, "log not found")
     return FileResponse(str(path))
 
@@ -6512,7 +6696,7 @@ def jobs_rerun(request: Request, payload: dict = Body(...)):
     if not key:
         raise HTTPException(400, "job key required")
     all_jobs = get_job_store().all()
-    job = next((j for j in all_jobs if j["key"] == key), None)
+    job = next((j for j in _visible_jobs(all_jobs) if j["key"] == key), None)
     if job is None:
         raise HTTPException(404, "job not found")
     inst, date, target = job["inst"], job["date"], job["target"]
@@ -6524,6 +6708,18 @@ def jobs_rerun(request: Request, payload: dict = Body(...)):
     options = dict(p.get("options") or {})
     for field in ("run_name", "site", "telescope", "mode"):
         value = p.get(field) or job.get(field)
+        if (
+            field == "run_name"
+            and value
+            and not p.get("run_name")
+            and value == job.get("run_id")
+            and any(p.get(f) for f in ("site", "telescope", "mode"))
+        ):
+            # An unnamed run's row reports run_id as its run_name (a display
+            # fallback). run_id already carries the site/telescope/mode prefix,
+            # so feeding it back as the name re-prefixes it and forks a new
+            # run_id (and a second row) on every re-run.
+            value = None
         if value and not options.get(field):
             options[field] = value
     user_name = request.state.user
@@ -6544,15 +6740,24 @@ def jobs_rerun(request: Request, payload: dict = Body(...)):
 @photometry_router.get("/file/{inst}/{date}/{target}/run/{run_id}/{name}")
 def photometry_file_run(inst: str, date: str, target: str, run_id: str, name: str):
     path = phot.safe_run_artifact_path(inst, date, target, run_id, name)
-    if path is None:
+    if path is None or _night_hidden(inst, date, target):
         raise HTTPException(404, "artifact not found")
     return FileResponse(str(path), headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"})
+
+
+def _legacy_artifact_hidden(inst: str, date: str, name: str) -> bool:
+    """Legacy (pre-run-dir) products sit directly under the night as
+    ``<target>_<inst>_...``; hide those whose target the viewer may not see.
+    Night-level files such as calibration masters carry no target."""
+    hidden = _night_visibility().hidden_objects(inst, date)
+    stem = name.casefold()
+    return any(stem.startswith(obj + "_") for obj in hidden)
 
 
 @photometry_router.get("/file/{inst}/{date}/{name}")
 def photometry_file(inst: str, date: str, name: str):
     path = phot.safe_artifact_path(inst, date, name)
-    if path is None:
+    if path is None or _legacy_artifact_hidden(inst, date, name):
         raise HTTPException(404, "artifact not found")
     return FileResponse(str(path), headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"})
 
@@ -6567,6 +6772,8 @@ def _photometry_download_all(inst: str, date: str, target: str, run_id: str | No
         rdir = phot.run_output_dir(inst, date, target, run_id or None)
     except ValueError:
         raise HTTPException(400, "invalid target")
+    if _night_hidden(inst, date, target):
+        raise HTTPException(404, "no files to download")
 
     outputs = phot.list_outputs(inst, date, target, run_id=run_id or None)
     if not outputs.get("has_any") and not outputs.get("masters"):
@@ -6649,6 +6856,7 @@ def photometry_run(request: Request, payload: dict = Body(...)):
     options = payload.get("options") or {}
     test_run = bool(payload.get("test_run", True))
     user_name = request.state.user
+    _require_visible_night(inst, date, target)
     # Hard block: never launch a sinistro run that would merge multiple sites
     # or multiple physical telescopes.
     site_err = _site_required_error(_db_path(), inst, date, target, options)
@@ -6673,10 +6881,13 @@ def photometry_command(payload: dict = Body(...)):
     test_run = bool(payload.get("test_run", False))
     error = phot.validate_run_options(phot.normalize_run_options(options), inst=inst)
     # Surface the multi-site/multi-telescope block as a command error so the
-    # page disables the run buttons and shows why until a choice is made.
-    if not error:
+    # page disables the run buttons and shows why until a choice is made. Both
+    # read the obslog, so a hidden target skips them, as a never-observed name
+    # (no frames) effectively does.
+    hidden = _night_hidden(inst, date, target)
+    if not error and not hidden:
         error = _site_required_error(_db_path(), inst, date, target, options)
-    if not error:
+    if not error and not hidden:
         error = _telescope_required_error(_db_path(), inst, date, target, options)
     command = phot.command_str(inst, date, target, options=options, test_run=test_run)
     return JSONResponse({"command": command, "error": error})
@@ -6701,6 +6912,7 @@ def photometry_postprocess(payload: dict = Body(...)):
         )
     if not run:
         return JSONResponse({"ok": False, "error": "a run is required"}, status_code=400)
+    _require_visible_night(inst, date, target)
     result = postproc.postprocess(
         inst,
         date,
@@ -6710,6 +6922,8 @@ def photometry_postprocess(payload: dict = Body(...)):
         payload.get("degree", 2),
         payload.get("iterations", 5),
         apply=bool(payload.get("apply", False)),
+        exclude_before_jd=payload.get("exclude_before_jd"),
+        exclude_after_jd=payload.get("exclude_after_jd"),
     )
     if not result.get("ok"):
         return JSONResponse(result, status_code=400)
@@ -6721,6 +6935,8 @@ def photometry_status(inst: str, date: str, target: str, run: str = ""):
     # Drain the queue so a pending full job is promoted once the slot frees,
     # even when only the photometry page (not the Jobs page) is polling.
     phot.sync_jobs()
+    if _night_hidden(inst, date, target):
+        return JSONResponse(dict(_NO_JOB_STATUS))
     return JSONResponse(phot.job_status(inst, date, target, run_id=(run or "").strip()))
 
 
@@ -6730,9 +6946,10 @@ async def photometry_log_stream(request: Request, inst: str, date: str, target: 
     change instead of waiting for the client's next poll (architecture issue
     #51, step 4)."""
     run_id = (run or "").strip()
+    hidden = _night_hidden(inst, date, target)
     return _sse_response(_sse_job_stream(
         request,
-        lambda: phot.job_status(inst, date, target, run_id=run_id),
+        lambda: dict(_NO_JOB_STATUS) if hidden else phot.job_status(inst, date, target, run_id=run_id),
         sync_fn=phot.sync_jobs,
     ))
 
@@ -6770,6 +6987,7 @@ def photometry_status_batch(payload: dict = Body(...)):
             status_code=400,
         )
 
+    nights = _night_visibility()
     results = []
     for job_spec in jobs:
         if not isinstance(job_spec, dict):
@@ -6788,7 +7006,10 @@ def photometry_status_batch(payload: dict = Body(...)):
             results.append({"error": "job fields are too long"})
             continue
 
-        status = phot.job_status(inst, date, target, run_id=run)
+        if nights.hidden(inst, date, target):
+            status = dict(_NO_JOB_STATUS)
+        else:
+            status = phot.job_status(inst, date, target, run_id=run)
         results.append({
             "inst": inst,
             "date": date,
@@ -6806,6 +7027,7 @@ def photometry_cancel(payload: dict = Body(...)):
     date = (payload.get("date") or "").strip()
     target = (payload.get("target") or "").strip()
     run_id = (payload.get("run_id") or payload.get("run") or "").strip()
+    _require_visible_night(inst, date, target)
     result = phot.cancel_run(inst, date, target, run_id=run_id)
     if not result.get("ok"):
         return JSONResponse(result, status_code=400)
@@ -6824,6 +7046,7 @@ def photometry_delete(payload: dict = Body(...)):
     if not (target or "").strip():
         return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
     run_id = (payload.get("run_id") or payload.get("run") or "").strip()
+    _require_visible_night(inst, date, target)
     result = phot.delete_reduction(inst, date, target, run_id=run_id)
     return JSONResponse(result)
 
@@ -7037,7 +7260,10 @@ def api_export_tag_csv(tag: str):
 def ttv_fit_outputs(target: str = "", run_name: str = ""):
     if not target:
         return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
-    outputs = ttv.get_ttv_outputs(target.strip(), run_name)
+    if _ttv_target_hidden(target.strip()):
+        outputs = ttv.empty_ttv_outputs()
+    else:
+        outputs = ttv.get_ttv_outputs(target.strip(), run_name)
     return JSONResponse({"ok": True, "outputs": outputs})
 
 
@@ -7045,13 +7271,30 @@ def ttv_fit_outputs(target: str = "", run_name: str = ""):
 def ttv_fit_runs(target: str = ""):
     if not target:
         return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
-    return JSONResponse({"ok": True, "runs": ttv.list_ttv_runs(target.strip())})
+    runs = [] if _ttv_target_hidden(target.strip()) else ttv.list_ttv_runs(target.strip())
+    return JSONResponse({"ok": True, "runs": runs})
+
+
+# What the model/ΔBIC endpoints answer for a run with no saved output; a
+# hidden target (issue #144) answers the same.
+_TTV_NO_MODEL = {"ok": False, "error": "saved run has no complete TTV model output"}
 
 
 @ttv_fit_router.get("/model", response_class=JSONResponse)
 def ttv_fit_model(target: str = "", run_name: str = "", end_date: str = ""):
     if not target:
         return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
+    if _ttv_target_hidden(target.strip()):
+        # Keep get_ttv_model's own end_date check ahead of the missing-output
+        # answer, so a hidden target errors exactly like an absent one.
+        try:
+            if end_date.strip():
+                datetime.date.fromisoformat(end_date.strip())
+        except ValueError:
+            return JSONResponse(
+                {"ok": False, "error": "end_date must be YYYY-MM-DD"}, status_code=400
+            )
+        return JSONResponse(dict(_TTV_NO_MODEL), status_code=400)
     result = ttv.get_ttv_model(target.strip(), run_name, end_date.strip())
     return JSONResponse(result, status_code=200 if result.get("ok") else 400)
 
@@ -7065,6 +7308,8 @@ def ttv_fit_delta_bic(target: str = "", run_name: str = ""):
     """
     if not target:
         return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
+    if _ttv_target_hidden(target.strip()):
+        return JSONResponse(dict(_TTV_NO_MODEL), status_code=400)
     result = ttv.compute_delta_bic(target.strip(), run_name)
     return JSONResponse(result, status_code=200 if result.get("ok") else 400)
 
@@ -7075,6 +7320,7 @@ def api_start_ttv_fit(request: Request, payload: dict = Body(...)):
     options = payload.get("options") or {}
     if not target:
         return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
+    _require_visible_ttv_target(target)
     result = ttv.start_ttv_fit(target, options, request.state.user)
     return JSONResponse(result)
 
@@ -7085,6 +7331,7 @@ def api_cancel_ttv_fit(payload: dict = Body(...)):
     run_name = (payload.get("run_name") or "").strip()
     if not target:
         return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
+    _require_visible_ttv_target(target)
     res = ttv.cancel_ttv_fit(target, run_name)
     return JSONResponse(res)
 
@@ -7095,6 +7342,7 @@ def api_delete_ttv_fit(payload: dict = Body(...)):
     run_name = (payload.get("run_name") or "").strip()
     if not target:
         return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
+    _require_visible_ttv_target(target)
     res = ttv.delete_ttv_fit(target, run_name)
     return JSONResponse(res)
 
@@ -7103,6 +7351,8 @@ def api_delete_ttv_fit(payload: dict = Body(...)):
 def ttv_fit_status(target: str = "", run_name: str = ""):
     if not target:
         return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
+    if _ttv_target_hidden(target.strip()):
+        return JSONResponse(dict(_NO_JOB_STATUS))
     status = ttv.job_status(target.strip(), run_name)
     return JSONResponse(status)
 
@@ -7113,7 +7363,10 @@ async def ttv_fit_log_stream(request: Request, target: str = "", run_name: str =
     if not target:
         raise HTTPException(status_code=400, detail="target is required")
     target = target.strip()
-    return _sse_response(_sse_job_stream(request, lambda: ttv.job_status(target, run_name)))
+    hidden = _ttv_target_hidden(target)
+    return _sse_response(_sse_job_stream(
+        request, lambda: dict(_NO_JOB_STATUS) if hidden else ttv.job_status(target, run_name)
+    ))
 
 
 # Text-like TTV output extensions the browser should render in a new tab
@@ -7152,7 +7405,7 @@ def ttv_fit_output_file(target: str = "", run_name: str = "", file: str = ""):
     if not target:
         return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
     filepath = ttv.safe_output_file(target.strip(), run_name, file)
-    if filepath is None:
+    if filepath is None or _ttv_target_hidden(target.strip()):
         if not file or pathlib.PurePath(file).name != file:
             raise HTTPException(400, "invalid filename")
         raise HTTPException(404, f"file not found: {file}")
@@ -7164,7 +7417,7 @@ def ttv_fit_download_all(target: str = "", run_name: str = ""):
     if not target:
         return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
     output_dir = ttv.ttv_output_dir(target.strip(), run_name)
-    if not output_dir.is_dir():
+    if not output_dir.is_dir() or _ttv_target_hidden(target.strip()):
         raise HTTPException(404, "output directory not found")
     files = [
         (path, path.name)
@@ -7210,9 +7463,13 @@ app.include_router(ads_router)
 # router-based route whose full path happens to also be exactly one or two
 # segments (e.g. GET /api/tags was being matched here as
 # instrument="api", obsdate="tags" instead of reaching tags_router).
+# The obslog browser filters by the viewer's denied set (issue #144 PR6). A
+# night or CCD with nothing visible renders exactly like one never observed
+# (200, empty), not 404: an unknown date is already a 200 here, so a 404 would
+# confirm the hidden night exists.
 @app.get("/{instrument}", response_class=HTMLResponse)
 def instrument_page(instrument: str):
-    dates = _get_dates(_db_path(), instrument)
+    dates = _get_dates(_db_path(), instrument, denied=_viewer_denied())
     return _render(
         "instrument.html",
         instrument=instrument,
@@ -7223,12 +7480,12 @@ def instrument_page(instrument: str):
 
 @app.get("/{instrument}/{obsdate}", response_class=HTMLResponse)
 def date_page(instrument: str, obsdate: str):
-    summaries = _get_summaries(_db_path(), instrument, obsdate)
+    summaries = _get_summaries(_db_path(), instrument, obsdate, denied=_viewer_denied())
     ccds = sorted(set(s["ccd"] for s in summaries))
     return _render("date.html", instrument=instrument, obsdate=obsdate, summaries=summaries, ccds=ccds)
 
 
 @app.get("/{instrument}/{obsdate}/ccd{ccd}", response_class=HTMLResponse)
 def ccd_page(instrument: str, obsdate: str, ccd: int):
-    frames = _get_frames(_db_path(), instrument, obsdate, ccd)
+    frames = _get_frames(_db_path(), instrument, obsdate, ccd, denied=_viewer_denied())
     return _render("ccd.html", instrument=instrument, obsdate=obsdate, ccd=ccd, frames=frames)

@@ -60,22 +60,28 @@ def _run_context(inst: str, date: str, target: str, run_id: str) -> dict:
 def _command(
     context: dict,
     *,
-    sigma: float,
+    sigma: float | None,
     degree: int,
     iterations: int,
     apply: bool,
     preview_path: str | None = None,
+    exclude_before_jd: float | None = None,
+    exclude_after_jd: float | None = None,
 ) -> list[str]:
     args = [
         *_prose_prefix(_POSTPROCESS_MODULE, console_script=None),
         context["results_dir"],
         "--sigma",
-        str(sigma),
+        "none" if sigma is None else str(sigma),
         "--degree",
         str(degree),
         "--iterations",
         str(iterations),
     ]
+    if exclude_before_jd is not None:
+        args += ["--exclude-before-jd", str(exclude_before_jd)]
+    if exclude_after_jd is not None:
+        args += ["--exclude-after-jd", str(exclude_after_jd)]
     if preview_path:
         args += ["--preview", preview_path]
     if apply:
@@ -137,6 +143,8 @@ def _normalize(report: dict, *, preview_png: str | None) -> dict:
         "sigma": report.get("sigma"),
         "degree": report.get("degree"),
         "iterations": report.get("iterations"),
+        "exclude_before_jd": report.get("exclude_before_jd"),
+        "exclude_after_jd": report.get("exclude_after_jd"),
         "n_files": report.get("n_files", len(files)),
         "files": files,
         "summary_png": report.get("summary_png"),
@@ -169,12 +177,41 @@ def _preview_path() -> str:
     return os.path.join(tmpdir, "muscat_postprocess_preview.png")
 
 
-def validate_params(sigma, degree, iterations) -> str | None:
-    """Return an error string for out-of-range post-process parameters."""
+def _parse_optional_jd(value, name: str) -> tuple[float | None, str | None]:
+    """Parse an optional JD boundary; ``None``/``""`` means "not set"."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None, None
     try:
-        sigma_f = float(sigma)
+        return float(value), None
     except (TypeError, ValueError):
-        return "sigma must be a number"
+        return None, f"{name} must be a number"
+
+
+def _parse_optional_sigma(value) -> tuple[float | None, str | None]:
+    """Parse the sigma-clip threshold; ``None``/``""`` disables sigma-clipping
+    entirely (only the JD-range/invalid-Err filters still apply)."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None, None
+    try:
+        sigma_f = float(value)
+    except (TypeError, ValueError):
+        return None, "sigma must be a number"
+    if not (sigma_f > 0) or sigma_f > 100:
+        return None, "sigma must be between 0 and 100"
+    return sigma_f, None
+
+
+def validate_params(
+    sigma,
+    degree,
+    iterations,
+    exclude_before_jd=None,
+    exclude_after_jd=None,
+) -> str | None:
+    """Return an error string for out-of-range post-process parameters."""
+    _, err = _parse_optional_sigma(sigma)
+    if err:
+        return err
     try:
         deg_i = int(degree)
     except (TypeError, ValueError):
@@ -183,12 +220,18 @@ def validate_params(sigma, degree, iterations) -> str | None:
         iter_i = int(iterations)
     except (TypeError, ValueError):
         return "iterations must be an integer"
-    if not (sigma_f > 0) or sigma_f > 100:
-        return "sigma must be between 0 and 100"
     if not (0 <= deg_i <= 6):
         return "poly degree must be between 0 and 6"
     if not (1 <= iter_i <= 50):
         return "iterations must be between 1 and 50"
+    before, err = _parse_optional_jd(exclude_before_jd, "exclude before JD")
+    if err:
+        return err
+    after, err = _parse_optional_jd(exclude_after_jd, "exclude after JD")
+    if err:
+        return err
+    if before is not None and after is not None and not (before < after):
+        return "exclude before JD must be less than exclude after JD"
     return None
 
 
@@ -203,6 +246,8 @@ def postprocess(
     *,
     apply: bool,
     allow_active_job: bool = False,
+    exclude_before_jd=None,
+    exclude_after_jd=None,
 ) -> dict:
     """Run a post-process pass on a run's band lightcurves and return results.
 
@@ -210,10 +255,22 @@ def postprocess(
     ``apply=True`` overwrites the band CSVs in place and regenerates the
     summary lightcurve figure. A run with a live (running/pending/finalizing)
     job is refused for ``apply`` unless ``allow_active_job`` is set (tests).
+
+    ``sigma`` (``""``/``None`` meaning "not set") disables sigma-clipping
+    entirely, so a run can drop only the excluded JD range (and the
+    always-on invalid-Err rows) without also sigma-clipping the rest.
+
+    ``exclude_before_jd``/``exclude_after_jd`` (each optional, ``""``/``None``
+    meaning "not set") drop rows outside that window from the finished
+    light-curve *before* the sigma-clip trend is fitted, so a gap or a bad
+    head/tail segment cannot skew the fit used to reject the rest.
     """
-    err = validate_params(sigma, degree, iterations)
+    err = validate_params(sigma, degree, iterations, exclude_before_jd, exclude_after_jd)
     if err:
         return {"ok": False, "error": err}
+    sigma_val, _ = _parse_optional_sigma(sigma)
+    before, _ = _parse_optional_jd(exclude_before_jd, "exclude before JD")
+    after, _ = _parse_optional_jd(exclude_after_jd, "exclude after JD")
     try:
         context = _run_context(inst, date, target, run_id)
     except PostprocessError as exc:
@@ -239,10 +296,12 @@ def postprocess(
         report = _run_sync(
             _command(
                 context,
-                sigma=sigma,
+                sigma=sigma_val,
                 degree=degree,
                 iterations=iterations,
                 apply=True,
+                exclude_before_jd=before,
+                exclude_after_jd=after,
             )
         )
     else:
@@ -250,11 +309,13 @@ def postprocess(
         report = _run_sync(
             _command(
                 context,
-                sigma=sigma,
+                sigma=sigma_val,
                 degree=degree,
                 iterations=iterations,
                 apply=False,
                 preview_path=preview_path,
+                exclude_before_jd=before,
+                exclude_after_jd=after,
             )
         )
         preview_png = _read_preview(preview_path)

@@ -766,7 +766,7 @@
 
       fitViewToPoints(fitPoints.length ? fitPoints : [[data.ra, data.dec]]);
     } catch (e) {
-      setMsg('Request failed: ' + e, 'err');
+      setMsg(e && e.message ? e.message : 'Optimization failed. Please try again.', 'err');
     }
   }
 
@@ -957,7 +957,7 @@
     btn.disabled = true;
     setMsg('Resolving target and querying Gaia…');
     try {
-      const resp = await fetch('/api/fov/optimize', {
+      const data = await MuscatFetch.fetchJson('/api/fov/optimize', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -976,7 +976,6 @@
           allow_rotation: params.allowRotation,
         }),
       });
-      const data = await resp.json();
       if (!data.ok) {
         setMsg(data.error || 'Optimization failed.', 'err');
         return;

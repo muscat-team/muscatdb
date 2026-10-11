@@ -28,6 +28,7 @@ CLI-specific.
 
 from __future__ import annotations
 
+import os
 import time
 
 import pytest
@@ -148,14 +149,12 @@ class TestCancelBoundary:
         assert result == {"ok": True, "key": phot.job_key(INST, DATE, target, "default")}
         assert _row(store, key)["state"] == "cancelled"
 
-    def test_worker_claimed_running_job_cannot_be_cancelled_from_the_web_process(self, monkeypatch):
-        """Known limitation (worker.py's module docstring): once the worker
-        has claimed and launched a job, it lives only in the *worker*
-        process's in-memory _JOBS registry. A web process asked to cancel it
-        has no handle on the real subprocess and cannot reach it. This is a
-        regression guard on today's actual behaviour, not a fix for it --
-        closing the gap needs a cross-process cancel-request channel, not
-        yet built (architecture issue #51)."""
+    def test_worker_claimed_running_job_is_cancelled_from_the_web_process(self, monkeypatch):
+        """Once a worker has claimed and launched a job it lives only in the
+        *worker* process's in-memory _JOBS registry, so a web process cannot
+        signal it. The web process records a cancel request on the durable
+        row instead; the worker's next pass acts on it with its own local
+        cancel path and records the terminal state."""
         store = job_store.get_job_store()
         target = "TOI-P2-CANCEL-RUNNING"
         key = _db_key(target)
@@ -164,15 +163,27 @@ class TestCancelBoundary:
         worker.run("photometry", once=True)
         assert _row(store, key)["state"] == "running"
 
-        # Simulate the process boundary: the worker process's own _JOBS now
-        # holds this job, but a *separate* web process's _JOBS never would.
-        # Drop it here to see cancel_run() exactly as the web process would.
-        mem_key = phot.job_key(INST, DATE, target, "default")
+        signalled = []
+        monkeypatch.setattr(os, "getpgid", lambda pid: pid)
+        monkeypatch.setattr(os, "killpg", lambda pgid, sig: signalled.append((pgid, sig)))
+        monkeypatch.setattr(phot, "_kill_after", lambda proc: None)
+
+        # The web process is a *different* instance: it never holds the job in
+        # its own registry and must not mark the row cancelled itself.
+        with monkeypatch.context() as web:
+            web.setattr(phot, "current_instance_id", lambda: "web-host:1:web")
+            mem_key = phot.job_key(INST, DATE, target, "default")
+            with phot._LOCK:
+                worker_job = phot._JOBS.pop(mem_key)
+            result = phot.cancel_run(INST, DATE, target, "default")
         with phot._LOCK:
-            phot._JOBS[mem_key].logf.close()
-            del phot._JOBS[mem_key]
+            phot._JOBS[mem_key] = worker_job
 
-        result = phot.cancel_run(INST, DATE, target, "default")
+        assert result == {"ok": True, "key": mem_key, "requested": True}
+        assert _row(store, key)["state"] == "running", "only the owning worker records the outcome"
+        assert signalled == []
 
-        assert result == {"ok": False, "error": "no job to cancel"}
-        assert _row(store, key)["state"] == "running", "the real subprocess is never signalled"
+        worker.run("photometry", once=True)
+
+        assert signalled and signalled[0][0] == 5150
+        assert _row(store, key)["state"] == "cancelled"

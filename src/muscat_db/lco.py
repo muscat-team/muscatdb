@@ -38,6 +38,7 @@ from muscat_db.database import (
     db_path as _db_path,
     get_conn,
     get_user_lco_token,
+    sql_not_denied,
     user_lco_token_configured,
 )
 from muscat_db.instruments import INSTRUMENTS
@@ -159,6 +160,28 @@ def _get_lco_api_token(user_name: str | None = None, *, require_own_token: bool 
             ),
         )
     return token
+
+
+def require_own_token_for_archive(user_name: str | None) -> None:
+    """Refuse an archive read that would run under the shared ``LCO_API_TOKEN``.
+
+    Archive search and download normally fall back to the server token, which
+    never carries the caller's identity. With proposal access control (#144)
+    that fallback lets a viewer who is denied a restricted proposal fetch its
+    frames from LCO under the operator's account. Callers use this when the
+    viewer has any denied proposal: they must then read the archive with their
+    own token, whose reach is whatever their own LCO account can see.
+    """
+    if not (user_name or "").strip():
+        raise LcoError(
+            "Sign in and save your own LCO API token to use the LCO archive",
+            status=403,
+            detail=(
+                "Some proposals are restricted, so the archive is not read "
+                "with the server's shared token for anonymous callers."
+            ),
+        )
+    _get_lco_api_token(user_name, require_own_token=True)
 
 
 def config_state(user_name: str | None = None) -> dict:
@@ -415,14 +438,34 @@ def archive_search_all(
     url: str | None = f"{base_url}?{params}"
     results: list[dict] = []
     total: int | None = None
+    estimated = False
     while url and len(results) < max_frames:
         page = _lco_api_request(url, user_name=user_name, token=token)
+        rows = page.get("results") or []
         if total is None:
             total = page.get("count")
-        results.extend(page.get("results") or [])
+            estimated = bool(page.get("count_estimated"))
+        results.extend(rows)
         url = page.get("next")
+        if not url and estimated and rows and len(rows) >= _page_size(filters, rows):
+            # Past a size threshold the archive only estimates `count` (observed:
+            # 128 for a 36,625-frame query) and omits `next`, though `offset`
+            # keeps returning full pages. Trusting `next` silently stopped at
+            # page one, so page by offset until a short page instead.
+            url = f"{base_url}?{_query_params({**filters, 'offset': len(results)})}"
     truncated = bool(url) and len(results) >= max_frames
+    if estimated:
+        # The estimate is meaningless to callers; report what was retrieved
+        # (a lower bound when `truncated` is set).
+        total = len(results)
     return {"count": total, "results": results[:max_frames], "truncated": truncated}
+
+
+def _page_size(filters: dict, first_rows: list) -> int:
+    try:
+        return int(filters.get("limit") or len(first_rows))
+    except (TypeError, ValueError):
+        return len(first_rows)
 
 
 # OBJECT values LCO stamps on engineering frames that still carry a real
@@ -616,20 +659,30 @@ def _frame_coords_deg(frame: dict) -> tuple[float | None, float | None]:
     return _coord_to_deg(ra, is_ra=True), _coord_to_deg(dec, is_ra=False)
 
 
-def _local_lco_datasets(inst: str, obsdate: str, site: str) -> list[dict]:
+def _local_lco_datasets(
+    inst: str, obsdate: str, site: str, *, denied: frozenset[str] = frozenset()
+) -> list[dict]:
+    """Local frames for one (inst, night, site), minus restricted proposals.
+
+    *denied* is the viewer's restricted-proposal set (issue #144); frames under
+    it are left out so archive annotation and the ExoFOP cross-check cannot
+    reveal a restricted object or its frame count.
+    """
     db = _db_path()
+    visible_clause, visible_params = sql_not_denied(denied)
     with get_conn(db) as conn:
         conn.create_aggregate("coord_repr", 2, CoordRepr)
         rows = conn.execute(
-            """
+            f"""
             SELECT object, COUNT(*) AS nframes, coord_repr(ra, declination) AS coord
             FROM frames
             WHERE instrument = ?
               AND obsdate = ?
               AND filename LIKE ?
+              AND {visible_clause}
             GROUP BY object
             """,
-            (inst, obsdate, f"{site}%"),
+            (inst, obsdate, f"{site}%", *visible_params),
         ).fetchall()
     out = []
     for obj, nframes, packed in rows:
@@ -685,6 +738,7 @@ def local_lco_dataset_match(
     dec_deg: float,
     match_arcsec: float = _LCO_DATASET_MATCH_ARCSEC,
     object_name: str = "",
+    denied: frozenset[str] = frozenset(),
 ) -> dict | None:
     """Return the local frames dataset (if any) matching an observation.
 
@@ -709,7 +763,7 @@ def local_lco_dataset_match(
     labels = [obsdates] if isinstance(obsdates, str) else list(obsdates or [])
     candidates: list[dict] = []
     for label in labels:
-        candidates.extend(_local_lco_datasets(inst, label, site))
+        candidates.extend(_local_lco_datasets(inst, label, site, denied=denied))
 
     obj_ids = _target_identifiers(object_name)
     if obj_ids:
@@ -733,7 +787,9 @@ def local_lco_dataset_match(
     return None
 
 
-def _annotate_lco_archive_results(inst: str, results: list[dict]) -> tuple[list[dict], int]:
+def _annotate_lco_archive_results(
+    inst: str, results: list[dict], *, denied: frozenset[str] = frozenset()
+) -> tuple[list[dict], int]:
     if not results:
         return [], 0
 
@@ -801,7 +857,7 @@ def _annotate_lco_archive_results(inst: str, results: list[dict]) -> tuple[list[
             continue
         key = (inst_name, obsdate, site)
         if key not in local_cache:
-            local_cache[key] = _local_lco_datasets(inst_name, obsdate, site)
+            local_cache[key] = _local_lco_datasets(inst_name, obsdate, site, denied=denied)
 
         archive_ra = meta.get("archive_ra_deg")
         archive_dec = meta.get("archive_dec_deg")
@@ -1118,14 +1174,25 @@ def _funpack_file(path: Path, timeout: float = _FUNPACK_TIMEOUT_S) -> dict:
         status["status"] = "error"
         status["error"] = "funpack is not installed"
         return status
+    # Unpack to a sibling .part and rename on success, as _download_to_file
+    # does: `out.exists()` above is the "already unpacked" signal, so a funpack
+    # killed or timed out mid-write must never leave a truncated .fits there.
+    # cfitsio will not overwrite, so clear a .part left by an earlier crash.
+    tmp = out.with_name(out.name + ".part")
+    tmp.unlink(missing_ok=True)
     try:
         proc = subprocess.run(
-            [funpack, "-O", str(out), str(path)],
+            [funpack, "-O", str(tmp), str(path)],
             check=False,
             capture_output=True,
             text=True,
             timeout=timeout,
         )
+        if proc.returncode != 0:
+            status["status"] = "error"
+            status["error"] = (proc.stderr or proc.stdout or f"funpack exited {proc.returncode}").strip()
+            return status
+        tmp.replace(out)
     except OSError as exc:
         status["status"] = "error"
         status["error"] = str(exc)
@@ -1134,10 +1201,8 @@ def _funpack_file(path: Path, timeout: float = _FUNPACK_TIMEOUT_S) -> dict:
         status["status"] = "error"
         status["error"] = f"funpack timed out after {timeout:g}s"
         return status
-    if proc.returncode != 0:
-        status["status"] = "error"
-        status["error"] = (proc.stderr or proc.stdout or f"funpack exited {proc.returncode}").strip()
-        return status
+    finally:
+        tmp.unlink(missing_ok=True)
     status["status"] = "unpacked"
     return status
 
@@ -1878,6 +1943,136 @@ _INSTRUMENT_TYPE_TO_KIND = {
     # there is nothing to clone.
     "0M4-SCICAM-QHY600": "qhy600",
 }
+
+# Reverse of the map above, keyed by the schedule form's instrument *kind*.
+# muscat3/muscat4 schedule the same 2M0-SCICAM-MUSCAT hardware as muscat.
+# sbig is deliberately absent: it has no live instrument_type (retired), so it
+# can never be "currently schedulable" and is never availability-annotated.
+_KIND_TO_INSTRUMENT_TYPE = {
+    "muscat": "2M0-SCICAM-MUSCAT",
+    "muscat3": "2M0-SCICAM-MUSCAT",
+    "muscat4": "2M0-SCICAM-MUSCAT",
+    "sinistro": "1M0-SCICAM-SINISTRO",
+    "qhy600": "0M4-SCICAM-QHY600",
+}
+
+# Per-site instrument availability is a slowly-changing fact (LCO moves or
+# installs hardware, or a telescope goes down for repairs), so the schedule page
+# reads it through a short TTL cache rather than calling the portal on every
+# load. ``site_instruments(force=True)`` bypasses it.
+_SITE_INSTRUMENTS_TTL_S = 900.0
+# Minimum spacing between portal fetch *attempts* (successful or not). The
+# endpoint is anonymous and one fetch is six upstream requests, so this bounds
+# ``refresh=1`` callers and stops an outage from being retried on every load.
+_SITE_INSTRUMENTS_MIN_FETCH_INTERVAL_S = 60.0
+# Cache state, all guarded by ``_site_instruments_lock``:
+#   "value"   -> (monotonic time of last success, site -> codes)
+#   "attempt" -> monotonic time of the last fetch attempt
+#   "error"   -> the LcoError from that attempt, if it failed
+_site_instruments_cache: dict = {}
+# Held across the check and the six-site fetch, so concurrent callers queue
+# behind one fetch rather than each issuing their own (single-flight).
+_site_instruments_lock = threading.Lock()
+
+
+def kind_instrument_type(kind: str | None) -> str | None:
+    """LCO instrument_type code for a schedule-form instrument kind."""
+    return _KIND_TO_INSTRUMENT_TYPE.get((kind or "").strip().lower())
+
+
+def site_instruments(*, force: bool = False) -> dict[str, list[str]]:
+    """Currently schedulable instrument_type codes, per LCO site.
+
+    Reads the Observation Portal's ``/api/instruments/?site=<site>`` view: the
+    response is a mapping of instrument_type -> capabilities *for that one
+    site*, and it already reflects configdb's schedulability (disabled and
+    manual telescope/instrument states are dropped for a non-staff token), so
+    it answers "can this instrument be scheduled here right now".
+
+    The schedule page uses this to annotate a site whose instrument is
+    temporarily offline -- e.g. ELP while its 1 m Sinistro is down for the
+    Sophia upgrade, or any site during a maintenance outage -- *without*
+    hardcoding it out of the site lists. When LCO re-lists the instrument, the
+    site becomes available again on the next cache expiry.
+
+    Cached for ``_SITE_INSTRUMENTS_TTL_S`` seconds. ``force=True`` re-fetches,
+    but never sooner than ``_SITE_INSTRUMENTS_MIN_FETCH_INTERVAL_S`` after the
+    previous attempt, so an anonymous ``refresh=1`` cannot drive the portal.
+    A fetch failure returns the last cached snapshot (even if stale) so a
+    transient portal error does not blank the UI, and is not retried until
+    the minimum interval has passed. With nothing cached the :class:`LcoError`
+    propagates.
+
+    Concurrent callers are single-flight: the lock is held across the fetch,
+    so a cold cache costs one six-site fetch, not one per caller.
+    """
+    # Imported here to avoid a module-level cycle: transit_obs does not import
+    # lco, but lco only needs the site keys, which live there.
+    from muscat_db import transit_obs
+
+    with _site_instruments_lock:
+        cache = _site_instruments_cache
+        now = time.monotonic()
+        value = cache.get("value")
+        attempt = cache.get("attempt")
+        fresh = value is not None and now - value[0] < _SITE_INSTRUMENTS_TTL_S
+
+        if fresh and not force:
+            return {site: list(codes) for site, codes in value[1].items()}
+
+        may_fetch = (
+            attempt is None
+            or now - attempt >= _SITE_INSTRUMENTS_MIN_FETCH_INTERVAL_S
+        )
+        if not may_fetch:
+            if value is not None:
+                return {site: list(codes) for site, codes in value[1].items()}
+            last = cache.get("error")
+            if last is None:  # pragma: no cover - attempt implies value or error
+                raise LcoError("site instruments unavailable", status=503)
+            raise LcoError(last.message, status=last.status, detail=last.detail)
+
+        cache["attempt"] = now
+        try:
+            result: dict[str, list[str]] = {}
+            for site in transit_obs.LCO_SITES:
+                payload = _lco_api_request(
+                    f"https://observe.lco.global/api/instruments/?site={site}"
+                )
+                result[site] = (
+                    sorted(k for k, v in payload.items() if isinstance(v, dict))
+                    if isinstance(payload, dict)
+                    else []
+                )
+        except LcoError as exc:
+            cache["error"] = exc
+            if value is None:
+                raise
+            logger.warning(
+                "site instrument refresh failed; serving cached snapshot (age %.0fs)",
+                now - value[0],
+            )
+            return {site: list(codes) for site, codes in value[1].items()}
+
+        cache["value"] = (now, result)
+        cache.pop("error", None)
+        return {site: list(codes) for site, codes in result.items()}
+
+
+def instrument_availability(*, force: bool = False) -> dict:
+    """Site instrument availability for the schedule page.
+
+    Wraps :func:`site_instruments` with a kind -> sites rollup so the frontend
+    can mark a whole instrument's sites in one lookup. ``by_site`` is the raw
+    site -> instrument_type list; ``by_kind`` maps each schedule-form kind to
+    the sites currently listing its instrument_type.
+    """
+    by_site = site_instruments(force=force)
+    by_kind = {
+        kind: sorted(s for s, codes in by_site.items() if itype in codes)
+        for kind, itype in _KIND_TO_INSTRUMENT_TYPE.items()
+    }
+    return {"by_site": by_site, "by_kind": by_kind}
 
 
 def requestgroup_to_params(rg: dict) -> dict:

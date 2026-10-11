@@ -108,6 +108,11 @@ ENV_VARS: tuple[EnvVar, ...] = (
         "2",
         "Number of build-db nightly snapshots to retain (older ones are pruned)",
     ),
+    EnvVar(
+        "SLACK_WEBHOOK_FILE",
+        "/etc/muscat-db/slack-webhook-url",
+        "File holding the Slack webhook URL for `audit` alerts (same file as deploy/pull-deploy.sh)",
+    ),
     EnvVar("MUSCAT_PHOT_STALL_LIMIT_S", "1500", "Photometry job stall timeout (seconds)"),
     EnvVar("MUSCAT_PHOT_MAX_RUNTIME_S", "10800", "Photometry job max runtime (seconds)"),
     EnvVar("MUSCAT_PHOT_FINALIZE_GRACE_S", "8", "Log-quiescence grace window (seconds)"),
@@ -323,6 +328,7 @@ ENV_VARS: tuple[EnvVar, ...] = (
     # --- caches --------------------------------------------------------------
     EnvVar("MUSCAT_CATALOG_CACHE_MAX", "512", "Max entries in the in-process catalog lookup cache"),
     EnvVar("MUSCAT_GAIA_CACHE_MAX", "512", "Max entries in the in-process Gaia cone-search cache"),
+    EnvVar("MUSCAT_GAIA_CACHE_DIR", "~/.cache/muscat-db/gaia", "Directory for the persistent Gaia cone-search cache (.npz per field)"),
     EnvVar("MUSCAT_INDEX_CACHE_MAX", "64", "Max entries in the index-page render cache"),
 
     # --- chat ----------------------------------------------------------------

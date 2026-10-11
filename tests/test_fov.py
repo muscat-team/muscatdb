@@ -610,3 +610,127 @@ def test_cached_query_gaia_field_distinguishes_different_fields(monkeypatch):
     b = fov.cached_query_gaia_field(50.0, 10.0, 60.0)
     assert a.ra[0] == 10.0
     assert b.ra[0] == 50.0
+
+
+# ── ESA query must be synchronous (async TAP jobs took ~90 s -> proxy 504) ───
+
+def test_query_gaia_esa_uses_sync_job(monkeypatch):
+    from astropy.table import Table
+
+    tab = Table({
+        "ra": [10.0], "dec": [-20.0], "phot_g_mean_mag": [12.0],
+        "bp_rp": [1.0], "pmra": [0.0], "pmdec": [0.0],
+    })
+
+    class _Job:
+        def get_results(self):
+            return tab
+
+    class _FakeGaia:
+        @staticmethod
+        def launch_job(query, *a, **k):
+            return _Job()
+
+        @staticmethod
+        def launch_job_async(query, *a, **k):
+            raise AssertionError("async TAP jobs queue for ~90 s; use the sync endpoint")
+
+    monkeypatch.setattr("astroquery.gaia.Gaia", _FakeGaia)
+    result = fov._query_gaia_esa(10.0, -20.0, 60.0, 0.0, 18.0)
+    assert result.error is None
+    assert len(result) == 1
+
+
+# ── persistent (disk) Gaia cache ─────────────────────────────────────────────
+
+def _stars(source="Gaia DR3 (ESA)"):
+    return fov.StarField(
+        ra=np.array([10.0, 10.001]), dec=np.array([-20.0, -20.001]),
+        gmag=np.array([11.0, 13.5]), bp_rp=np.array([1.2, np.nan]),
+        pmra=np.array([1.0, 2.0]), pmdec=np.array([-1.0, 0.5]), source=source,
+    )
+
+
+def test_gaia_cache_survives_process_restart(monkeypatch):
+    calls = []
+
+    def _fake(*a, **k):
+        calls.append(a)
+        return _stars()
+
+    monkeypatch.setattr(fov, "query_gaia_field", _fake)
+    first = fov.cached_query_gaia_field(10.0, -20.0, 500.0)
+    fov._gaia_cache.clear()  # simulates a server restart: memory gone, disk stays
+    second = fov.cached_query_gaia_field(10.0, -20.0, 500.0)
+
+    assert len(calls) == 1
+    assert second.source == first.source
+    np.testing.assert_allclose(second.gmag, first.gmag)
+    np.testing.assert_allclose(second.bp_rp, first.bp_rp)  # NaN round-trips
+    np.testing.assert_allclose(second.pmra, first.pmra)
+
+
+def test_gaia_cache_does_not_persist_failures(monkeypatch):
+    calls = []
+
+    def _fake(*a, **k):
+        calls.append(a)
+        s = _stars()
+        s.error = "ESA Gaia query failed: timed out"
+        return s
+
+    monkeypatch.setattr(fov, "query_gaia_field", _fake)
+    fov.cached_query_gaia_field(10.0, -20.0, 500.0)
+    fov._gaia_cache.clear()
+    fov.cached_query_gaia_field(10.0, -20.0, 500.0)
+    assert len(calls) == 2
+
+
+def test_gaia_cache_ignores_corrupt_file(monkeypatch):
+    calls = []
+
+    def _fake(*a, **k):
+        calls.append(a)
+        return _stars()
+
+    monkeypatch.setattr(fov, "query_gaia_field", _fake)
+    fov.cached_query_gaia_field(10.0, -20.0, 500.0)
+    for f in fov._gaia_disk_dir().iterdir():
+        f.write_bytes(b"not an npz")
+    fov._gaia_cache.clear()
+    result = fov.cached_query_gaia_field(10.0, -20.0, 500.0)
+    assert len(result) == 2
+    assert len(calls) == 2
+
+
+# ── /api/fov/optimize must forward every user setting to the optimizer ───────
+
+def test_api_fov_optimize_forwards_avoid_mag(monkeypatch):
+    from muscat_db import web
+
+    seen = {}
+
+    class _Result:
+        def to_dict(self):
+            return {"ok": True}
+
+    def _fake_optimize(**kwargs):
+        seen.update(kwargs)
+        return _Result()
+
+    monkeypatch.setattr(web.fov_opt, "optimize", _fake_optimize)
+    resp = web.api_fov_optimize({
+        "instrument": "muscat2", "target": "T", "ra": 1.0, "dec": 2.0,
+        "mag_delta": 5, "avoid_mag": 8,
+    })
+    assert resp.status_code == 200
+    assert seen["avoid_mag"] == 8.0
+
+
+def test_gaia_disk_path_keeps_memory_key_resolution():
+    # The in-memory key distinguishes RA at 1e-4 deg; a `%g` disk name drops to
+    # 1e-3 for RA >= 100 (~3.6"), so the disk layer must format at 4 decimals.
+    a = fov._gaia_cache_key(123.4567, 10.0, 300.0, 0.0, 18.0)
+    b = fov._gaia_cache_key(123.4568, 10.0, 300.0, 0.0, 18.0)
+    assert a != b
+    assert fov._gaia_disk_path(a) != fov._gaia_disk_path(b)
