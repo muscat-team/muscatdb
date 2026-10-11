@@ -174,7 +174,8 @@ def test_deploys_and_relaunches_on_new_remote_commit(deploy_env):
     assert result.returncode == 0, result.stderr
     assert (deploy_env["checkout"] / "app.txt").read_text() == "v2\n"
     assert deploy_env["uv_marker"].exists()
-    assert "sync --dev" in deploy_env["uv_marker"].read_text()
+    # --extra cluster: a bare `sync --dev` strips psycopg, which the workers need.
+    assert "sync --dev --extra cluster" in deploy_env["uv_marker"].read_text()
     tmux_calls = deploy_env["tmux_marker"].read_text()
     assert "test-session" in tmux_calls
     assert str(port_num) in tmux_calls
@@ -386,3 +387,25 @@ def test_failed_health_check_does_not_advance_marker_so_next_poll_retries(deploy
     uv_calls = deploy_env["uv_marker"].read_text().splitlines()
     assert len(uv_calls) == 2, "the retry must actually re-run uv sync, not skip it"
     assert marker_file.read_text().strip() == _head_sha(deploy_env["checkout"])
+
+
+def test_launch_sources_optional_web_env_file_at_launch_time(deploy_env, tmp_path):
+    """The relaunched pane must pick up the per-checkout env file (queue-only
+    web app, control plane) -- and must not fail when the file is absent."""
+    web_env = tmp_path / "web-env"
+    (deploy_env["seed"] / "app.txt").write_text("v2\n")
+    _git("add", "app.txt", cwd=deploy_env["seed"])
+    _git("commit", "-m", "v2", cwd=deploy_env["seed"])
+    _git("push", "origin", "main", cwd=deploy_env["seed"])
+
+    with _healthy_server() as port_num:
+        result = _run(
+            deploy_env,
+            port=str(port_num),
+            env_extra={"PULL_DEPLOY_WEB_ENV_FILE": str(web_env)},
+        )
+
+    assert result.returncode == 0, result.stderr
+    launch = deploy_env["tmux_marker"].read_text()
+    # Guarded: a missing file is skipped rather than aborting the launch.
+    assert f"[ ! -f '{web_env}' ] || . '{web_env}'" in launch

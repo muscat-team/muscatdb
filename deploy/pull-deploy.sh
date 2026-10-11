@@ -124,11 +124,21 @@ if [ "${PULL_DEPLOY_REEXECED:-0}" != "1" ]; then
   PULL_DEPLOY_REEXECED=1 exec "$0" "$@"
 fi
 
-"$UV" sync --dev
+# `--extra cluster` keeps psycopg installed: a bare `uv sync --dev` removes it
+# from the venv on every deploy, and the worker fleet runs this checkout's
+# interpreter (deploy/workers.py --profile prod), so it would crash on import.
+"$UV" sync --dev --extra cluster
 
 # The launch command carries its own cd, since it runs inside the pane, not
 # this script's shell.
-LAUNCH_CMD="cd '$DEPLOY_PATH' && $UV run uvicorn muscat_db.web:sio_app --host 127.0.0.1 --port $PORT"
+#
+# An optional per-checkout env file is sourced first when it exists, so the
+# relaunched app keeps settings a respawned pane would otherwise lose (the
+# output of `deploy/workers.py --profile prod web-env`, the Postgres control
+# plane variables). Absent file: no change in behaviour. Checked inside the
+# pane, at launch time, not when this script runs.
+WEB_ENV_FILE="${PULL_DEPLOY_WEB_ENV_FILE:-$DEPLOY_PATH/.web-env}"
+LAUNCH_CMD="cd '$DEPLOY_PATH' && { [ ! -f '$WEB_ENV_FILE' ] || . '$WEB_ENV_FILE'; } && $UV run uvicorn muscat_db.web:sio_app --host 127.0.0.1 --port $PORT"
 # send-keys only confirms the pane accepted keystrokes, not that anything
 # runs -- and when the pane's sole process *is* the previous uvicorn (the
 # shape every real deploy leaves it in, not a wrapping shell), a Ctrl-C to it

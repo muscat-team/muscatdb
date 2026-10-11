@@ -311,6 +311,10 @@ eval "$(.venv/bin/python deploy/workers.py --profile prod web-env)"   # in the s
 
 Before the first `prod` switch: allow `muscatdb_prod` for each worker host in `pg_hba.conf` (the old `muscatdb_control` is refused today), and decide `max_full_jobs` (production currently documents `1`; the fleet default is hosts + 1). While `prod` is active, the dev server on `:8888` has no worker claiming from `muscatdb_dev`, so run it with `queue_only = false` or switch back.
 
+`pull-deploy.sh` runs `uv sync --dev --extra cluster`, so `psycopg` survives each deploy (the prod workers run the deploy checkout's interpreter). It also sources `$DEPLOY_PATH/.web-env` (override: `PULL_DEPLOY_WEB_ENV_FILE`) before `uvicorn` when that file exists, so a respawned `:8001` keeps its queue-only and control-plane variables. The file is not committed and absent by default, which changes nothing; to put `:8001` on the Postgres control plane, create it from `workers.py --profile prod web-env` plus the `MUSCAT_CONTROL_PLANE=postgres` and DSN exports. That switch does not migrate job history, so decide it deliberately.
+
+**2026-10-11:** `--profile prod up` ran with `max_full_jobs = 6`; the `muscatdb_prod` `pg_hba.conf`/`ufw` entries were added for ut3-ut7 and all five hosts hold LISTEN connections. `:8001` is still on the SQLite control plane, so those workers have nothing queued until `.web-env` is created.
+
 Run it from ut2 (it needs Python >= 3.11; the workers' system python is 3.10). Once per host, `loginctl enable-linger $USER` so the units survive the last logout; `up` warns when it is off.
 
 Adding another host takes two steps on ut2 that need `sudo` in a real terminal, then one command:
