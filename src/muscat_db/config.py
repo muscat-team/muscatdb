@@ -108,6 +108,11 @@ ENV_VARS: tuple[EnvVar, ...] = (
         "2",
         "Number of build-db nightly snapshots to retain (older ones are pruned)",
     ),
+    EnvVar(
+        "SLACK_WEBHOOK_FILE",
+        "/etc/muscat-db/slack-webhook-url",
+        "File holding the Slack webhook URL for `audit` alerts (same file as deploy/pull-deploy.sh)",
+    ),
     EnvVar("MUSCAT_PHOT_STALL_LIMIT_S", "1500", "Photometry job stall timeout (seconds)"),
     EnvVar("MUSCAT_PHOT_MAX_RUNTIME_S", "10800", "Photometry job max runtime (seconds)"),
     EnvVar("MUSCAT_PHOT_FINALIZE_GRACE_S", "8", "Log-quiescence grace window (seconds)"),

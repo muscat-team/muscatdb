@@ -32,6 +32,8 @@ from muscat_db.obsdate_normalize import (
 )
 from muscat_db.propid_backfill import PROPID_INSTRUMENTS
 from muscat_db import scan_failures, scanner
+from muscat_db.audit import DEFAULT_MIN_AGE_DAYS
+from muscat_db.sweep import DEFAULT_WORKERS as SWEEP_DEFAULT_WORKERS
 from muscat_db.scanner import scan_date, scan_missing_dates, scan_yesterday
 from muscat_db.summarizer import summarize_csv
 
@@ -373,6 +375,10 @@ def build_db(
     """Build SQLite database from all CSV observation logs."""
     _log_startup_banner(f"build-db --db {db}")
     _require_existing_db(ctx, db, "build")
+    _run_build_db(db)
+
+
+def _run_build_db(db: str) -> None:
     from muscat_db.database import build_db as _build_db
     console.print("[cyan]Scanning observation logs...[/]")
     with Progress(
@@ -384,6 +390,83 @@ def build_db(
     ) as progress:
         count = _build_db(db, progress=progress)
     console.print(f"[green]Database built: {count} frames indexed in {db}[/]")
+
+
+@app.command(name="sweep", cls=_Cmd)
+def sweep_cmd(
+    ctx: typer.Context,
+    workers: int = typer.Option(
+        SWEEP_DEFAULT_WORKERS, "--workers", "-w",
+        help="Parallel worker count (default leaves most of the host to photometry)",
+    ),
+    build: bool = typer.Option(
+        False, "--build-db",
+        help="Rebuild the database afterwards, only if the sweep wrote any obslog CSVs",
+    ),
+    db: str = _db_option(),
+):
+    """Backfill: scan every missing date of every instrument, then retry open scan failures.
+
+    Meant for a weekly cron entry. Skips itself while photometry/fit jobs are
+    active. Never rescans a date with a known cause (see `audit`) or one where
+    it would leave fewer rows than the existing CSV, and skips incomplete dates
+    whose raw files have not changed since the last sweep.
+    """
+    from muscat_db.sweep import run_sweep
+
+    _log_startup_banner(f"sweep --workers {workers}{' --build-db' if build else ''}")
+    if build:
+        _require_existing_db(ctx, db, "build")
+    with Progress(
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("[bold]{task.fields[filename]}"),
+        TimeRemainingColumn(),
+        console=console,
+    ) as progress:
+        result = run_sweep(max_workers=workers, progress=progress)
+    if result.skipped:
+        console.print(f"[yellow]Sweep skipped: {result.skipped}[/]")
+        return
+    for name, dates in result.scanned.items():
+        console.print(f"[green]Scanned {len(dates)} missing date(s) for {name}: {', '.join(dates)}[/]")
+    for inst, obsdate in result.retried:
+        console.print(f"[green]Retried {inst} {obsdate}: scanned cleanly[/]")
+    for inst, obsdate in result.failed:
+        console.print(f"[red]Retried {inst} {obsdate}: still failing (see `muscat-db scan-failures`)[/]")
+    for inst, obsdate, why in result.held:
+        console.print(f"[yellow]Held {inst} {obsdate}, not rescanned: {why}[/]")
+    if result.unchanged:
+        console.print(f"[dim]{result.unchanged} incomplete date(s) skipped: raw files unchanged since the last sweep[/]")
+    if not result.changed:
+        console.print("[green]Nothing to rescan[/]")
+        return
+    if build:
+        _run_build_db(db)
+
+
+@app.command(name="audit", cls=_Cmd)
+def audit_cmd(
+    db: str = _db_option(),
+    min_age_days: int = typer.Option(
+        DEFAULT_MIN_AGE_DAYS, "--min-age-days", help="Skip dates younger than this; their delivery may still be arriving",
+    ),
+    notify: bool = typer.Option(
+        True, "--notify/--no-notify",
+        help="Post new or changed mismatches to Slack and remember them for the next run",
+    ),
+):
+    """Compare raw files on disk with database rows per instrument/date/CCD; report differences.
+
+    Read-only: never rescans. Known causes (#197, #198) are tagged and never alert.
+    """
+    from muscat_db.audit import report, run_audit
+
+    _log_startup_banner(f"audit --db {db}")
+    if not os.path.exists(db):
+        console.print(f"[red]No database at {db}; nothing to audit against.[/]")
+        raise typer.Exit(1)
+    report(run_audit(db, min_age_days=min_age_days), notify=notify)
 
 
 @app.command(cls=_Cmd, name="build-static-site")

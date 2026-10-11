@@ -185,6 +185,48 @@ complete to `scan-missing`. `muscat-db scan-failures` lists the open entries.
 `scan-yesterday` still exits 0 on such a failure, so the other instruments'
 `build-db` goes ahead.
 
+## Cron (weekly): backfill sweep and ingestion audit
+
+`scan-yesterday` looks at each date once, so a date that fails or arrives late
+is never revisited, and nothing used to notice. Two weekly jobs close that gap
+(#196). Run them at low priority, well clear of the 17:30 nightly:
+
+```
+0 3 * * 0 cd $MUSCATDB_ROOT && nice -n 19 ionice -c3 uv run muscat-db sweep --build-db >> $MUSCATDB_ROOT/logs/sweep.log 2>&1
+0 6 * * 0 cd $MUSCATDB_ROOT && nice -n 19 ionice -c3 uv run muscat-db audit >> $MUSCATDB_ROOT/logs/audit.log 2>&1
+```
+
+`sweep` rescans every date `scan-missing <inst> all` would pick up, for every
+instrument, then retries the open scan failures. With `--build-db` it rebuilds
+the database afterwards, but only if it rewrote any obslog CSVs. It stays out
+of the way of photometry: it does not start while any photometry/fit job is
+active, uses 8 workers by default (`--workers`), and a second sweep never runs
+alongside the first. It holds a date, rather than rescanning it, when:
+
+- the date has a known cause in `audit` (the #197 and #198 dates), or
+- any CCD has fewer raw files than its existing CSV has rows, so a rescan
+  would replace good rows with fewer or none.
+
+It also skips incomplete dates whose raw directory has not changed since the
+sweep last rescanned them (recorded in
+`$MUSCAT_OBSLOG_DIR/.sweep-state.json`). Some dates hold FITS files whose
+headers cannot be read, which keeps them "incomplete" however often they are
+rescanned; without this, every weekly run would redo them for nothing.
+
+`audit` compares, per instrument, date and CCD, the raw files `scan_date`
+would match with the rows in `frames`, and reports every difference as
+`missing` (an ingestion gap), `extra` (a rescan would lose rows) or `gone`
+(rows for a date whose raw directory no longer exists). It only reads. Dates
+younger than 3 days are skipped (`--min-age-days`), since their delivery may
+still be arriving. The full report goes to `audit.log`. Slack (the same
+`/etc/muscat-db/slack-webhook-url` as `deploy/pull-deploy.sh`, or
+`$SLACK_WEBHOOK_FILE`) gets only what is new or changed since the previous
+run, recorded in `$MUSCAT_OBSLOG_DIR/.audit-last.json`, plus any new open
+scan failures. Dates with a known cause are tagged with their issue and never
+alert; drop them from `audit._KNOWN_ISSUES` when the issue is fixed. Use
+`--no-notify` for a manual run that should neither post nor move that
+baseline.
+
 `build-db` snapshots the existing database before rebuilding it (SQLite backup
 API, safe while the server is running) to `$MUSCAT_DB_BACKUP_DIR` (default
 `$MUSCAT_TMPDIR`, i.e. `~/temp`) as `muscat.db.nightly-<stamp>.sqlite`, keeping
