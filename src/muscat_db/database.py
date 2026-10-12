@@ -454,6 +454,10 @@ def ephemeris_view_slug(state: dict) -> tuple[str, str, str]:
     return slug, state_hash, state_json
 
 
+# The YYMMDD segment of ``obslog-<inst>-<YYMMDD>-ccd<N>.csv``.
+_CSV_NAME_DATE_RE = re.compile(r"^obslog-.+-(\d{6})-ccd\d+\.csv$")
+
+
 def _discover_csv_jobs(instrument: str | None = None, obsdate: str | None = None) -> list[tuple[str, str, str, int]]:
     """Return obslog CSV jobs as ``(inst, obsdate, path, ccd)`` tuples."""
     csv_jobs: list[tuple[str, str, str, int]] = []
@@ -479,6 +483,16 @@ def _discover_csv_jobs(instrument: str | None = None, obsdate: str | None = None
                 try:
                     ccd = int(fname.rstrip(".csv").rsplit("-ccd", 1)[1])
                 except (IndexError, ValueError):
+                    continue
+                named = _CSV_NAME_DATE_RE.match(fname)
+                if named and named.group(1) != entry:
+                    # Filed under the wrong folder (#197): ingesting it under
+                    # the folder's date would put every frame in the db twice.
+                    # Left on disk for the operator to move; never deleted.
+                    logger.warning(
+                        "skipping %s: its filename date %s differs from folder %s",
+                        f"{obsdir}/{fname}", named.group(1), entry,
+                    )
                     continue
                 csv_jobs.append((inst_name, entry, f"{obsdir}/{fname}", ccd))
     return csv_jobs
