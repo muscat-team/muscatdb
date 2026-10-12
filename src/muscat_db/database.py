@@ -1946,6 +1946,28 @@ def get_frames(
         return [dict(zip(columns, r)) for r in cur.fetchall()]
 
 
+def get_target_frames(
+    db_path: str, instrument: str, obsdate: str, object_name: str,
+    *, denied: frozenset[str] = frozenset(),
+) -> dict[int, list[dict]]:
+    """One target's frames on a night grouped by CCD (ordered by start time),
+    without those under a *denied* proposal."""
+    visible, visible_params = sql_not_denied(denied)
+    with get_conn(db_path) as conn:
+        cur = conn.execute(
+            f"""SELECT * FROM frames
+               WHERE instrument = ? AND obsdate = ? AND object = ? AND {visible}
+               ORDER BY ccd, jd_start, filename""",
+            (instrument, obsdate, object_name, *visible_params),
+        )
+        columns = [d[0] for d in cur.description]
+        by_ccd: dict[int, list[dict]] = {}
+        for row in cur.fetchall():
+            frame = dict(zip(columns, row))
+            by_ccd.setdefault(frame["ccd"], []).append(frame)
+        return by_ccd
+
+
 def get_observed_pointing(
     db_path: str, instrument: str, obsdate: str, object_name: str,
     *, denied: frozenset[str] = frozenset(),

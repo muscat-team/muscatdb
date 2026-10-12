@@ -37,6 +37,24 @@
   .band-checks label { display: flex; align-items: center; gap: 0.3rem; color: var(--text); font-size: 0.85rem; }
   .opt-span2 { grid-column: span 2; }
   #opt-error { color: var(--red); font-size: 0.8rem; min-height: 1rem; }
+
+  /* reference-time slider + live per-band preview (Reference selection = time) */
+  .ref-time-wrap { position: relative; display: flex; align-items: center; gap: 0.5rem; }
+  .ref-time-wrap input[type=range] { flex: 1; }
+  .ref-time-popup { position: absolute; left: 0; bottom: calc(100% + 0.5rem); z-index: 50;
+    width: min(720px, 92vw); padding: 0.6rem; border: 1px solid var(--border);
+    border-radius: 6px; background: var(--surface); box-shadow: 0 6px 24px rgba(0,0,0,0.35); }
+  .ref-time-popup[hidden] { display: none; }
+  .ref-time-popup .rt-head { font-size: 0.78rem; color: var(--text-dim); margin-bottom: 0.4rem; }
+  .ref-time-popup .rt-grid { display: grid; gap: 0.5rem;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
+  .ref-time-popup figure { margin: 0; text-align: center; }
+  .ref-time-popup img { width: 100%; height: auto; aspect-ratio: 1 / 1; object-fit: contain;
+    background: #000; border-radius: 3px; image-rendering: auto; }
+  .ref-time-popup figcaption { font-size: 0.72rem; color: var(--text-dim); line-height: 1.3; }
+  .ref-time-popup figcaption b { color: var(--text); }
+  .ref-time-popup .rt-warn { color: var(--red); }
+  .ref-time-popup.rt-loading img { opacity: 0.55; }
 </style>
 
 <h1>Photometry</h1>
@@ -410,11 +428,11 @@
               {% if sel_inst in ('sinistro', 'sbig', 'qhy600') %}<span class="hint">Multi-site instrument: enabled for one selected band, disabled for multi-band</span>{% endif %}
             </div>
             <div class="opt">
-              <label for="opt-refid">Reference frame ID <span class="help-tooltip" title="FITS file frame number (4-digit suffix, e.g. 1480 for MCT20_1911191480). Empty means auto (first frame for self-reference, middle frame if a reference band is set, or the quality-selected anchor with a persistent source catalog when Reference selection = quality below). An explicit value here overrides quality selection. With Reference selection = time it is the anchor: each band uses its frame closest in time to the frame with this number. Per-camera numbering means the same number is not the same time in every band, so use time mode when bands have different exposure times.">?</span></label>
+              <label for="opt-refid">Reference frame ID <span class="help-tooltip" title="FITS file frame number (4-digit suffix, e.g. 1480 for MCT20_1911191480). Empty means auto (first frame for self-reference, middle frame if a reference band is set, or the quality-selected anchor with a persistent source catalog when Reference selection = quality below). An explicit value here overrides quality selection. Frame numbers are per camera, so the same number is not the same time in every band; use Reference selection = time (and a Reference time) when bands have different exposure times.">?</span></label>
               <input type="number" id="opt-refid" placeholder="auto" min="0" style="width: 100%;">
             </div>
             <div class="opt">
-              <label for="opt-ref_select">Reference selection <span class="help-tooltip" title="How the per-band reference is built (corresponds to --ref_select). 'position' (default) uses the legacy first/middle frame and its detections. 'quality' selects a clean anchor, registers source catalogs from a local top-K window, and rejects transient detections such as cosmic rays by requiring 60% recurrence. Ignored when Reference frame ID above is set. 'time' requires Reference frame ID and per-band self-reference: the frame with that number anchors a header time and each band uses its frame closest in time to it, so bands with different exposure times (cadences) stay simultaneous.">?</span></label>
+              <label for="opt-ref_select">Reference selection <span class="help-tooltip" title="How the per-band reference is built (corresponds to --ref_select). 'position' (default) uses the legacy first/middle frame and its detections. 'quality' selects a clean anchor, registers source catalogs from a local top-K window, and rejects transient detections such as cosmic rays by requiring 60% recurrence. Ignored when Reference frame ID above is set. 'time' uses the Reference time below instead of a frame number or reference band: each band uses its own frame closest in time to it, so bands with different exposure times (cadences) stay simultaneous.">?</span></label>
               <select id="opt-ref_select" style="width: 100%;">
                 <option value="position">position (default)</option>
                 <option value="quality">quality (local persistence)</option>
@@ -424,6 +442,19 @@
             <div class="opt">
               <label for="opt-ref_select_top_k">Quality candidates (top-K) <span class="help-tooltip" title="Number of nearby candidate frames pixel-validated and cross-registered when Reference selection = quality (corresponds to --ref_select_top_k). A source must recur in at least 60% of registered catalogs (3 of 5 by default). Ignored in position mode.">?</span></label>
               <input type="number" id="opt-ref_select_top_k" value="{{ run_defaults.ref_select_top_k }}" min="1" step="1" style="width: 100%;">
+            </div>
+            <div class="opt" id="ref-time-group" hidden>
+              <label for="ref-time-slider">Reference time (UT) <span class="help-tooltip" title="Used when Reference selection = time (corresponds to --ref_time). Drag in 10-minute steps; a pop-up shows, for every band, the frame closest in time to the chosen time and updates as you move. Each band uses its own closest frame, so bands with different exposure times stay simultaneous. You can also type HH:MM[:SS] UT, YYYY-MM-DDTHH:MM:SS (UTC) or a Julian date in the field below.">?</span></label>
+              <div class="ref-time-wrap">
+                <input type="range" id="ref-time-slider" min="0" max="0" step="1" value="0" disabled aria-describedby="ref-time-label" title="drag to choose the reference time; a preview of each band's closest frame follows the slider">
+                <span class="hint" id="ref-time-label" style="white-space:nowrap;">loading…</span>
+                <div id="ref-time-popup" class="ref-time-popup" role="status" aria-live="polite" hidden>
+                  <div class="rt-head" id="ref-time-popup-head"></div>
+                  <div class="rt-grid" id="ref-time-popup-grid"></div>
+                </div>
+              </div>
+              <input type="text" id="opt-ref_time" value="{{ run_defaults.ref_time }}" placeholder="HH:MM:SS UT, YYYY-MM-DDTHH:MM:SS or JD" style="width: 100%;">
+              <span class="hint">--ref_time; replaces Reference frame ID and Reference band in time mode</span>
             </div>
             <div class="opt">
               <label for="opt-max_num_stars">Max # stars for detection <span class="help-tooltip" title="Max number of stars to detect for PSF modeling or alignment (corresponds to --max_num_stars). Default 20: more candidate comparison stars.">?</span></label>
@@ -933,6 +964,7 @@
       ref_band: val('opt-ref_band'),
       refid: val('opt-refid'),
       ref_select: val('opt-ref_select'),
+      ref_time: val('opt-ref_time'),
       ref_select_top_k: val('opt-ref_select_top_k'),
       aper_unit: val('opt-aper_unit'),
       aper_radii: val('opt-aper_radii'),
@@ -994,7 +1026,7 @@
     document.querySelectorAll('input[name="band"]').forEach(function (c) {
       c.checked = saved.bands && saved.bands.indexOf(c.value) !== -1;
     });
-    ['run_name','ref_band','refid','ref_select','ref_select_top_k','aper_unit','aper_radii','annulus',
+    ['run_name','ref_band','refid','ref_select','ref_select_top_k','ref_time','aper_unit','aper_radii','annulus',
      'target_id','comparison_ids','avoid_comparison_ids','avoid_nearby_star_mode','avoid_nearby_star','target_coord','test_run_frames','min_star_separation','max_num_stars',
        'n_stars_align','cutout_size','display_stack_nframes','ccd_trim','edge_margin','bin_size_minutes','nan_imputation_method','sig_bkg','sig_fwhm','sig_dx','sig_dy','sig_flux','flux_poly_deg','min_star_area','wcs_method','centroid_method','cmap','site','telescope','mode','exclude_after_jd','exclude_before_jd','post_sigma','post_poly_deg','post_exclude_before_jd','post_exclude_after_jd'].forEach(function (id) {
       var el = document.getElementById('opt-'+id);
@@ -1108,6 +1140,152 @@
   }
   initJdSlider('exclude_after_jd', '');
   initJdSlider('exclude_before_jd', '');
+
+  // ----- reference time slider (--ref_select time) -----
+  // 10-minute steps over the target's frame span. Every change fetches the
+  // frame closest in time per band and shows it in a pop-up that follows the
+  // slider; in-flight requests are cancelled so the pop-up never lags behind.
+  (function initRefTimeSlider() {
+    var group = document.getElementById('ref-time-group');
+    var select = document.getElementById('opt-ref_select');
+    var slider = document.getElementById('ref-time-slider');
+    var field = document.getElementById('opt-ref_time');
+    var label = document.getElementById('ref-time-label');
+    var popup = document.getElementById('ref-time-popup');
+    var head = document.getElementById('ref-time-popup-head');
+    var grid = document.getElementById('ref-time-popup-grid');
+    if (!group || !select || !slider || !field || !popup) return;
+    var info = null, rangePromise = null, inflight = null, timer = null;
+    var WARN_OFFSET_S = 60;
+
+    function isoFromJd(jd) {
+      return new Date(Math.round((jd - 2440587.5) * 86400) * 1000).toISOString().slice(0, 19);
+    }
+    function jdFromIso(iso) {
+      var m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})$/.exec(iso);
+      if (!m) return null;
+      return Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]) / 86400000 + 2440587.5;
+    }
+    function jdAt(k) { return Math.min(info.jd_min + k * info.step_s / 86400, info.jd_max); }
+    function setLabel(jd) {
+      label.textContent = isoFromJd(jd).replace('T', ' ').slice(11) + ' UT';
+    }
+
+    function loadRange() {
+      if (rangePromise) return rangePromise;
+      var url = '/api/photometry/ref-time/' + encodeURIComponent(inst) + '/' +
+        encodeURIComponent(date) + '/' + encodeURIComponent(target);
+      rangePromise = fetch(url).then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      }).then(function (data) {
+        info = data;
+        slider.max = String(data.n_steps);
+        slider.disabled = false;
+        syncFromField();
+        return data;
+      }).catch(function () {
+        rangePromise = null;
+        label.textContent = 'no frame times for this target';
+        slider.disabled = true;
+      });
+      return rangePromise;
+    }
+
+    function syncFromField() {
+      if (!info) return;
+      var jd = jdFromIso((field.value || '').trim());
+      if (jd === null || jd < info.jd_min - 1e-6 || jd > info.jd_max + 1e-6) {
+        // clock/JD or out-of-range text: the slider mirrors only exact ISO values
+        slider.value = '0';
+        label.textContent = (field.value || '').trim() ? (field.value.trim() + ' (typed)') : isoFromJd(info.jd_min).slice(11) + ' UT';
+        return;
+      }
+      slider.value = String(Math.round((jd - info.jd_min) * 86400 / info.step_s));
+      setLabel(jd);
+    }
+    window.__syncRefTime = function () { updateVisibility(); syncFromField(); };
+
+    function esc(t) {
+      return String(t).replace(/[&<>"']/g, function (c) {
+        return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c];
+      });
+    }
+    function render(data) {
+      head.textContent = 'Closest frame per band to ' + data.ref_time.replace('T', ' ') + ' UT';
+      grid.innerHTML = data.bands.map(function (b) {
+        var far = b.offset_s > WARN_OFFSET_S;
+        var img = b.image
+          ? '<img alt="' + esc(b.band) + ' ' + esc(b.frame) + '" src="' + b.image + '">'
+          : '<div class="hint" style="aspect-ratio:1/1;display:flex;align-items:center;justify-content:center;">' + esc(b.error || 'no image') + '</div>';
+        return '<figure>' + img + '<figcaption><b>' + esc(b.band) + '</b> · ' + esc(b.frame) +
+          '<br>' + (b.exptime != null ? esc(b.exptime) + ' s exp · ' : '') +
+          '<span class="' + (far ? 'rt-warn' : '') + '">Δ ' + b.offset_s.toFixed(1) + ' s' +
+          (far ? ' (far from reference)' : '') + '</span></figcaption></figure>';
+      }).join('');
+      popup.classList.remove('rt-loading');
+    }
+    function showPreview(jd) {
+      if (inflight) inflight.abort();
+      inflight = new AbortController();
+      popup.hidden = false;
+      popup.classList.add('rt-loading');
+      var url = '/api/photometry/ref-time/' + encodeURIComponent(inst) + '/' +
+        encodeURIComponent(date) + '/' + encodeURIComponent(target) + '/preview?jd=' + jd.toFixed(6);
+      fetch(url, {signal: inflight.signal}).then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      }).then(render).catch(function (e) {
+        if (e && e.name === 'AbortError') return;
+        head.textContent = 'Preview unavailable';
+        grid.innerHTML = '';
+        popup.classList.remove('rt-loading');
+      });
+    }
+    function onSlide() {
+      if (!info) return;
+      var jd = jdAt(parseInt(slider.value, 10));
+      field.value = isoFromJd(jd);
+      setLabel(jd);
+      field.dispatchEvent(new Event('change', {bubbles: true}));
+      clearTimeout(timer);
+      timer = setTimeout(function () { showPreview(jd); }, 80);
+    }
+    function hidePopup() {
+      if (inflight) inflight.abort();
+      popup.hidden = true;
+    }
+
+    slider.addEventListener('input', onSlide);
+    // Pop-up is available on hover/focus too, not only while dragging.
+    function showCurrent() {
+      if (!info) return;
+      showPreview(jdAt(parseInt(slider.value, 10)));
+    }
+    slider.addEventListener('pointerenter', showCurrent);
+    slider.addEventListener('focus', showCurrent);
+    slider.parentElement.addEventListener('pointerleave', function () {
+      if (document.activeElement !== slider) hidePopup();
+    });
+    slider.addEventListener('blur', hidePopup);
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape') hidePopup(); });
+    field.addEventListener('input', syncFromField);
+
+    function updateVisibility() {
+      var on = select.value === 'time';
+      group.hidden = !on;
+      var refid = document.getElementById('opt-refid');
+      var refBand = document.getElementById('opt-ref_band');
+      [refid, refBand].forEach(function (el) {
+        if (!el) return;
+        el.disabled = on;
+        el.title = on ? 'not used with Reference selection = time (use Reference time)' : '';
+      });
+      if (on) loadRange();
+    }
+    select.addEventListener('change', updateVisibility);
+    updateVisibility();
+  })();
   initJdSlider('post_exclude_after_jd', '≈ ');
   initJdSlider('post_exclude_before_jd', '≈ ');
 
@@ -1142,7 +1320,7 @@
       document.querySelectorAll('input[name="band"]').forEach(function (c) {
         c.checked = DEFAULTS.bands && DEFAULTS.bands.indexOf(c.value) !== -1;
       });
-      ['run_name','ref_band','refid','ref_select','ref_select_top_k','aper_unit','aper_radii','annulus',
+      ['run_name','ref_band','refid','ref_select','ref_select_top_k','ref_time','aper_unit','aper_radii','annulus',
        'target_id','comparison_ids','avoid_comparison_ids','avoid_nearby_star_mode','avoid_nearby_star','target_coord','test_run_frames','min_star_separation','max_num_stars',
      'n_stars_align','cutout_size','display_stack_nframes','ccd_trim','edge_margin','bin_size_minutes','nan_imputation_method','sig_bkg','sig_fwhm','sig_dx','sig_dy','sig_flux','flux_poly_deg','min_star_area','wcs_method','centroid_method','cmap','site','telescope','mode','exclude_after_jd','exclude_before_jd','post_sigma','post_poly_deg','post_exclude_before_jd','post_exclude_after_jd'].forEach(function (id) {
         var el = document.getElementById('opt-'+id);
@@ -1157,6 +1335,7 @@
       });
       saveOptions();
       updateApertureHints();
+      if (window.__syncRefTime) window.__syncRefTime();
       syncJdSliderFromField('exclude_after_jd', '');
       syncJdSliderFromField('exclude_before_jd', '');
       syncJdSliderFromField('post_exclude_after_jd', '≈ ');
