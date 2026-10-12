@@ -1418,6 +1418,7 @@ erDiagram
               <li><strong>Pixel validation and persistence (Tier 2, all instruments)</strong> — the local candidates (<code>--ref_select_top_k</code>, default 5) are run through the normal source-detection pipeline in parallel and ranked using target match, non-outlier star count, measured FWHM, and target saturation. Their catalogs are registered to the selected anchor, and a detection is retained only when it occurs in at least 60% of the registered catalogs (3 of 5 by default). This removes one-frame cosmic-ray and hot-pixel detections while preserving the WCS-selected or explicit target. MuSCAT/MuSCAT2 use a local window around the positional midpoint because they lack the BANZAI header proxy.</li>
             </ol>
             <p>An explicit <strong>Reference frame ID</strong> always overrides quality selection. If fewer than two candidate catalogs can be registered, the pipeline safely keeps the anchor catalog instead of applying an unreliable persistence filter. The chosen frame, candidate comparison, registration status, and persistence counts are written to a <code>*_ref_selection.txt</code> sidecar (linked from the results page as "view ref selection") so the decision can be audited without re-running anything. Quality mode adds work roughly proportional to top-K, so it remains opt-in.</p>
+            <p><strong>Reference selection = time</strong> (<code>--ref_select time</code>) is for runs where bands have different exposure times, such as MuSCAT2 with 15 s in ip and 30 s in the other bands. Frame numbers are per camera, so the same <strong>Reference frame ID</strong> is a different time (or does not exist) in other bands. In time mode the frame with that exact number anchors a header time and every band uses its frame closest in time to it; offsets are logged and anything beyond 60 s is warned about. It requires a Reference frame ID and per-band self-reference (no reference band).</p>
           </div>
         </div>
 
@@ -1633,7 +1634,8 @@ erDiagram
               <li><strong>aper_radii</strong>: auto (Gaia heuristic)</li>
               <li><strong>annulus</strong>: auto (Gaia heuristic)</li>
               <li><strong>aper_unit</strong>: pix</li>
-              <li><strong>max_num_stars</strong>: 10</li>
+              <li><strong>max_num_stars</strong>: 20</li>
+              <li><strong>min_star_area</strong>: 20 pix</li>
               <li><strong>min_star_separation</strong>: 10.0 pix</li>
               <li><strong>avoid_nearby_star_mode</strong>: auto (max(2 x FWHM, 3 arcsec))</li>
               <li><strong>cutout_size</strong>: 35 pix</li>

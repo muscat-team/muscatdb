@@ -410,14 +410,15 @@
               {% if sel_inst in ('sinistro', 'sbig', 'qhy600') %}<span class="hint">Multi-site instrument: enabled for one selected band, disabled for multi-band</span>{% endif %}
             </div>
             <div class="opt">
-              <label for="opt-refid">Reference frame ID <span class="help-tooltip" title="FITS file frame number (4-digit suffix, e.g. 1480 for MCT20_1911191480). Empty means auto (first frame for self-reference, middle frame if a reference band is set, or the quality-selected anchor with a persistent source catalog when Reference selection = quality below). An explicit value here always overrides.">?</span></label>
+              <label for="opt-refid">Reference frame ID <span class="help-tooltip" title="FITS file frame number (4-digit suffix, e.g. 1480 for MCT20_1911191480). Empty means auto (first frame for self-reference, middle frame if a reference band is set, or the quality-selected anchor with a persistent source catalog when Reference selection = quality below). An explicit value here overrides quality selection. With Reference selection = time it is the anchor: each band uses its frame closest in time to the frame with this number. Per-camera numbering means the same number is not the same time in every band, so use time mode when bands have different exposure times.">?</span></label>
               <input type="number" id="opt-refid" placeholder="auto" min="0" style="width: 100%;">
             </div>
             <div class="opt">
-              <label for="opt-ref_select">Reference selection <span class="help-tooltip" title="How the per-band reference is built (corresponds to --ref_select). 'position' (default) uses the legacy first/middle frame and its detections. 'quality' selects a clean anchor, registers source catalogs from a local top-K window, and rejects transient detections such as cosmic rays by requiring 60% recurrence. Ignored when Reference frame ID above is set.">?</span></label>
+              <label for="opt-ref_select">Reference selection <span class="help-tooltip" title="How the per-band reference is built (corresponds to --ref_select). 'position' (default) uses the legacy first/middle frame and its detections. 'quality' selects a clean anchor, registers source catalogs from a local top-K window, and rejects transient detections such as cosmic rays by requiring 60% recurrence. Ignored when Reference frame ID above is set. 'time' requires Reference frame ID and per-band self-reference: the frame with that number anchors a header time and each band uses its frame closest in time to it, so bands with different exposure times (cadences) stay simultaneous.">?</span></label>
               <select id="opt-ref_select" style="width: 100%;">
                 <option value="position">position (default)</option>
                 <option value="quality">quality (local persistence)</option>
+                <option value="time">time (match refID frame time)</option>
               </select>
             </div>
             <div class="opt">
@@ -425,7 +426,7 @@
               <input type="number" id="opt-ref_select_top_k" value="{{ run_defaults.ref_select_top_k }}" min="1" step="1" style="width: 100%;">
             </div>
             <div class="opt">
-              <label for="opt-max_num_stars">Max # stars for detection <span class="help-tooltip" title="Max number of stars to detect for PSF modeling or alignment (corresponds to --max_num_stars).">?</span></label>
+              <label for="opt-max_num_stars">Max # stars for detection <span class="help-tooltip" title="Max number of stars to detect for PSF modeling or alignment (corresponds to --max_num_stars). Default 20: more candidate comparison stars.">?</span></label>
               <input type="number" id="opt-max_num_stars" value="{{ run_defaults.max_num_stars }}" min="1" style="width: 100%;">
             </div>
             <div class="opt">
@@ -437,7 +438,7 @@
               <input type="number" id="opt-min_star_separation" value="{{ run_defaults.min_star_separation }}" step="0.5" min="0" style="width: 100%;">
             </div>
             <div class="opt">
-              <label for="opt-min_star_area">Min star area (pix) <span class="help-tooltip" title="Minimum pixel area for source detection (corresponds to --min_star_area).">?</span></label>
+              <label for="opt-min_star_area">Min star area (pix) <span class="help-tooltip" title="Minimum pixel area for source detection (corresponds to --min_star_area). Default 20 rejects small spurious detections such as trails and hot pixels.">?</span></label>
               <input type="number" id="opt-min_star_area" value="{{ run_defaults.min_star_area }}" min="1" style="width: 100%;">
             </div>
             <div class="opt">

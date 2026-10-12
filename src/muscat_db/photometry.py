@@ -71,6 +71,7 @@ RUN_DEFAULTS: dict = {
     "refid": "",               # "" -> pipeline default (0 / middle frame, or the
                                # quality mode's persistent-catalog anchor)
     "ref_select": "position",  # position (legacy) | quality (local temporal persistence)
+                               # | time (per-band frame closest in time to refid's frame)
     "ref_select_top_k": 5,     # local catalogs registered when ref_select=quality
     "aper_radii": "",          # "MIN,MAX,DR"; "" -> Gaia heuristic
     "annulus": "",             # "RIN,ROUT"; required with aper_radii
@@ -81,7 +82,7 @@ RUN_DEFAULTS: dict = {
     "use_barycorrpy": False,
     "test_run_frames": 10,
     "min_star_separation": 10.0,
-    "max_num_stars": 10,
+    "max_num_stars": 20,
     "n_stars_align": "",       # "" -> same as max_num_stars
     "cutout_size": 35,
     "display_stack_nframes": 15,  # own frames aligned+median-stacked into the
@@ -108,7 +109,7 @@ RUN_DEFAULTS: dict = {
                                # (a poly is fit to the raw target flux; see flux_poly_deg)
     "flux_poly_deg": 2,        # degree of the polynomial fitted to the raw target
                                # flux before residual sigma clipping (used with sig_flux)
-    "min_star_area": 10,
+    "min_star_area": 20,
     "wcs_method": "astrometry.net",
     "centroid_method": "auto",  # auto | quad | com (mirrors prose2's --centroid_method)
     "calib_dir": "",
@@ -1260,8 +1261,13 @@ def validate_run_options(o: dict, inst: str | None = None) -> str | None:
         return "reference band must be one of the selected bands"
     if (o.get("avoid_comparison_ids") or "").strip() and not (o.get("ref_band") or "").strip():
         return "avoid comparison IDs requires a reference band"
-    if o.get("ref_select", "position") not in ("position", "quality"):
-        return "reference selection must be 'position' or 'quality'"
+    if o.get("ref_select", "position") not in ("position", "quality", "time"):
+        return "reference selection must be 'position', 'quality' or 'time'"
+    if o.get("ref_select") == "time":
+        if o.get("refid") in (None, ""):
+            return "reference selection 'time' requires a reference frame ID"
+        if (o.get("ref_band") or "").strip():
+            return "reference selection 'time' cannot be combined with a reference band"
     top_k = o.get("ref_select_top_k")
     if top_k not in (None, "") and int(top_k) < 1:
         return "quality candidates (top-K) must be >= 1"
@@ -1370,7 +1376,9 @@ def build_command(
         args += ["--ref_band", o["ref_band"]]
     if o.get("refid") not in (None, ""):
         args += ["--refid", str(o["refid"])]
-    if o.get("ref_select") == "quality":
+    if o.get("ref_select") == "time":
+        args += ["--ref_select", "time"]
+    elif o.get("ref_select") == "quality":
         args += ["--ref_select", "quality"]
         top_k = o.get("ref_select_top_k")
         if top_k not in (None, "") and int(top_k) != RUN_DEFAULTS["ref_select_top_k"]:
