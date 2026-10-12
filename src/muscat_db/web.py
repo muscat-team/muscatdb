@@ -6768,8 +6768,15 @@ def photometry_ref_time_preview(inst: str, date: str, target: str, jd: float):
     if not math.isfinite(jd):
         raise HTTPException(422, "jd must be finite")
     frames = _ref_time_frames(inst, date, target)
+    calibrated_dir = None
+    if inst in ref_time_lib.CALIBRATED_INSTRUMENTS:
+        # Same directory run_photometry reads/writes (--calib_dir default).
+        calibrated_dir = pathlib.Path(str(phot.results_dir(inst, date)) + "_calibrated")
     return JSONResponse(
-        ref_time_lib.preview(frames, target, jd, phot.raw_data_dir(inst, date))
+        ref_time_lib.preview(
+            frames, target, jd, phot.raw_data_dir(inst, date),
+            calibrated_dir=calibrated_dir,
+        )
     )
 
 

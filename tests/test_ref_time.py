@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import sqlite3
+from pathlib import Path
 import struct
 import zlib
 
@@ -169,6 +170,62 @@ def test_preview_reports_missing_files_per_band_without_failing(tmp_path):
     assert "not found" in out["bands"][0]["error"]
 
 
+def _write_cal(path, shape=(40, 50), level=500.0):
+    data = np.full(shape, level, dtype="float32")
+    data[20:24, 25:29] += 9000.0
+    fits.PrimaryHDU(data).writeto(path)
+    return path
+
+
+def test_find_calibrated_file_uses_calibrated_suffix(tmp_path):
+    (tmp_path / "MCT20_2205070638_calibrated.fits").write_bytes(b"")
+    assert rt.find_calibrated_file(tmp_path, "MCT20_2205070638") == (
+        tmp_path / "MCT20_2205070638_calibrated.fits"
+    )
+    assert rt.find_calibrated_file(tmp_path, "MCT20_2205070999") is None
+    assert rt.find_calibrated_file(None, "MCT20_2205070638") is None
+
+
+def test_preview_prefers_calibrated_frames_over_raw(tmp_path):
+    raw, cal = tmp_path / "raw", tmp_path / "cal"
+    raw.mkdir(), cal.mkdir()
+    frames = _frames_by_ccd()
+    for fr in (f for fl in frames.values() for f in fl):
+        _write_fits(raw / f"{fr['filename']}.fits", shape=(40, 50))
+    # only band gp (ccd 0) has a calibrated counterpart for the chosen frame
+    _write_cal(cal / "MCT20_2205070002_calibrated.fits")
+    jd = T0 + 2_450_000.0 + 60.0 / 86400.0
+
+    out = rt.preview(frames, TARGET, jd, raw, max_px=32, calibrated_dir=cal)
+
+    by_band = {b["band"]: b for b in out["bands"]}
+    assert out["calibrated_expected"] is True
+    assert by_band["gp"]["source"] == "calibrated"
+    assert by_band["gp"]["image"].startswith("data:image/png;base64,")
+    assert by_band["ip"]["source"] == "raw"
+    assert "not calibrated" in by_band["ip"]["note"]
+
+
+def test_preview_without_calibrated_dir_reports_raw_without_note(tmp_path):
+    frames = {0: [_frame(0, "MCT20_2205070000", 0.0)]}
+    _write_fits(tmp_path / "MCT20_2205070000.fits", shape=(40, 50))
+
+    out = rt.preview(frames, TARGET, T0 + 2_450_000.0, tmp_path, max_px=32)
+
+    assert out["calibrated_expected"] is False
+    assert out["bands"][0]["source"] == "raw"
+    assert "note" not in out["bands"][0]
+
+
+def test_preview_reports_error_when_neither_calibrated_nor_raw_exists(tmp_path):
+    frames = {0: [_frame(0, "MCT20_nope", 0.0)]}
+    out = rt.preview(
+        frames, TARGET, T0 + 2_450_000.0, tmp_path, calibrated_dir=tmp_path / "cal"
+    )
+    assert out["bands"][0]["image"] is None
+    assert "not found" in out["bands"][0]["error"]
+
+
 # ── routes ───────────────────────────────────────────────────────────────────
 
 @pytest.fixture
@@ -177,6 +234,7 @@ def client(tmp_path, monkeypatch):
 
     monkeypatch.setenv("MUSCAT_DB_PATH", str(tmp_path / "muscat.db"))
     monkeypatch.setenv("MUSCAT_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("MUSCAT_PROSE_DIR", str(tmp_path / "prose"))
     from muscat_db.web import app
 
     with TestClient(app) as c:
@@ -235,3 +293,24 @@ def test_preview_route_rejects_non_finite_jd(client, tmp_path):
         f"/api/photometry/ref-time/{INST}/{DATE}/{TARGET}/preview", params={"jd": "nan"}
     )
     assert r.status_code == 422
+
+
+def test_preview_route_shows_calibrated_frames_for_muscat2(client, tmp_path):
+    from muscat_db import photometry as phot
+
+    _seed(tmp_path, client)
+    cal = Path(str(phot.results_dir(INST, DATE)) + "_calibrated")
+    cal.mkdir(parents=True)
+    _write_cal(cal / "MCT20_2205070002_calibrated.fits")
+    jd = T0 + 2_450_000.0 + 60.0 / 86400.0
+
+    r = client.get(
+        f"/api/photometry/ref-time/{INST}/{DATE}/{TARGET}/preview", params={"jd": jd}
+    )
+
+    body = r.json()
+    bands = {b["band"]: b for b in body["bands"]}
+    assert body["calibrated_expected"] is True
+    assert bands["gp"]["source"] == "calibrated"
+    assert bands["ip"]["source"] == "raw"
+    assert "not calibrated" in bands["ip"]["note"]

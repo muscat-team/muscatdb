@@ -28,6 +28,10 @@ SLIDER_STEP_S = 600  # 10-minute increments
 _MIN_JD = 2_000_000.0
 PREVIEW_MAX_PX = 192
 _FRAME_SUFFIXES = (".fits", ".fits.fz", ".fit", ".fts")
+# MuSCAT/MuSCAT2 frames are dark-subtracted and flat-fielded by prose2's
+# calibration step into ``<results>/<inst>/<date>_calibrated/<FRAME>_calibrated.fits``;
+# the preview shows those (raw frames are uncorrected and hard to read).
+CALIBRATED_INSTRUMENTS = ("muscat", "muscat2")
 
 # Raw filter name (as stored in the obslog) -> pipeline band name.
 _BAND_BY_FILTER = {"g": "gp", "r": "rp", "i": "ip", "z_s": "zs", "z": "zs"}
@@ -136,6 +140,15 @@ def find_frame_file(raw_dir: Path, filename: str) -> Path | None:
     return None
 
 
+def find_calibrated_file(calibrated_dir: Path | None, filename: str) -> Path | None:
+    """The ``<FRAME>_calibrated.fits`` for a frame, or None when the directory
+    is not given or holds no such file."""
+    if calibrated_dir is None:
+        return None
+    candidate = Path(calibrated_dir) / f"{filename}_calibrated.fits"
+    return candidate if candidate.is_file() else None
+
+
 def _image_hdu_data(path: Path) -> np.ndarray:
     with fits.open(path, memmap=False) as hdul:
         for hdu in hdul:
@@ -207,8 +220,17 @@ def preview(
     jd: float,
     raw_dir: Path,
     max_px: int = PREVIEW_MAX_PX,
+    calibrated_dir: Path | None = None,
 ) -> dict:
-    """Per band: the frame closest in time to *jd* and a preview image."""
+    """Per band: the frame closest in time to *jd* and a preview image.
+
+    With *calibrated_dir* (MuSCAT/MuSCAT2) the calibrated frame is shown when
+    it exists; otherwise the raw frame is used and the band is marked
+    ``source="raw"`` with a note, so the caller can tell the user that frame has
+    not been calibrated yet (calibrated files only exist for frames a
+    photometry run has processed).
+    """
+    expected = calibrated_dir is not None
     out_bands: list[dict] = []
     for ccd in sorted(frames_by_ccd):
         frames = [f for f in frames_by_ccd[ccd] if f.get("object") == target]
@@ -224,8 +246,17 @@ def preview(
             "offset_s": round(offset_s, 3),
             "exptime": frame.get("exptime"),
             "image": None,
+            "source": None,
         }
-        path = find_frame_file(raw_dir, frame["filename"])
+        path = find_calibrated_file(calibrated_dir, frame["filename"])
+        if path is not None:
+            entry["source"] = "calibrated"
+        else:
+            path = find_frame_file(raw_dir, frame["filename"])
+            if path is not None:
+                entry["source"] = "raw"
+                if expected:
+                    entry["note"] = "not calibrated yet (raw frame; a photometry run calibrates it)"
         if path is None:
             entry["error"] = f"file not found: {frame['filename']}"
         else:
@@ -235,4 +266,9 @@ def preview(
             except Exception as e:  # noqa: BLE001 - one bad frame must not blank the others
                 entry["error"] = f"could not render {frame['filename']}: {e}"
         out_bands.append(entry)
-    return {"ref_time": jd_to_iso(jd), "jd": jd, "bands": out_bands}
+    return {
+        "ref_time": jd_to_iso(jd),
+        "jd": jd,
+        "calibrated_expected": expected,
+        "bands": out_bands,
+    }
