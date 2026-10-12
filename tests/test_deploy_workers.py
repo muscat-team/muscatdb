@@ -194,9 +194,14 @@ def test_max_full_jobs_reaches_workers_and_web_app():
     assert "export MUSCAT_MAX_FULL_JOBS=6" in w.web_env(w.parse_config(data))
 
 
-def test_shipped_config_allows_one_full_run_per_host_plus_one():
-    cfg = w.load_config(w.DEFAULT_CONFIG)
+def test_shipped_prod_profile_allows_one_full_run_per_host_plus_one():
+    cfg = w.load_config(w.DEFAULT_CONFIG, "prod")
     assert cfg.max_full_jobs == len(cfg.hosts) + 1
+
+
+def test_shipped_dev_profile_caps_the_dev_server_at_two_full_runs():
+    cfg = w.load_config(w.DEFAULT_CONFIG, "dev")
+    assert cfg.max_full_jobs == 2
 
 
 # -- up / down ----------------------------------------------------------------
