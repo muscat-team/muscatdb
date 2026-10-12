@@ -2019,7 +2019,11 @@ def job_status(inst: str, date: str, target: str, run_id: str = "") -> dict:
             persisted = _persisted_status(inst, date, target, run_id)
             if persisted is not None:
                 return persisted
-            return {"state": "none", "log": "", "returncode": None, "elapsed": 0}
+            # No job row (pruned, or run elsewhere) but the run's log file is
+            # still on disk: surface it, as the Jobs page's Log button does.
+            # The state stays "none" -- there is no record of the outcome.
+            lp = log_path(inst, date, target, run_id)
+            return {"state": "none", "log": _tail(lp) if lp else "", "returncode": None, "elapsed": 0}
         state, rc, is_terminal = _resolve_job_state(job)
         if is_terminal and job.state == "running":
             job.state = state
@@ -2029,17 +2033,17 @@ def job_status(inst: str, date: str, target: str, run_id: str = "") -> dict:
                 job.logf.close()
             except OSError:
                 pass
-        log_path = job.log_path
+        job_log = job.log_path
         elapsed = job.elapsed if job.state not in ("running", "cancelling") and job.elapsed is not None else round(time.time() - job.started_at)
     error_desc = ""
-    if state == "error" and log_path:
-        error_desc = _get_error_desc(log_path)
+    if state == "error" and job_log:
+        error_desc = _get_error_desc(job_log)
     elif state == "cancelled":
         error_desc = "Cancelled by user"
     return {
         "state": state,
         "returncode": rc,
-        "log": _tail(log_path),
+        "log": _tail(job_log),
         "elapsed": round(elapsed),
         "error_desc": error_desc,
         "run_type": job.run_type if job else "full",

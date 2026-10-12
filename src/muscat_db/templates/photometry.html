@@ -782,11 +782,11 @@
           // rendered would otherwise vanish here -- job_status() already has
           // it (via _persisted_status), but nothing on this page read it, so
           // the Jobs page was the only place the error was ever visible.
-          if (logEl && (s.state === 'error' || s.state === 'cancelled')) {
-            logEl.style.display = 'block';
-            logEl.innerHTML = MuscatDom.ansiToHtml(terminalLogText(s));
-            MuscatStorage.set(logKey(), logEl.textContent);
-          }
+          // Show the run's log for every finished state (done included), the
+          // way the Jobs page's Log button does -- not only failures.
+          MuscatDom.showFinishedLog(logEl, s, logKey(), function (st) {
+            return terminalLogText(st).slice((st.log || '').length);
+          });
         }
       }).catch(function () { setRunning(false); });
     }
