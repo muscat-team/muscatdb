@@ -8,7 +8,9 @@ a normalized result to the photometry page.
   returns the outlier plot as a base64 data URL, so nothing extra is persisted
   into the run directory.
 * ``apply`` overwrites each band CSV in place (exactly one version is then seen
-  by transit fit) and regenerates the run's summary ``*_lightcurves.png``.
+  by transit fit) and regenerates the run's summary ``*_lightcurves.png``. The
+  first apply snapshots the unclipped files into ``.clip_backup`` inside the run
+  directory; ``restore_clip`` puts them back.
 """
 
 from __future__ import annotations
@@ -17,7 +19,9 @@ import base64
 import json
 import logging
 import os
+import shutil
 import subprocess
+from pathlib import Path
 
 from muscat_db.photometry import (
     _job_env,
@@ -33,6 +37,11 @@ logger = logging.getLogger("muscat_db.postprocess")
 _POSTPROCESS_TIMEOUT_S = int(os.environ.get("MUSCAT_POSTPROCESS_TIMEOUT_S", 120))
 _TERMINAL_STATES = {"done", "error", "cancelled", "none"}
 _MAX_PNG_BYTES = 16 * 1024 * 1024
+# Files apply may rewrite: the band CSVs and the summary figure. prose2 owns
+# the band-CSV naming rule, so this is a deliberate superset (every top-level
+# CSV and summary PNG) rather than a copy of that rule.
+_BACKUP_DIRNAME = ".clip_backup"
+_BACKUP_PATTERNS = ("*.csv", "*_lightcurves.png")
 
 
 class PostprocessError(ValueError):
@@ -235,6 +244,129 @@ def validate_params(
     return None
 
 
+_MANIFEST_NAME = "_clip_manifest.json"
+
+
+def _backup_dir(rdir: Path) -> Path:
+    return rdir / _BACKUP_DIRNAME
+
+
+def _tracked_files(rdir: Path) -> list[Path]:
+    return [
+        p
+        for pattern in _BACKUP_PATTERNS
+        for p in sorted(rdir.glob(pattern))
+        if p.is_file()
+    ]
+
+
+def _fingerprint(rdir: Path) -> dict[str, list[int]]:
+    """``{name: [size, mtime_ns]}`` of every file apply may rewrite right now."""
+    out: dict[str, list[int]] = {}
+    for p in _tracked_files(rdir):
+        st = p.stat()
+        out[p.name] = [st.st_size, st.st_mtime_ns]
+    return out
+
+
+def _read_manifest(rdir: Path) -> dict[str, list[int]] | None:
+    try:
+        return json.loads((_backup_dir(rdir) / _MANIFEST_NAME).read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def _write_manifest(rdir: Path) -> None:
+    (_backup_dir(rdir) / _MANIFEST_NAME).write_text(json.dumps(_fingerprint(rdir)))
+
+
+def _snapshot_unclipped(rdir: Path) -> None:
+    """Copy the files apply may rewrite into ``.clip_backup``.
+
+    The first snapshot is kept: a later apply runs on already-clipped data, so
+    only the original makes a too-aggressive clip recoverable. It is replaced
+    when the run's files changed since the last clip (a re-reduction), because
+    restoring it would then bring back stale data. Written to a ``.part``
+    directory and renamed, so a crash never leaves a half-filled backup that
+    restore would trust.
+    """
+    final = _backup_dir(rdir)
+    if final.is_dir():
+        manifest = _read_manifest(rdir)
+        if manifest is None or manifest == _fingerprint(rdir):
+            return
+        shutil.rmtree(final)
+    part = rdir / (_BACKUP_DIRNAME + ".part")
+    shutil.rmtree(part, ignore_errors=True)
+    part.mkdir()
+    try:
+        for src in _tracked_files(rdir):
+            shutil.copy2(src, part / src.name)
+        part.rename(final)
+    except OSError:
+        shutil.rmtree(part, ignore_errors=True)
+        raise
+
+
+def _active_job_error(inst: str, date: str, target: str, run_id: str) -> str | None:
+    try:
+        from muscat_db.photometry import job_status
+
+        state = str(job_status(inst, date, target, run_id=run_id).get("state") or "")
+    except Exception:  # noqa: BLE001 - best-effort guard, never block apply
+        state = ""
+    if state in _TERMINAL_STATES:
+        return None
+    return f"cannot post-process while the run's job is {state!r}; wait for it to finish"
+
+
+def restore_clip(
+    inst: str, date: str, target: str, run_id: str, *, allow_active_job: bool = False
+) -> dict:
+    """Put the run's band CSVs and summary figure back as they were before the
+    first ``apply``, then drop the snapshot so the next apply takes a new one.
+
+    Refused when the run's files changed since the clip (it was re-reduced):
+    the snapshot is then older than the data on disk.
+    """
+    try:
+        rdir = Path(_run_context(inst, date, target, run_id)["results_dir"])
+    except PostprocessError as exc:
+        return {"ok": False, "error": str(exc)}
+    backup = _backup_dir(rdir)
+    if not backup.is_dir():
+        return {"ok": False, "error": "no pre-clip backup for this run; nothing to restore"}
+    if not allow_active_job:
+        err = _active_job_error(inst, date, target, run_id)
+        if err:
+            return {"ok": False, "error": err}
+    manifest = _read_manifest(rdir)
+    if manifest is not None and manifest != _fingerprint(rdir):
+        return {
+            "ok": False,
+            "error": (
+                "the run's band CSVs changed after the clip (re-reduced or "
+                "edited), so the backup is stale and was not restored"
+            ),
+        }
+    kept = {p.name for p in backup.iterdir() if p.is_file() and p.name != _MANIFEST_NAME}
+    restored: list[str] = []
+    try:
+        for name in sorted(kept):
+            tmp = rdir / (name + ".restoring")
+            shutil.copy2(backup / name, tmp)
+            os.replace(tmp, rdir / name)
+            restored.append(name)
+        # Files the clip created (e.g. a first summary figure) did not exist before.
+        for name in sorted(set(manifest or {}) - kept):
+            (rdir / name).unlink(missing_ok=True)
+        shutil.rmtree(backup)
+    except OSError as exc:
+        logger.error("clip restore failed for %s: %s", rdir, exc)
+        return {"ok": False, "error": f"restore failed: {exc}"}
+    return {"ok": True, "restored": restored, "n_files": len(restored)}
+
+
 def postprocess(
     inst: str,
     date: str,
@@ -279,20 +411,15 @@ def postprocess(
     preview_png = None
     if apply:
         if not allow_active_job:
-            try:
-                from muscat_db.photometry import job_status
-
-                state = str(job_status(inst, date, target, run_id=run_id).get("state") or "")
-            except Exception:  # noqa: BLE001 - best-effort guard, never block apply
-                state = ""
-            if state not in _TERMINAL_STATES:
-                return {
-                    "ok": False,
-                    "error": (
-                        f"cannot post-process while the run's job is {state!r}; "
-                        "wait for it to finish"
-                    ),
-                }
+            err = _active_job_error(inst, date, target, run_id)
+            if err:
+                return {"ok": False, "error": err}
+        # Never clip without an undo: if the snapshot cannot be taken, refuse.
+        try:
+            _snapshot_unclipped(Path(context["results_dir"]))
+        except OSError as exc:
+            logger.error("could not back up %s before clip: %s", context["results_dir"], exc)
+            return {"ok": False, "error": f"could not back up band CSVs before clipping: {exc}"}
         report = _run_sync(
             _command(
                 context,
@@ -321,6 +448,12 @@ def postprocess(
         preview_png = _read_preview(preview_path)
 
     result = _normalize(report, preview_png=preview_png)
+    if apply and report.get("ok") and report.get("applied"):
+        try:
+            _write_manifest(Path(context["results_dir"]))
+        except OSError as exc:
+            logger.error("could not record clip manifest: %s", exc)
+    result["restorable"] = _backup_dir(Path(context["results_dir"])).is_dir()
     if not result.get("ok") and report.get("error"):
         result["error"] = report.get("error")
     return result

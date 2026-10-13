@@ -717,9 +717,10 @@
     <div class="run-actions">
       <button class="btn primary" type="button" id="postproc-test-btn" {% if not sel_run %}disabled{% endif %}>Test post-process</button>
       <button class="btn primary" type="button" id="postproc-apply-btn" {% if not sel_run %}disabled{% endif %}>Apply post-process</button>
+      <button class="btn" type="button" id="postproc-restore-btn" title="Put back the band CSVs and summary figure saved before the first apply" {% if not sel_run %}disabled{% endif %}>Restore pre-clip</button>
     </div>
     <p style="color: var(--text-dim); font-size: 0.78rem; margin: 0.4rem 0 0;">
-      Test only previews rejected frames and writes nothing. Apply overwrites the selected run's band CSVs in place and regenerates its summary <code>*_lightcurves.png</code> so transit fit sees exactly one version. Raw-flux &amp; covariate figures are <em>not</em> regenerated.
+      Test only previews rejected frames and writes nothing. Apply overwrites the selected run's band CSVs in place and regenerates its summary <code>*_lightcurves.png</code> so transit fit sees exactly one version. The first apply saves the unclipped files; Restore pre-clip puts them back. Raw-flux &amp; covariate figures are <em>not</em> regenerated.
       {% if runs and runs | length > 1 %} Works on the active run chip above.
       {% endif %}
     </p>
@@ -1952,6 +1953,7 @@
   var postprocTestBtn = document.getElementById('postproc-test-btn');
   var postprocApplyBtn = document.getElementById('postproc-apply-btn');
   var postprocResult = document.getElementById('postproc-result');
+  var postprocRestoreBtn = document.getElementById('postproc-restore-btn');
   // #postproc-section sits outside .run-panel, so it's not covered by that
   // panel's own input/change listener (which persists via refreshCmd) --
   // persist its fields directly so an edit survives a refresh even before
@@ -2030,6 +2032,38 @@
       window.showMessageModal('Post-process', err.message, 'error');
     });
   }
+  async function restorePostprocess() {
+    if (!runId) {
+      window.showMessageModal('Post-process', 'This legacy run has no run id, so there is nothing to restore.', 'notice');
+      return;
+    }
+    var ok = await window.showConfirmModal(
+      'Restore pre-clip files?',
+      'Replace the clipped band CSVs and summary figure with the files saved before the first post-process apply.',
+      { confirmLabel: 'Restore' }
+    );
+    if (!ok) return;
+    var prevText = postprocRestoreBtn.textContent;
+    postprocRestoreBtn.disabled = true;
+    postprocRestoreBtn.textContent = 'Restoring…';
+    function done() { postprocRestoreBtn.disabled = false; postprocRestoreBtn.textContent = prevText; }
+    fetch('/api/photometry/postprocess/restore', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ inst: inst, date: date, target: target, run: runId })
+    }).then(function (r) { return r.json(); }).then(function (res) {
+      done();
+      if (!res.ok) {
+        window.showMessageModal('Restore pre-clip', res.error || 'restore failed', 'error');
+        return;
+      }
+      window.showMessageModal('Success', 'Restored ' + (res.n_files || 0) + ' file(s) saved before the first apply.', 'success');
+      setTimeout(function () { window.location.reload(); }, 900);
+    }).catch(function (err) {
+      done();
+      window.showMessageModal('Restore pre-clip', err.message, 'error');
+    });
+  }
+  if (postprocRestoreBtn) postprocRestoreBtn.addEventListener('click', restorePostprocess);
   if (postprocTestBtn) postprocTestBtn.addEventListener('click', function () { runPostprocess(false); });
   if (postprocApplyBtn) postprocApplyBtn.addEventListener('click', function () { runPostprocess(true); });
 

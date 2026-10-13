@@ -6973,6 +6973,28 @@ def photometry_postprocess(payload: dict = Body(...)):
     return JSONResponse(result)
 
 
+@photometry_router.post("/postprocess/restore")
+def photometry_postprocess_restore(payload: dict = Body(...)):
+    """Undo the run's post-process clip: put back the band CSVs and summary
+    figure saved before the first ``apply``."""
+    inst = (payload.get("inst") or "").strip()
+    date = (payload.get("date") or "").strip()
+    target = (payload.get("target") or "").strip()
+    run = (payload.get("run") or "").strip()
+    if inst not in INSTRUMENTS or not phot.valid_date(date) or not target:
+        return JSONResponse(
+            {"ok": False, "error": "invalid instrument, date or target"},
+            status_code=400,
+        )
+    if not run:
+        return JSONResponse({"ok": False, "error": "a run is required"}, status_code=400)
+    _require_visible_night(inst, date, target)
+    result = postproc.restore_clip(inst, date, target, run)
+    if not result.get("ok"):
+        return JSONResponse(result, status_code=400)
+    return JSONResponse(result)
+
+
 @photometry_router.get("/status")
 def photometry_status(inst: str, date: str, target: str, run: str = ""):
     # Drain the queue so a pending full job is promoted once the slot frees,
