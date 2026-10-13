@@ -467,6 +467,25 @@ cannot be recovered at all if this host is lost.
 The state observed at any given time is tracked in the issue that covers it rather
 than here, so this section does not go stale: see #77.
 
+Record, 2026-10-13: prose2 `github.com/jpdeleon/prose2` @ `main` `eb8e8183`
+(clean). It includes jpdeleon/prose2#11 (`ep60` SOPHIA camera name; `up`/`Y`/`w`
+sinistro saturation limits) and #12 (opt-in `keyword_gain`/`keyword_read_noise`
+header override). Observed on ut2, ut3, ut4 and ut5, which share one checkout
+through `/ut2`, so there is one copy to keep current.
+
+Camera definitions come from `~/.prose/*.telescope`, which are **symlinks into
+`prose2/data/`**, so a `git pull` of the checkout is the whole refresh.
+`prose.CONFIG.update_builtins()` is not part of it: it rewrites only the ten
+observatory files in `prose/builtins.py` and never touches `data/*.telescope`. A
+`.telescope` file added upstream needs one `ln -s` into `~/.prose` (done for
+`qhy600` and `sbig` on 2026-10-13).
+
+A bare `FITSImage(path)` resolves its telescope by matching the header `INSTRUME`,
+then `TELESCOP`, against each file's `names`. As of this record only Sinistro
+(`faXX`, `ep60`) matches real LCO frames; MuSCAT3/4, SBIG and QHY600 frames fall
+back to the default telescope (gain 1, read noise 9), so their `keyword_*` opt-ins
+are not reached yet.
+
 Verify before trusting a pipeline result, since a fork can be behind upstream or
 carry a patch that exists in no release:
 
