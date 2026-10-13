@@ -41,6 +41,49 @@ def test_photometry_status_returns_log_from_disk_without_job_row(tmp_path, monke
     assert "reduction line 2" in s["log"]
 
 
+class _RowStore(_EmptyStore):
+    def __init__(self, *rows):
+        self._rows = list(rows)
+
+    def all(self):
+        return self._rows
+
+
+def _row(state, **extra):
+    key = "photometry:" + phot.job_key("muscat3", "250728", "TOI-5205", "default")
+    return {"key": key, "type": "photometry", "state": state, **extra}
+
+
+def test_photometry_status_running_on_another_instance_is_running(tmp_path, monkeypatch):
+    # A run held by a fleet worker is `running` in the DB but not in _JOBS. The
+    # on-disk log fallback must not present its partial log as a finished
+    # ("none") run: the page would stop polling and freeze the log.
+    log = tmp_path / "web.log"
+    log.write_text("reduction line 1\npartial line 2\n")
+    store = _RowStore(_row("running", instance_id="muscat-ut5:123:abcd", started_at=1.0))
+    monkeypatch.setattr(phot, "get_job_store", lambda: store)
+    monkeypatch.setattr(phot, "log_path", lambda *a, **k: log)
+
+    s = phot.job_status("muscat3", "250728", "TOI-5205", "default")
+
+    assert s["state"] == "running"
+    assert "partial line 2" in s["log"]
+    assert s["returncode"] is None
+
+
+def test_photometry_status_terminal_row_still_wins_over_disk_fallback(tmp_path, monkeypatch):
+    log = tmp_path / "web.log"
+    log.write_text("all done\n")
+    store = _RowStore(_row("done", returncode=0, elapsed=5))
+    monkeypatch.setattr(phot, "get_job_store", lambda: store)
+    monkeypatch.setattr(phot, "log_path", lambda *a, **k: log)
+
+    s = phot.job_status("muscat3", "250728", "TOI-5205", "default")
+
+    assert s["state"] == "done"
+    assert "all done" in s["log"]
+
+
 def test_photometry_status_without_log_or_job_is_empty(monkeypatch):
     monkeypatch.setattr(phot, "get_job_store", lambda: _EmptyStore())
     monkeypatch.setattr(phot, "log_path", lambda *a, **k: None)

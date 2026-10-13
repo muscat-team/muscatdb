@@ -1966,6 +1966,35 @@ def _pending_status(inst: str, date: str, target: str, run_id: str = "") -> dict
     return None
 
 
+def _running_status(inst: str, date: str, target: str, run_id: str = "") -> dict | None:
+    """Return a running-job status dict if a running DB entry exists, else None.
+
+    A run held by another instance (a fleet worker) is ``running`` in the DB
+    but absent from this process's ``_JOBS``. Report it as ``running`` with the
+    log tail so the page keeps polling, rather than letting the on-disk log
+    fallback in ``job_status`` present a still-growing log as a finished run.
+    """
+    db_key = f"photometry:{job_key(inst, date, target, run_id)}"
+    try:
+        for entry in get_job_store().all():
+            if (
+                entry["key"] == db_key
+                and entry["type"] == "photometry"
+                and entry["state"] == "running"
+            ):
+                lp = log_path(inst, date, target, run_id)
+                started = entry.get("started_at") or time.time()
+                return {
+                    "state": "running",
+                    "returncode": None,
+                    "log": _tail(lp) if lp else "",
+                    "elapsed": round(time.time() - started),
+                }
+    except Exception:
+        logger.debug("failed to read running photometry status for %s/%s/%s/%s", inst, date, target, run_id, exc_info=True)
+    return None
+
+
 def _persisted_status(inst: str, date: str, target: str, run_id: str = "") -> dict | None:
     """Return a terminal-state status dict from the DB for a job no longer in
     ``_JOBS``.
@@ -2016,6 +2045,9 @@ def job_status(inst: str, date: str, target: str, run_id: str = "") -> dict:
             pending = _pending_status(inst, date, target, run_id)
             if pending is not None:
                 return pending
+            running = _running_status(inst, date, target, run_id)
+            if running is not None:
+                return running
             persisted = _persisted_status(inst, date, target, run_id)
             if persisted is not None:
                 return persisted
