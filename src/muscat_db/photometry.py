@@ -43,6 +43,7 @@ from pathlib import Path
 
 from muscat_db import jobs, database
 from muscat_db.job_store import current_instance_id, current_owner, get_job_store
+from muscat_db.ref_time import is_valid_ref_time
 from muscat_db.instruments import INSTRUMENTS
 from muscat_db.cache import register_cache
 from muscat_db.band_utils import DEFAULT_BANDS, NARROW_BANDS, _FILTER_BAND_ALIAS, bands_from_filters  # noqa: F401
@@ -71,6 +72,8 @@ RUN_DEFAULTS: dict = {
     "refid": "",               # "" -> pipeline default (0 / middle frame, or the
                                # quality mode's persistent-catalog anchor)
     "ref_select": "position",  # position (legacy) | quality (local temporal persistence)
+                               # | time (per-band frame closest in time to ref_time)
+    "ref_time": "",            # ref_select=time: HH:MM[:SS] UT | ISO UTC | JD
     "ref_select_top_k": 5,     # local catalogs registered when ref_select=quality
     "aper_radii": "",          # "MIN,MAX,DR"; "" -> Gaia heuristic
     "annulus": "",             # "RIN,ROUT"; required with aper_radii
@@ -81,7 +84,7 @@ RUN_DEFAULTS: dict = {
     "use_barycorrpy": False,
     "test_run_frames": 10,
     "min_star_separation": 10.0,
-    "max_num_stars": 10,
+    "max_num_stars": 20,
     "n_stars_align": "",       # "" -> same as max_num_stars
     "cutout_size": 35,
     "display_stack_nframes": 15,  # own frames aligned+median-stacked into the
@@ -108,7 +111,7 @@ RUN_DEFAULTS: dict = {
                                # (a poly is fit to the raw target flux; see flux_poly_deg)
     "flux_poly_deg": 2,        # degree of the polynomial fitted to the raw target
                                # flux before residual sigma clipping (used with sig_flux)
-    "min_star_area": 10,
+    "min_star_area": 20,
     "wcs_method": "astrometry.net",
     "centroid_method": "auto",  # auto | quad | com (mirrors prose2's --centroid_method)
     "calib_dir": "",
@@ -1203,7 +1206,7 @@ def normalize_run_options(raw: dict | None) -> dict:
     if "bands" in raw:  # present-but-empty must surface as an error, not default
         o["bands"] = [str(b).strip() for b in (bands or []) if str(b).strip()]
 
-    for key in ("run_name", "ref_band", "ref_select", "aper_radii", "annulus", "aper_unit", "ccd_trim", "target_id", "comparison_ids", "avoid_comparison_ids", "avoid_nearby_star_mode", "avoid_nearby_star", "target_coord", "wcs_method", "centroid_method", "calib_dir", "site", "telescope", "mode", "cmap", "nan_imputation_method", "exclude_after_jd", "exclude_before_jd"):
+    for key in ("run_name", "ref_band", "ref_select", "ref_time", "aper_radii", "annulus", "aper_unit", "ccd_trim", "target_id", "comparison_ids", "avoid_comparison_ids", "avoid_nearby_star_mode", "avoid_nearby_star", "target_coord", "wcs_method", "centroid_method", "calib_dir", "site", "telescope", "mode", "cmap", "nan_imputation_method", "exclude_after_jd", "exclude_before_jd"):
         if raw.get(key) is not None:
             o[key] = str(raw[key]).strip()
 
@@ -1260,8 +1263,16 @@ def validate_run_options(o: dict, inst: str | None = None) -> str | None:
         return "reference band must be one of the selected bands"
     if (o.get("avoid_comparison_ids") or "").strip() and not (o.get("ref_band") or "").strip():
         return "avoid comparison IDs requires a reference band"
-    if o.get("ref_select", "position") not in ("position", "quality"):
-        return "reference selection must be 'position' or 'quality'"
+    if o.get("ref_select", "position") not in ("position", "quality", "time"):
+        return "reference selection must be 'position', 'quality' or 'time'"
+    if o.get("ref_select") == "time":
+        if not is_valid_ref_time(str(o.get("ref_time") or "")):
+            return (
+                "reference selection 'time' requires a valid reference time "
+                "(HH:MM[:SS] UT, YYYY-MM-DDTHH:MM:SS UTC, or a Julian date)"
+            )
+        if (o.get("ref_band") or "").strip():
+            return "reference selection 'time' cannot be combined with a reference band"
     top_k = o.get("ref_select_top_k")
     if top_k not in (None, "") and int(top_k) < 1:
         return "quality candidates (top-K) must be >= 1"
@@ -1368,9 +1379,15 @@ def build_command(
     ]
     if o.get("ref_band"):
         args += ["--ref_band", o["ref_band"]]
-    if o.get("refid") not in (None, ""):
+    time_mode = o.get("ref_select") == "time"
+    # --refid is a per-camera frame number; prose2 rejects it with --ref_select
+    # time (the reference is the --ref_time instead), so a stale value in the
+    # form is dropped rather than forwarded.
+    if o.get("refid") not in (None, "") and not time_mode:
         args += ["--refid", str(o["refid"])]
-    if o.get("ref_select") == "quality":
+    if time_mode:
+        args += ["--ref_select", "time", "--ref_time", str(o["ref_time"]).strip()]
+    elif o.get("ref_select") == "quality":
         args += ["--ref_select", "quality"]
         top_k = o.get("ref_select_top_k")
         if top_k not in (None, "") and int(top_k) != RUN_DEFAULTS["ref_select_top_k"]:

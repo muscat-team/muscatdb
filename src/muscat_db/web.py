@@ -67,6 +67,7 @@ from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader
 
 from muscat_db import photometry as phot
+from muscat_db import ref_time as ref_time_lib
 from muscat_db import postprocess as postproc
 from muscat_db import exposure as exp_calc
 from muscat_db.access import (
@@ -151,6 +152,7 @@ from muscat_db.database import (
     format_elapsed,
     get_dates as _get_dates,
     get_frames as _get_frames,
+    get_target_frames as _get_target_frames,
     get_frame_objects as _get_frame_objects,
     get_observed_pointing as _get_observed_pointing,
     get_exposure_log_for_objects as _get_exposure_log_for_objects,
@@ -6735,6 +6737,47 @@ def jobs_rerun(request: Request, payload: dict = Body(...)):
     if not result.get("ok"):
         return JSONResponse(result, status_code=400)
     return JSONResponse(result)
+
+
+def _ref_time_frames(inst: str, date: str, target: str) -> dict[int, list[dict]]:
+    """Visible frames of *target* by CCD for the reference-time slider; 404 for
+    an unknown instrument/date, a hidden night, or a target without frames."""
+    if inst not in INSTRUMENTS or not phot.valid_date(date):
+        raise HTTPException(404, "unknown instrument or date")
+    _require_visible_night(inst, date, target)
+    frames = _get_target_frames(_db_path(), inst, date, target, denied=_viewer_denied())
+    if not frames:
+        raise HTTPException(404, f"no frames for {target!r}")
+    return frames
+
+
+@photometry_router.get("/ref-time/{inst}/{date}/{target}")
+def photometry_ref_time_range(inst: str, date: str, target: str):
+    """Time range, 10-minute slider steps and per-band cadence for the
+    ``--ref_select time`` reference-time slider."""
+    info = ref_time_lib.build_range(_ref_time_frames(inst, date, target), target)
+    if info is None:
+        raise HTTPException(404, f"no timed frames for {target!r}")
+    return JSONResponse(info)
+
+
+@photometry_router.get("/ref-time/{inst}/{date}/{target}/preview")
+def photometry_ref_time_preview(inst: str, date: str, target: str, jd: float):
+    """Per band, the frame closest in time to full-JD *jd* and a preview image,
+    so the slider can show what ``--ref_time`` would select."""
+    if not math.isfinite(jd):
+        raise HTTPException(422, "jd must be finite")
+    frames = _ref_time_frames(inst, date, target)
+    calibrated_dir = None
+    if inst in ref_time_lib.CALIBRATED_INSTRUMENTS:
+        # Same directory run_photometry reads/writes (--calib_dir default).
+        calibrated_dir = pathlib.Path(str(phot.results_dir(inst, date)) + "_calibrated")
+    return JSONResponse(
+        ref_time_lib.preview(
+            frames, target, jd, phot.raw_data_dir(inst, date),
+            calibrated_dir=calibrated_dir,
+        )
+    )
 
 
 @photometry_router.get("/file/{inst}/{date}/{target}/run/{run_id}/{name}")

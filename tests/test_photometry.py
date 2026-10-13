@@ -970,7 +970,88 @@ class TestRunOptions:
         err = phot.validate_run_options(
             phot.normalize_run_options({"bands": ["gp"], "ref_select": "best"})
         )
-        assert err and "position" in err.lower() and "quality" in err.lower()
+        assert err and all(m in err.lower() for m in ("position", "quality", "time"))
+
+    def test_star_detection_defaults_are_20(self):
+        # 20/20 avoids spurious non-star detections (trails) and gives more
+        # comparison stars; mirrors prose2's --max_num_stars/--min_star_area.
+        assert phot.RUN_DEFAULTS["max_num_stars"] == 20
+        assert phot.RUN_DEFAULTS["min_star_area"] == 20
+
+    def test_star_detection_defaults_not_echoed(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("MUSCAT_PROSE_DIR", str(tmp_path))
+        cmd = phot.build_command(INST, DATE, TARGET, {}, test_run=False)
+        assert "--max_num_stars" not in cmd
+        assert "--min_star_area" not in cmd
+
+    def test_previous_star_detection_defaults_are_now_echoed(self, monkeypatch, tmp_path):
+        # 10 used to be the default; it is now an explicit override.
+        monkeypatch.setenv("MUSCAT_PROSE_DIR", str(tmp_path))
+        cmd = phot.build_command(
+            INST, DATE, TARGET, {"max_num_stars": 10, "min_star_area": 10}, test_run=False
+        )
+        assert cmd[cmd.index("--max_num_stars") + 1] == "10"
+        assert cmd[cmd.index("--min_star_area") + 1] == "10"
+
+    def test_ref_select_time_emits_flag_with_ref_time(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("MUSCAT_PROSE_DIR", str(tmp_path))
+        cmd = phot.build_command(
+            INST, DATE, TARGET,
+            {"ref_select": "time", "ref_time": "2022-05-08T02:24:08"}, test_run=False,
+        )
+        assert cmd[cmd.index("--ref_select") + 1] == "time"
+        assert cmd[cmd.index("--ref_time") + 1] == "2022-05-08T02:24:08"
+        assert "--refid" not in cmd
+        assert "--ref_select_top_k" not in cmd
+
+    def test_ref_time_not_emitted_unless_time_mode(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("MUSCAT_PROSE_DIR", str(tmp_path))
+        cmd = phot.build_command(
+            INST, DATE, TARGET,
+            {"ref_select": "position", "ref_time": "2022-05-08T02:24:08"}, test_run=False,
+        )
+        assert "--ref_time" not in cmd
+
+    def test_refid_not_emitted_in_time_mode(self, monkeypatch, tmp_path):
+        # a stale refid left in the form must not reach the CLI (prose2 rejects it)
+        monkeypatch.setenv("MUSCAT_PROSE_DIR", str(tmp_path))
+        cmd = phot.build_command(
+            INST, DATE, TARGET,
+            {"ref_select": "time", "ref_time": "02:24:08", "refid": "1214"}, test_run=False,
+        )
+        assert "--refid" not in cmd
+
+    def test_validate_ref_select_time_requires_ref_time(self):
+        err = phot.validate_run_options(
+            phot.normalize_run_options({"bands": ["gp"], "ref_select": "time"})
+        )
+        assert err and "reference time" in err.lower()
+
+    def test_validate_ref_select_time_rejects_unparseable_ref_time(self):
+        err = phot.validate_run_options(
+            phot.normalize_run_options(
+                {"bands": ["gp"], "ref_select": "time", "ref_time": "soon"}
+            )
+        )
+        assert err and "reference time" in err.lower()
+
+    def test_validate_ref_select_time_rejects_reference_band(self):
+        err = phot.validate_run_options(
+            phot.normalize_run_options(
+                {"bands": ["gp", "rp"], "ref_select": "time",
+                 "ref_time": "02:24", "ref_band": "gp"}
+            )
+        )
+        assert err and "reference band" in err.lower()
+
+    def test_validate_ref_select_time_accepts_ref_time(self):
+        for value in ("02:24:08", "2022-05-08T02:24:08", "2459707.6001"):
+            err = phot.validate_run_options(
+                phot.normalize_run_options(
+                    {"bands": ["gp", "rp"], "ref_select": "time", "ref_time": value}
+                )
+            )
+            assert err is None, value
 
     def test_validate_rejects_non_positive_ref_select_top_k(self):
         err = phot.validate_run_options(
@@ -1974,6 +2055,15 @@ class TestRoutes:
                       "opt-aper_radii", "opt-max_num_stars",
                       "opt-use_barycorrpy", "Pipeline options"):
             assert token in r.text
+
+    def test_page_offers_time_reference_selection_and_new_defaults(self, client):
+        r = client.get(f"/photometry?inst={INST}&date={DATE}&target={TARGET}")
+        assert r.status_code == 200
+        assert '<option value="time"' in r.text
+        for token in ('id="opt-ref_time"', 'id="ref-time-slider"', 'id="ref-time-popup"'):
+            assert token in r.text
+        assert 'id="opt-max_num_stars" value="20"' in r.text
+        assert 'id="opt-min_star_area" value="20"' in r.text
 
     def test_photometry_page_sinistro_dynamic_selectors(self, client, tmp_path):
         # Site/mode run dropdowns are obslog-derived and shown only when the

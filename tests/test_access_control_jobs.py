@@ -467,3 +467,40 @@ def test_exofop_cross_check_receives_viewer_denied_set(client, monkeypatch):
     assert seen["denied"] == DENIED
     assert _get(client, "/api/lco/archive/exofop", user="root", OBJECT="TOI-1").status_code == 200
     assert seen["denied"] == frozenset()
+
+
+# ── reference-time slider routes (frame previews) ───────────────────────
+
+_REF_TIME_JD = 2_450_003.0  # full JD of the 260103 frames (jd_start 3.0)
+
+
+def _ref_time_paths(date: str, target: str) -> list[str]:
+    base = f"/api/photometry/ref-time/{INST}/{date}/{target}"
+    return [base, f"{base}/preview?jd={_REF_TIME_JD}"]
+
+
+@pytest.mark.parametrize(
+    ("date", "target"),
+    [
+        ("260102", "HIDDENTGT"),  # fully restricted night
+        ("260103", "HIDDEN TGT"),  # restricted target in a mixed night
+        ("260103", "NOSUCHTGT"),  # unknown target in a mixed night
+    ],
+)
+def test_ref_time_routes_404_for_restricted_viewer(client, date, target):
+    for path in _ref_time_paths(date, target):
+        assert client.get(path, headers=_headers("alice")).status_code == 404, path
+
+
+def test_ref_time_routes_open_target_visible_to_restricted_viewer(client):
+    for path in _ref_time_paths("260103", "OPENTGT"):
+        assert client.get(path, headers=_headers("alice")).status_code == 200, path
+
+
+@pytest.mark.parametrize(
+    ("date", "target"),
+    [("260102", "HIDDENTGT"), ("260103", "HIDDEN TGT"), ("260103", "OPENTGT")],
+)
+def test_ref_time_routes_visible_to_admin(client, date, target):
+    for path in _ref_time_paths(date, target):
+        assert client.get(path, headers=_headers("root")).status_code == 200, path
