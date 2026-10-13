@@ -22,6 +22,8 @@ from pathlib import Path
 import numpy as np
 from astropy.io import fits
 
+from muscat_db.band_utils import bands_from_filters
+
 JD_START_OFFSET = 2_450_000.0
 _JD_UNIX_EPOCH = 2_440_587.5
 SLIDER_STEP_S = 600  # 10-minute increments
@@ -33,9 +35,6 @@ _FRAME_SUFFIXES = (".fits", ".fits.fz", ".fit", ".fts")
 # the preview shows those (raw frames are uncorrected and hard to read).
 CALIBRATED_INSTRUMENTS = ("muscat", "muscat2")
 
-# Raw filter name (as stored in the obslog) -> pipeline band name.
-_BAND_BY_FILTER = {"g": "gp", "r": "rp", "i": "ip", "z_s": "zs", "z": "zs"}
-
 _CLOCK_RE = re.compile(r"^(\d{1,2}):(\d{2})(?::(\d{2}(?:\.\d+)?))?$")
 _ISO_RE = re.compile(
     r"^(\d{4})-(\d{1,2})-(\d{1,2})[T ](\d{1,2}):(\d{2})(?::(\d{2}(?:\.\d+)?))?$"
@@ -43,8 +42,10 @@ _ISO_RE = re.compile(
 
 
 def band_for_filter(raw_filter: str | None) -> str:
+    """Pipeline band token for a raw obslog filter (shared alias map)."""
     raw = (raw_filter or "").strip()
-    return _BAND_BY_FILTER.get(raw, raw)
+    bands = bands_from_filters([raw])
+    return bands[0] if bands else raw
 
 
 def _full_jd(jd_start: float) -> float:

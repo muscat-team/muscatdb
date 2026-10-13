@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import re
 import sqlite3
 from pathlib import Path
 import struct
@@ -314,3 +315,38 @@ def test_preview_route_shows_calibrated_frames_for_muscat2(client, tmp_path):
     assert bands["gp"]["source"] == "calibrated"
     assert bands["ip"]["source"] == "raw"
     assert "not calibrated" in bands["ip"]["note"]
+
+
+# ---- review follow-ups ------------------------------------------------------
+
+_SRC = Path(__file__).resolve().parent.parent / "src" / "muscat_db"
+
+
+@pytest.mark.parametrize(
+    ("raw", "band"),
+    [
+        ("g", "gp"), ("r", "rp"), ("i", "ip"), ("z_s", "zs"), ("z", "zs"),
+        ("rp*diffuser", "rp"), ("zp", "zs"), ("zp*diffuser", "zs"),
+        (" gp ", "gp"), ("V", "V"), ("", ""), (None, ""),
+    ],
+)
+def test_band_for_filter_uses_shared_alias_map(raw, band):
+    assert rt.band_for_filter(raw) == band
+
+
+def test_hidden_opt_is_not_overridden_by_flex_display():
+    # `.opt { display: flex }` beats the UA [hidden] rule, so the reference-time
+    # group stayed visible outside time mode; an explicit rule must restore it.
+    css = (_SRC / "static" / "styles.css").read_text()
+    assert re.search(r"\.opt\[hidden\]\s*\{\s*display:\s*none", css)
+
+
+def test_saved_legacy_star_defaults_migrate_but_chosen_values_survive():
+    html = (_SRC / "templates" / "photometry.html").read_text()
+    # saves are stamped with a version, but the run payload (collectOptions) is not
+    assert "o._v = OPT_VERSION" in html
+    collect = html.split("function collectOptions()")[1].split("function saveOptions()")[0]
+    assert "_v" not in collect
+    # only a pre-version save holding the old default (10) is dropped
+    assert "(saved._v || 1) < OPT_VERSION" in html
+    assert re.search(r"LEGACY_DEFAULTS_V1\s*=\s*\{\s*max_num_stars:\s*'10',\s*min_star_area:\s*'10'", html)

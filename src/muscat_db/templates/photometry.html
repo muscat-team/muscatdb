@@ -1014,12 +1014,29 @@
       post_exclude_after_jd: val('opt-post_exclude_after_jd')
     };
   }
+  // Bump when a default changes so options saved under the old default can be
+  // told apart from a value the user chose (see restoreOptions).
+  var OPT_VERSION = 2;
+  // Defaults that changed in OPT_VERSION 2 (10 -> 20, matching prose2's), by
+  // option id. A save from before that holds the old default only because the
+  // form was auto-saved, so it is dropped and the server default applies.
+  var LEGACY_DEFAULTS_V1 = { max_num_stars: '10', min_star_area: '10' };
   function saveOptions() {
-    MuscatOptions.save(OPT_KEY, collectOptions);
+    MuscatOptions.save(OPT_KEY, function () {
+      // _v lives only in storage: collectOptions() is also the run payload.
+      var o = collectOptions();
+      o._v = OPT_VERSION;
+      return o;
+    });
   }
   function restoreOptions() {
     var saved = MuscatOptions.restore(OPT_KEY);
     if (!saved) return;
+    if ((saved._v || 1) < OPT_VERSION) {
+      Object.keys(LEGACY_DEFAULTS_V1).forEach(function (id) {
+        if (String(saved[id]) === LEGACY_DEFAULTS_V1[id]) delete saved[id];
+      });
+    }
     // migrate legacy persisted value after the 'nova' -> 'astrometry.net' rename
     if (saved.wcs_method === 'nova') saved.wcs_method = 'astrometry.net';
     if (saved.avoid_nearby_star_mode === undefined && saved.avoid_nearby_stars !== undefined) {
