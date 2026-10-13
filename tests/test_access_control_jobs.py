@@ -504,3 +504,21 @@ def test_ref_time_routes_open_target_visible_to_restricted_viewer(client):
 def test_ref_time_routes_visible_to_admin(client, date, target):
     for path in _ref_time_paths(date, target):
         assert client.get(path, headers=_headers("root")).status_code == 200, path
+
+
+# ── scoped viewer (issue #202) ──────────────────────────────────────────
+
+
+def test_scoped_viewer_jobs_and_runs_follow_the_allowlist(client, env):
+    from muscat_db import access
+
+    access.set_scoped(env, "andrew")
+    access.grant(env, "andrew", _OPEN, "admin")
+    html = _get(client, "/jobs", user="andrew").text
+    assert "OPENTGT" in html
+    assert "HIDDENTGT" not in html
+    picker = _get(client, "/photometry", user="andrew", inst=INST).text
+    assert "260103" in picker
+    assert "260102" not in picker
+    hidden = _get(client, "/photometry", user="andrew", inst=INST, date="260103", target="HIDDENTGT").text
+    assert RUN not in hidden

@@ -45,16 +45,23 @@ uv run muscat-db access unrestrict <proposal_id>
 uv run muscat-db access grant <user> <proposal_id>
 uv run muscat-db access revoke <user> <proposal_id>
 uv run muscat-db access list [--user <user>]
+# Scoped viewer (issue #202): sees only the proposals granted to them
+uv run muscat-db access scope <user> [--off]
 ```
 
 A restricted proposal is hidden from `/targets`, `/target`, project pages and
 the target APIs for every viewer without a grant; admins
 (`htpasswd promote <user>`) see everything, and a request with no authenticated
 user is treated as having no grants. Restriction only covers frames whose
-`proposal_id` is known, so `access restrict` warns while
-`muscat-db backfill-propid` still has dates pending. Jobs, photometry,
-transit-fit, TTV-fit and the `/inst/date/ccd` browser are not gated yet
-(#144 PRs 5 and 6).
+`proposal_id` is known, so `access restrict` warns about frames that have none.
+
+A *scoped* viewer (`access scope <user>`) inverts the rule: they see only the
+proposals granted to them with `access grant`, and nothing else. Frames with no
+PROPID (muscat, muscat2, and blank LCO frames) and any proposal not on their
+allowlist are hidden, including proposals ingested later. They get no shared
+chat (only a private `@bot` exchange and messages addressed to them), and
+`/toi` and `/nexsci` do not flag or link targets outside their scope. Admins are
+never scoped. A scoped user with no grants sees nothing.
 
 Connect to production via SSH tunnel: `ssh -L 8000:localhost:8000 <user>@muscat-ut2` → http://localhost:8000. Staging's public port is `:8002` (`ssh -L 8002:localhost:8002`).
 

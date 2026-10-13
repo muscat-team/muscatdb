@@ -261,3 +261,35 @@ def test_exposure_target_of_open_target_unchanged(client):
     resp = _exposure_target(client, "alice", "OPENTGT").json()
     assert (resp["n_observations"], resp["n_unique_dates"]) == (3, 2)
     assert resp["coordinates"] is not None
+
+
+# ── scoped viewer (issue #202) ──────────────────────────────────────────
+
+
+def _scoped(db: str, *grants: str) -> None:
+    from muscat_db import access
+
+    access.set_scoped(db, "andrew")
+    for proposal in grants:
+        access.grant(db, "andrew", proposal, "admin")
+
+
+def test_scoped_viewer_browser_sees_only_allowlisted_nights_and_frames(client, db):
+    _scoped(db, _OPEN)
+    html = _get(client, "/sinistro", user="andrew").text
+    assert 'href="/sinistro/260101"' in html
+    assert "260102" not in html  # only under the other proposal
+    night = _get(client, "/sinistro/260103", user="andrew").text
+    assert "OPENTGT" in night and "HIDDENTGT" not in night
+    ccd = _get(client, "/sinistro/260103/ccd0", user="andrew").text
+    assert "SIN_2601030001" in ccd
+    assert "SIN_2601030002" not in ccd
+
+
+def test_scoped_viewer_with_no_grant_sees_no_nights(client, db):
+    _scoped(db)
+    html = _get(client, "/sinistro", user="andrew").text
+    assert not any(d in html for d in ("260101", "260102", "260103"))
+    hidden = _get(client, "/sinistro/260101", user="andrew").text
+    never = _get(client, "/sinistro/991231", user="andrew").text
+    assert hidden.replace("260101", "991231") == never

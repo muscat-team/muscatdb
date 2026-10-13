@@ -23,6 +23,7 @@ import urllib.parse
 import time
 from collections import deque
 
+from . import access
 from . import chat_agent
 from . import jobs
 from .auth import PROXY_SECRET_HEADER, authentication_required, trusted_forwarded_user
@@ -52,6 +53,10 @@ _BROADCAST_MENTION_RE = re.compile(r"(?<![\w@])@(?:all|everyone|channel)\b", re.
 _users_by_sid: dict[str, str | None] = {}  # sid -> username (None = anonymous)
 _rate: dict[str, deque] = {}
 _LOOP: asyncio.AbstractEventLoop | None = None
+# Everything the whole team sees is emitted to this room. A scoped viewer
+# (issue #202) never joins it, so the shared room's free text -- which can name
+# any target -- cannot reach them; they keep their private room and @bot.
+_PUBLIC_ROOM = "chat:public"
 _known_cache: dict = {"ts": 0.0, "map": {}}
 
 
@@ -112,7 +117,7 @@ def _online_usernames() -> set[str]:
 
 async def _broadcast_presence() -> None:
     users = _online_users()
-    await sio.emit("presence", {"count": len(users), "users": users})
+    await sio.emit("presence", {"count": len(users), "users": users}, room=_PUBLIC_ROOM)
 
 
 def _known_users_map() -> dict[str, str]:
@@ -163,6 +168,25 @@ async def _session_user(sid: str) -> str | None:
         return None
 
 
+async def _session_scoped(sid: str) -> bool:
+    try:
+        session = await sio.get_session(sid)
+        return bool((session or {}).get("scoped"))
+    except KeyError:
+        return False
+
+
+def _user_is_scoped(user: str | None) -> bool:
+    """Fail closed: when the lookup errors, treat the user as scoped."""
+    if not user:
+        return False
+    try:
+        return access.is_scoped(db.db_path(), user)
+    except Exception:
+        logger.exception("scope lookup failed for %s; treating as scoped", user)
+        return True
+
+
 # ----- connection lifecycle ------------------------------------------------
 @sio.event
 async def connect(sid, environ):
@@ -178,15 +202,18 @@ async def connect(sid, environ):
     if user is None and authentication_required():
         logger.warning("rejected unauthenticated chat connection %s", sid)
         raise ConnectionRefusedError("authentication required")
-    await sio.save_session(sid, {"user": user})
+    scoped = _user_is_scoped(user)
+    await sio.save_session(sid, {"user": user, "scoped": scoped})
     _users_by_sid[sid] = user
     if user:
         await sio.enter_room(sid, f"user:{user}")
+    if not scoped:
+        await sio.enter_room(sid, _PUBLIC_ROOM)
     # Backfill recent history to this client only (never persisted here).
     # When the user is authenticated, scoped messages (e.g. job-finished
     # notifications) are included only for their owner.
     try:
-        history = db.get_recent_chat_messages(user=user)
+        history = db.get_recent_chat_messages(user=user, addressed_only=scoped)
     except Exception:
         logger.exception("failed to load chat history")
         history = []
@@ -221,6 +248,14 @@ async def message(sid, data):
     user = await _session_user(sid)
     display = _display(user)
 
+    # A scoped viewer has no part in the shared room; only the private @bot
+    # exchange below is open to them.
+    if await _session_scoped(sid) and not chat_agent.addressed(text):
+        await sio.emit(
+            "chat_error", {"error": "the shared chat is not available for this account"}, to=sid
+        )
+        return
+
     # @test → ephemeral: broadcast live, never persisted, not editable.
     if _TEST_PREFIX_RE.match(text):
         body = _TEST_PREFIX_RE.sub("", text, count=1) or "(test message)"
@@ -238,6 +273,7 @@ async def message(sid, data):
                 "reactions": [],
                 "edited": False,
             },
+            room=_PUBLIC_ROOM,
         )
         return
 
@@ -278,7 +314,7 @@ async def message(sid, data):
             await sio.emit("chat_error", {"error": "message could not be saved"}, to=sid)
             return
         payload = {**msg, "sid": sid}
-        await sio.emit("message", payload)
+        await sio.emit("message", payload, room=_PUBLIC_ROOM)
         for name in mentions:
             await sio.emit("mention", {"from": display, "message": payload}, room=f"user:{name}")
         return
@@ -292,7 +328,7 @@ async def message(sid, data):
         return
 
     payload = {**msg, "sid": sid}
-    await sio.emit("message", payload)
+    await sio.emit("message", payload, room=_PUBLIC_ROOM)
     # Nudge each mentioned user (on any page/tab) so they notice.
     for name in mentions:
         await sio.emit("mention", {"from": display, "message": payload}, room=f"user:{name}")
@@ -307,7 +343,7 @@ async def edit_message(sid, data):
     if not isinstance(data, dict):
         return
     user = await _session_user(sid)
-    if not user:
+    if not user or await _session_scoped(sid):
         return
     msg_id = data.get("id")
     text = data.get("text")
@@ -320,7 +356,7 @@ async def edit_message(sid, data):
     if updated is None:
         await sio.emit("chat_error", {"error": "not allowed to edit that message"}, to=sid)
         return
-    await sio.emit("message_edited", updated)
+    await sio.emit("message_edited", updated, room=_PUBLIC_ROOM)
 
 
 @sio.on("delete_message")
@@ -328,13 +364,13 @@ async def delete_message(sid, data):
     if not isinstance(data, dict):
         return
     user = await _session_user(sid)
-    if not user:
+    if not user or await _session_scoped(sid):
         return
     msg_id = data.get("id")
     if not isinstance(msg_id, int):
         return
     if db.delete_chat_message(msg_id, user):
-        await sio.emit("message_deleted", {"id": msg_id})
+        await sio.emit("message_deleted", {"id": msg_id}, room=_PUBLIC_ROOM)
     else:
         await sio.emit("chat_error", {"error": "not allowed to delete that message"}, to=sid)
 
@@ -344,7 +380,7 @@ async def toggle_reaction(sid, data):
     if not isinstance(data, dict):
         return
     user = await _session_user(sid)
-    if not user:  # reactions require an identity
+    if not user or await _session_scoped(sid):  # reactions require an identity
         return
     msg_id = data.get("id")
     emoji = data.get("emoji")
@@ -355,15 +391,19 @@ async def toggle_reaction(sid, data):
         return
     result = db.toggle_chat_reaction(msg_id, user, emoji)
     if result is not None:
-        await sio.emit("reaction_updated", result)
+        await sio.emit("reaction_updated", result, room=_PUBLIC_ROOM)
 
 
 @sio.on("typing")
 async def typing(sid, data):
+    if await _session_scoped(sid):
+        return
     user = await _session_user(sid)
     is_typing = bool(isinstance(data, dict) and data.get("typing"))
     # Relay to everyone except the sender; ephemeral, never stored.
-    await sio.emit("typing", {"user": _display(user), "typing": is_typing}, skip_sid=sid)
+    await sio.emit(
+        "typing", {"user": _display(user), "typing": is_typing}, room=_PUBLIC_ROOM, skip_sid=sid
+    )
 
 
 # ----- codebase assistant (@bot): private, per-user, in-memory --------------
@@ -567,7 +607,9 @@ def on_job_finished(
     if owner:
         asyncio.run_coroutine_threadsafe(sio.emit("message", payload, room=f"user:{owner}"), loop)
     else:
-        asyncio.run_coroutine_threadsafe(sio.emit("message", payload), loop)
+        asyncio.run_coroutine_threadsafe(
+            sio.emit("message", payload, room=_PUBLIC_ROOM), loop
+        )
 
 
 # Register once at import so both pipelines' sync loops notify chat.

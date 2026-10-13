@@ -379,6 +379,11 @@ def sio_harness(monkeypatch):
     monkeypatch.setattr(chat, "sio", fake)
     monkeypatch.setattr(chat, "_rate", {})
     monkeypatch.setattr(chat, "_users_by_sid", {})
+
+    async def _not_scoped(_sid):
+        return False
+
+    monkeypatch.setattr(chat, "_session_scoped", _not_scoped)
     return fake
 
 
@@ -525,3 +530,67 @@ def test_reaction_requires_identity_and_valid_emoji(sio_harness, monkeypatch):
     asyncio.run(chat.toggle_reaction("sid-1", {"id": 1, "emoji": "   "}))
     asyncio.run(chat.toggle_reaction("sid-1", {"id": "notanint", "emoji": "👍"}))
     assert sio_harness.emits == []
+
+
+# --------------------------------------------------------------------------
+# Scoped viewers (issue #202): no part in the shared room
+# --------------------------------------------------------------------------
+def test_scoped_viewer_cannot_post_to_the_shared_room(sio_harness, monkeypatch):
+    import asyncio
+
+    _as_user(monkeypatch, "andrew")
+
+    async def _scoped(_sid):
+        return True
+
+    monkeypatch.setattr(chat, "_session_scoped", _scoped)
+    monkeypatch.setattr(
+        chat.db,
+        "save_chat_message",
+        lambda *a, **k: pytest.fail("a scoped viewer's post must not be persisted"),
+    )
+    asyncio.run(chat.message("sid-1", {"text": "hello room"}))
+    assert sio_harness.events() == ["chat_error"]
+
+
+def test_scoped_viewer_cannot_edit_delete_react_or_type(sio_harness, monkeypatch):
+    import asyncio
+
+    _as_user(monkeypatch, "andrew")
+
+    async def _scoped(_sid):
+        return True
+
+    monkeypatch.setattr(chat, "_session_scoped", _scoped)
+    for name in ("edit_chat_message", "delete_chat_message", "toggle_chat_reaction"):
+        monkeypatch.setattr(
+            chat.db, name, lambda *a, **k: pytest.fail("scoped viewer reached the DB")
+        )
+    asyncio.run(chat.edit_message("s", {"id": 1, "text": "x"}))
+    asyncio.run(chat.delete_message("s", {"id": 1}))
+    asyncio.run(chat.toggle_reaction("s", {"id": 1, "emoji": "👍"}))
+    asyncio.run(chat.typing("s", {"typing": True}))
+    assert sio_harness.emits == []
+
+
+def test_shared_room_broadcasts_go_to_the_public_room_only(sio_harness, monkeypatch):
+    import asyncio
+
+    _as_user(monkeypatch, "alice")
+    monkeypatch.setattr(
+        chat.db, "save_chat_message", lambda user, text, **k: {"id": 1, "user": user, "text": text}
+    )
+    monkeypatch.setattr(chat, "_parse_mentions", lambda text: [])
+    asyncio.run(chat.message("sid-1", {"text": "hello room"}))
+    broadcasts = [kw for event, _p, kw in sio_harness.emits if event == "message"]
+    assert broadcasts and all(kw.get("room") == chat._PUBLIC_ROOM for kw in broadcasts)
+
+
+def test_addressed_only_history_drops_public_messages(chat_db):
+    save_chat_message("alice", "public note", kind="user")
+    save_chat_message("system", "Photometry for X done", kind="system", visible_to="andrew")
+    save_chat_message("system", "someone else's job", kind="system", visible_to="bob")
+    texts = [m["text"] for m in get_recent_chat_messages(days=7, user="andrew", addressed_only=True)]
+    assert texts == ["Photometry for X done"]
+    everyone = [m["text"] for m in get_recent_chat_messages(days=7, user="andrew")]
+    assert "public note" in everyone and "someone else's job" not in everyone

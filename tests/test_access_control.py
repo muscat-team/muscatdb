@@ -31,10 +31,12 @@ from muscat_db.cli import app as cli_app
 from muscat_db.coord import CoordRepr
 from muscat_db.database import (
     SCHEMA,
+    ScopedDenied,
     _insert_summary_rows,
     _populate_targets,
     _summary_rows,
     get_targets,
+    sql_not_denied,
 )
 
 pytestmark = pytest.mark.usefixtures("mock_target_coord_resolution")
@@ -437,3 +439,131 @@ def test_cli_unrestrict(db):
     assert runner.invoke(cli_app, ["access", "unrestrict", _RESTRICTED]).exit_code == 0
     assert access.denied_proposal_ids_for(db, None) == frozenset()
     assert runner.invoke(cli_app, ["access", "unrestrict", _RESTRICTED]).exit_code == 1
+
+
+# ── scoped viewer (issue #202) ──────────────────────────────────────────
+
+
+def _scope(db: str, user: str, *grants: str) -> None:
+    access.set_scoped(db, user)
+    for proposal in grants:
+        access.grant(db, user, proposal, "admin")
+
+
+def test_scoped_denied_set_is_everything_but_the_allowlist(db):
+    _scope(db, "andrew", _OPEN)
+    denied = access.denied_proposal_ids_for(db, "andrew")
+    assert isinstance(denied, ScopedDenied)
+    assert denied.allowed == {_OPEN}
+    assert _RESTRICTED in denied
+    assert "" in denied  # frames without a PROPID
+    assert _OPEN not in denied
+
+
+def test_scoped_viewer_sees_only_allowlisted_targets(client, db):
+    _scope(db, "andrew", _OPEN)
+    html = client.get("/targets", headers=_headers("andrew")).text
+    assert "MIXEDTGT" in html
+    assert "HIDDENTGT" not in html  # only under a different proposal
+    assert "OPENTGT" not in html  # blank PROPID, e.g. muscat/muscat2
+
+
+def test_scoped_viewer_target_rollup_counts_only_allowlisted_frames(client, db):
+    _scope(db, "andrew", _OPEN)
+    rows = _export_rows(client, "andrew")
+    assert set(rows) == {"MIXEDTGT"}
+    assert rows["MIXEDTGT"]["n_frames"] == "2"  # the 3 restricted frames are not counted
+
+
+def test_scoped_viewer_with_no_grants_sees_nothing(client, db):
+    access.set_scoped(db, "andrew")
+    assert _export_rows(client, "andrew") == {}
+    html = client.get("/targets", headers=_headers("andrew")).text
+    assert not any(t in html for t in ("MIXEDTGT", "HIDDENTGT", "OPENTGT"))
+
+
+def test_unscoping_restores_blocklist_behaviour(client, db):
+    _scope(db, "andrew", _OPEN)
+    assert set(_export_rows(client, "andrew")) == {"MIXEDTGT"}
+    access.set_scoped(db, "andrew", False)
+    web._index_cache.clear()
+    assert set(_export_rows(client, "andrew")) == {"MIXEDTGT", "OPENTGT"}
+
+
+def test_scoped_viewer_does_not_disturb_other_viewers(client, db):
+    _scope(db, "andrew", _OPEN)
+    assert set(_export_rows(client, "andrew")) == {"MIXEDTGT"}
+    assert set(_export_rows(client, "alice")) == {"MIXEDTGT", "OPENTGT"}
+
+
+def test_admin_is_never_scoped(db):
+    _set_admin(db, "root")
+    access.set_scoped(db, "root")
+    assert access.is_scoped(db, "root") is False
+    assert access.denied_proposal_ids_for(db, "root") == frozenset()
+
+
+def test_scoped_sql_fails_closed_on_unseen_proposals():
+    """A proposal ingested after the denied set was computed is not in it, so
+    the filter must be an allowlist, not a blocklist."""
+    scoped = ScopedDenied({"", "OLD-PROP"}, {"KEY-1"})
+    clause, params = sql_not_denied(scoped)
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE t (proposal_id TEXT)")
+    conn.executemany(
+        "INSERT INTO t VALUES (?)",
+        [("KEY-1",), ("key-1",), ("OLD-PROP",), ("",), (None,), ("NEW-PROP",)],
+    )
+    kept = [r[0] for r in conn.execute(f"SELECT proposal_id FROM t WHERE {clause}", params)]
+    assert kept == ["KEY-1", "key-1"]
+    assert sql_not_denied(ScopedDenied({""}, set())) == ("0", [])
+
+
+def test_is_denied_for_scoped_viewer_hides_unseen_and_blank():
+    scoped = ScopedDenied({""}, {"KEY-1"})
+    assert not access.is_denied("key-1", scoped)
+    assert access.is_denied("", scoped)
+    assert access.is_denied(None, scoped)
+    assert access.is_denied("BRAND-NEW", scoped)
+
+
+def test_catalog_rows_for_unseen_targets_lose_their_in_db_flag(monkeypatch):
+    monkeypatch.setattr(web, "_viewer_denied", lambda: ScopedDenied({""}, {"KEY-1"}))
+    monkeypatch.setattr(web, "_all_norm_names", lambda db, denied: {"visible"})
+    monkeypatch.setattr(web, "_db_path", lambda: "unused.db")
+    indb, tname = web._mask_unseen_catalog_rows(
+        [1, 1, 0], ["visible", "hidden", ""], lambda i: f"fallback{i}"
+    )
+    assert indb == [1, 0, 0]
+    assert tname == ["visible", "fallback1", ""]
+
+
+def test_catalog_rows_untouched_for_unrestricted_viewer(monkeypatch):
+    monkeypatch.setattr(web, "_viewer_denied", lambda: frozenset())
+    indb, tname = web._mask_unseen_catalog_rows([1], ["anything"], lambda i: "x")
+    assert (indb, tname) == ([1], ["anything"])
+
+
+def test_cli_scope_roundtrip_and_admin_refusal(db, monkeypatch):
+    monkeypatch.setenv("MUSCAT_DB_PATH", db)
+    runner = CliRunner()
+    first = runner.invoke(cli_app, ["access", "scope", "andrew"])
+    assert first.exit_code == 0, first.output
+    assert "is scoped" in first.output
+    assert "no grants" in first.output
+    assert access.is_scoped(db, "andrew")
+    assert "already scoped" in runner.invoke(cli_app, ["access", "scope", "andrew"]).output
+    off = runner.invoke(cli_app, ["access", "scope", "andrew", "--off"])
+    assert off.exit_code == 0 and "no longer scoped" in off.output
+    assert not access.is_scoped(db, "andrew")
+    _set_admin(db, "root")
+    refused = runner.invoke(cli_app, ["access", "scope", "root"])
+    assert refused.exit_code == 1
+
+
+def test_cli_grant_to_scoped_user_does_not_warn_about_unrestricted(db, monkeypatch):
+    monkeypatch.setenv("MUSCAT_DB_PATH", db)
+    access.set_scoped(db, "andrew")
+    result = CliRunner().invoke(cli_app, ["access", "grant", "andrew", _OPEN])
+    assert result.exit_code == 0, result.output
+    assert "no effect" not in result.output

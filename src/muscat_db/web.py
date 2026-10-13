@@ -1571,10 +1571,35 @@ def workflow_redirect():
     return RedirectResponse(url="/guide", status_code=301)
 
 
+def _mask_unseen_catalog_rows(
+    indb: list[int], tname: list[str], fallback: Callable[[int], str]
+) -> tuple[list[int], list[str]]:
+    """Clear the "in muscat-db" flag of catalog rows whose matched target the
+    viewer may not see (issue #202), so /toi and /nexsci neither link a target
+    outside their scope nor count it. A no-op for a viewer denied nothing."""
+    denied = _viewer_denied()
+    if not denied or not any(indb):
+        return indb, tname
+    visible = _all_norm_names(_db_path(), denied)
+    indb = list(indb)
+    tname = list(tname)
+    for i, flag in enumerate(indb):
+        if flag and tname[i] not in visible:
+            indb[i] = 0
+            tname[i] = fallback(i)
+    return indb, tname
+
+
 @app.get("/toi", response_class=HTMLResponse)
 def toi_page():
     cat = _load_toi_catalog()
     indb, tname = _toi_db_membership(cat["data"], _db_path())
+    tois, nms = cat["data"]["toi"], cat["data"]["name"]
+    indb, tname = _mask_unseen_catalog_rows(
+        indb,
+        tname,
+        lambda i: _normalize_target_name(f"TOI-{tois[i]}" if tois[i] else nms[i] or ""),
+    )
     boyle, n_boyle = _merge_boyle_columns(cat["data"])
     harps, n_harps = _harps_coord_membership(cat["data"])
     lamost, n_lamost = _lamost_coord_membership(cat["data"])
@@ -1890,6 +1915,7 @@ async def api_target_spectra(name: str = ""):
 def nexsci_page():
     cat = _load_nexsci_catalog()
     indb, tname = _nexsci_db_membership(cat["data"], _db_path())
+    indb, tname = _mask_unseen_catalog_rows(indb, tname, lambda i: "")
     harps, n_harps = _harps_coord_membership(cat["data"])
     lamost, n_lamost = _lamost_coord_membership(cat["data"])
     jwst_targets = _load_jwst_targets()

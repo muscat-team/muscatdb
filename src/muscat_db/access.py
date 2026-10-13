@@ -31,7 +31,7 @@ import logging
 import sqlite3
 from collections.abc import Callable, Iterable
 
-from muscat_db.database import get_conn, sql_not_denied
+from muscat_db.database import ScopedDenied, get_conn, sql_not_denied
 
 logger = logging.getLogger(__name__)
 
@@ -76,14 +76,48 @@ def _granted_ids(conn: sqlite3.Connection, username: str) -> frozenset[str]:
     return frozenset(r[0].upper() for r in rows if r[0])
 
 
-def denied_proposal_ids_for(db_path: str, username: str | None) -> frozenset[str]:
-    """Restricted proposal ids (upper-cased) this viewer may not see.
+def _is_scoped(conn: sqlite3.Connection, username: str) -> bool:
+    try:
+        row = conn.execute(
+            "SELECT scoped FROM users WHERE username = ?", (username,)
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        if _missing_table(exc) or "no such column" in str(exc):
+            return False
+        raise
+    return bool(row and row[0])
 
-    Empty when nothing is restricted or the viewer is an admin. Any database
-    error other than a missing table propagates: failing open here would
-    silently expose restricted data.
+
+def is_scoped(db_path: str, username: str | None) -> bool:
+    """Whether *username* is a scoped viewer (issue #202). Admins never are."""
+    if not username:
+        return False
+    with get_conn(db_path) as conn:
+        return _is_scoped(conn, username) and not _is_admin(conn, username)
+
+
+def _observed_ids(conn: sqlite3.Connection) -> frozenset[str]:
+    rows = conn.execute("SELECT DISTINCT proposal_id FROM summaries").fetchall()
+    return frozenset((r[0] or "").upper() for r in rows)
+
+
+def denied_proposal_ids_for(db_path: str, username: str | None) -> frozenset[str]:
+    """Proposal ids (upper-cased) this viewer may not see.
+
+    Empty when nothing is restricted or the viewer is an admin. A scoped
+    viewer (``users.scoped``, issue #202) is denied everything that is not on
+    their allowlist, including frames with no PROPID, and gets a
+    :class:`ScopedDenied` so SQL filters fail closed on proposals ingested
+    later. Any database error other than a missing table propagates: failing
+    open here would silently expose restricted data.
     """
     with get_conn(db_path) as conn:
+        if username is not None and _is_scoped(conn, username):
+            if _is_admin(conn, username):
+                return frozenset()
+            allowed = _granted_ids(conn, username)
+            denied = (_observed_ids(conn) | _restricted_ids(conn) | {""}) - allowed
+            return ScopedDenied(denied, allowed)
         restricted = _restricted_ids(conn)
         if not restricted:
             return frozenset()
@@ -97,7 +131,12 @@ def denied_proposal_ids_for(db_path: str, username: str | None) -> frozenset[str
 def is_denied(proposal_id: str | None, denied: frozenset[str]) -> bool:
     """Whether one row's ``proposal_id`` falls in a denied set from
     :func:`denied_proposal_ids_for`."""
-    return bool(denied) and (proposal_id or "").upper() in denied
+    if not denied:
+        return False
+    pid = (proposal_id or "").upper()
+    if isinstance(denied, ScopedDenied):
+        return pid not in denied.allowed
+    return pid in denied
 
 
 def _compact(name: str) -> str:
@@ -257,6 +296,34 @@ def observed_spelling(db_path: str, proposal_id: str) -> str | None:
             (proposal_id,),
         ).fetchone()
     return row[0] if row else None
+
+
+def is_admin_user(db_path: str, username: str) -> bool:
+    """Whether *username* has ``users.is_admin`` set."""
+    with get_conn(db_path) as conn:
+        return _is_admin(conn, username)
+
+
+def set_scoped(db_path: str, username: str, scoped: bool = True) -> bool:
+    """Mark *username* as a scoped viewer (or clear it). Returns False when
+    the flag already had that value. The user row is created if missing, the
+    same way ``htpasswd promote`` does."""
+    with get_conn(db_path) as conn:
+        _ensure_schema(conn)
+        conn.execute(
+            "INSERT OR IGNORE INTO users (username, display_name) VALUES (?, ?)",
+            (username, username),
+        )
+        before = conn.execute(
+            "SELECT scoped FROM users WHERE username = ?", (username,)
+        ).fetchone()[0]
+        if bool(before) == scoped:
+            return False
+        conn.execute(
+            "UPDATE users SET scoped = ? WHERE username = ?", (1 if scoped else 0, username)
+        )
+        conn.commit()
+    return True
 
 
 def restrict(db_path: str, proposal_id: str, description: str = "") -> bool:
