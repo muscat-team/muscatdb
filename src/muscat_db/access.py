@@ -381,22 +381,26 @@ def list_grants(db_path: str, username: str | None = None) -> list[dict]:
     ]
 
 
-def pending_backfill_dates(
+def blank_propid_frames(
     db_path: str, instruments: Iterable[str] | None = None
 ) -> dict[str, int]:
-    """Per PROPID-capturing instrument, how many observed dates the PR3
-    backfill has not yet processed (per its checkpoint). Rows on those dates
-    carry ``proposal_id = ''`` and so stay visible to everyone even after
-    their proposal is restricted. Instruments with nothing pending are
-    omitted."""
-    from muscat_db import database
+    """Per PROPID-capturing instrument, how many frames carry no
+    ``proposal_id``. Those rows stay visible to everyone even after their
+    proposal is restricted, so this is the leak a new restriction would leave.
+    Counting frames rather than the PR3 backfill's checkpoint means a night
+    newer than the last backfill run, whose frames already carry a PROPID,
+    does not warn. Instruments with nothing blank are omitted."""
     from muscat_db import propid_backfill as pb
 
-    pending: dict[str, int] = {}
-    for inst in instruments if instruments is not None else pb.PROPID_INSTRUMENTS:
-        done = pb._load_checkpoint(pb._checkpoint_path(inst))
-        dates = {d["obsdate"] for d in database.get_dates(db_path, inst)}
-        n = len(dates - done)
-        if n:
-            pending[inst] = n
-    return pending
+    names = tuple(instruments if instruments is not None else pb.PROPID_INSTRUMENTS)
+    if not names:
+        return {}
+    marks = ",".join("?" for _ in names)
+    with get_conn(db_path) as conn:
+        rows = conn.execute(
+            f"SELECT instrument, COUNT(*) FROM frames "
+            f"WHERE instrument IN ({marks}) AND TRIM(COALESCE(proposal_id, '')) = '' "
+            f"GROUP BY instrument",
+            names,
+        ).fetchall()
+    return {inst: n for inst, n in rows if n}
