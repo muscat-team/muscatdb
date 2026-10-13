@@ -259,6 +259,12 @@ def observed_spelling(db_path: str, proposal_id: str) -> str | None:
     return row[0] if row else None
 
 
+def is_admin_user(db_path: str, username: str) -> bool:
+    """Whether *username* has ``users.is_admin`` set."""
+    with get_conn(db_path) as conn:
+        return _is_admin(conn, username)
+
+
 def restrict(db_path: str, proposal_id: str, description: str = "") -> bool:
     """Opt *proposal_id* into restriction. Returns False if it already was
     (the description is then updated in place)."""
