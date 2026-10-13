@@ -43,6 +43,7 @@ from pathlib import Path
 
 from muscat_db import jobs, database
 from muscat_db.job_store import current_instance_id, current_owner, get_job_store
+from muscat_db.ref_time import is_valid_ref_time
 from muscat_db.instruments import INSTRUMENTS
 from muscat_db.cache import register_cache
 from muscat_db.band_utils import DEFAULT_BANDS, NARROW_BANDS, _FILTER_BAND_ALIAS, bands_from_filters  # noqa: F401
@@ -71,6 +72,8 @@ RUN_DEFAULTS: dict = {
     "refid": "",               # "" -> pipeline default (0 / middle frame, or the
                                # quality mode's persistent-catalog anchor)
     "ref_select": "position",  # position (legacy) | quality (local temporal persistence)
+                               # | time (per-band frame closest in time to ref_time)
+    "ref_time": "",            # ref_select=time: HH:MM[:SS] UT | ISO UTC | JD
     "ref_select_top_k": 5,     # local catalogs registered when ref_select=quality
     "aper_radii": "",          # "MIN,MAX,DR"; "" -> Gaia heuristic
     "annulus": "",             # "RIN,ROUT"; required with aper_radii
@@ -81,7 +84,7 @@ RUN_DEFAULTS: dict = {
     "use_barycorrpy": False,
     "test_run_frames": 10,
     "min_star_separation": 10.0,
-    "max_num_stars": 10,
+    "max_num_stars": 20,
     "n_stars_align": "",       # "" -> same as max_num_stars
     "cutout_size": 35,
     "display_stack_nframes": 15,  # own frames aligned+median-stacked into the
@@ -108,7 +111,7 @@ RUN_DEFAULTS: dict = {
                                # (a poly is fit to the raw target flux; see flux_poly_deg)
     "flux_poly_deg": 2,        # degree of the polynomial fitted to the raw target
                                # flux before residual sigma clipping (used with sig_flux)
-    "min_star_area": 10,
+    "min_star_area": 20,
     "wcs_method": "astrometry.net",
     "centroid_method": "auto",  # auto | quad | com (mirrors prose2's --centroid_method)
     "calib_dir": "",
@@ -1203,7 +1206,7 @@ def normalize_run_options(raw: dict | None) -> dict:
     if "bands" in raw:  # present-but-empty must surface as an error, not default
         o["bands"] = [str(b).strip() for b in (bands or []) if str(b).strip()]
 
-    for key in ("run_name", "ref_band", "ref_select", "aper_radii", "annulus", "aper_unit", "ccd_trim", "target_id", "comparison_ids", "avoid_comparison_ids", "avoid_nearby_star_mode", "avoid_nearby_star", "target_coord", "wcs_method", "centroid_method", "calib_dir", "site", "telescope", "mode", "cmap", "nan_imputation_method", "exclude_after_jd", "exclude_before_jd"):
+    for key in ("run_name", "ref_band", "ref_select", "ref_time", "aper_radii", "annulus", "aper_unit", "ccd_trim", "target_id", "comparison_ids", "avoid_comparison_ids", "avoid_nearby_star_mode", "avoid_nearby_star", "target_coord", "wcs_method", "centroid_method", "calib_dir", "site", "telescope", "mode", "cmap", "nan_imputation_method", "exclude_after_jd", "exclude_before_jd"):
         if raw.get(key) is not None:
             o[key] = str(raw[key]).strip()
 
@@ -1260,8 +1263,16 @@ def validate_run_options(o: dict, inst: str | None = None) -> str | None:
         return "reference band must be one of the selected bands"
     if (o.get("avoid_comparison_ids") or "").strip() and not (o.get("ref_band") or "").strip():
         return "avoid comparison IDs requires a reference band"
-    if o.get("ref_select", "position") not in ("position", "quality"):
-        return "reference selection must be 'position' or 'quality'"
+    if o.get("ref_select", "position") not in ("position", "quality", "time"):
+        return "reference selection must be 'position', 'quality' or 'time'"
+    if o.get("ref_select") == "time":
+        if not is_valid_ref_time(str(o.get("ref_time") or "")):
+            return (
+                "reference selection 'time' requires a valid reference time "
+                "(HH:MM[:SS] UT, YYYY-MM-DDTHH:MM:SS UTC, or a Julian date)"
+            )
+        if (o.get("ref_band") or "").strip():
+            return "reference selection 'time' cannot be combined with a reference band"
     top_k = o.get("ref_select_top_k")
     if top_k not in (None, "") and int(top_k) < 1:
         return "quality candidates (top-K) must be >= 1"
@@ -1368,9 +1379,15 @@ def build_command(
     ]
     if o.get("ref_band"):
         args += ["--ref_band", o["ref_band"]]
-    if o.get("refid") not in (None, ""):
+    time_mode = o.get("ref_select") == "time"
+    # --refid is a per-camera frame number; prose2 rejects it with --ref_select
+    # time (the reference is the --ref_time instead), so a stale value in the
+    # form is dropped rather than forwarded.
+    if o.get("refid") not in (None, "") and not time_mode:
         args += ["--refid", str(o["refid"])]
-    if o.get("ref_select") == "quality":
+    if time_mode:
+        args += ["--ref_select", "time", "--ref_time", str(o["ref_time"]).strip()]
+    elif o.get("ref_select") == "quality":
         args += ["--ref_select", "quality"]
         top_k = o.get("ref_select_top_k")
         if top_k not in (None, "") and int(top_k) != RUN_DEFAULTS["ref_select_top_k"]:
@@ -1966,6 +1983,35 @@ def _pending_status(inst: str, date: str, target: str, run_id: str = "") -> dict
     return None
 
 
+def _running_status(inst: str, date: str, target: str, run_id: str = "") -> dict | None:
+    """Return a running-job status dict if a running DB entry exists, else None.
+
+    A run held by another instance (a fleet worker) is ``running`` in the DB
+    but absent from this process's ``_JOBS``. Report it as ``running`` with the
+    log tail so the page keeps polling, rather than letting the on-disk log
+    fallback in ``job_status`` present a still-growing log as a finished run.
+    """
+    db_key = f"photometry:{job_key(inst, date, target, run_id)}"
+    try:
+        for entry in get_job_store().all():
+            if (
+                entry["key"] == db_key
+                and entry["type"] == "photometry"
+                and entry["state"] == "running"
+            ):
+                lp = log_path(inst, date, target, run_id)
+                started = entry.get("started_at") or time.time()
+                return {
+                    "state": "running",
+                    "returncode": None,
+                    "log": _tail(lp) if lp else "",
+                    "elapsed": round(time.time() - started),
+                }
+    except Exception:
+        logger.debug("failed to read running photometry status for %s/%s/%s/%s", inst, date, target, run_id, exc_info=True)
+    return None
+
+
 def _persisted_status(inst: str, date: str, target: str, run_id: str = "") -> dict | None:
     """Return a terminal-state status dict from the DB for a job no longer in
     ``_JOBS``.
@@ -2016,10 +2062,17 @@ def job_status(inst: str, date: str, target: str, run_id: str = "") -> dict:
             pending = _pending_status(inst, date, target, run_id)
             if pending is not None:
                 return pending
+            running = _running_status(inst, date, target, run_id)
+            if running is not None:
+                return running
             persisted = _persisted_status(inst, date, target, run_id)
             if persisted is not None:
                 return persisted
-            return {"state": "none", "log": "", "returncode": None, "elapsed": 0}
+            # No job row (pruned, or run elsewhere) but the run's log file is
+            # still on disk: surface it, as the Jobs page's Log button does.
+            # The state stays "none" -- there is no record of the outcome.
+            lp = log_path(inst, date, target, run_id)
+            return {"state": "none", "log": _tail(lp) if lp else "", "returncode": None, "elapsed": 0}
         state, rc, is_terminal = _resolve_job_state(job)
         if is_terminal and job.state == "running":
             job.state = state
@@ -2029,17 +2082,17 @@ def job_status(inst: str, date: str, target: str, run_id: str = "") -> dict:
                 job.logf.close()
             except OSError:
                 pass
-        log_path = job.log_path
+        job_log = job.log_path
         elapsed = job.elapsed if job.state not in ("running", "cancelling") and job.elapsed is not None else round(time.time() - job.started_at)
     error_desc = ""
-    if state == "error" and log_path:
-        error_desc = _get_error_desc(log_path)
+    if state == "error" and job_log:
+        error_desc = _get_error_desc(job_log)
     elif state == "cancelled":
         error_desc = "Cancelled by user"
     return {
         "state": state,
         "returncode": rc,
-        "log": _tail(log_path),
+        "log": _tail(job_log),
         "elapsed": round(elapsed),
         "error_desc": error_desc,
         "run_type": job.run_type if job else "full",

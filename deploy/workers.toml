@@ -30,11 +30,13 @@ profile     = "dev"                         # [profiles.*] applied when --profil
 # production jobs. Switch with: `--profile dev down`, then `--profile prod up`.
 [profiles.dev]
 # nothing to override: [defaults] above is the dev setup (muscatdb_dev, dev checkout)
+max_full_jobs = 2   # the dev server on :8888 gets 2 concurrent full runs per pipeline
 
 [profiles.prod]
 database      = "muscatdb_prod"
 repo          = "/ut2/jerome/deploy/main/app"   # the deploy checkout of branch main
 queue_only    = true                            # :8001 queues full runs for the workers
+max_full_jobs = 6                              # 5 hosts + 1, as the fleet default
 
 [web]
 # true: the web app only queues full runs (MUSCAT_WORKER_MAX_SLOTS=0) and the

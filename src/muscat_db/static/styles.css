@@ -597,6 +597,8 @@ tr.filter-row th input::placeholder { color: var(--text-dim); font-style: italic
   padding: 0.5rem 0 0.75rem;
 }
 .opt { display: flex; flex-direction: column; gap: 0.25rem; }
+/* author display beats the UA [hidden] rule; keep hidden options hidden */
+.opt[hidden] { display: none; }
 .opt > label { font-size: 0.78rem; color: var(--text-dim); }
 .opt input[type="text"], .opt input[type="number"], .opt select {
   background: var(--input-bg); color: var(--text);
