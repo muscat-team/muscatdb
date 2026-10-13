@@ -400,3 +400,72 @@ def pending_backfill_dates(
         if n:
             pending[inst] = n
     return pending
+
+
+# ── Explain (read-only, CLI) ────────────────────────────────────────────
+
+
+def explain_user(db_path: str, username: str) -> dict:
+    """What *username* can and cannot see, per proposal, as the web computes it.
+
+    Read-only. Built from the same :func:`denied_proposal_ids_for` the request
+    path uses, so it cannot drift from what a viewer actually gets. An unknown
+    username is explained as an ordinary authenticated viewer with no grants,
+    which is what the web treats it as.
+    """
+    denied = denied_proposal_ids_for(db_path, username)
+    restricted = {r["proposal_id"].upper() for r in list_restrictions(db_path)}
+    granted = {g["proposal_id"].upper() for g in list_grants(db_path, username)}
+    with get_conn(db_path) as conn:
+        admin = _is_admin(conn, username)
+        rows = conn.execute(
+            "SELECT COALESCE(proposal_id, ''), "
+            "COUNT(DISTINCT instrument || '|' || obsdate || '|' || COALESCE(object, '')), "
+            "COUNT(DISTINCT object) FROM summaries GROUP BY 1 ORDER BY 1"
+        ).fetchall()
+    proposals = []
+    observed: set[str] = set()
+    for pid, target_nights, objects in rows:
+        key = pid.upper()
+        observed.add(key)
+        proposals.append(
+            {
+                "proposal_id": pid,
+                "restricted": key in restricted,
+                "granted": key in granted,
+                "visible": not is_denied(pid, denied),
+                "target_nights": target_nights,
+                "objects": objects,
+            }
+        )
+    return {
+        "username": username,
+        "admin": admin,
+        "proposals": proposals,
+        # a grant on a proposal no summary carries gives the user nothing
+        "unmatched_grants": sorted(granted - observed),
+        "unmatched_restrictions": sorted(restricted - observed),
+    }
+
+
+def explain_target(db_path: str, username: str, target: str) -> list[dict]:
+    """Every summary row for *target* (spaces and case ignored, the same match
+    :class:`NightVisibility` uses) with whether *username* may see it."""
+    denied = denied_proposal_ids_for(db_path, username)
+    want = _compact(target)
+    with get_conn(db_path) as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT instrument, obsdate, object, COALESCE(proposal_id, '') "
+            "FROM summaries ORDER BY instrument, obsdate"
+        ).fetchall()
+    return [
+        {
+            "instrument": inst,
+            "obsdate": date,
+            "object": obj,
+            "proposal_id": pid,
+            "visible": not is_denied(pid, denied),
+        }
+        for inst, date, obj, pid in rows
+        if _compact(obj or "") == want
+    ]

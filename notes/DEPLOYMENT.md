@@ -44,6 +44,7 @@ uv run muscat-db access restrict <proposal_id> [--description "..."]
 uv run muscat-db access unrestrict <proposal_id>
 uv run muscat-db access grant <user> <proposal_id>
 uv run muscat-db access revoke <user> <proposal_id>
+uv run muscat-db access explain <user> [--target <name>]   # read-only: what <user> sees, per proposal
 uv run muscat-db access list [--user <user>]
 ```
 
