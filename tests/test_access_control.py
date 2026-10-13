@@ -309,7 +309,6 @@ def test_writes_on_never_observed_name_keep_old_behavior(client, db):
     [
         ("delete", "/api/targets/HIDDENTGT/note", None),
         ("put", "/api/targets/HIDDENTGT/identified", {"is_identified": 1}),
-        ("put", "/api/targets/HIDDENTGT/norm-name", {"norm_name": "Other"}),
     ],
 )
 def test_other_writes_on_hidden_target_are_404(client, method, path, body):
@@ -318,6 +317,26 @@ def test_other_writes_on_hidden_target_are_404(client, method, path, body):
         kwargs["json"] = body
     resp = client.request(method.upper(), path, **kwargs)
     assert resp.status_code == 404
+
+
+@pytest.mark.parametrize("obj", ["OPENTGT", "HIDDENTGT", "NEVEROBSX"])
+def test_norm_name_rename_is_admin_only(client, db, obj):
+    """A rename moves the raw OBJECT into another target's group, so it is
+    admin-only (#228). Non-admins get the same 403 for a visible, a hidden and
+    a never-observed name: the status is no existence oracle."""
+    resp = client.put(
+        f"/api/targets/{obj}/norm-name", json={"norm_name": "Other"}, headers=_headers("alice")
+    )
+    assert resp.status_code == 403
+
+
+def test_admin_can_rename_a_target(client, db):
+    _set_admin(db, "root")
+    resp = client.put(
+        "/api/targets/HIDDENTGT/norm-name", json={"norm_name": "Other"}, headers=_headers("root")
+    )
+    assert resp.status_code == 200
+    assert resp.json()["norm_name"] == "Other"
 
 
 def test_admin_can_write_restricted_target_note(client, db):
