@@ -139,8 +139,42 @@
     e.className = 'lco-msg' + (kind ? ' ' + kind : '');
   }
 
+  /* Render a finished job's log in a page's log box, from the server's
+     status (done / error / cancelled / none). The box used to be filled only
+     from localStorage, so a run finished in another tab, browser or host
+     (e.g. a fleet worker) showed an empty box -- or a stale "Queued" line --
+     even though the Jobs page's Log button served the same file. The server
+     log is authoritative: it replaces whatever was saved, and when the server
+     has no log at all the saved text is dropped rather than left to mislead.
+     `footer`, if given, maps the status to extra text appended after the log.
+     Returns true when a log was shown. */
+  function showFinishedLog(logEl, s, storeKey, footer) {
+    if (!logEl || !s) return false;
+    var text = s.log || '';
+    if (!text) {
+      if (s.state === 'none') {
+        logEl.innerHTML = '';
+        logEl.style.display = 'none';
+        try { global.MuscatStorage.remove(storeKey); } catch (e) { /* storage unavailable */ }
+      }
+      return false;
+    }
+    var extra = footer ? footer(s) : null;
+    if (extra == null) {
+      extra = '';
+      if (s.state === 'error') extra = '\n\n\u2717 exit code ' + s.returncode;
+      else if (s.state === 'cancelled') extra = '\n\n\u25a0 cancelled';
+    }
+    logEl.style.display = 'block';
+    logEl.innerHTML = ansiToHtml(text + extra);
+    logEl.scrollTop = logEl.scrollHeight;
+    try { global.MuscatStorage.set(storeKey, text + extra); } catch (e) { /* storage unavailable */ }
+    return true;
+  }
+
   global.MuscatDom = {
     el: el,
+    showFinishedLog: showFinishedLog,
     escapeHtml: escapeHtml,
     ansiToHtml: ansiToHtml,
     val: val,

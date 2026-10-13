@@ -4201,6 +4201,23 @@
     scheduleSaveView();
   }
 
+  // Show the selected run's log once it is over, like the Jobs page's Log
+  // button. The log box used to be filled only by a live poll, so a finished
+  // run (or one finished on a fleet worker) left it empty.
+  function showTTVRunLog(target, runName) {
+    const logEl = document.getElementById('run-log');
+    if (!logEl) return;
+    const qs = `target=${encodeURIComponent(target)}&run_name=${encodeURIComponent(runName)}`;
+    fetch('/api/ttv-fit/status?' + qs)
+      .then(r => r.json())
+      .then(s => {
+        if (['done', 'error', 'cancelled', 'none'].indexOf(s.state) !== -1) {
+          MuscatDom.showFinishedLog(logEl, s, 'ttv:log:' + target + ':' + runName);
+        }
+      })
+      .catch(() => {});
+  }
+
   function loadTTVRunOutputs(target, runName, runs, historyMode = 'replace') {
     const qs = `target=${encodeURIComponent(target)}&run_name=${encodeURIComponent(runName)}`;
     const deleteBtn = document.getElementById('delete-btn');
@@ -4210,6 +4227,7 @@
       .then(res => {
         if (res.ok && res.outputs && res.outputs.has_any) {
           selectedTTVRun = runName;
+          showTTVRunLog(target, runName);
           updateTTVRunUrl(runName, historyMode);
           if (deleteBtn) deleteBtn.style.display = 'inline-block';
           renderTTVOutputs(target, runName, res.outputs, runs);

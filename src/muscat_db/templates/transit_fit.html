@@ -2646,6 +2646,20 @@
   })();
 
 
+  // Show the run's log once it is over, like the Jobs page's Log button.
+  // restoreLog() only knows what this browser saved while a run was live, so a
+  // run that finished elsewhere (another tab, a fleet worker) showed nothing.
+  (function showFinishedRunLog() {
+    if (!logEl || !inst || !date || !target) return;
+    var qs = 'inst=' + encodeURIComponent(inst) + '&date=' + encodeURIComponent(date) + '&target=' + encodeURIComponent(target);
+    if (runId) qs += '&run=' + encodeURIComponent(runId);
+    fetch('/api/transit-fit/status?' + qs).then(function (r) { return r.json(); }).then(function (s) {
+      if (s.state === 'done' || s.state === 'error' || s.state === 'cancelled' || s.state === 'none') {
+        MuscatDom.showFinishedLog(logEl, s, logKey());
+      }
+    }).catch(function () { /* keep whatever was restored from storage */ });
+  })();
+
   // NASA Exoplanet Archive Query Handler
   var queryBtn = document.getElementById('archive-query-btn');
   if (queryBtn) {
