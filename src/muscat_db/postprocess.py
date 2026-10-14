@@ -16,6 +16,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import math
 import os
 import subprocess
 
@@ -182,9 +183,14 @@ def _parse_optional_jd(value, name: str) -> tuple[float | None, str | None]:
     if value is None or (isinstance(value, str) and not value.strip()):
         return None, None
     try:
-        return float(value), None
+        parsed = float(value)
     except (TypeError, ValueError):
         return None, f"{name} must be a number"
+    # float() accepts "inf"/"nan"; an infinite bound would make apply rewrite
+    # every band CSV in place with zero rows.
+    if not math.isfinite(parsed):
+        return None, f"{name} must be a finite number"
+    return parsed, None
 
 
 def _parse_optional_sigma(value) -> tuple[float | None, str | None]:

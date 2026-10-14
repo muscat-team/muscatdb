@@ -1219,13 +1219,12 @@ def _warn_restriction_gaps(db: str, proposal_id: str) -> None:
     """Say loudly what a new restriction does not yet cover."""
     from muscat_db import access
 
-    pending = access.pending_backfill_dates(db)
-    if pending:
-        detail = ", ".join(f"{inst}: {n}" for inst, n in sorted(pending.items()))
+    blank = access.blank_propid_frames(db)
+    if blank:
+        detail = ", ".join(f"{inst}: {n}" for inst, n in sorted(blank.items()))
         console.print(
-            "[bold yellow]WARNING: the PROPID backfill has not processed every date "
-            f"({detail} date(s) pending).[/]\n"
-            "[yellow]Frames on those dates carry an empty proposal_id, so any of "
+            f"[bold yellow]WARNING: some frames have no PROPID ({detail} frame(s)).[/]\n"
+            "[yellow]Those frames carry an empty proposal_id, so any of "
             f"them taken under {proposal_id} stay visible to everyone until "
             "`muscat-db backfill-propid` covers them.[/]"
         )
@@ -1395,6 +1394,80 @@ def access_list(
             ", ".join(r["grantees"]) or "-",
         )
     console.print(table)
+
+
+@access_app.command("explain")
+def access_explain(
+    username: str = typer.Argument(..., help="nginx username"),
+    target: str | None = typer.Option(
+        None, "--target", "-t", help="Also list this target's nights and their visibility"
+    ),
+):
+    """Show what a user sees and why, per proposal (read-only).
+
+    Uses the same computation as the web, so run it before and after a
+    `restrict`, `grant` or `revoke` to check nothing went dark by mistake.
+    """
+    from muscat_db import access
+    from muscat_db.database import db_path
+
+    db = db_path()
+    info = access.explain_user(db, username)
+    if not access.user_exists(db, username):
+        console.print(
+            f"[yellow]{username} has no users row; explained as an ordinary viewer "
+            "with no grants.[/]"
+        )
+    if info["admin"]:
+        console.print(f"[green]{username} is an admin: nothing is hidden.[/]")
+
+    table = Table(title=f"Proposals as seen by {username}")
+    table.add_column("Proposal", style="cyan")
+    table.add_column("Restricted")
+    table.add_column("Granted")
+    table.add_column("Sees")
+    table.add_column("Target-nights", justify="right")
+    table.add_column("Targets", justify="right")
+    for p in info["proposals"]:
+        table.add_row(
+            p["proposal_id"] or "(blank)",
+            "yes" if p["restricted"] else "no",
+            "yes" if p["granted"] else "no",
+            "[green]yes[/]" if p["visible"] else "[red]no[/]",
+            str(p["target_nights"]),
+            str(p["objects"]),
+        )
+    console.print(table)
+    hidden = sum(p["target_nights"] for p in info["proposals"] if not p["visible"])
+    total = sum(p["target_nights"] for p in info["proposals"])
+    console.print(f"{total - hidden} of {total} target-nights visible, {hidden} hidden")
+    for pid in info["unmatched_grants"]:
+        console.print(
+            f"[yellow]Grant {pid} matches no observation, so it shows {username} nothing.[/]"
+        )
+    for pid in info["unmatched_restrictions"]:
+        console.print(f"[yellow]Restriction {pid} matches no observation.[/]")
+
+    if target is not None:
+        rows = access.explain_target(db, username, target)
+        if not rows:
+            console.print(f"[yellow]No observation of {target!r} (spaces and case ignored).[/]")
+            return
+        detail = Table(title=f"{target}")
+        detail.add_column("Instrument")
+        detail.add_column("Date")
+        detail.add_column("Proposal", style="cyan")
+        detail.add_column("Sees")
+        for r in rows:
+            detail.add_row(
+                r["instrument"], r["obsdate"], r["proposal_id"] or "(blank)",
+                "[green]yes[/]" if r["visible"] else "[red]no[/]",
+            )
+        console.print(detail)
+        seen = any(r["visible"] for r in rows)
+        console.print(
+            f"{target}: " + ("visible" if seen else "hidden (answers as an unknown target)")
+        )
 
 
 # ---------------------------------------------------------------------------

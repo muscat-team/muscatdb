@@ -120,6 +120,13 @@ class TestValidateParams:
         assert pp.validate_params(5.0, 2, 5, "not-a-number", None) is not None
         assert pp.validate_params(5.0, 2, 5, None, "not-a-number") is not None
 
+    @pytest.mark.parametrize("bad", ["inf", "-inf", "nan", "1e999", float("inf"), float("nan")])
+    def test_rejects_non_finite_jd_exclusion(self, bad):
+        # inf/nan parse as floats; with apply=true an infinite bound would
+        # rewrite every band CSV in place with zero rows.
+        assert pp.validate_params(5.0, 2, 5, bad, None) is not None
+        assert pp.validate_params(5.0, 2, 5, None, bad) is not None
+
     def test_rejects_before_not_less_than_after(self):
         err = pp.validate_params(5.0, 2, 5, 2460877.0, 2460877.0)
         assert err is not None and "before" in err and "after" in err
