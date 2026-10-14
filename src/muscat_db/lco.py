@@ -1380,7 +1380,7 @@ def _prune_archive_download_jobs(now: float | None = None, reserve_slots: int = 
     finished = [
         (jid, job.get("finished_at") or 0)
         for jid, job in _ARCHIVE_DOWNLOAD_JOBS.items()
-        if job["state"] in {"done", "error"}
+        if job["state"] in {"done", "error", "cancelled"}
     ]
     for jid, finished_at in finished:
         if finished_at and now - finished_at > _ARCHIVE_DOWNLOAD_JOB_TTL_S:
@@ -1392,7 +1392,7 @@ def _prune_archive_download_jobs(now: float | None = None, reserve_slots: int = 
         finished = [
             (jid, job.get("finished_at") or 0)
             for jid, job in _ARCHIVE_DOWNLOAD_JOBS.items()
-            if job["state"] in {"done", "error"}
+            if job["state"] in {"done", "error", "cancelled"}
         ]
         for jid, _finished_at in sorted(finished, key=lambda item: item[1])[:overflow]:
             _ARCHIVE_DOWNLOAD_JOBS.pop(jid, None)
@@ -1446,10 +1446,44 @@ def _notify_archive_download_finished(job: dict) -> None:
     )
 
 
+def _mark_archive_job_cancelled(job: dict) -> None:
+    """Terminal state for a cancelled job. Caller holds ``_ARCHIVE_DOWNLOAD_LOCK``."""
+    job["state"] = "cancelled"
+    job["phase"] = "cancelled"
+    job["finished_at"] = time.time()
+    job["error"] = None
+
+
+def cancel_archive_download(job_id: str) -> dict:
+    """Cancel a pending or running archive download and return its state.
+
+    A queued job is cancelled immediately. A running job moves to
+    ``cancelling``; its worker stops starting new frames, lets in-flight ones
+    finish, skips funpack/ingest and then settles on ``cancelled``. Files
+    already downloaded are left in place.
+    """
+    with _ARCHIVE_DOWNLOAD_LOCK:
+        job = _ARCHIVE_DOWNLOAD_JOBS.get(job_id)
+        if job is None:
+            raise LcoError("LCO archive download job not found", status=404)
+        state = job["state"]
+        if state in {"done", "error", "cancelled"}:
+            raise LcoError(f"LCO archive download job already {state}", status=409)
+        job["cancel_requested"] = True
+        if state == "pending":
+            _mark_archive_job_cancelled(job)
+        else:
+            job["state"] = "cancelling"
+        return _archive_download_snapshot(job)
+
+
 def _run_archive_download_job(job_id: str) -> None:
     with _ARCHIVE_DOWNLOAD_LOCK:
         job = _ARCHIVE_DOWNLOAD_JOBS.get(job_id)
         if job is None:
+            return
+        if job.get("cancel_requested") or job["state"] == "cancelled":
+            _mark_archive_job_cancelled(job)
             return
         job["state"] = "running"
         job["phase"] = "downloading"
@@ -1470,9 +1504,18 @@ def _run_archive_download_job(job_id: str) -> None:
                     if current is None:
                         return
                     current["results"].append(result)
+                    cancel_now = bool(current.get("cancel_requested"))
+                if cancel_now:
+                    # Frames already running finish; queued ones never start.
+                    for pending in futures:
+                        pending.cancel()
+                    break
         with _ARCHIVE_DOWNLOAD_LOCK:
             current = _ARCHIVE_DOWNLOAD_JOBS.get(job_id)
             if current is None:
+                return
+            if current.get("cancel_requested"):
+                _mark_archive_job_cancelled(current)
                 return
             current["phase"] = "funpacking"
             results = [dict(r) for r in current["results"]]
@@ -1510,6 +1553,16 @@ def _run_archive_download_job(job_id: str) -> None:
                         if current is None:
                             return
                         current["funpack_results"].append(result)
+                        cancel_now = bool(current.get("cancel_requested"))
+                    if cancel_now:
+                        for pending in futures:
+                            pending.cancel()
+                        break
+        with _ARCHIVE_DOWNLOAD_LOCK:
+            current = _ARCHIVE_DOWNLOAD_JOBS.get(job_id)
+            if current is not None and current.get("cancel_requested"):
+                _mark_archive_job_cancelled(current)
+                return
         processing_failed = download_failed or funpack_failed
         if not processing_failed and auto_ingest:
             _process_archive_datasets(job_id, frames)
@@ -1588,8 +1641,15 @@ def download_batch(frames: list[dict]) -> list[dict]:
 def start_archive_download(
     frames: list[dict], overwrite: bool = False, auto_ingest: bool = False,
     user_name: str | None = None,
+    server_side: bool = False,
 ) -> dict:
-    """Queue an LCO archive download in a dedicated worker and return its state."""
+    """Queue an LCO archive download in a dedicated worker and return its state.
+
+    ``server_side`` marks a frame list the server built itself (e.g. the ExoFOP
+    download's own archive search). The payload-size cap exists to bound
+    client-posted bodies, so it does not apply to those: a 3000+ frame night
+    would otherwise be refused for a body that never crossed the wire.
+    """
     if not isinstance(frames, list) or not frames:
         raise LcoError("no frames selected", status=400)
     if _ARCHIVE_DOWNLOAD_MAX_FRAMES > 0 and len(frames) > _ARCHIVE_DOWNLOAD_MAX_FRAMES:
@@ -1601,7 +1661,7 @@ def start_archive_download(
         raise LcoError("each frame must be an object", status=400)
     compact_frames = _compact_archive_frames(frames)
     payload_bytes = _archive_payload_bytes(compact_frames)
-    if payload_bytes > _ARCHIVE_DOWNLOAD_MAX_PAYLOAD_BYTES:
+    if not server_side and payload_bytes > _ARCHIVE_DOWNLOAD_MAX_PAYLOAD_BYTES:
         raise LcoError(
             f"Frame payload exceeds {_ARCHIVE_DOWNLOAD_MAX_PAYLOAD_BYTES} bytes",
             status=413,
@@ -1631,7 +1691,7 @@ def start_archive_download(
         _prune_archive_download_jobs(now, reserve_slots=1)
         active_for_user = sum(
             1 for existing in _ARCHIVE_DOWNLOAD_JOBS.values()
-            if existing.get("state") in {"pending", "running"}
+            if existing.get("state") in {"pending", "running", "cancelling"}
             and existing.get("user_name", "anonymous") == user_key
         )
         if active_for_user >= _ARCHIVE_DOWNLOAD_MAX_PER_USER:

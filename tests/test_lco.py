@@ -1873,6 +1873,22 @@ class ExofopTimeSeriesTest(unittest.TestCase):
         """
         self.assertEqual(exofop._site_from_tel("LCO-McD-1m (1.0 m)"), "elp")
         self.assertEqual(exofop._site_from_tel("LCO-McD (1.0 m)"), "elp")
+        self.assertEqual(exofop._site_from_tel("LCO-Teid-1m0 (1.0 m)"), "tfn")
+        self.assertEqual(exofop._site_from_tel("LCO-TEID (1.0 m)"), "tfn")
+        self.assertEqual(exofop._site_from_tel("LCO-HAL-M3 (2.0 m)"), "ogg")
+        self.assertEqual(exofop._site_from_tel("LCO-HAL-2m0 (2.0 m)"), "ogg")
+        self.assertEqual(exofop._site_from_tel("Whitin CDK700 (0.7 m)"), "")
+        for tstel, tscam, want in (
+            ("LCO-HAL-M3 (2.0 m)", "MUSCAT3", "muscat3"),
+            ("LCO-HAL-2m0 (2.0 m)", "MuSCAT3", "muscat3"),
+            ("LCO-McD (1.0 m)", "Sinistro", "sinistro"),
+            ("LCO-McD-1m0 (1.0 m)", "SINISTRO", "sinistro"),
+            ("LCO-Teid-1m0 (1.0 m)", "SINISTRO", "sinistro"),
+            ("LCO-TEID (1.0 m)", "Sinistro", "sinistro"),
+        ):
+            entry = {"tstel": tstel, "tscam": tscam}
+            self.assertEqual(exofop._instrument_from(entry), want, tstel)
+            self.assertTrue(exofop._site_from_tel(tstel), tstel)
         entry = {"tstel": "LCO-McD-1m (1.0 m)", "tscam": "SINISTRO"}
         self.assertEqual(exofop._instrument_from(entry), "sinistro")
 
@@ -1901,6 +1917,86 @@ class ExofopTimeSeriesTest(unittest.TestCase):
         with patch("muscat_db.exofop.catalog._sync_get", side_effect=RuntimeError("boom")):
             self.assertEqual(exofop.fetch_time_series("6715"), [])
         exofop._exofop_cache.clear()
+
+    def test_camera_names_parse_to_instrument(self):
+        cases = (
+            ("LCO-McD (1.0 m)", "Sinistro", "sinistro"),
+            ("LCO-CTIO-1m0 (1.0 m)", "SINISTRO", "sinistro"),
+            ("LCO-SAAO (1.0 m)", "fa15", "sinistro"),
+            ("LCO-TEID (1.0 m)", "FA11", "sinistro"),
+            ("LCO-HAL-M3 (2.0 m)", "MuSCAT3", "muscat3"),
+            ("LCO-COJ-2m0 (2.0 m)", "MuSCAT4", "muscat4"),
+            ("LCO-COJ-2m0 (2.0 m)", "MuSCAT 4", "muscat4"),
+            ("LCO-OGG-2m0 (2.0 m)", "muscat-3", "muscat3"),
+            ("OAO 1.88 m", "MuSCAT2", "muscat2"),
+            ("TCS 1.5 m", "MuSCAT2", "muscat2"),
+            ("OAO 1.88 m", "MuSCAT", "muscat"),
+        )
+        for tstel, tscam, want in cases:
+            got = exofop._instrument_from({"tstel": tstel, "tscam": tscam})
+            if want == "muscat":
+                # bare MuSCAT is not an LCO unit: no site/tel -> no inference
+                self.assertIn(got, ("muscat", ""), (tstel, tscam))
+            else:
+                self.assertEqual(got, want, (tstel, tscam))
+        # "FA" must not match inside unrelated words.
+        self.assertEqual(exofop._instrument_from({"tstel": "X", "tscam": "FAIRCHILD"}), "")
+
+    def test_is_lco_telescope(self):
+        for tstel in ("LCO-HAL-M3 (2.0 m)", "LCO-McD (1.0 m)", "LCO-Teid-1m0 (1.0 m)",
+                      "LCO-SAAO (1.0 m)", "LCO-CTIO (1.0 m)"):
+            self.assertTrue(exofop.is_lco_telescope(tstel), tstel)
+        for tstel in ("Whitin CDK700 (0.7 m)", "OAO 1.88 m", "TCS 1.5 m", ""):
+            self.assertFalse(exofop.is_lco_telescope(tstel), tstel)
+
+    def test_check_time_series_flags_lco(self):
+        lco_row = exofop.check_time_series_exists({"tstel": "LCO-HAL-M3 (2.0 m)", "tscam": "MuSCAT3"})
+        other = exofop.check_time_series_exists({"tstel": "Whitin CDK700 (0.7 m)", "tscam": "SBIG"})
+        self.assertTrue(lco_row["lco"])
+        self.assertFalse(other["lco"])
+
+    def test_filter_to_telescope_drops_other_instruments_and_sites(self):
+        rows = [
+            {"site_id": "elp", "telescope_id": "1m0a", "instrument_id": "fa16", "n": 1},
+            {"site_id": "elp", "telescope_id": "0m4a", "instrument_id": "sq36", "n": 2},
+            {"site_id": "cpt", "telescope_id": "1m0a", "instrument_id": "fa06", "n": 3},
+        ]
+        kept = exofop._filter_to_telescope(rows, "elp", "sinistro")
+        self.assertEqual([r["n"] for r in kept], [1])
+        self.assertEqual(exofop._filter_to_telescope(rows, "", ""), rows)
+
+    def test_resolve_tic_number_forms(self):
+        for name in ("TIC434398831", "TIC-434398831", "tic 434398831", "TIC_434398831"):
+            self.assertEqual(exofop.resolve_tic_number(name), "434398831", name)
+        for name in ("WASP-12", "TOI-6715", "", "TIC"):
+            self.assertIsNone(exofop.resolve_tic_number(name), name)
+
+    def test_fetch_time_series_by_tic_uses_numeric_id(self):
+        class _Resp:
+            def json(self):
+                return {"time_series": [{"tsid": "1"}]}
+        calls = []
+        def fake_get(url, **kwargs):
+            calls.append(url)
+            return _Resp()
+        exofop._exofop_cache.clear()
+        with patch("muscat_db.exofop.catalog._sync_get", side_effect=fake_get):
+            rows = exofop.fetch_time_series("", tic="434398831")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(
+            calls, ["https://exofop.ipac.caltech.edu/tess/target.php?id=434398831&json"]
+        )
+        exofop._exofop_cache.clear()
+
+    def test_build_report_falls_back_to_tic_when_not_a_toi(self):
+        with patch("muscat_db.exofop.resolve_toi_number", return_value=None), \
+                patch("muscat_db.exofop.fetch_time_series", return_value=[]) as fts:
+            r = exofop.build_time_series_report("TIC-434398831")
+        self.assertTrue(r["ok"])
+        self.assertIsNone(r["toi"])
+        self.assertEqual(r["tic"], "434398831")
+        fts.assert_called_once()
+        self.assertEqual(fts.call_args.kwargs["tic"], "434398831")
 
     def test_build_report_non_toi(self):
         with patch("muscat_db.exofop.resolve_toi_number", return_value=None):
