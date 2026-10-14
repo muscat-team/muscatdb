@@ -1971,8 +1971,13 @@ def _resolve_archive_coords(target: str) -> tuple[float, float, str] | None:
     # "TOI-5012.01" 404s, "TOI-5012" resolves). resolve_lco_key_project_name
     # is a no-op for an already-plain name, so the extra ".NN" strip below
     # only ever fires for a name it actually rewrote.
+    # SIMBAD rejects a ".NN" candidate suffix (see above), so a decorated name
+    # is asked for only in its suffix-stripped forms; a plain name goes as is.
+    simbad_names = candidates
+    if resolve_lco_key_project_name(target) != target.strip():
+        simbad_names = list(dict.fromkeys(re.sub(r"\.\d+$", "", c) for c in candidates))
     radec = None
-    for simbad_name in candidates:
+    for simbad_name in simbad_names:
         radec = exp_calc.resolve_target_coords(simbad_name)
         if radec:
             break

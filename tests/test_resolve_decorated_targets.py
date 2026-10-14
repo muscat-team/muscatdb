@@ -55,7 +55,8 @@ def test_falls_back_to_tic_on_simbad_when_catalogs_have_nothing(monkeypatch):
     monkeypatch.setattr(catalog.exp_calc, "resolve_target_coords", fake_simbad)
     res = catalog._resolve_archive_coords("TIC 434398831.11 (TOI 32.11)")
     assert res == (93.96, 16.02, "simbad")
-    assert "TOI 32" in asked and "TIC 434398831" in asked
+    # SIMBAD never sees a ".NN" candidate suffix.
+    assert asked == ["TOI 32", "TIC 434398831"]
 
 
 def test_unresolvable_decorated_name_is_none(monkeypatch):
