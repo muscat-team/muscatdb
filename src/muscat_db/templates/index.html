@@ -522,6 +522,7 @@
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({norm_name: value}),
           });
+          if (res.status === 403) throw new Error('only an admin may rename a target');
           if (!res.ok) throw new Error('HTTP ' + res.status);
           close(value);
         } catch (err) {

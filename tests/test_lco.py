@@ -1488,6 +1488,25 @@ class InferArchiveInstrumentTest(unittest.TestCase):
         frame = {"SITEID": "lsc", "TELID": "1m0a", "INSTRUME": "fa15"}
         self.assertEqual(lco.infer_archive_instrument(frame), "sinistro")
 
+    def test_sinistro_sophia_ep_camera_by_metadata_fields(self):
+        # SOPHIA cameras replace faXX with epXX (counting up from ep60) inside
+        # the same "1M0-SCICAM-SINISTRO" instrument. Real elp frame
+        # elp1m008-ep60-20261012-0106-e91.fits.fz: TELID=1m0a, INSTRUME=ep60,
+        # GAIN=1.0, SATURATE=286000, PIXSCALE=0.389. Must not be mistaken for
+        # MuSCAT's "ep" cameras, which live on 2m0a telescopes.
+        frame = {"SITEID": "elp", "TELID": "1m0a", "INSTRUME": "ep60"}
+        self.assertEqual(lco.infer_archive_instrument(frame), "sinistro")
+
+    def test_sinistro_sophia_ep_camera_by_filename_only(self):
+        frame = {"filename": "elp1m008-ep60-20261012-0106-e91.fits.fz"}
+        self.assertEqual(lco.infer_archive_instrument(frame), "sinistro")
+
+    def test_muscat_ep_camera_still_maps_to_2m0_instruments(self):
+        frame = {"SITEID": "ogg", "TELID": "2m0a", "INSTRUME": "ep02"}
+        self.assertEqual(lco.infer_archive_instrument(frame), "muscat3")
+        frame = {"SITEID": "coj", "TELID": "2m0a", "INSTRUME": "ep06"}
+        self.assertEqual(lco.infer_archive_instrument(frame), "muscat4")
+
     def test_0m4_frame_with_unrecognized_instrume_raises(self):
         # Neither "kb" (sbig) nor "sq" (qhy600) -- must fail loudly rather
         # than guess.

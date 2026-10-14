@@ -1219,13 +1219,12 @@ def _warn_restriction_gaps(db: str, proposal_id: str) -> None:
     """Say loudly what a new restriction does not yet cover."""
     from muscat_db import access
 
-    pending = access.pending_backfill_dates(db)
-    if pending:
-        detail = ", ".join(f"{inst}: {n}" for inst, n in sorted(pending.items()))
+    blank = access.blank_propid_frames(db)
+    if blank:
+        detail = ", ".join(f"{inst}: {n}" for inst, n in sorted(blank.items()))
         console.print(
-            "[bold yellow]WARNING: the PROPID backfill has not processed every date "
-            f"({detail} date(s) pending).[/]\n"
-            "[yellow]Frames on those dates carry an empty proposal_id, so any of "
+            f"[bold yellow]WARNING: some frames have no PROPID ({detail} frame(s)).[/]\n"
+            "[yellow]Those frames carry an empty proposal_id, so any of "
             f"them taken under {proposal_id} stay visible to everyone until "
             "`muscat-db backfill-propid` covers them.[/]"
         )

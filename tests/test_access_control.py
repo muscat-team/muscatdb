@@ -309,7 +309,6 @@ def test_writes_on_never_observed_name_keep_old_behavior(client, db):
     [
         ("delete", "/api/targets/HIDDENTGT/note", None),
         ("put", "/api/targets/HIDDENTGT/identified", {"is_identified": 1}),
-        ("put", "/api/targets/HIDDENTGT/norm-name", {"norm_name": "Other"}),
     ],
 )
 def test_other_writes_on_hidden_target_are_404(client, method, path, body):
@@ -318,6 +317,26 @@ def test_other_writes_on_hidden_target_are_404(client, method, path, body):
         kwargs["json"] = body
     resp = client.request(method.upper(), path, **kwargs)
     assert resp.status_code == 404
+
+
+@pytest.mark.parametrize("obj", ["OPENTGT", "HIDDENTGT", "NEVEROBSX"])
+def test_norm_name_rename_is_admin_only(client, db, obj):
+    """A rename moves the raw OBJECT into another target's group, so it is
+    admin-only (#228). Non-admins get the same 403 for a visible, a hidden and
+    a never-observed name: the status is no existence oracle."""
+    resp = client.put(
+        f"/api/targets/{obj}/norm-name", json={"norm_name": "Other"}, headers=_headers("alice")
+    )
+    assert resp.status_code == 403
+
+
+def test_admin_can_rename_a_target(client, db):
+    _set_admin(db, "root")
+    resp = client.put(
+        "/api/targets/HIDDENTGT/norm-name", json={"norm_name": "Other"}, headers=_headers("root")
+    )
+    assert resp.status_code == 200
+    assert resp.json()["norm_name"] == "Other"
 
 
 def test_admin_can_write_restricted_target_note(client, db):
@@ -392,18 +411,23 @@ def test_no_module_but_access_writes_the_access_tables():
 # ── CLI ─────────────────────────────────────────────────────────────────
 
 
-def test_cli_restrict_uses_observed_spelling_and_warns_about_backfill(tmp_path, monkeypatch):
+def test_cli_restrict_uses_observed_spelling_and_warns_about_blank_propid(tmp_path, monkeypatch):
     path = tmp_path / "cli.db"
     _build_db(str(path), restrict=False)
     monkeypatch.setenv("MUSCAT_DB_PATH", str(path))
     result = CliRunner().invoke(cli_app, ["access", "restrict", _OPEN.lower(), "-d", "embargo"])
     assert result.exit_code == 0, result.output
-    assert "backfill has not processed every date" in result.output
+    assert "no PROPID" in result.output
+    assert "muscat3: 1" in result.output
     rows = access.list_restrictions(str(path))
     assert [(r["proposal_id"], r["description"]) for r in rows] == [(_OPEN, "embargo")]
 
 
-def test_cli_restrict_is_quiet_about_backfill_once_complete(tmp_path, monkeypatch):
+def test_cli_restrict_warns_about_blank_propid_even_when_checkpoint_is_complete(
+    tmp_path, monkeypatch
+):
+    """The warning counts the frames that would leak, not the dates the
+    backfill checkpoint has not recorded (#144)."""
     import json
 
     path = tmp_path / "cli.db"
@@ -415,7 +439,29 @@ def test_cli_restrict_is_quiet_about_backfill_once_complete(tmp_path, monkeypatc
         (ckpt / f"propid_backfill_{inst}.json").write_text(json.dumps({"done": dates}))
     result = CliRunner().invoke(cli_app, ["access", "restrict", _OPEN])
     assert result.exit_code == 0, result.output
-    assert "backfill" not in result.output
+    assert "muscat3: 1" in result.output
+
+
+def test_cli_restrict_is_quiet_when_no_frame_lacks_propid(tmp_path, monkeypatch):
+    """No checkpoint at all (a night newer than the last backfill run), but
+    every frame carries a PROPID: nothing to warn about."""
+    path = tmp_path / "cli.db"
+    _build_db(str(path), restrict=False)
+    with sqlite3.connect(path) as conn:
+        conn.execute("UPDATE frames SET proposal_id = ? WHERE proposal_id = ''", (_OPEN,))
+    monkeypatch.setenv("MUSCAT_DB_PATH", str(path))
+    result = CliRunner().invoke(cli_app, ["access", "restrict", _OPEN])
+    assert result.exit_code == 0, result.output
+    assert "no PROPID" not in result.output
+
+
+def test_blank_propid_frames_ignores_instruments_without_propid(tmp_path):
+    """muscat/muscat2 never carry a PROPID, so a blank there is not a gap."""
+    path = tmp_path / "blank.db"
+    _build_db(str(path), restrict=False)
+    with sqlite3.connect(path) as conn:
+        conn.execute("UPDATE frames SET instrument = 'muscat' WHERE proposal_id = ''")
+    assert access.blank_propid_frames(str(path)) == {}
 
 
 def test_cli_grant_revoke_list_roundtrip(db):

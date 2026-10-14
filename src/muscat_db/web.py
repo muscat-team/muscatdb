@@ -73,6 +73,7 @@ from muscat_db import exposure as exp_calc
 from muscat_db.access import (
     NightVisibility,
     denied_proposal_ids_for,
+    is_admin_user,
     hidden_obsdates as _hidden_obsdates,
     object_hidden as _object_hidden,
     sql_not_denied as _sql_not_denied,
@@ -7138,10 +7139,16 @@ def api_set_identified(obj: str, payload: dict = Body(...)):
 
 @target_router.put("/{obj}/norm-name")
 def api_set_norm_name(obj: str, payload: dict = Body(...)):
+    db = _db_path()
+    # Admin only (#228): a rename moves the raw OBJECT into another target's
+    # group, which changes who else can see its frames. The check comes first
+    # so a non-admin gets the same 403 whether or not the target exists.
+    user = _CURRENT_USER.get()
+    if not user or not is_admin_user(db, user):
+        raise HTTPException(403, "only an admin may rename a target")
     norm_name = (payload.get("norm_name") or "").strip()
     if len(norm_name) > 200:
         raise HTTPException(400, "norm_name too long (max 200 chars)")
-    db = _db_path()
     _require_visible_object(db, obj)
     _set_norm_name_override(db, obj, norm_name)
     return JSONResponse({"ok": True, "object": obj, "norm_name": norm_name})
