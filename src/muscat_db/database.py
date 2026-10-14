@@ -160,6 +160,7 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash TEXT NOT NULL DEFAULT '',
     display_name  TEXT NOT NULL DEFAULT '',
     is_admin      INTEGER NOT NULL DEFAULT 0,
+    scoped        INTEGER NOT NULL DEFAULT 0,
     created_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_login    TEXT,
     settings      TEXT NOT NULL DEFAULT '{}'
@@ -389,6 +390,9 @@ _MIGRATIONS = [
     "ALTER TABLE frames ADD COLUMN proposal_id TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE summaries ADD COLUMN proposal_id TEXT NOT NULL DEFAULT ''",
     "CREATE INDEX IF NOT EXISTS idx_frames_proposal ON frames(proposal_id)",
+    # 2026-10-13: issue #202 -- a scoped viewer sees only their allowlisted
+    # proposals; users without the flag keep the #144 blocklist behaviour.
+    "ALTER TABLE users ADD COLUMN scoped INTEGER NOT NULL DEFAULT 0",
 ]
 
 
@@ -717,11 +721,9 @@ def _target_rows(
         where.append(f"object IN ({', '.join('?' for _ in objects)})")
         params.extend(sorted(objects))
     if exclude_proposals:
-        where.append(
-            "COALESCE(proposal_id, '') COLLATE NOCASE NOT IN "
-            f"({', '.join('?' for _ in exclude_proposals)})"
-        )
-        params.extend(sorted(exclude_proposals))
+        clause, clause_params = sql_not_denied(exclude_proposals)
+        where.append(clause)
+        params.extend(clause_params)
     cur = conn.execute(
         f"""SELECT
               object,
@@ -1351,16 +1353,45 @@ def clear_stale_date(db_path: str, instrument: str, obsdate: str) -> None:
     clear_all_caches()
 
 
+class ScopedDenied(frozenset):
+    """The denied set of a *scoped* viewer (issue #202).
+
+    Its members are every proposal id currently in the database that the
+    viewer may not see, plus ``''`` (frames without a PROPID), so code that
+    tests membership keeps working. ``allowed`` is the viewer's allowlist, and
+    SQL built from it is ``IN (allowed)`` instead of ``NOT IN (denied)``: a
+    proposal first ingested after this set was computed is hidden by default
+    rather than visible by default.
+    """
+
+    allowed: frozenset[str]
+
+    def __new__(cls, denied, allowed):
+        obj = super().__new__(cls, denied)
+        obj.allowed = frozenset(allowed)
+        return obj
+
+
 def sql_not_denied(denied: frozenset[str], column: str = "proposal_id") -> tuple[str, list[str]]:
     """``(clause, params)`` keeping only rows outside *denied* (issue #144).
 
     *denied* is upper-cased (see ``access.denied_proposal_ids_for``) and the
     match is case-insensitive, because ``summaries``/``frames`` keep the header
     spelling. Returns ``("1", [])`` for an empty set so callers can always
-    splice the clause in. *column* is a trusted identifier, never user input.
+    splice the clause in. A :class:`ScopedDenied` keeps only rows whose
+    proposal is on the allowlist, so blank and unseen proposals are dropped
+    (issue #202). *column* is a trusted identifier, never user input.
     """
     if not denied:
         return "1", []
+    if isinstance(denied, ScopedDenied):
+        if not denied.allowed:
+            return "0", []
+        placeholders = ",".join("?" for _ in denied.allowed)
+        return (
+            f"COALESCE({column}, '') COLLATE NOCASE IN ({placeholders})",
+            sorted(denied.allowed),
+        )
     placeholders = ",".join("?" for _ in denied)
     return (
         f"COALESCE({column}, '') COLLATE NOCASE NOT IN ({placeholders})",
@@ -1409,14 +1440,12 @@ def objects_with_restricted_proposal(
     """
     if not restricted:
         return set()
+    # A scoped viewer's "restricted" objects are those with a summary outside
+    # the allowlist, so reuse the visible clause negated.
+    visible, params = sql_not_denied(restricted)  # type: ignore[arg-type]
     with get_conn(db_path) as conn:
-        placeholders = ",".join("?" * len(restricted))
-        # summaries.proposal_id has no NOCASE collation, but the ids in
-        # restricted_proposals are admin-typed: match them case-insensitively.
         cur = conn.execute(
-            "SELECT DISTINCT object FROM summaries "
-            f"WHERE proposal_id COLLATE NOCASE IN ({placeholders})",
-            tuple(restricted),
+            f"SELECT DISTINCT object FROM summaries WHERE NOT ({visible})", params
         )
         return {r[0] for r in cur.fetchall() if r[0]}
 
@@ -2874,17 +2903,31 @@ def save_chat_message(
     }
 
 
-def get_recent_chat_messages(days: int | None = None, limit: int = 500, user: str | None = None) -> list[dict]:
+def get_recent_chat_messages(
+    days: int | None = None,
+    limit: int = 500,
+    user: str | None = None,
+    addressed_only: bool = False,
+) -> list[dict]:
     """Return persisted messages from the last ``days`` (oldest first), with
     reactions attached. ``limit`` caps the payload for a very busy window.
     When ``user`` is given, messages with a ``visible_to`` restriction are
-    filtered to only those addressed to that user (plus all public messages)."""
+    filtered to only those addressed to that user (plus all public messages).
+    ``addressed_only`` (a scoped viewer, issue #202) drops the public ones
+    too, leaving only messages addressed to ``user``."""
     path = db_path()
     window_days = CHAT_BACKFILL_DAYS if days is None else days
     since = time.time() - window_days * 86400
     with get_conn(path, row_factory=sqlite3.Row) as conn:
         _ensure_chat_schema(conn, path)
-        if user:
+        if user and addressed_only:
+            rows = conn.execute(
+                "SELECT * FROM chat_messages WHERE created_at >= ? "
+                "AND visible_to = ? "
+                "ORDER BY created_at DESC LIMIT ?",
+                (since, user, limit),
+            ).fetchall()
+        elif user:
             rows = conn.execute(
                 "SELECT * FROM chat_messages WHERE created_at >= ? "
                 "AND (visible_to IS NULL OR visible_to = ?) "

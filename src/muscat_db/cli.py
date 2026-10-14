@@ -1296,7 +1296,7 @@ def access_grant(
             "htpasswd add`, or has never logged in). Granting anyway.[/]"
         )
     restricted = {r["proposal_id"].upper() for r in access.list_restrictions(db)}
-    if proposal_id.upper() not in restricted:
+    if proposal_id.upper() not in restricted and not access.is_scoped(db, username):
         console.print(
             f"[yellow]{proposal_id} is not restricted, so this grant has no effect "
             "until it is.[/]"
@@ -1320,6 +1320,36 @@ def access_revoke(
         console.print(f"[yellow]{username} had no grant for {proposal_id}[/]")
         raise typer.Exit(1)
     console.print(f"[green]{username} revoked from {proposal_id}[/]")
+
+
+@access_app.command("scope")
+def access_scope(
+    username: str = typer.Argument(..., help="nginx username"),
+    off: bool = typer.Option(False, "--off", help="Return the user to blocklist behaviour"),
+):
+    """Make a user a scoped viewer: they see only the proposals granted to them
+    (`access grant`), and nothing else, including frames with no PROPID."""
+    from muscat_db import access
+    from muscat_db.database import db_path
+
+    db = db_path()
+    if access.is_admin_user(db, username):
+        console.print(f"[red]Error: '{username}' is an admin; admins are never scoped[/]")
+        raise typer.Exit(1)
+    changed = access.set_scoped(db, username, not off)
+    if off:
+        verb = "is no longer scoped" if changed else "was not scoped"
+        console.print(f"[green]{username} {verb}[/]")
+        return
+    console.print(
+        f"[green]{username} is scoped[/]" if changed else f"[yellow]{username} is already scoped[/]"
+    )
+    grants = access.list_grants(db, username)
+    if not grants:
+        console.print(
+            f"[yellow]{username} has no grants, so they see nothing. Add one with "
+            f"`muscat-db access grant {username} <PROPOSAL>`.[/]"
+        )
 
 
 @access_app.command("list")
