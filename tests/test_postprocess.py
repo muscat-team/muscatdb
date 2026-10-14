@@ -486,6 +486,45 @@ class TestClipBackupRestore:
         assert out["ok"], out
         assert self._original(run_dir) == reduced  # v2, never the pre-re-reduction v1
 
+    def _clip_then_fail(self, rdir):
+        """prose2 stand-in that rewrites the CSVs and then reports failure."""
+        clip = _fake_prose_clip(rdir)
+
+        def run(args):
+            clip(args)
+            return {"ok": False, "error": "figure step failed"}
+
+        return run
+
+    def test_restore_works_after_apply_that_rewrote_files_then_failed(
+        self, run_dir, monkeypatch
+    ):
+        original = self._original(run_dir)
+        monkeypatch.setattr(pp, "_run_sync", self._clip_then_fail(run_dir))
+
+        res = pp.postprocess(INST, DATE, TARGET, RUN, 5.0, 2, 5, apply=True)
+
+        assert res["ok"] is False
+        assert self._original(run_dir) != original  # the failed apply did rewrite them
+
+        out = pp.restore_clip(INST, DATE, TARGET, RUN)
+
+        assert out["ok"], out
+        assert self._original(run_dir) == original
+
+    def test_retry_after_failed_rewriting_apply_keeps_the_original_snapshot(
+        self, run_dir, monkeypatch
+    ):
+        original = self._original(run_dir)
+        monkeypatch.setattr(pp, "_run_sync", self._clip_then_fail(run_dir))
+        pp.postprocess(INST, DATE, TARGET, RUN, 5.0, 2, 5, apply=True)
+
+        monkeypatch.setattr(pp, "_run_sync", _fake_prose_clip(run_dir))
+        pp.postprocess(INST, DATE, TARGET, RUN, 3.0, 2, 5, apply=True)
+
+        assert pp.restore_clip(INST, DATE, TARGET, RUN)["ok"]
+        assert self._original(run_dir) == original
+
     def test_restore_blocked_while_job_running(self, run_dir, monkeypatch):
         monkeypatch.setattr(pp, "_run_sync", _fake_prose_clip(run_dir))
         pp.postprocess(INST, DATE, TARGET, RUN, 5.0, 2, 5, apply=True)

@@ -451,7 +451,11 @@ def postprocess(
         preview_png = _read_preview(preview_path)
 
     result = _normalize(report, preview_png=preview_png)
-    if apply and report.get("ok") and report.get("applied"):
+    if apply:
+        # Record the on-disk state after every attempt that reached prose2,
+        # failed or not: a failure after the CSVs were rewritten would otherwise
+        # leave the manifest at the unclipped state, making restore refuse and a
+        # retry replace the good snapshot with half-clipped files.
         try:
             _write_manifest(Path(context["results_dir"]))
         except OSError as exc:
