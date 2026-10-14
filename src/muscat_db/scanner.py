@@ -186,7 +186,11 @@ def _read_fits_header_keys(filepath: str, keys: list[str]) -> dict[str, str]:
 
 def _process_single_file(filepath: str, inst: InstrumentConfig) -> dict[str, str] | None:
     fname = os.path.basename(filepath).removesuffix(".fits")
-    kv = _read_fits_header_keys(filepath, inst.keys)
+    keys = [*inst.keys, "TELID"] if inst.telescope_prefixes else inst.keys
+    kv = _read_fits_header_keys(filepath, keys)
+    telid = kv.get("TELID", "").strip().lower()
+    if telid and not telid.startswith(inst.telescope_prefixes):
+        return None
     mjd_key = "MJD-OBS" if inst.use_alt_ut_key else "MJD-STRT"
     ut_key = "UTSTART" if inst.use_alt_ut_key else "EXP-STRT"
     try:
