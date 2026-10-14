@@ -322,15 +322,19 @@ def build_status_cmd(
     """Report the age of the last build-db; exit 1 if stale or unknown (#237)."""
     age = build_age(db)
     if age is None:
-        console.print(f"[red]No last_build_at in {db}: cannot tell when it was last built[/]")
+        console.print(
+            f"[red]No last_build_at in {db}: cannot tell when it was last built[/]",
+            soft_wrap=True,
+        )
         raise typer.Exit(1)
     hours = age.total_seconds() / 3600
     if hours > max_age_hours:
         console.print(
-            f"[red]{db} was last built {hours:.1f} h ago (limit {max_age_hours:g} h)[/]"
+            f"[red]{db} was last built {hours:.1f} h ago (limit {max_age_hours:g} h)[/]",
+            soft_wrap=True,
         )
         raise typer.Exit(1)
-    console.print(f"[green]{db} was last built {hours:.1f} h ago[/]")
+    console.print(f"[green]{db} was last built {hours:.1f} h ago[/]", soft_wrap=True)
 
 
 @app.command(name="scan-failures", cls=_Cmd)
