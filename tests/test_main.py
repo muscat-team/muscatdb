@@ -220,6 +220,40 @@ class TestScanner:
             files.append(path)
         return files
 
+    def _sinistro_frame(self, tmp_data, obsdate, name, telid):
+        ddir = f"{tmp_data}/sinistro/{obsdate}"
+        os.makedirs(ddir, exist_ok=True)
+        header = {
+            "OBJECT": "TEST", "EXPTIME": 10.0, "FILTER": "gp",
+            "RA": "12:00:00", "DEC": "+00:00:00",
+            "MJD-OBS": 60000.0, "UTSTART": "01:00:00", "CONFMODE": "full_frame",
+        }
+        if telid is not None:
+            header["TELID"] = telid
+        return _make_fits(f"{ddir}/{name}", header)
+
+    def test_sinistro_scan_skips_frames_from_another_telescope(self, tmp_obslog, tmp_data):
+        # 2m0 MuSCAT frames downloaded into the Sinistro folder (3,471 rows in
+        # production, filed under two instruments) must not be scanned as sinistro.
+        from muscat_db.scanner import scan_date
+        obsdate = "231008"
+        self._sinistro_frame(tmp_data, obsdate, "coj1m011-fa12-20231008-0132-e91.fits", "1m0a")
+        self._sinistro_frame(tmp_data, obsdate, "coj2m002-ep06-20231008-0228-e91.fits", "2m0a")
+
+        result = scan_date("sinistro", obsdate, max_workers=1)
+
+        assert result["per_ccd"] == {0: 1}
+        with open(f"{tmp_obslog}/sinistro/{obsdate}/obslog-sinistro-{obsdate}-ccd0.csv") as f:
+            frames = [r["FRAME"] for r in csv.DictReader(f)]
+        assert frames == ["coj1m011-fa12-20231008-0132-e91"]
+
+    def test_sinistro_scan_keeps_frames_without_a_telid(self, tmp_obslog, tmp_data):
+        # An absent header keyword is not evidence of another telescope.
+        from muscat_db.scanner import scan_date
+        self._sinistro_frame(tmp_data, "210519", "coj1m011-fa12-20210519-0001-e91.fits", None)
+
+        assert scan_date("sinistro", "210519", max_workers=1)["per_ccd"] == {0: 1}
+
     @pytest.mark.parametrize("inst_name,ccd,nfiles", [
         ("muscat", 0, 3),
         ("muscat", 2, 2),

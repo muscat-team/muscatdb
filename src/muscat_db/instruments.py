@@ -20,6 +20,12 @@ class InstrumentConfig:
     # muscat/muscat2: their header RA/Dec is only the TCS's own belief about
     # where it was pointed, never independently verified against the sky.
     has_wcs: bool = True
+    # Header TELID prefixes this instrument's frames carry ("1m0" for sinistro).
+    # Only for instruments whose data directory is not narrowed by a filename
+    # prefix: a frame from another telescope filed in that directory (a whole-
+    # night archive download) would otherwise be scanned as this instrument. A
+    # frame with no TELID is kept; an absent keyword is not evidence.
+    telescope_prefixes: tuple[str, ...] = ()
 
     @property
     def data_dir(self) -> str:
@@ -115,6 +121,7 @@ SINISTRO = InstrumentConfig(
     focus_label="FOCUS (mm)",
     airmass_key="AIRMASS",
     use_alt_ut_key=True,
+    telescope_prefixes=("1m0",),
 )
 
 # LCO 0.4m network. Archival-only: SBIG STL-6303 CCDs, retired -- no LCO API
