@@ -5364,6 +5364,7 @@ def api_lco_archive_exofop(
             "ok": True,
             "match_mode": "exofop",
             "toi": report["toi"],
+            "tic": report.get("tic"),
             "time_series": report["time_series"],
             "total": report["total"],
         }
@@ -5399,6 +5400,8 @@ def api_lco_archive_exofop_download(request: Request, payload: dict = Body(...))
         reduction_level = str(payload.get("reduction_level") or "91")
         rows = exofop.archive_search_by_target_date(
             target, tsdate, reduction_level=reduction_level, user_name=_request_user(request),
+            site=str(payload.get("site") or "").strip(),
+            instrument=str(payload.get("exofop_instrument") or "").strip(),
         )
         if not rows:
             return JSONResponse(
@@ -5414,6 +5417,7 @@ def api_lco_archive_exofop_download(request: Request, payload: dict = Body(...))
             overwrite=bool(payload.get("overwrite")),
             auto_ingest=True,
             user_name=request.state.user,
+            server_side=True,
         )
         _persist_lco_archive_download_row(_lco_archive_download_row(job))
         return JSONResponse({"ok": True, **job})
@@ -5458,6 +5462,29 @@ def api_lco_archive_download(request: Request, payload: dict = Body(...)):
         return JSONResponse({"ok": True, "results": results})
     except lco.LcoError as e:
         return _lco_error_response(e)
+
+
+@lco_router.post("/archive/download/{job_id}/cancel", response_class=JSONResponse)
+def api_lco_archive_download_cancel(job_id: str):
+    try:
+        job = lco.cancel_archive_download(job_id)
+        _persist_lco_archive_download_row(_lco_archive_download_row(job))
+        return JSONResponse({"ok": True, **job})
+    except lco.LcoError as e:
+        return _lco_error_response(e)
+
+
+@lco_router.get("/archive/downloads", response_class=JSONResponse)
+def api_lco_archive_downloads():
+    """Live archive-download jobs of this server process, newest first.
+
+    Light per-job rows (no frame/result lists) for pages that mirror download
+    state, e.g. the ExoFOP obslog table on the LCO archive page.
+    """
+    rows = _visible_jobs([_lco_archive_download_row(job) for job in lco.archive_download_jobs()])
+    keys = ("key", "run_id", "state", "inst", "date", "target", "run_name",
+            "error_desc", "started_at", "user_name")
+    return JSONResponse({"ok": True, "jobs": [{k: r.get(k) for k in keys} for r in rows]})
 
 
 @lco_router.get("/archive/download/{job_id}", response_class=JSONResponse)
@@ -6525,12 +6552,36 @@ def _lco_archive_download_rows() -> list[dict]:
     return rows
 
 
+def _orphaned_lco_archive_row(row: dict) -> dict:
+    """Terminal copy of a persisted in-flight row whose worker thread is gone.
+
+    Archive downloads run on in-process threads, so a server restart (or a
+    ``--reload``) abandons them while their persisted row still says
+    ``running``; nothing would ever move it on.
+    """
+    out = dict(row)
+    if row.get("state") == "cancelling":
+        out["state"] = "cancelled"
+        return out
+    out["state"] = "error"
+    out["error_desc"] = "Interrupted: the server restarted while this download was running"
+    return out
+
+
 def _jobs_with_lco_archive_rows() -> list[dict]:
+    live = _lco_archive_download_rows()
+    live_keys = {row["key"] for row in live}
     merged: dict[str, dict] = {}
     for job in get_job_store().all():
-        row = _adapt_persisted_lco_archive_row(job) if job.get("type") == "lco_archive_download" else job
+        if job.get("type") != "lco_archive_download":
+            merged[job["key"]] = job
+            continue
+        row = _adapt_persisted_lco_archive_row(job)
+        if row.get("state") in ("running", "pending", "cancelling") and row["key"] not in live_keys:
+            row = _orphaned_lco_archive_row(row)
+            _persist_lco_archive_download_row(row)
         merged[row["key"]] = row
-    for row in _lco_archive_download_rows():
+    for row in live:
         merged[row["key"]] = row
     return list(merged.values())
 

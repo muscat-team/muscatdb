@@ -40,6 +40,11 @@
         data-search="{{ (j.target + ' ' + (j.run_name or '') + ' ' + j.inst + ' ' + j.date + ' ' + j.type + ' ' + (j.user_name or '') + ' ' + (j.details or '')) | lower }}">
       {% if j.type == 'lco_archive_download' %}
       <td class="job-actions lco-actions-cell">
+        {% if j.state == 'running' or j.state == 'pending' %}
+          <button class="btn sm danger" data-key="{{ j.key }}" data-type="lco_archive_download" data-run="{{ j.run_id }}" data-job-action="cancel">Cancel</button>
+        {% elif j.state == 'cancelling' %}
+          <button class="btn sm" disabled="">Cancelling…</button>
+        {% endif %}
         {% if j.photometry_url %}
           <a class="btn sm" href="{{ j.photometry_url }}" title="Open this dataset in Photometry" aria-label="Open this dataset in Photometry">🔭</a>
         {% endif %}
@@ -552,6 +557,14 @@
       } else {
         row.setAttribute('data-lco-followup-ready', '0');
       }
+      if (state === 'running' || state === 'pending') {
+        td.appendChild(actionButton('Cancel', 'btn sm danger', 'cancel',
+          {key: key, type: type, run: runId}));
+      } else if (state === 'cancelling') {
+        var busy = actionButton('Cancelling…', 'btn sm', '', {});
+        busy.disabled = true;
+        td.appendChild(busy);
+      }
       var hideLco = actionButton('Hide', 'btn sm hide-btn', 'hide', {key: key});
       hideLco.title = 'Hide this row';
       td.appendChild(hideLco);
@@ -755,7 +768,10 @@
     var target = btn.getAttribute('data-target');
     var runId  = btn.getAttribute('data-run') || '';
     var url, body;
-    if (type === 'ttv_fit') {
+    if (type === 'lco_archive_download') {
+      url = '/api/lco/archive/download/' + encodeURIComponent(runId) + '/cancel';
+      body = '{}';
+    } else if (type === 'ttv_fit') {
       url = '/api/ttv-fit/cancel';
       body = JSON.stringify({ target: target, run_name: runId });
     } else if (type === 'transit_fit') {
