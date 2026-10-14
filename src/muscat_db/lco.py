@@ -1477,6 +1477,21 @@ def cancel_archive_download(job_id: str) -> dict:
         return _archive_download_snapshot(job)
 
 
+def delete_archive_download(job_id: str) -> None:
+    """Forget a finished archive download held in this process's memory.
+
+    Only terminal jobs may go: a pending/running one still has a worker.
+    Absent jobs are a no-op (e.g. after a restart only the DB row remains).
+    """
+    with _ARCHIVE_DOWNLOAD_LOCK:
+        job = _ARCHIVE_DOWNLOAD_JOBS.get(job_id)
+        if job is None:
+            return
+        if job["state"] not in {"done", "error", "cancelled"}:
+            raise LcoError(f"LCO archive download job is still {job['state']}", status=409)
+        _ARCHIVE_DOWNLOAD_JOBS.pop(job_id, None)
+
+
 def _run_archive_download_job(job_id: str) -> None:
     with _ARCHIVE_DOWNLOAD_LOCK:
         job = _ARCHIVE_DOWNLOAD_JOBS.get(job_id)

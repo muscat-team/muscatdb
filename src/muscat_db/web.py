@@ -6652,8 +6652,13 @@ def jobs_page():
     all_jobs = _visible_jobs(all_jobs)
     all_jobs.sort(key=lambda j: j.get("started_at", 0), reverse=True)
 
+    stored_keys = _stored_job_keys()
+    user = _CURRENT_USER.get()
+    is_admin = _jobs_user_is_admin(user)
     for j in all_jobs:
         j["elapsed"] = _live_elapsed(j)
+        j["stored"] = j["key"] in stored_keys
+        j["can_delete"] = j["stored"] and _may_delete_job(j, user, is_admin)
 
     counts = {"running": 0, "done": 0, "error": 0, "cancelled": 0, "pending": 0}
     for j in all_jobs:
@@ -6663,7 +6668,7 @@ def jobs_page():
         if s in counts:
             counts[s] += 1
 
-    return _render("jobs.html", jobs=all_jobs, counts=counts)
+    return _render("jobs.html", jobs=all_jobs, counts=counts, is_admin=is_admin)
 
 
 _last_running: set[str] = set()
@@ -6789,6 +6794,79 @@ def ttv_job_log(target: str, run: str = ""):
     if path is None or _ttv_target_hidden(target):
         raise HTTPException(404, "log not found")
     return FileResponse(str(path))
+
+
+_JOB_TERMINAL_STATES = frozenset({"done", "error", "cancelled"})
+
+
+def _jobs_user_is_admin(user: str | None) -> bool:
+    return bool(user) and is_admin_user(_db_path(), user)
+
+
+def _may_delete_job(job: dict, user: str | None, is_admin: bool) -> bool:
+    """A finished job may be deleted by its owner or an admin.
+
+    Unauthenticated (local) use is the ``anonymous`` user, which is also what
+    jobs started without a user are recorded under.
+    """
+    if job.get("state") not in _JOB_TERMINAL_STATES:
+        return False
+    if is_admin:
+        return True
+    owner = (job.get("user_name") or "anonymous").strip() or "anonymous"
+    return owner == ((user or "anonymous").strip() or "anonymous")
+
+
+def _stored_job_keys() -> set[str]:
+    """Keys of rows that live in the job store (as shown on the Jobs page).
+
+    Rows derived from disk, e.g. fits found outside the web UI, have no stored
+    record to delete.
+    """
+    keys: set[str] = set()
+    for job in get_job_store().all():
+        if job.get("type") == "lco_archive_download":
+            keys.add(_adapt_persisted_lco_archive_row(job)["key"])
+        else:
+            keys.add(job["key"])
+    return keys
+
+
+@jobs_router.post("/delete", response_class=JSONResponse)
+def jobs_delete(payload: dict = Body(...)):
+    """Delete a finished job's record. Output files are not touched.
+
+    Only terminal jobs, and only by their owner or an admin. A live LCO
+    archive download is also dropped from this process's in-memory list so it
+    does not reappear.
+    """
+    key = (payload.get("key") or "").strip()
+    if not key:
+        raise HTTPException(400, "job key required")
+    visible = _visible_jobs(_jobs_with_lco_archive_rows())
+    job = next((j for j in visible if j["key"] == key), None)
+    if job is None:
+        raise HTTPException(404, "job not found")
+    if job.get("state") not in _JOB_TERMINAL_STATES:
+        raise HTTPException(409, "only finished jobs can be deleted")
+    user = _CURRENT_USER.get()
+    if not _may_delete_job(job, user, _jobs_user_is_admin(user)):
+        raise HTTPException(403, "only the job's owner or an admin may delete it")
+    store = get_job_store()
+    if job.get("type") == "lco_archive_download":
+        try:
+            lco.delete_archive_download(str(job.get("run_id") or key.split(":", 1)[-1]))
+        except lco.LcoError as e:
+            return _lco_error_response(e)
+        for persisted in store.all():
+            if (
+                persisted.get("type") == "lco_archive_download"
+                and _adapt_persisted_lco_archive_row(persisted)["key"] == key
+            ):
+                store.delete(persisted["key"])
+    else:
+        store.delete(key)
+    return JSONResponse({"ok": True, "key": key})
 
 
 @jobs_router.post("/rerun")
