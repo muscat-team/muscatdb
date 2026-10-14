@@ -288,12 +288,14 @@ def _snapshot_unclipped(rdir: Path) -> None:
     when the run's files changed since the last clip (a re-reduction), because
     restoring it would then bring back stale data. Written to a ``.part``
     directory and renamed, so a crash never leaves a half-filled backup that
-    restore would trust.
+    restore would trust. The manifest is written with the snapshot (the
+    fingerprint of the unclipped files), so an apply that fails after
+    snapshotting still leaves a backup a re-reduction can be detected against.
+    A missing or unreadable manifest is treated as stale.
     """
     final = _backup_dir(rdir)
     if final.is_dir():
-        manifest = _read_manifest(rdir)
-        if manifest is None or manifest == _fingerprint(rdir):
+        if _read_manifest(rdir) == _fingerprint(rdir):
             return
         shutil.rmtree(final)
     part = rdir / (_BACKUP_DIRNAME + ".part")
@@ -302,6 +304,7 @@ def _snapshot_unclipped(rdir: Path) -> None:
     try:
         for src in _tracked_files(rdir):
             shutil.copy2(src, part / src.name)
+        (part / _MANIFEST_NAME).write_text(json.dumps(_fingerprint(rdir)))
         part.rename(final)
     except OSError:
         shutil.rmtree(part, ignore_errors=True)

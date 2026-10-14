@@ -469,6 +469,23 @@ class TestClipBackupRestore:
         assert pp.restore_clip(INST, DATE, TARGET, RUN)["ok"]
         assert self._original(run_dir) == reduced
 
+    def test_failed_apply_then_rereduction_replaces_stale_snapshot(self, run_dir, monkeypatch):
+        # an apply that snapshots and then fails leaves a backup with no clip manifest
+        monkeypatch.setattr(pp, "_run_sync", lambda a: _ok_report())  # applied: False
+        pp.postprocess(INST, DATE, TARGET, RUN, 5.0, 2, 5, apply=True)
+        assert (run_dir / ".clip_backup").is_dir()
+        # the run is re-reduced (v2), then clipped successfully
+        for p in run_dir.glob("*.csv"):
+            p.write_text("BJD_TDB,Flux,Err\n2460900.1,1.0,0.001\n2460900.2,1.0,0.001\n")
+        reduced = self._original(run_dir)
+        monkeypatch.setattr(pp, "_run_sync", _fake_prose_clip(run_dir))
+        pp.postprocess(INST, DATE, TARGET, RUN, 5.0, 2, 5, apply=True)
+
+        out = pp.restore_clip(INST, DATE, TARGET, RUN)
+
+        assert out["ok"], out
+        assert self._original(run_dir) == reduced  # v2, never the pre-re-reduction v1
+
     def test_restore_blocked_while_job_running(self, run_dir, monkeypatch):
         monkeypatch.setattr(pp, "_run_sync", _fake_prose_clip(run_dir))
         pp.postprocess(INST, DATE, TARGET, RUN, 5.0, 2, 5, apply=True)
