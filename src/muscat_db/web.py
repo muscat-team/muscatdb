@@ -74,6 +74,7 @@ from muscat_db.access import (
     NightVisibility,
     denied_proposal_ids_for,
     hidden_obsdates as _hidden_obsdates,
+    is_denied as _is_denied,
     object_hidden as _object_hidden,
     sql_not_denied as _sql_not_denied,
 )
@@ -145,6 +146,7 @@ from muscat_db.catalog import (
 )
 from muscat_db.database import (
     _apply_schema as _apply_database_schema,
+    ScopedDenied,
     UserSettingsError,
     ensure_user,
     get_conn,
@@ -731,7 +733,10 @@ def _visible_obsdates(db: str, inst: str, denied: frozenset[str]) -> list[str]:
     """Date picker for the photometry and transit-fit pages: obslog nights
     plus nights with products on disk, minus nights the viewer may not see."""
     date_set = {d["obsdate"] for d in _get_dates(db, inst, denied=denied)}
-    date_set.update(phot.output_dates(inst))
+    # A scoped viewer fails closed: a product night with no summaries cannot be
+    # tied to an allowlisted proposal, so only obslog nights are offered.
+    if not isinstance(denied, ScopedDenied):
+        date_set.update(phot.output_dates(inst))
     date_set -= _hidden_obsdates(db, inst, denied)
     return sorted(date_set, reverse=True)
 
@@ -4514,6 +4519,10 @@ def api_lco_clone(ident: str, request: Request):
         # Windows are date-specific and regenerated for a new epoch; ``requests``
         # is local monitoring bookkeeping (carries the old windows too), not a
         # form field. Drop both so a clone starts from a clean, future-dated slate.
+        if _is_denied(params.get("proposal"), _viewer_denied()):
+            return JSONResponse(
+                {"ok": False, "error": "Request not found"}, status_code=404
+            )
         params.pop("windows", None)
         params.pop("requests", None)
         return JSONResponse({"ok": True, "params": params, "source": source})
@@ -5174,7 +5183,11 @@ def api_lco_split_submit(request: Request, payload: dict = Body(...)):
 @lco_router.get("/monitored-requests", response_class=JSONResponse)
 def api_lco_monitored_requests():
     """Return locally persisted scheduler requests and pipeline progress."""
-    return JSONResponse({"ok": True, "requests": lco_monitor.list_requests()})
+    denied = _viewer_denied()
+    rows = [
+        r for r in lco_monitor.list_requests() if not _is_denied(r.get("proposal"), denied)
+    ]
+    return JSONResponse({"ok": True, "requests": rows})
 
 
 def _require_own_archive_token(request: Request) -> None:
@@ -6818,7 +6831,10 @@ def _legacy_artifact_hidden(inst: str, date: str, name: str) -> bool:
     """Legacy (pre-run-dir) products sit directly under the night as
     ``<target>_<inst>_...``; hide those whose target the viewer may not see.
     Night-level files such as calibration masters carry no target."""
-    hidden = _night_visibility().hidden_objects(inst, date)
+    nights = _night_visibility()
+    if nights.unknown_night(inst, date):
+        return True
+    hidden = nights.hidden_objects(inst, date)
     stem = name.casefold()
     return any(stem.startswith(obj + "_") for obj in hidden)
 

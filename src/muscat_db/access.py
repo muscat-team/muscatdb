@@ -188,10 +188,20 @@ class NightVisibility:
             ]
         return self._rows[key]
 
+    def unknown_night(self, instrument: str, obsdate: str) -> bool:
+        """True for a scoped viewer on a night with no summaries at all.
+
+        Nothing on such a night can be tied to an allowlisted proposal, so a
+        scoped viewer fails closed; other viewers keep the old behaviour.
+        """
+        return isinstance(self.denied, ScopedDenied) and not self._night(instrument, obsdate)
+
     def hidden(self, instrument: str, obsdate: str, target: str) -> bool:
         """True when the viewer may not see *target*'s data on this night."""
         if not self.denied:
             return False
+        if self.unknown_night(instrument, obsdate):
+            return True
         rows = self._night(instrument, obsdate)
         if all(visible for _, visible in rows):
             return False
@@ -211,6 +221,8 @@ class NightVisibility:
         """
         if not self.denied:
             return False
+        if self.unknown_night(instrument, obsdate):
+            return True
         return any(not visible for _, visible in self._night(instrument, obsdate))
 
     def hidden_objects(self, instrument: str, obsdate: str) -> set[str]:

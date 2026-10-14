@@ -293,3 +293,41 @@ def test_scoped_viewer_with_no_grant_sees_no_nights(client, db):
     hidden = _get(client, "/sinistro/260101", user="andrew").text
     never = _get(client, "/sinistro/991231", user="andrew").text
     assert hidden.replace("260101", "991231") == never
+
+
+def test_scoped_viewer_fails_closed_on_a_night_with_no_summaries(db, monkeypatch):
+    """A product night nobody ingested cannot be tied to an allowlisted
+    proposal, so a scoped viewer must not see it (review of #230)."""
+    from muscat_db.access import NightVisibility
+
+    _scoped(db, _OPEN)
+    scoped = web.denied_proposal_ids_for(db, "andrew")
+    nights = NightVisibility(db, scoped)
+    assert nights.unknown_night("sinistro", "260199")
+    assert nights.hidden("sinistro", "260199", "ANY")
+    assert nights.night_has_denied("sinistro", "260199")
+    assert not nights.hidden("sinistro", "260101", "OPENTGT")
+
+    monkeypatch.setattr(web.phot, "output_dates", lambda inst: ["260199"])
+    assert "260199" not in web._visible_obsdates(db, "sinistro", scoped)
+    # An unrestricted viewer keeps the pre-#202 behaviour.
+    assert "260199" in web._visible_obsdates(db, "sinistro", frozenset({"X"}))
+    assert not NightVisibility(db, frozenset({"X"})).unknown_night("sinistro", "260199")
+
+
+def test_scoped_viewer_cannot_read_or_clone_other_proposals_lco_requests(client, db, monkeypatch):
+    _scoped(db, _OPEN)
+    rows = [
+        {"request_id": 1, "proposal": _OPEN, "target": "OPENTGT"},
+        {"request_id": 2, "proposal": "NOT-GRANTED", "target": "HIDDENTGT"},
+        {"request_id": 3, "proposal": "", "target": "BLANK"},
+    ]
+    monkeypatch.setattr(web.lco_monitor, "list_requests", lambda *a, **k: rows)
+    listed = _get(client, "/api/lco/monitored-requests", user="andrew").json()["requests"]
+    assert [r["request_id"] for r in listed] == [1]
+
+    payloads = {1: {"proposal": _OPEN}, 2: {"proposal": "NOT-GRANTED"}}
+    monkeypatch.setattr(web.lco_monitor, "get_request_payload", lambda i, *a, **k: payloads.get(i))
+    assert _get(client, "/api/lco/clone/1", user="andrew").json()["ok"] is True
+    denied = client.get("/api/lco/clone/2", headers=_headers("andrew"))
+    assert denied.status_code == 404

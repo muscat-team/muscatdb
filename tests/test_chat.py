@@ -586,6 +586,40 @@ def test_shared_room_broadcasts_go_to_the_public_room_only(sio_harness, monkeypa
     assert broadcasts and all(kw.get("room") == chat._PUBLIC_ROOM for kw in broadcasts)
 
 
+def test_mentions_and_broadcast_pings_skip_scoped_users(sio_harness, monkeypatch):
+    """A mention carries the shared-room text, so a scoped user must not get it
+    (review of #230)."""
+    import asyncio
+
+    _as_user(monkeypatch, "alice")
+    monkeypatch.setattr(chat, "_user_is_scoped", lambda name: name == "andrew")
+    monkeypatch.setattr(chat, "_known_users_map", lambda: {"bob": "bob", "andrew": "andrew"})
+    monkeypatch.setattr(chat, "_users_by_sid", {"s1": "andrew", "s2": "bob", "s3": "alice"})
+    monkeypatch.setattr(
+        chat.db, "save_chat_message", lambda user, text, **k: {"id": 1, "user": user, "text": text}
+    )
+    asyncio.run(chat.message("sid-1", {"text": "@andrew @bob HIDDENTGT looks odd"}))
+    asyncio.run(chat.message("sid-1", {"text": "@all HIDDENTGT again"}))
+    asyncio.run(chat.message("sid-1", {"text": "/me checks HIDDENTGT @andrew"}))
+    rooms = [kw.get("room") for event, _p, kw in sio_harness.emits if event == "mention"]
+    assert "user:andrew" not in rooms
+    assert "user:bob" in rooms
+
+
+def test_scoped_viewer_cannot_reach_the_public_room_with_test_and_bot(sio_harness, monkeypatch):
+    import asyncio
+
+    _as_user(monkeypatch, "andrew")
+
+    async def _scoped(_sid):
+        return True
+
+    monkeypatch.setattr(chat, "_session_scoped", _scoped)
+    asyncio.run(chat.message("sid-1", {"text": "@test @bot HIDDENTGT"}))
+    assert sio_harness.events() == ["chat_error"]
+    assert not [kw for e, _p, kw in sio_harness.emits if kw.get("room") == chat._PUBLIC_ROOM]
+
+
 def test_addressed_only_history_drops_public_messages(chat_db):
     save_chat_message("alice", "public note", kind="user")
     save_chat_message("system", "Photometry for X done", kind="system", visible_to="andrew")

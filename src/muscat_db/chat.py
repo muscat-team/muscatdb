@@ -187,6 +187,12 @@ def _user_is_scoped(user: str | None) -> bool:
         return True
 
 
+def _unscoped(names) -> list[str]:
+    """*names* minus scoped viewers: a mention carries the shared-room text, so
+    it must never reach a user who has no part in that room."""
+    return [n for n in names if not _user_is_scoped(n)]
+
+
 # ----- connection lifecycle ------------------------------------------------
 @sio.event
 async def connect(sid, environ):
@@ -250,7 +256,11 @@ async def message(sid, data):
 
     # A scoped viewer has no part in the shared room; only the private @bot
     # exchange below is open to them.
-    if await _session_scoped(sid) and not chat_agent.addressed(text):
+    # ``@test`` is checked first because that branch broadcasts to the public
+    # room even when the text also contains ``@bot``.
+    if await _session_scoped(sid) and (
+        _TEST_PREFIX_RE.match(text) or not chat_agent.addressed(text)
+    ):
         await sio.emit(
             "chat_error", {"error": "the shared chat is not available for this account"}, to=sid
         )
@@ -315,7 +325,7 @@ async def message(sid, data):
             return
         payload = {**msg, "sid": sid}
         await sio.emit("message", payload, room=_PUBLIC_ROOM)
-        for name in mentions:
+        for name in _unscoped(mentions):
             await sio.emit("mention", {"from": display, "message": payload}, room=f"user:{name}")
         return
 
@@ -330,11 +340,11 @@ async def message(sid, data):
     payload = {**msg, "sid": sid}
     await sio.emit("message", payload, room=_PUBLIC_ROOM)
     # Nudge each mentioned user (on any page/tab) so they notice.
-    for name in mentions:
+    for name in _unscoped(mentions):
         await sio.emit("mention", {"from": display, "message": payload}, room=f"user:{name}")
     # @all / @everyone / @channel → ping every other online teammate too.
     if _BROADCAST_MENTION_RE.search(text):
-        for name in _online_usernames() - {user} - set(mentions):
+        for name in _unscoped(_online_usernames() - {user} - set(mentions)):
             await sio.emit("mention", {"from": display, "message": payload}, room=f"user:{name}")
 
 
