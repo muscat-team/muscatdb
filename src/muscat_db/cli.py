@@ -30,6 +30,7 @@ from muscat_db.obsdate_normalize import (
     dedupe_conflicts,
     plan_all,
 )
+from muscat_db.build_status import build_age
 from muscat_db.propid_backfill import PROPID_INSTRUMENTS
 from muscat_db import scan_failures, scanner
 from muscat_db.audit import DEFAULT_MIN_AGE_DAYS
@@ -308,6 +309,32 @@ def scan_yesterday_cmd(
             f"[red]Scan failed for {obsdate}: {', '.join(failed)} "
             "-- recorded for retry; see `muscat-db scan-failures`[/]"
         )
+
+
+@app.command(name="build-status", cls=_Cmd)
+def build_status_cmd(
+    db: str = _db_option(),
+    max_age_hours: float = typer.Option(
+        36.0, "--max-age-hours", min=0.0,
+        help="Exit 1 if the last build-db is older than this (default 36)",
+    ),
+):
+    """Report the age of the last build-db; exit 1 if stale or unknown (#237)."""
+    age = build_age(db)
+    if age is None:
+        console.print(
+            f"[red]No last_build_at in {db}: cannot tell when it was last built[/]",
+            soft_wrap=True,
+        )
+        raise typer.Exit(1)
+    hours = age.total_seconds() / 3600
+    if hours > max_age_hours:
+        console.print(
+            f"[red]{db} was last built {hours:.1f} h ago (limit {max_age_hours:g} h)[/]",
+            soft_wrap=True,
+        )
+        raise typer.Exit(1)
+    console.print(f"[green]{db} was last built {hours:.1f} h ago[/]", soft_wrap=True)
 
 
 @app.command(name="scan-failures", cls=_Cmd)

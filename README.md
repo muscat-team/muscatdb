@@ -167,8 +167,20 @@ deployment host (not checked in, since it's host-specific — the account,
 ```
 MUSCAT_OBSLOG_DIR=/ut2/muscat/obslog
 MUSCATDB_ROOT=/path/to/muscat-db
-30 17 * * * cd $MUSCATDB_ROOT && bash scripts/download_catalogs.sh >> $MUSCATDB_ROOT/logs/download_catalogs.log 2>&1 && uv run muscat-db scan-yesterday >> $MUSCATDB_ROOT/logs/scan.log 2>&1 && uv run muscat-db build-db >> $MUSCATDB_ROOT/logs/build-db.log 2>&1
+30 17 * * * cd $MUSCATDB_ROOT && bash deploy/nightly.sh run
+30 21 * * * cd $MUSCATDB_ROOT && bash deploy/nightly.sh check
 ```
+
+`deploy/nightly.sh run` is the old `download_catalogs && scan-yesterday &&
+build-db` chain, with the same per-step logs under `logs/`. The first failing
+step stops the chain and posts its name, exit code and the last 15 log lines to
+Slack, so a refused build (the integrity gate, #182) is no longer silent
+(#237). `check` runs `muscat-db build-status --max-age-hours 36` and alerts if
+the database was not rebuilt, which also catches a cron entry that never fired.
+Both use the webhook file `/etc/muscat-db/slack-webhook-url` that
+`deploy/pull-deploy.sh` uses (override with `SLACK_WEBHOOK_FILE`); without it
+the failure is still written to stderr. `muscat-db build-status` can also be
+run by hand: it prints the age of the last build and exits 1 when stale.
 
 `MUSCAT_OBSLOG_DIR` is exported inline rather than left to `.env` because cron
 runs with a minimal environment; pin it in `.env` too for manual/GUI runs (see
@@ -246,7 +258,7 @@ nightly job, put it ahead of `build-db` and join it with `;` so an archive
 outage cannot block the rebuild:
 
 ```
-30 17 * * * cd $MUSCATDB_ROOT && uv run muscat-db lco-sync KEY2026B-001 --user <name> --no-ingest >> $MUSCATDB_ROOT/logs/lco-sync.log 2>&1; bash scripts/download_catalogs.sh >> $MUSCATDB_ROOT/logs/download_catalogs.log 2>&1 && uv run muscat-db scan-yesterday >> $MUSCATDB_ROOT/logs/scan.log 2>&1 && uv run muscat-db build-db >> $MUSCATDB_ROOT/logs/build-db.log 2>&1
+30 17 * * * cd $MUSCATDB_ROOT && uv run muscat-db lco-sync KEY2026B-001 --user <name> --no-ingest >> $MUSCATDB_ROOT/logs/lco-sync.log 2>&1; bash deploy/nightly.sh run
 ```
 
 - **Whole nights.** The unit of work is a dataset: one instrument night (the
