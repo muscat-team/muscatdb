@@ -27,10 +27,6 @@
     <div class="lco-field">
       <label for="dl-proposal">Proposal ID <span class="help-tooltip" title="LCO proposal ID (e.g. KEY2023B-04) to restrict the archive search to observations taken under that proposal.">?</span></label>
       <input id="dl-proposal" type="text" placeholder="e.g. KEY2023B-04">
-      <label for="dl-exofop" style="display: flex; align-items: center; gap: 0.35rem; margin-top: 0.3rem; font-size: 0.78rem; color: var(--text-dim);">
-        <input type="checkbox" id="dl-exofop"> Check ExoFOP obslog
-        <span class="help-tooltip" title="When on, the search also fetches the target's ExoFOP time-series obslog and flags each reported LCO run as already in muscat-db or missing. The check is purely local (no extra LCO calls); use a row's Download button to fetch it.">?</span>
-      </label>
     </div>
     <div class="lco-field">
       <label for="dl-object">Object <span class="help-tooltip" title="Target star name (e.g. WASP-12, TIC 460950389). Resolved to sky coordinates via the NASA/TOI catalog then SIMBAD; every frame whose footprint covers that position is returned.">?</span></label>
@@ -60,6 +56,7 @@
   <div class="lco-actions">
     <button class="btn primary" type="button" id="btn-search">Search frames</button>
     <span class="lco-msg" id="msg-search" style="margin: 0;"></span>
+    <a id="link-target-page" href="/targets" style="display: none; font-size: 0.85rem;" title="ExoFOP obslog and datasets for this target">Target page (ExoFOP obslog)</a>
   </div>
   <p class="lco-note">By default the <strong>Object</strong> name is resolved to sky coordinates (NASA/TOI catalog, then SIMBAD) and every frame whose footprint <em>covers</em> that position is returned — robust to naming variants (WASP-12 / Wasp-12 / WASP12). Enable <strong>Fuzzy name match</strong> to fall back to matching the raw OBJECT header text instead.</p>
   <p class="lco-note">Files save to <code>&lt;MUSCAT_LCO_DIR&gt;/&lt;inferred instrument&gt;/&lt;date&gt;/</code> (or that instrument's data dir). The destination instrument is inferred from the archive metadata: OGG 2m0 MuSCAT → muscat3, COJ 2m0 MuSCAT → muscat4, LCO 1m0 → sinistro, and LCO 0.4m → sbig (SBIG STL-6303, "kb"-prefixed camera code) or qhy600 (QHY600 CMOS, "sq"-prefixed camera code).</p>
@@ -77,27 +74,6 @@
   </div>
   <div id="frames-groups" style="display: none;"></div>
 </details>
-
-<details class="lco-section section-fold" id="exofop-report" open style="display: none;">
-  <summary><h3>ExoFOP obslog <span id="exofop-title" style="font-size: 0.8rem; font-weight: normal; color: var(--text-dim);"></span>
-    <a id="exofop-link" href="#" target="_blank" rel="noopener noreferrer" style="display: none; font-size: 0.8rem; font-weight: normal; margin-left: 0.5rem;">Open on ExoFOP</a></h3></summary>
-  <div class="lco-actions" style="margin-bottom: 0.4rem;">
-    <span class="lco-msg" id="msg-exofop" style="margin: 0;"></span>
-    <a id="exofop-jobs-link" href="/jobs" style="display: none; font-size: 0.85rem;">To Jobs</a>
-  </div>
-  <p class="lco-note" id="exofop-msg" style="margin: 0 0 0.4rem;"></p>
-  <div class="lco-table-wrap">
-    <table class="lco-table">
-      <thead>
-        <tr>
-          <th>Telescope</th><th>Camera</th><th>Filter</th><th>Date (UT)</th><th>Frames</th><th>Status</th><th>Download</th>
-        </tr>
-      </thead>
-      <tbody id="exofop-tbody"></tbody>
-    </table>
-  </div>
-  <p class="lco-note">Each row downloads on its own and follows its job live (see <a href="/jobs">Jobs</a>). Downloads honour <strong>Overwrite existing</strong> in the Results card.</p>
-</details>
 {% endblock %}
 
 {% block scripts %}
@@ -108,7 +84,7 @@
   var OPT_KEY = 'lco:archive:options';
   var STATE_KEY = 'lco:archive:state';
   var FOLD_KEY = 'lco:archive:fold-state';
-  var FOLD_IDS = ['fold-request', 'fold-search', 'fold-results', 'exofop-report'];
+  var FOLD_IDS = ['fold-request', 'fold-search', 'fold-results'];
   var el = MuscatDom.el, val = MuscatDom.val;
   var chk = MuscatDom.chk, setVal = MuscatDom.setVal;
   function setChk(id, v) { var e = el(id); if (e) e.checked = !!v; }
@@ -128,7 +104,7 @@
     'dl-filter','dl-rlevel','dl-start','dl-end','dl-limit',
     'dl-request-id','dl-req-rlevel'
   ];
-  var CHECK_IDS = ['dl-overwrite', 'dl-fuzzy-name', 'dl-exofop'];
+  var CHECK_IDS = ['dl-overwrite', 'dl-fuzzy-name'];
   var DL_SITE_OPTIONS = {
     '': [],
     '0m4': ['ogg', 'coj', 'lsc', 'cpt', 'tfn', 'elp'],
@@ -423,8 +399,6 @@
     updateDownloadButton();
   }
 
-  // "Download selected" acts on the frame groups only; ExoFOP rows carry
-  // their own per-row Download button.
   function updateDownloadButton() {
     el('btn-download').disabled = !el('frames-groups').querySelector('tbody input[type=checkbox]');
   }
@@ -464,7 +438,6 @@
       lastFrames = d.results || [];
       renderFrameGroups();
       saveArchiveState();
-      fetchExofopReport(val('dl-object'));
       var shown = lastFrames.length;
       var total = d.count !== undefined ? d.count : shown;
       var datasetMsg = d.dataset_count !== undefined ? (' across ' + d.dataset_count + ' dataset' + (d.dataset_count === 1 ? '' : 's')) : '';
@@ -575,276 +548,6 @@
       }).catch(function (e) { msg('msg-download', String(e), 'err'); });
   });
 
-  // Fetch and render the ExoFOP time-series cross-check for the searched target.
-  // Runs only when the "Check ExoFOP obslog" checkbox is on; the backend
-  // does a purely local existence test, so this makes no extra LCO calls.
-  function fetchExofopReport(target) {
-    var region = el('exofop-report');
-    var tbody = el('exofop-tbody');
-    if (!chk('dl-exofop') || !(target || '').trim()) {
-      if (region) region.style.display = 'none';
-      return;
-    }
-    region.style.display = '';
-    var msgEl = el('exofop-msg');
-    msgEl.textContent = 'Checking ExoFOP for ' + target + '…';
-    tbody.innerHTML = '';
-    el('exofop-title').textContent = '';
-    el('exofop-link').style.display = 'none';
-    var q = new URLSearchParams();
-    q.set('OBJECT', target);
-    fetch('/api/lco/archive/exofop?' + q.toString()).then(function (r) { return r.json(); }).then(function (d) {
-      if (!d.ok) {
-        msgEl.textContent = d.error || 'Not a known TOI — no ExoFOP time-series cross-check.';
-        return;
-      }
-      el('exofop-title').textContent = d.toi ? '(TOI ' + d.toi + ')' : '(TIC ' + d.tic + ')';
-      var exoId = d.toi ? 'TOI-' + d.toi : d.tic;
-      var exoLink = el('exofop-link');
-      exoLink.href = 'https://exofop.ipac.caltech.edu/tess/target.php?id=' + encodeURIComponent(exoId);
-      exoLink.style.display = '';
-      renderExofopRows(d.time_series || []);
-    }).catch(function (e) {
-      msgEl.textContent = 'ExoFOP check failed: ' + e;
-    });
-  }
-
-  function renderExofopRows(rows) {
-    var tbody = el('exofop-tbody');
-    var msgEl = el('exofop-msg');
-    tbody.innerHTML = '';
-    if (!rows.length) {
-      msgEl.textContent = 'No ExoFOP time-series entries reported for this target.';
-      updateDownloadButton();
-      return;
-    }
-    var missing = 0;
-    rows.forEach(function (r) {
-      var exists = !!r.exists;
-      if (!exists && r.exists_checked) missing++;
-      var tag = r.tstag || '';
-      var status = r.exists_checked
-        ? (exists
-            ? '<span class="badge badge-green">In muscat-db' + (r.dataset_local_frames ? ' (' + r.dataset_local_frames + ' fr)' : '') + '</span>'
-            : '<span class="badge badge-amber">Not in database</span>')
-        : '<span class="badge badge-filter-other">N/A</span>';
-      // Per-row button: LCO telescopes only (others are not in the LCO
-      // archive); also offered when existence could not be checked (N/A),
-      // since the download resolves target + date on the server.
-      var dlBtn = (!exists && r.tsdate && r.lco)
-        ? '<button type="button" class="btn sm exofop-dl-btn" data-exofop-tag="' + esc(tag) +
-          '" data-exofop-date="' + esc(r.tsdate) + '" data-exofop-site="' + esc(r.site || '') +
-          '" data-exofop-inst="' + esc(r.instrument || '') + '">Download</button>'
-        : '';
-      var tr = document.createElement('tr');
-      tr._exo = {
-        lco: !!r.lco, instrument: String(r.instrument || '').toLowerCase(),
-        dates: obsLabels(r.tsdate), exists: exists, existsChecked: !!r.exists_checked,
-        statusHtml: status, actionHtml: dlBtn, jobId: ''
-      };
-      tr.innerHTML =
-        '<td>' + esc(r.tstel || '') + '</td>' +
-        '<td>' + esc(r.tscam || '') + '</td>' +
-        '<td>' + esc(r.tsfilt || '') + '</td>' +
-        '<td>' + esc(r.tsdate || '') + '</td>' +
-        '<td>' + esc(String(r.tsnum !== undefined ? r.tsnum : '')) + '</td>' +
-        '<td class="exofop-status">' + status + '</td>' +
-        '<td align="center" class="exofop-action">' + dlBtn + '</td>';
-      tbody.appendChild(tr);
-    });
-    scheduleExofopSync(0);
-    msgEl.innerHTML =
-      (rows.length - missing) + '/' + rows.length + ' reported in muscat-db, ' +
-      missing + ' missing' + (missing ? ' — use a row\'s <strong>Download</strong> button to fetch it from the LCO archive.' : '.');
-    updateDownloadButton();
-  }
-
-  // Poll the exofop-download job like the normal archive download does, and
-  // surface the result on the page's download message.
-  function pollExofopDownload(jobId) {
-    fetch('/api/lco/archive/download/' + encodeURIComponent(jobId))
-      .then(function (r) { return r.json(); })
-      .then(function (d) {
-        if (!d.ok) { msg('msg-exofop', 'ExoFOP download job ' + jobId + ' failed', 'err'); return; }
-        if (d.state === 'pending' || d.state === 'running' || d.state === 'cancelling') {
-          msg('msg-exofop', 'ExoFOP dataset ' + jobId + ' downloading…');
-          setTimeout(function () { pollExofopDownload(jobId); }, 1500);
-          return;
-        }
-        var results = d.results || [];
-        var ok = results.filter(function (x) { return x.status === 'downloaded'; }).length;
-        var ex = results.filter(function (x) { return x.status === 'exists'; }).length;
-        var er = results.filter(function (x) { return x.status === 'error'; }).length;
-        if (d.state === 'cancelled') {
-          msg('msg-exofop', 'ExoFOP dataset ' + jobId + ' cancelled');
-        } else if (d.state === 'error') {
-          msg('msg-exofop', 'ExoFOP dataset ' + jobId + ' failed', 'err');
-        } else {
-          msg('msg-exofop', 'ExoFOP dataset ' + jobId + ' done — ' + ok + ' downloaded, ' + ex + ' already present, ' + er + ' errors');
-        }
-        var link = el('exofop-jobs-link');
-        if (link) link.style.display = '';
-      })
-      .catch(function () { msg('msg-exofop', 'ExoFOP download job ' + jobId + ' failed', 'err'); });
-  }
-
-  // Start a background download/ingest for one checked ExoFOP time-series
-  // entry. Its tstag is ExoFOP's own internal Data Tag, not an LCO request
-  // id (confirmed against the live archive -- request_id=<tstag> never
-  // resolves, for old or recent reports alike), so the server searches the
-  // archive by target name + reported UT date instead; "tag" here is only
-  // used for the status message, not sent to the API.
-  function startExofopDownload(tag, tsdate, row, site, inst) {
-    var body = {
-      target: val('dl-object'), tsdate: tsdate || '',
-      reduction_level: val('dl-rlevel') || '91', overwrite: chk('dl-overwrite'), background: true,
-      site: site || '', exofop_instrument: inst || '',
-    };
-    fetch('/api/lco/archive/exofop-download', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-      .then(function (r) { return r.json(); })
-      .then(function (d) {
-        if (!d.ok) { msg('msg-exofop', d.error || 'ExoFOP download failed', 'err'); if (row) row.checked = false; return; }
-        var link = el('exofop-jobs-link');
-        if (link && d.job_id) link.style.display = '';
-        msg('msg-exofop', 'ExoFOP dataset ' + (tag || tsdate) + ' queued for download…');
-        if (row) row.checked = false;
-        if (d.job_id) pollExofopDownload(d.job_id);
-        scheduleExofopSync(300);
-      })
-      .catch(function (e) { msg('msg-exofop', String(e), 'err'); if (row) row.checked = false; });
-  }
-
-  // ── Live download state for the ExoFOP rows ────────────────────────────
-  // A row's observation is "being downloaded" when a live LCO archive job
-  // covers its instrument on one of its observing-night labels (same +/-1 day
-  // window the server uses for the existence check). The page polls the
-  // lightweight /api/lco/archive/downloads list, so the status cell and
-  // action button follow the Jobs page state, including a cancel from there.
-  var exofopSyncTimer = null;
-  var ACTIVE_STATES = { pending: 1, running: 1, cancelling: 1 };
-
-  function obsLabels(tsdate) {
-    var m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(tsdate || ''));
-    if (!m) return [];
-    var base = Date.UTC(+m[1], +m[2] - 1, +m[3]);
-    return [-1, 0, 1].map(function (d) {
-      var t = new Date(base + d * 86400000);
-      return String(t.getUTCFullYear()).slice(2) + String(t.getUTCMonth() + 1).padStart(2, '0') +
-        String(t.getUTCDate()).padStart(2, '0');
-    });
-  }
-
-  function matchJob(jobs, x) {
-    if (!x.lco || !x.instrument || !x.dates.length) return null;
-    var best = null;
-    jobs.forEach(function (j) {
-      var insts = String(j.inst || '').toLowerCase().split(',');
-      var dates = String(j.date || '').split(',');
-      if (insts.indexOf(x.instrument) < 0) return;
-      if (!dates.some(function (d) { return x.dates.indexOf(d) >= 0; })) return;
-      // Prefer an active job over a finished one, then the newest.
-      var rank = (ACTIVE_STATES[j.state] ? 1e12 : 0) + (j.started_at || 0);
-      if (!best || rank > best.rank) best = { job: j, rank: rank };
-    });
-    return best ? best.job : null;
-  }
-
-  function setRowStatus(tr, html, actionHtml) {
-    var st = tr.querySelector('.exofop-status');
-    var ac = tr.querySelector('.exofop-action');
-    if (st) st.innerHTML = html;
-    if (ac) ac.innerHTML = actionHtml;
-  }
-
-  function renderRowJob(tr, job) {
-    var x = tr._exo;
-    var label = job.run_name ? ' (' + esc(job.run_name) + ')' : '';
-    var link = ' <a href="/jobs" title="Open the Jobs page">jobs</a>';
-    if (ACTIVE_STATES[job.state]) {
-      var cancelBtn = job.state === 'cancelling'
-        ? '<button type="button" class="btn sm" disabled>Cancelling…</button>'
-        : '<button type="button" class="btn sm danger exofop-cancel-btn" data-job-id="' + esc(job.run_id || '') + '">Cancel</button>';
-      var text = job.state === 'pending' ? 'Queued' : (job.state === 'cancelling' ? 'Cancelling…' : 'Downloading');
-      var cls = job.state === 'pending' ? 'badge-pending'
-        : (job.state === 'cancelling' ? 'badge-cancelled' : 'badge-amber pulse');
-      setRowStatus(tr, '<span class="badge ' + cls + '">' + text + label + '</span>' + link, cancelBtn);
-      x.jobId = job.run_id || '';
-      return;
-    }
-    // Terminal job state for this row.
-    if (job.state === 'done' || x.exists) return;
-    var cls = job.state === 'cancelled' ? 'badge-cancelled' : 'badge-error';
-    var word = job.state === 'cancelled' ? 'Cancelled' : 'Failed';
-    var err = job.state === 'error' && job.error_desc ? ' title="' + esc(job.error_desc) + '"' : '';
-    setRowStatus(tr, '<span class="badge ' + cls + '"' + err + '>' + word + '</span>' + link,
-      x.retryHtml || x.actionHtml);
-  }
-
-  function syncExofopJobs() {
-    exofopSyncTimer = null;
-    var rows = Array.prototype.slice.call(el('exofop-tbody').querySelectorAll('tr'))
-      .filter(function (tr) { return tr._exo && tr._exo.lco; });
-    if (!rows.length) return;
-    fetch('/api/lco/archive/downloads').then(function (r) { return r.json(); }).then(function (d) {
-      var jobs = d.jobs || [];
-      var anyActive = false, needReload = false;
-      rows.forEach(function (tr) {
-        var x = tr._exo;
-        var job = matchJob(jobs, x);
-        if (job && ACTIVE_STATES[job.state]) {
-          anyActive = true;
-          renderRowJob(tr, job);
-        } else if (job && x.jobId && job.run_id === x.jobId) {
-          // The job this row was following has just finished.
-          if (job.state === 'done') needReload = true; else renderRowJob(tr, job);
-          x.jobId = '';
-        } else if (x.jobId) {
-          // Job vanished from the live list (e.g. server restart): re-check the DB.
-          x.jobId = '';
-          needReload = true;
-        } else if (job && !x.exists && job.state !== 'done') {
-          renderRowJob(tr, job);
-        }
-      });
-      if (needReload) {
-        fetchExofopReport(val('dl-object'));
-        return;
-      }
-      if (anyActive) scheduleExofopSync(3000);
-    }).catch(function () { scheduleExofopSync(8000); });
-  }
-
-  function scheduleExofopSync(delay) {
-    if (exofopSyncTimer) clearTimeout(exofopSyncTimer);
-    exofopSyncTimer = setTimeout(syncExofopJobs, delay);
-  }
-
-  // Per-row Cancel: same endpoint as the Jobs page's Cancel button.
-  el('exofop-tbody').addEventListener('click', function (e) {
-    var b = e.target.closest ? e.target.closest('.exofop-cancel-btn') : null;
-    if (!b || b.disabled) return;
-    var id = b.getAttribute('data-job-id');
-    if (!id) return;
-    b.disabled = true;
-    b.textContent = 'Cancelling…';
-    fetch('/api/lco/archive/download/' + encodeURIComponent(id) + '/cancel', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}'
-    }).then(function (r) { return r.json(); }).then(function (d) {
-      if (!d.ok) { msg('msg-exofop', d.error || 'Cancel failed', 'err'); b.disabled = false; b.textContent = 'Cancel'; return; }
-      scheduleExofopSync(500);
-    }).catch(function (err) { msg('msg-exofop', String(err), 'err'); b.disabled = false; b.textContent = 'Cancel'; });
-  });
-
-  // Per-row Download button: queue just that observation.
-  el('exofop-tbody').addEventListener('click', function (e) {
-    var b = e.target.closest ? e.target.closest('.exofop-dl-btn') : null;
-    if (!b || b.disabled) return;
-    b.disabled = true;
-    b.textContent = 'Queued…';
-    startExofopDownload(b.getAttribute('data-exofop-tag') || '', b.getAttribute('data-exofop-date') || '', null,
-      b.getAttribute('data-exofop-site') || '', b.getAttribute('data-exofop-inst') || '');
-  });
-
   // Persist the open/collapsed state of each section-fold card across page
   // reloads (e.g. a background download refresh collapses the Results card back
   // to where the operator left it).
@@ -878,17 +581,24 @@
   applyDownloadSiteOptions();
   restoreArchiveState();
 
+  // The ExoFOP obslog lives on the target page; keep a link to it in step
+  // with the Object field.
+  function syncTargetPageLink() {
+    var a = el('link-target-page');
+    var name = (val('dl-object') || '').trim();
+    if (!a) return;
+    a.style.display = name ? '' : 'none';
+    if (name) a.href = '/target?name=' + encodeURIComponent(name);
+  }
+  var objectInput = el('dl-object');
+  if (objectInput) objectInput.addEventListener('input', syncTargetPageLink);
+
   // ?target=<name> prefills the Object field (e.g. linked from the target
   // page's "Search LCO archive" button), overriding the persisted value.
   var urlParams = new URLSearchParams(window.location.search);
   var targetParam = urlParams.get('target');
-  if (targetParam) {
-    setVal('dl-object', targetParam);
-    // A linked target runs the search and the ExoFOP obslog check straight
-    // away, so the link lands on results rather than an empty form.
-    setChk('dl-exofop', true);
-    el('btn-search').click();
-  }
+  if (targetParam) setVal('dl-object', targetParam);
+  syncTargetPageLink();
 })();
 </script>
 {% endblock %}

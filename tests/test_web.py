@@ -1449,10 +1449,12 @@ def test_lco_pages_render_and_nav_links_it(mock_db):
     assert "Submitted Request Monitoring" in page.text
     assert "/api/lco/monitored-requests" in page.text
     assert page.text.count('class="lco-section section-fold"') == 5
-    assert archive.text.count('class="lco-section section-fold"') == 4
+    assert archive.text.count('class="lco-section section-fold"') == 3
     assert "<summary><h3>Target &amp; Transit Windows</h3></summary>" in page.text
     assert "<summary><h3>Results</h3></summary>" in archive.text
-    assert "<summary><h3>ExoFOP obslog" in archive.text
+    # The ExoFOP obslog moved to the target page.
+    assert "exofop-tbody" not in archive.text
+    assert 'id="link-target-page"' in archive.text
     # Nav (from base.html) links to /lco/schedule on every page.
     assert 'href="/lco/schedule"' in client.get("/obs").text
 
@@ -4093,3 +4095,17 @@ def test_orphaned_cancelling_lco_archive_row_resolves_to_cancelled(mock_db, monk
     after = TestClient(app).get("/api/jobs/status").json()
     assert after["running"] == []
     assert "lco_archive_download:orph2" in after["finished"]
+
+
+def test_target_page_has_exofop_obslog_section(mock_db, monkeypatch):
+    from muscat_db import web
+    web._index_cache.clear()
+    monkeypatch.setattr(
+        web, "_get_datasets_for_normalized_target",
+        lambda _db, norm_name, _denied=frozenset(): ([], "2026-07-01"),
+    )
+    html = TestClient(app).get("/target?name=WASP10").text
+    assert 'id="exofop-obslog-details"' in html
+    assert "/api/lco/archive/exofop?OBJECT=" in html
+    assert "/api/lco/archive/exofop-download" in html
+    assert 'id="exofop-obslog-tbody"' in html
