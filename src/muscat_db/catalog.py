@@ -1610,6 +1610,31 @@ def resolve_lco_key_project_name(raw: str) -> str:
     return primary
 
 
+def _lco_key_project_candidates(raw: str) -> list[str]:
+    """Every designation worth resolving for an LCO key-project name, best first.
+
+    ``TIC 434398831.11 (TOI 32.11)`` yields ``TOI 32.11``, ``TOI 32``,
+    ``TIC 434398831.11``, ``TIC 434398831``: the TOI half first (it is what
+    catalogs key on), then the TIC half, each with and without its ``.NN``
+    candidate suffix -- SIMBAD rejects a suffixed candidate. A host the TOI
+    catalogs do not list yet (or one SIMBAD cannot place) is still resolvable
+    through its TIC ID, so callers try these in order rather than giving up
+    on the first. A plain, undecorated name is returned unchanged.
+    """
+    raw = (raw or "").strip()
+    m = _LCO_KEY_PROJECT_ALIAS_RE.fullmatch(raw)
+    if not m:
+        return [raw]
+    parts = [m.group("alias").strip(), m.group("primary").strip()]
+    parts.sort(key=lambda p: 0 if _TOI_SHAPE_RE.fullmatch(p) else 1)  # stable
+    out: list[str] = []
+    for part in parts:
+        for name in (part, re.sub(r"\.\d+$", "", part)):
+            if name and name not in out:
+                out.append(name)
+    return out
+
+
 # Helper to normalize target names for comparison
 def _normalize_target_name(t: str, overrides: dict[str, str] | None = None) -> str:
     # Check user override first
@@ -1926,9 +1951,14 @@ def _resolve_archive_coords(target: str) -> tuple[float, float, str] | None:
     falls back to SIMBAD name resolution. Returns None when the name cannot be
     resolved by any source. Both results are cached.
     """
-    coords = _query_target_coordinates(target)
-    if coords is not None:
-        return float(coords["ra"]), float(coords["dec"]), str(coords.get("source") or "catalog")
+    # The name as given first, then (for an LCO key-project decoration such as
+    # "TIC 434398831.11 (TOI 32.11)") each half, so a host listed under only
+    # one of its designations still resolves.
+    candidates = _lco_key_project_candidates(target)
+    for name in dict.fromkeys([target, *candidates]):
+        coords = _query_target_coordinates(name)
+        if coords is not None:
+            return float(coords["ra"]), float(coords["dec"]), str(coords.get("source") or "catalog")
 
     cache_key = "simbad_" + target.strip().upper()
     cached = _CATALOG_CACHE.get(cache_key, _CACHE_MISS)
@@ -1941,11 +1971,11 @@ def _resolve_archive_coords(target: str) -> tuple[float, float, str] | None:
     # "TOI-5012.01" 404s, "TOI-5012" resolves). resolve_lco_key_project_name
     # is a no-op for an already-plain name, so the extra ".NN" strip below
     # only ever fires for a name it actually rewrote.
-    simbad_name = resolve_lco_key_project_name(target)
-    if simbad_name != target.strip():
-        simbad_name = re.sub(r"\.\d+$", "", simbad_name)
-
-    radec = exp_calc.resolve_target_coords(simbad_name)
+    radec = None
+    for simbad_name in candidates:
+        radec = exp_calc.resolve_target_coords(simbad_name)
+        if radec:
+            break
     result = (float(radec[0]), float(radec[1]), "simbad") if radec else None
     _CATALOG_CACHE[cache_key] = result
     return result
