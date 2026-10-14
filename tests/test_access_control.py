@@ -478,6 +478,64 @@ def test_cli_grant_revoke_list_roundtrip(db):
     assert runner.invoke(cli_app, ["access", "revoke", "alice", _RESTRICTED]).exit_code == 1
 
 
+def test_explain_user_reports_visibility_per_proposal(db):
+    info = access.explain_user(db, "alice")
+    by_pid = {p["proposal_id"]: p for p in info["proposals"]}
+    assert not info["admin"]
+    assert by_pid[_RESTRICTED]["restricted"] and not by_pid[_RESTRICTED]["visible"]
+    assert by_pid[_OPEN]["visible"] and not by_pid[_OPEN]["restricted"]
+    assert by_pid[""]["visible"]
+    assert by_pid[_RESTRICTED]["target_nights"] == 2
+    assert by_pid[_RESTRICTED]["objects"] == 2
+
+
+def test_explain_user_follows_grants_and_admin(db):
+    access.grant(db, "alice", _RESTRICTED, "root")
+    _set_admin(db, "root")
+    alice = {p["proposal_id"]: p for p in access.explain_user(db, "alice")["proposals"]}
+    assert alice[_RESTRICTED]["granted"] and alice[_RESTRICTED]["visible"]
+    root = access.explain_user(db, "root")
+    assert root["admin"]
+    assert all(p["visible"] for p in root["proposals"])
+
+
+def test_explain_user_flags_grants_that_match_nothing(db):
+    access.grant(db, "alice", "NOSUCH-PROPOSAL-1", "root")
+    assert access.explain_user(db, "alice")["unmatched_grants"] == ["NOSUCH-PROPOSAL-1"]
+
+
+def test_explain_target_lists_nights_and_hides_by_proposal(db):
+    rows = access.explain_target(db, "alice", "mixed tgt")
+    assert [(r["obsdate"], r["visible"]) for r in rows] == [("260101", True), ("260102", False)]
+    assert not any(r["visible"] for r in access.explain_target(db, "alice", "HIDDENTGT"))
+    assert access.explain_target(db, "alice", "NEVEROBSX") == []
+
+
+def test_explain_matches_what_the_web_serves(client, db):
+    """The report and the page agree: a target explain calls hidden is a 404."""
+    assert not any(r["visible"] for r in access.explain_target(db, "alice", "HIDDENTGT"))
+    resp = client.put(
+        "/api/targets/HIDDENTGT/note", json={"note": "x"}, headers=_headers("alice")
+    )
+    assert resp.status_code == 404
+
+
+def test_cli_explain_summarises_and_explains_a_target(db):
+    result = CliRunner().invoke(
+        cli_app, ["access", "explain", "alice", "--target", "HIDDENTGT"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "2 of 4 target-nights visible, 2 hidden" in result.output
+    assert "hidden (answers as an unknown target)" in result.output
+    assert "has no users row" in result.output
+
+
+def test_cli_explain_is_read_only(db):
+    before = (access.list_restrictions(db), access.list_grants(db))
+    CliRunner().invoke(cli_app, ["access", "explain", "alice"])
+    assert (access.list_restrictions(db), access.list_grants(db)) == before
+
+
 def test_cli_unrestrict(db):
     runner = CliRunner()
     assert runner.invoke(cli_app, ["access", "unrestrict", _RESTRICTED]).exit_code == 0
