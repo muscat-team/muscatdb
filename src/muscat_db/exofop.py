@@ -47,6 +47,13 @@ _exofop_cache_lock = threading.Lock()
 
 _TOI_NAME_RE = re.compile(r"^TOI0*(\d+)(?:\.\d+)?$", re.IGNORECASE)
 _PLAIN_TOI_RE = re.compile(r"^toi0*(\d+)$", re.IGNORECASE)
+_TIC_NAME_RE = re.compile(r"^TIC[\s_-]*0*(\d+)$", re.IGNORECASE)
+
+
+def resolve_tic_number(target: str) -> str | None:
+    """Return the numeric TIC id for a ``TIC434398831`` / ``TIC-434398831`` name."""
+    m = _TIC_NAME_RE.match((target or "").strip())
+    return m.group(1) if m else None
 
 
 def _toi_float(value):
@@ -120,16 +127,25 @@ def _load_catalog():
 # ExoFOP time_series fetch (with response-level caching)
 # --------------------------------------------------------------------------- #
 
-def _exofop_url(toi: str) -> str:
-    return f"https://exofop.ipac.caltech.edu/tess/target.php?id=TOI-{toi}&json"
+def _exofop_url(toi: str = "", tic: str = "") -> str:
+    # ExoFOP accepts either ``id=TOI-<n>`` or a bare TIC id.
+    ident = f"TOI-{toi}" if toi else str(tic)
+    return f"https://exofop.ipac.caltech.edu/tess/target.php?id={ident}&json"
 
 
-def fetch_time_series(toi: str, *, _now: float | None = None) -> list[dict]:
-    """Return the ExoFOP ``time_series`` list for the TOI host number, cached."""
+def fetch_time_series(
+    toi: str, *, tic: str = "", _now: float | None = None
+) -> list[dict]:
+    """Return the ExoFOP ``time_series`` list, cached.
+
+    Keyed by the TOI host number; *tic* is the fallback id for a target that
+    is not a known TOI.
+    """
     toi = str(toi or "").strip()
-    if not toi:
+    tic = str(tic or "").strip()
+    if not toi and not tic:
         return []
-    cache_key = f"ts:{toi}"
+    cache_key = f"ts:{toi}" if toi else f"ts:tic:{tic}"
     now = _now if _now is not None else datetime.datetime.now(datetime.timezone.utc).timestamp()
     with _exofop_cache_lock:
         hit = _exofop_cache.get(cache_key)
@@ -138,7 +154,7 @@ def fetch_time_series(toi: str, *, _now: float | None = None) -> list[dict]:
 
     try:
         resp = catalog._sync_get(
-            _exofop_url(toi),
+            _exofop_url(toi, tic),
             headers={"User-Agent": "MuSCAT-db/0.1.0"},
             timeout=20,
         )
@@ -173,7 +189,8 @@ _SITE_TOKENS = {
     # confirmed against TOI-1807's reported LCO/Sinistro time-series entries).
     "MCD": "elp",
     "TFN": "tfn",
-    "TEIDE": "tfn",
+    # "TEID" also covers ExoFOP's truncated "LCO-Teid-1m0" / "LCO-TEID (1.0 m)".
+    "TEID": "tfn",
     "TLV": "tlv",
     "WISE": "tlv",
 }
@@ -181,7 +198,6 @@ _SITE_TOKENS = {
 # Known 1 m / 0.4 m cameras in ExoFOP follow-up reports -> LCO-style INSTRUME.
 _CAMERA_TO_INSTRUME = {
     "SINISTRO": "sinistro",
-    "FA": "sinistro",
     "MUSCAT": "muscat",
     "QHY600": "qhy600",
     "SBIG": "sbig",
@@ -189,14 +205,29 @@ _CAMERA_TO_INSTRUME = {
 }
 
 
+# "MuSCAT2", "MuSCAT 3", "muscat-4", "MUSCAT_3" -- the digit names the instrument.
+_MUSCAT_NUMBERED_RE = re.compile(r"MU?SCAT[\s_-]*([234])(?!\d)", re.IGNORECASE)
+
+
 def _site_from_tel(tstel: str) -> str:
     upper = (tstel or "").upper()
     for token, code in _SITE_TOKENS.items():
         if token in upper:
             return code
+    # ExoFOP abbreviates Haleakala as a standalone "HAL" (e.g. "LCO-HAL-M3 (2.0 m)",
+    # "LCO-HAL-2m0"); whole-token only, so it cannot match inside another word.
+    if re.search(r"(?<![A-Z])HAL(?![A-Z])", upper):
+        return "ogg"
     # Fall back to an LCO-style site code embedded in the string (e.g. "1m0a").
     m = re.search(r"\b(cpt|lsc|ogg|coj|elp|tfn|tlv)\b", upper)
     return m.group(1) if m else ""
+
+
+def is_lco_telescope(tstel: str) -> bool:
+    """True when an ExoFOP ``tstel`` string names an LCO telescope."""
+    return bool(_site_from_tel(tstel)) or bool(
+        re.search(r"\bLCO", (tstel or "").upper())
+    )
 
 
 def _tel_class(tstel: str) -> str:
@@ -229,11 +260,20 @@ def _instrument_from(entry: dict) -> str:
     site = _site_from_tel(tstel)
     tel = _tel_class(tstel)
     camera = str(entry.get("tscam") or "")
+    # An explicitly numbered MuSCAT camera names its instrument outright
+    # ("MuSCAT2", "MuSCAT 3", "muscat-4"); only the bare "MuSCAT" form needs
+    # the site/telescope inference below.
+    m = _MUSCAT_NUMBERED_RE.search(camera)
+    if m:
+        return f"muscat{m.group(1)}"
     instrume = ""
     for token, kind in _CAMERA_TO_INSTRUME.items():
         if token in camera.upper():
             instrume = kind
             break
+    if not instrume and re.search(r"\bFA\d*\b", camera, re.IGNORECASE):
+        # Sinistro camera-unit codes (fa11, fa15, ...).
+        instrume = "sinistro"
     if not instrume:
         return ""
     try:
@@ -273,14 +313,42 @@ def _target_coords(target: str) -> tuple[float, float] | None:
 # Archive search for one ExoFOP time-series entry (by target + date, not tag)
 # --------------------------------------------------------------------------- #
 
+def _filter_to_telescope(rows: list[dict], site: str, instrument: str) -> list[dict]:
+    """Keep only frames from *site* and of muscat-db *instrument* (when given)."""
+    site = (site or "").lower()
+    instrument = (instrument or "").lower()
+    if not site and not instrument:
+        return rows
+    kept = []
+    for r in rows:
+        if site and str(r.get("site_id") or r.get("SITEID") or "").lower() != site:
+            continue
+        if instrument:
+            try:
+                if lco.infer_archive_instrument(r).lower() != instrument:
+                    continue
+            except lco.LcoError:
+                continue
+        kept.append(r)
+    return kept
+
+
 def archive_search_by_target_date(
     target: str,
     tsdate: str,
     *,
     reduction_level: str = "91",
     user_name: str | None = None,
+    site: str = "",
+    instrument: str = "",
 ) -> list[dict]:
     """Search the LCO archive for the observation behind one time-series entry.
+
+    ``site`` / ``instrument`` (the entry's inferred LCO site code and
+    muscat-db instrument) narrow the result to that entry's own telescope;
+    without them every LCO frame covering the target that night is returned,
+    including other telescopes' (e.g. 0.4 m qhy600 frames beside a 1 m
+    Sinistro report).
 
     ``tstag`` is not usable for this: it is ExoFOP's own internal Data Tag,
     not an LCO request id (see the module docstring), and confirmed against
@@ -326,6 +394,7 @@ def archive_search_by_target_date(
     except lco.LcoError:
         return []
     rows = result.get("results") or []
+    rows = _filter_to_telescope(rows, site, instrument)
     # OBSTYPE=EXPOSE (above) doesn't catch an engineering frame that was
     # itself submitted as a plain EXPOSE block (observed: an auto-focus
     # sequence filed with a real "e91" filename) -- this is the narrower,
@@ -354,6 +423,9 @@ def check_time_series_exists(
     site = _site_from_tel(str(entry.get("tstel") or ""))
     result["instrument"] = inst
     result["site"] = site
+    # Only LCO telescopes can be fetched from the LCO archive; the UI uses this
+    # to decide whether to offer a Download button.
+    result["lco"] = is_lco_telescope(str(entry.get("tstel") or ""))
 
     if not inst or not site:
         result["exists"] = False
@@ -397,13 +469,20 @@ def build_time_series_report(
     archive page's convention of reporting dataset count alongside frames).
     """
     toi = resolve_toi_number(target)
+    tic = None
     if toi is None:
-        return {"ok": False, "error": "Target does not resolve to a known TOI"}
-    entries = fetch_time_series(toi, _now=_now)
+        tic = resolve_tic_number(target)
+        if tic is None:
+            return {
+                "ok": False,
+                "error": "Target does not resolve to a known TOI or TIC id",
+            }
+    entries = fetch_time_series(toi or "", tic=tic or "", _now=_now)
     rows = [check_time_series_exists(e, target=target, denied=denied) for e in entries]
     return {
         "ok": True,
         "toi": toi,
+        "tic": tic,
         "time_series": rows,
         "total": len(rows),
     }

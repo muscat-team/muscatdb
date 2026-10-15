@@ -355,6 +355,25 @@ def test_jobs_page_persists_lco_archive_done_row_across_refresh(mock_db, monkeyp
     assert 'data-key="lco_archive_download:abc123"' in refreshed.text
 
 
+def test_jobs_orphaned_running_lco_archive_row_resolves_to_error(mock_db, monkeypatch):
+    """A running row whose in-memory job is gone (server restart/--reload killed
+    the worker thread) must not stay 'running' forever."""
+    running_job = {
+        "job_id": "orph1", "state": "running", "frames_total": 4, "frames_done": 2,
+        "phase": "downloading", "results": [], "funpack_results": [],
+        "instruments": ["sinistro"], "obsdates": ["230902"], "objects": ["WASP-12"],
+        "dest_dirs": [], "started_at": 1700000000.0, "finished_at": None, "error": None,
+    }
+    monkeypatch.setattr("muscat_db.lco.archive_download_jobs", lambda: [running_job])
+    first = TestClient(app).get("/api/jobs/status").json()
+    assert [r["key"] for r in first["running"]] == ["lco_archive_download:orph1"]
+
+    monkeypatch.setattr("muscat_db.lco.archive_download_jobs", lambda: [])
+    after = TestClient(app).get("/api/jobs/status").json()
+    assert after["running"] == []
+    assert "lco_archive_download:orph1" in after["finished"]
+
+
 def test_jobs_status_includes_lco_archive_download(mock_db, monkeypatch):
     monkeypatch.setattr(
         "muscat_db.lco.archive_download_jobs",
@@ -1433,6 +1452,9 @@ def test_lco_pages_render_and_nav_links_it(mock_db):
     assert archive.text.count('class="lco-section section-fold"') == 3
     assert "<summary><h3>Target &amp; Transit Windows</h3></summary>" in page.text
     assert "<summary><h3>Results</h3></summary>" in archive.text
+    # The ExoFOP obslog moved to the target page.
+    assert "exofop-tbody" not in archive.text
+    assert 'id="link-target-page"' in archive.text
     # Nav (from base.html) links to /lco/schedule on every page.
     assert 'href="/lco/schedule"' in client.get("/obs").text
 
@@ -3918,7 +3940,7 @@ def test_transit_fit_target_params_populates_without_inst_date(mock_db):
 def test_exofop_archive_endpoint_non_toi(mock_db):
     client = TestClient(app)
     with patch("muscat_db.web.exofop.build_time_series_report", return_value={
-        "ok": False, "error": "Target does not resolve to a known TOI",
+        "ok": False, "error": "Target does not resolve to a known TOI or TIC id",
     }):
         r = client.get("/api/lco/archive/exofop", params={"OBJECT": "WASP-12"})
     assert r.status_code == 200
@@ -3956,6 +3978,17 @@ def test_exofop_archive_endpoint_rows(mock_db):
     missing = [x for x in body["time_series"] if not x["exists"]]
     assert len(missing) == 1
     assert missing[0]["tsid"] == "123"
+
+
+def test_exofop_archive_endpoint_passes_tic_for_non_toi(mock_db):
+    client = TestClient(app)
+    with patch("muscat_db.web.exofop.build_time_series_report", return_value={
+        "ok": True, "toi": None, "tic": "434398831", "time_series": [], "total": 0,
+    }):
+        r = client.get("/api/lco/archive/exofop", params={"OBJECT": "TIC434398831"})
+    body = r.json()
+    assert body["toi"] is None
+    assert body["tic"] == "434398831"
 
 
 def test_exofop_archive_endpoint_rejects_blank_target(mock_db):
@@ -4010,3 +4043,69 @@ def test_exofop_download_endpoint_reports_not_found_when_search_empty(mock_db):
     assert r.status_code == 404
     assert r.json()["ok"] is False
     assert r.json()["ok"] is False
+
+
+def test_lco_archive_downloads_lists_live_jobs(mock_db, monkeypatch):
+    job = {
+        "job_id": "live1", "state": "running", "frames_total": 4, "frames_done": 1,
+        "phase": "downloading", "results": [], "funpack_results": [],
+        "instruments": ["sinistro"], "obsdates": ["230902"], "objects": ["WASP-12"],
+        "dest_dirs": [], "started_at": 1700000000.0, "finished_at": None, "error": None,
+    }
+    monkeypatch.setattr("muscat_db.lco.archive_download_jobs", lambda: [job])
+    body = TestClient(app).get("/api/lco/archive/downloads").json()
+    assert body["ok"] is True
+    (row,) = body["jobs"]
+    assert row["run_id"] == "live1"
+    assert row["state"] == "running"
+    assert row["inst"] == "sinistro"
+    assert row["date"] == "230902"
+    assert "results" not in row
+
+
+def test_lco_archive_download_cancel_endpoint(mock_db, monkeypatch):
+    snap = {
+        "job_id": "c1", "state": "cancelling", "frames_total": 2, "frames_done": 0,
+        "phase": "downloading", "results": [], "funpack_results": [],
+        "instruments": ["sinistro"], "obsdates": ["230902"], "objects": ["WASP-12"],
+        "dest_dirs": [], "started_at": 1700000000.0, "finished_at": None, "error": None,
+    }
+    monkeypatch.setattr("muscat_db.lco.cancel_archive_download", lambda job_id: dict(snap, job_id=job_id))
+    r = TestClient(app).post("/api/lco/archive/download/c1/cancel")
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    assert r.json()["state"] == "cancelling"
+
+
+def test_lco_archive_download_cancel_unknown_job_is_404(mock_db):
+    r = TestClient(app).post("/api/lco/archive/download/does-not-exist/cancel")
+    assert r.status_code == 404
+
+
+def test_orphaned_cancelling_lco_archive_row_resolves_to_cancelled(mock_db, monkeypatch):
+    job = {
+        "job_id": "orph2", "state": "running", "frames_total": 4, "frames_done": 2,
+        "phase": "downloading", "results": [], "funpack_results": [],
+        "instruments": ["sinistro"], "obsdates": ["230902"], "objects": ["WASP-12"],
+        "dest_dirs": [], "started_at": 1700000000.0, "finished_at": None, "error": None,
+    }
+    monkeypatch.setattr("muscat_db.lco.archive_download_jobs", lambda: [dict(job, state="cancelling")])
+    TestClient(app).get("/api/jobs/status")
+    monkeypatch.setattr("muscat_db.lco.archive_download_jobs", lambda: [])
+    after = TestClient(app).get("/api/jobs/status").json()
+    assert after["running"] == []
+    assert "lco_archive_download:orph2" in after["finished"]
+
+
+def test_target_page_has_exofop_obslog_section(mock_db, monkeypatch):
+    from muscat_db import web
+    web._index_cache.clear()
+    monkeypatch.setattr(
+        web, "_get_datasets_for_normalized_target",
+        lambda _db, norm_name, _denied=frozenset(): ([], "2026-07-01"),
+    )
+    html = TestClient(app).get("/target?name=WASP10").text
+    assert 'id="exofop-obslog-details"' in html
+    assert "/api/lco/archive/exofop?OBJECT=" in html
+    assert "/api/lco/archive/exofop-download" in html
+    assert 'id="exofop-obslog-tbody"' in html

@@ -31,7 +31,7 @@ import logging
 import sqlite3
 from collections.abc import Callable, Iterable
 
-from muscat_db.database import get_conn, sql_not_denied
+from muscat_db.database import ScopedDenied, get_conn, sql_not_denied
 
 logger = logging.getLogger(__name__)
 
@@ -76,14 +76,48 @@ def _granted_ids(conn: sqlite3.Connection, username: str) -> frozenset[str]:
     return frozenset(r[0].upper() for r in rows if r[0])
 
 
-def denied_proposal_ids_for(db_path: str, username: str | None) -> frozenset[str]:
-    """Restricted proposal ids (upper-cased) this viewer may not see.
+def _is_scoped(conn: sqlite3.Connection, username: str) -> bool:
+    try:
+        row = conn.execute(
+            "SELECT scoped FROM users WHERE username = ?", (username,)
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        if _missing_table(exc) or "no such column" in str(exc):
+            return False
+        raise
+    return bool(row and row[0])
 
-    Empty when nothing is restricted or the viewer is an admin. Any database
-    error other than a missing table propagates: failing open here would
-    silently expose restricted data.
+
+def is_scoped(db_path: str, username: str | None) -> bool:
+    """Whether *username* is a scoped viewer (issue #202). Admins never are."""
+    if not username:
+        return False
+    with get_conn(db_path) as conn:
+        return _is_scoped(conn, username) and not _is_admin(conn, username)
+
+
+def _observed_ids(conn: sqlite3.Connection) -> frozenset[str]:
+    rows = conn.execute("SELECT DISTINCT proposal_id FROM summaries").fetchall()
+    return frozenset((r[0] or "").upper() for r in rows)
+
+
+def denied_proposal_ids_for(db_path: str, username: str | None) -> frozenset[str]:
+    """Proposal ids (upper-cased) this viewer may not see.
+
+    Empty when nothing is restricted or the viewer is an admin. A scoped
+    viewer (``users.scoped``, issue #202) is denied everything that is not on
+    their allowlist, including frames with no PROPID, and gets a
+    :class:`ScopedDenied` so SQL filters fail closed on proposals ingested
+    later. Any database error other than a missing table propagates: failing
+    open here would silently expose restricted data.
     """
     with get_conn(db_path) as conn:
+        if username is not None and _is_scoped(conn, username):
+            if _is_admin(conn, username):
+                return frozenset()
+            allowed = _granted_ids(conn, username)
+            denied = (_observed_ids(conn) | _restricted_ids(conn) | {""}) - allowed
+            return ScopedDenied(denied, allowed)
         restricted = _restricted_ids(conn)
         if not restricted:
             return frozenset()
@@ -97,7 +131,12 @@ def denied_proposal_ids_for(db_path: str, username: str | None) -> frozenset[str
 def is_denied(proposal_id: str | None, denied: frozenset[str]) -> bool:
     """Whether one row's ``proposal_id`` falls in a denied set from
     :func:`denied_proposal_ids_for`."""
-    return bool(denied) and (proposal_id or "").upper() in denied
+    if not denied:
+        return False
+    pid = (proposal_id or "").upper()
+    if isinstance(denied, ScopedDenied):
+        return pid not in denied.allowed
+    return pid in denied
 
 
 def _compact(name: str) -> str:
@@ -149,10 +188,20 @@ class NightVisibility:
             ]
         return self._rows[key]
 
+    def unknown_night(self, instrument: str, obsdate: str) -> bool:
+        """True for a scoped viewer on a night with no summaries at all.
+
+        Nothing on such a night can be tied to an allowlisted proposal, so a
+        scoped viewer fails closed; other viewers keep the old behaviour.
+        """
+        return isinstance(self.denied, ScopedDenied) and not self._night(instrument, obsdate)
+
     def hidden(self, instrument: str, obsdate: str, target: str) -> bool:
         """True when the viewer may not see *target*'s data on this night."""
         if not self.denied:
             return False
+        if self.unknown_night(instrument, obsdate):
+            return True
         rows = self._night(instrument, obsdate)
         if all(visible for _, visible in rows):
             return False
@@ -172,6 +221,8 @@ class NightVisibility:
         """
         if not self.denied:
             return False
+        if self.unknown_night(instrument, obsdate):
+            return True
         return any(not visible for _, visible in self._night(instrument, obsdate))
 
     def hidden_objects(self, instrument: str, obsdate: str) -> set[str]:
@@ -257,6 +308,34 @@ def observed_spelling(db_path: str, proposal_id: str) -> str | None:
             (proposal_id,),
         ).fetchone()
     return row[0] if row else None
+
+
+def is_admin_user(db_path: str, username: str) -> bool:
+    """Whether *username* has ``users.is_admin`` set."""
+    with get_conn(db_path) as conn:
+        return _is_admin(conn, username)
+
+
+def set_scoped(db_path: str, username: str, scoped: bool = True) -> bool:
+    """Mark *username* as a scoped viewer (or clear it). Returns False when
+    the flag already had that value. The user row is created if missing, the
+    same way ``htpasswd promote`` does."""
+    with get_conn(db_path) as conn:
+        _ensure_schema(conn)
+        conn.execute(
+            "INSERT OR IGNORE INTO users (username, display_name) VALUES (?, ?)",
+            (username, username),
+        )
+        before = conn.execute(
+            "SELECT scoped FROM users WHERE username = ?", (username,)
+        ).fetchone()[0]
+        if bool(before) == scoped:
+            return False
+        conn.execute(
+            "UPDATE users SET scoped = ? WHERE username = ?", (1 if scoped else 0, username)
+        )
+        conn.commit()
+    return True
 
 
 def restrict(db_path: str, proposal_id: str, description: str = "") -> bool:
@@ -381,22 +460,95 @@ def list_grants(db_path: str, username: str | None = None) -> list[dict]:
     ]
 
 
-def pending_backfill_dates(
+def blank_propid_frames(
     db_path: str, instruments: Iterable[str] | None = None
 ) -> dict[str, int]:
-    """Per PROPID-capturing instrument, how many observed dates the PR3
-    backfill has not yet processed (per its checkpoint). Rows on those dates
-    carry ``proposal_id = ''`` and so stay visible to everyone even after
-    their proposal is restricted. Instruments with nothing pending are
-    omitted."""
-    from muscat_db import database
+    """Per PROPID-capturing instrument, how many frames carry no
+    ``proposal_id``. Those rows stay visible to everyone even after their
+    proposal is restricted, so this is the leak a new restriction would leave.
+    Counting frames rather than the PR3 backfill's checkpoint means a night
+    newer than the last backfill run, whose frames already carry a PROPID,
+    does not warn. Instruments with nothing blank are omitted."""
     from muscat_db import propid_backfill as pb
 
-    pending: dict[str, int] = {}
-    for inst in instruments if instruments is not None else pb.PROPID_INSTRUMENTS:
-        done = pb._load_checkpoint(pb._checkpoint_path(inst))
-        dates = {d["obsdate"] for d in database.get_dates(db_path, inst)}
-        n = len(dates - done)
-        if n:
-            pending[inst] = n
-    return pending
+    names = tuple(instruments if instruments is not None else pb.PROPID_INSTRUMENTS)
+    if not names:
+        return {}
+    marks = ",".join("?" for _ in names)
+    with get_conn(db_path) as conn:
+        rows = conn.execute(
+            f"SELECT instrument, COUNT(*) FROM frames "
+            f"WHERE instrument IN ({marks}) AND TRIM(COALESCE(proposal_id, '')) = '' "
+            f"GROUP BY instrument",
+            names,
+        ).fetchall()
+    return {inst: n for inst, n in rows if n}
+
+
+# ── Explain (read-only, CLI) ────────────────────────────────────────────
+
+
+def explain_user(db_path: str, username: str) -> dict:
+    """What *username* can and cannot see, per proposal, as the web computes it.
+
+    Read-only. Built from the same :func:`denied_proposal_ids_for` the request
+    path uses, so it cannot drift from what a viewer actually gets. An unknown
+    username is explained as an ordinary authenticated viewer with no grants,
+    which is what the web treats it as.
+    """
+    denied = denied_proposal_ids_for(db_path, username)
+    restricted = {r["proposal_id"].upper() for r in list_restrictions(db_path)}
+    granted = {g["proposal_id"].upper() for g in list_grants(db_path, username)}
+    with get_conn(db_path) as conn:
+        admin = _is_admin(conn, username)
+        rows = conn.execute(
+            "SELECT COALESCE(proposal_id, ''), "
+            "COUNT(DISTINCT instrument || '|' || obsdate || '|' || COALESCE(object, '')), "
+            "COUNT(DISTINCT object) FROM summaries GROUP BY 1 ORDER BY 1"
+        ).fetchall()
+    proposals = []
+    observed: set[str] = set()
+    for pid, target_nights, objects in rows:
+        key = pid.upper()
+        observed.add(key)
+        proposals.append(
+            {
+                "proposal_id": pid,
+                "restricted": key in restricted,
+                "granted": key in granted,
+                "visible": not is_denied(pid, denied),
+                "target_nights": target_nights,
+                "objects": objects,
+            }
+        )
+    return {
+        "username": username,
+        "admin": admin,
+        "proposals": proposals,
+        # a grant on a proposal no summary carries gives the user nothing
+        "unmatched_grants": sorted(granted - observed),
+        "unmatched_restrictions": sorted(restricted - observed),
+    }
+
+
+def explain_target(db_path: str, username: str, target: str) -> list[dict]:
+    """Every summary row for *target* (spaces and case ignored, the same match
+    :class:`NightVisibility` uses) with whether *username* may see it."""
+    denied = denied_proposal_ids_for(db_path, username)
+    want = _compact(target)
+    with get_conn(db_path) as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT instrument, obsdate, object, COALESCE(proposal_id, '') "
+            "FROM summaries ORDER BY instrument, obsdate"
+        ).fetchall()
+    return [
+        {
+            "instrument": inst,
+            "obsdate": date,
+            "object": obj,
+            "proposal_id": pid,
+            "visible": not is_denied(pid, denied),
+        }
+        for inst, date, obj, pid in rows
+        if _compact(obj or "") == want
+    ]

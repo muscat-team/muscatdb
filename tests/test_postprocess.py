@@ -120,6 +120,13 @@ class TestValidateParams:
         assert pp.validate_params(5.0, 2, 5, "not-a-number", None) is not None
         assert pp.validate_params(5.0, 2, 5, None, "not-a-number") is not None
 
+    @pytest.mark.parametrize("bad", ["inf", "-inf", "nan", "1e999", float("inf"), float("nan")])
+    def test_rejects_non_finite_jd_exclusion(self, bad):
+        # inf/nan parse as floats; with apply=true an infinite bound would
+        # rewrite every band CSV in place with zero rows.
+        assert pp.validate_params(5.0, 2, 5, bad, None) is not None
+        assert pp.validate_params(5.0, 2, 5, None, bad) is not None
+
     def test_rejects_before_not_less_than_after(self):
         err = pp.validate_params(5.0, 2, 5, 2460877.0, 2460877.0)
         assert err is not None and "before" in err and "after" in err
@@ -369,3 +376,213 @@ class TestEndpoint:
         )
         assert r.status_code == 400
         assert "no band light-curve" in r.json()["error"]
+
+def _fake_prose_clip(rdir: Path, *, drop_png: bool = True):
+    """Stand-in for prose2's apply_clip: halves every band CSV in place."""
+    def run(args):
+        for p in sorted(rdir.glob("*.csv")):
+            head, *rows = p.read_text().splitlines()
+            p.write_text("\n".join([head, *rows[:1]]) + "\n")
+        if drop_png:
+            (rdir / f"{TARGET}_{INST}_{DATE}_lightcurves.png").write_bytes(b"clipped-png")
+        report = _ok_report()
+        report["applied"] = True
+        return report
+    return run
+
+
+class TestClipBackupRestore:
+    @pytest.fixture
+    def run_dir(self, prose_dir, monkeypatch):
+        rdir = _make_run_dir(prose_dir)
+        monkeypatch.setattr("muscat_db.photometry.job_status", lambda *a, **k: {"state": "done"})
+        return rdir
+
+    def _original(self, rdir):
+        return {p.name: p.read_bytes() for p in rdir.glob("*.csv")}
+
+    def test_apply_backs_up_then_restore_recovers_originals(self, run_dir, monkeypatch):
+        original = self._original(run_dir)
+        monkeypatch.setattr(pp, "_run_sync", _fake_prose_clip(run_dir))
+
+        res = pp.postprocess(INST, DATE, TARGET, RUN, 5.0, 2, 5, apply=True)
+
+        assert res["ok"] and res["restorable"] is True
+        assert self._original(run_dir) != original  # the clip really rewrote them
+
+        out = pp.restore_clip(INST, DATE, TARGET, RUN)
+
+        assert out["ok"], out
+        assert self._original(run_dir) == original
+        assert not (run_dir / ".clip_backup").exists()
+        # the summary figure the clip created did not exist before: removed
+        assert not (run_dir / f"{TARGET}_{INST}_{DATE}_lightcurves.png").exists()
+
+    def test_second_apply_keeps_the_first_snapshot(self, run_dir, monkeypatch):
+        original = self._original(run_dir)
+        monkeypatch.setattr(pp, "_run_sync", _fake_prose_clip(run_dir))
+        pp.postprocess(INST, DATE, TARGET, RUN, 5.0, 2, 5, apply=True)
+        # a second clip runs on the already-clipped files
+        pp.postprocess(INST, DATE, TARGET, RUN, 3.0, 2, 5, apply=True)
+
+        assert pp.restore_clip(INST, DATE, TARGET, RUN)["ok"]
+        assert self._original(run_dir) == original
+
+    def test_apply_is_refused_when_backup_cannot_be_taken(self, run_dir, monkeypatch):
+        calls = []
+        monkeypatch.setattr(pp, "_run_sync", lambda a: calls.append(a) or _ok_report())
+
+        def boom(rdir):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(pp, "_snapshot_unclipped", boom)
+        res = pp.postprocess(INST, DATE, TARGET, RUN, 5.0, 2, 5, apply=True)
+
+        assert res["ok"] is False and "back up" in res["error"]
+        assert calls == []  # prose2 never ran, so nothing was overwritten
+
+    def test_preview_takes_no_backup(self, run_dir, monkeypatch):
+        monkeypatch.setattr(pp, "_run_sync", lambda a: _ok_report())
+        monkeypatch.setattr(pp, "_read_preview", lambda path: None)
+        res = pp.postprocess(INST, DATE, TARGET, RUN, 5.0, 2, 5, apply=False)
+        assert res["restorable"] is False
+        assert not (run_dir / ".clip_backup").exists()
+
+    def test_restore_without_backup_is_an_error(self, run_dir):
+        out = pp.restore_clip(INST, DATE, TARGET, RUN)
+        assert out["ok"] is False and "nothing to restore" in out["error"]
+
+    def test_restore_refused_when_files_changed_after_clip(self, run_dir, monkeypatch):
+        monkeypatch.setattr(pp, "_run_sync", _fake_prose_clip(run_dir))
+        pp.postprocess(INST, DATE, TARGET, RUN, 5.0, 2, 5, apply=True)
+        # photometry re-run in the same run dir regenerates the CSV
+        fresh = next(iter(sorted(run_dir.glob("*.csv"))))
+        fresh.write_text("BJD_TDB,Flux,Err\n2460900.1,1.0,0.001\n2460900.2,1.0,0.001\n")
+
+        out = pp.restore_clip(INST, DATE, TARGET, RUN)
+
+        assert out["ok"] is False and "stale" in out["error"]
+        assert fresh.read_text().startswith("BJD_TDB,Flux,Err\n2460900.1")
+
+    def test_apply_after_rereduction_replaces_stale_snapshot(self, run_dir, monkeypatch):
+        monkeypatch.setattr(pp, "_run_sync", _fake_prose_clip(run_dir))
+        pp.postprocess(INST, DATE, TARGET, RUN, 5.0, 2, 5, apply=True)
+        for p in run_dir.glob("*.csv"):
+            p.write_text("BJD_TDB,Flux,Err\n2460900.1,1.0,0.001\n2460900.2,1.0,0.001\n")
+        reduced = self._original(run_dir)
+
+        pp.postprocess(INST, DATE, TARGET, RUN, 5.0, 2, 5, apply=True)
+
+        assert pp.restore_clip(INST, DATE, TARGET, RUN)["ok"]
+        assert self._original(run_dir) == reduced
+
+    def test_failed_apply_then_rereduction_replaces_stale_snapshot(self, run_dir, monkeypatch):
+        # an apply that snapshots and then fails leaves a backup with no clip manifest
+        monkeypatch.setattr(pp, "_run_sync", lambda a: _ok_report())  # applied: False
+        pp.postprocess(INST, DATE, TARGET, RUN, 5.0, 2, 5, apply=True)
+        assert (run_dir / ".clip_backup").is_dir()
+        # the run is re-reduced (v2), then clipped successfully
+        for p in run_dir.glob("*.csv"):
+            p.write_text("BJD_TDB,Flux,Err\n2460900.1,1.0,0.001\n2460900.2,1.0,0.001\n")
+        reduced = self._original(run_dir)
+        monkeypatch.setattr(pp, "_run_sync", _fake_prose_clip(run_dir))
+        pp.postprocess(INST, DATE, TARGET, RUN, 5.0, 2, 5, apply=True)
+
+        out = pp.restore_clip(INST, DATE, TARGET, RUN)
+
+        assert out["ok"], out
+        assert self._original(run_dir) == reduced  # v2, never the pre-re-reduction v1
+
+    def _clip_then_fail(self, rdir):
+        """prose2 stand-in that rewrites the CSVs and then reports failure."""
+        clip = _fake_prose_clip(rdir)
+
+        def run(args):
+            clip(args)
+            return {"ok": False, "error": "figure step failed"}
+
+        return run
+
+    def test_restore_works_after_apply_that_rewrote_files_then_failed(
+        self, run_dir, monkeypatch
+    ):
+        original = self._original(run_dir)
+        monkeypatch.setattr(pp, "_run_sync", self._clip_then_fail(run_dir))
+
+        res = pp.postprocess(INST, DATE, TARGET, RUN, 5.0, 2, 5, apply=True)
+
+        assert res["ok"] is False
+        assert self._original(run_dir) != original  # the failed apply did rewrite them
+
+        out = pp.restore_clip(INST, DATE, TARGET, RUN)
+
+        assert out["ok"], out
+        assert self._original(run_dir) == original
+
+    def test_retry_after_failed_rewriting_apply_keeps_the_original_snapshot(
+        self, run_dir, monkeypatch
+    ):
+        original = self._original(run_dir)
+        monkeypatch.setattr(pp, "_run_sync", self._clip_then_fail(run_dir))
+        pp.postprocess(INST, DATE, TARGET, RUN, 5.0, 2, 5, apply=True)
+
+        monkeypatch.setattr(pp, "_run_sync", _fake_prose_clip(run_dir))
+        pp.postprocess(INST, DATE, TARGET, RUN, 3.0, 2, 5, apply=True)
+
+        assert pp.restore_clip(INST, DATE, TARGET, RUN)["ok"]
+        assert self._original(run_dir) == original
+
+    def test_restore_blocked_while_job_running(self, run_dir, monkeypatch):
+        monkeypatch.setattr(pp, "_run_sync", _fake_prose_clip(run_dir))
+        pp.postprocess(INST, DATE, TARGET, RUN, 5.0, 2, 5, apply=True)
+        monkeypatch.setattr("muscat_db.photometry.job_status", lambda *a, **k: {"state": "running"})
+        out = pp.restore_clip(INST, DATE, TARGET, RUN)
+        assert out["ok"] is False and "running" in out["error"]
+        assert (run_dir / ".clip_backup").is_dir()
+
+    def test_backup_dir_is_invisible_to_band_csv_globs(self, run_dir, monkeypatch):
+        monkeypatch.setattr(pp, "_run_sync", _fake_prose_clip(run_dir))
+        pp.postprocess(INST, DATE, TARGET, RUN, 5.0, 2, 5, apply=True)
+        top_level = {p.name for p in run_dir.glob("*.csv")}
+        assert top_level == {f"{TARGET}_{INST}_gp_{DATE}.csv", f"{TARGET}_{INST}_gp_{DATE}_rp.csv"}
+
+
+class TestRestoreEndpoint:
+    def test_rejects_missing_run(self, mock_db):
+        client = TestClient(__import__("muscat_db.web", fromlist=["app"]).app)
+        r = client.post(
+            "/api/photometry/postprocess/restore",
+            json={"inst": INST, "date": DATE, "target": TARGET, "run": ""},
+        )
+        assert r.status_code == 400 and r.json()["error"] == "a run is required"
+
+    def test_forwards_to_restore_clip(self, mock_db, monkeypatch):
+        from muscat_db import web
+
+        seen = {}
+        def fake(inst, date, target, run):
+            seen.update(inst=inst, date=date, target=target, run=run)
+            return {"ok": True, "restored": ["a.csv"], "n_files": 1}
+
+        monkeypatch.setattr(web.postproc, "restore_clip", fake)
+        client = TestClient(web.app)
+        r = client.post(
+            "/api/photometry/postprocess/restore",
+            json={"inst": INST, "date": DATE, "target": TARGET, "run": RUN},
+        )
+        assert r.status_code == 200 and r.json()["n_files"] == 1
+        assert seen == {"inst": INST, "date": DATE, "target": TARGET, "run": RUN}
+
+    def test_surfaces_restore_failure_as_400(self, mock_db, monkeypatch):
+        from muscat_db import web
+
+        monkeypatch.setattr(
+            web.postproc, "restore_clip",
+            lambda *a, **k: {"ok": False, "error": "no pre-clip backup for this run; nothing to restore"},
+        )
+        client = TestClient(web.app)
+        r = client.post(
+            "/api/photometry/postprocess/restore",
+            json={"inst": INST, "date": DATE, "target": TARGET, "run": RUN},
+        )
+        assert r.status_code == 400 and r.json()["ok"] is False

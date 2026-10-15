@@ -73,7 +73,9 @@ from muscat_db import exposure as exp_calc
 from muscat_db.access import (
     NightVisibility,
     denied_proposal_ids_for,
+    is_admin_user,
     hidden_obsdates as _hidden_obsdates,
+    is_denied as _is_denied,
     object_hidden as _object_hidden,
     sql_not_denied as _sql_not_denied,
 )
@@ -145,6 +147,7 @@ from muscat_db.catalog import (
 )
 from muscat_db.database import (
     _apply_schema as _apply_database_schema,
+    ScopedDenied,
     UserSettingsError,
     ensure_user,
     get_conn,
@@ -731,7 +734,10 @@ def _visible_obsdates(db: str, inst: str, denied: frozenset[str]) -> list[str]:
     """Date picker for the photometry and transit-fit pages: obslog nights
     plus nights with products on disk, minus nights the viewer may not see."""
     date_set = {d["obsdate"] for d in _get_dates(db, inst, denied=denied)}
-    date_set.update(phot.output_dates(inst))
+    # A scoped viewer fails closed: a product night with no summaries cannot be
+    # tied to an allowlisted proposal, so only obslog nights are offered.
+    if not isinstance(denied, ScopedDenied):
+        date_set.update(phot.output_dates(inst))
     date_set -= _hidden_obsdates(db, inst, denied)
     return sorted(date_set, reverse=True)
 
@@ -1571,10 +1577,35 @@ def workflow_redirect():
     return RedirectResponse(url="/guide", status_code=301)
 
 
+def _mask_unseen_catalog_rows(
+    indb: list[int], tname: list[str], fallback: Callable[[int], str]
+) -> tuple[list[int], list[str]]:
+    """Clear the "in muscat-db" flag of catalog rows whose matched target the
+    viewer may not see (issue #202), so /toi and /nexsci neither link a target
+    outside their scope nor count it. A no-op for a viewer denied nothing."""
+    denied = _viewer_denied()
+    if not denied or not any(indb):
+        return indb, tname
+    visible = _all_norm_names(_db_path(), denied)
+    indb = list(indb)
+    tname = list(tname)
+    for i, flag in enumerate(indb):
+        if flag and tname[i] not in visible:
+            indb[i] = 0
+            tname[i] = fallback(i)
+    return indb, tname
+
+
 @app.get("/toi", response_class=HTMLResponse)
 def toi_page():
     cat = _load_toi_catalog()
     indb, tname = _toi_db_membership(cat["data"], _db_path())
+    tois, nms = cat["data"]["toi"], cat["data"]["name"]
+    indb, tname = _mask_unseen_catalog_rows(
+        indb,
+        tname,
+        lambda i: _normalize_target_name(f"TOI-{tois[i]}" if tois[i] else nms[i] or ""),
+    )
     boyle, n_boyle = _merge_boyle_columns(cat["data"])
     harps, n_harps = _harps_coord_membership(cat["data"])
     lamost, n_lamost = _lamost_coord_membership(cat["data"])
@@ -1890,6 +1921,7 @@ async def api_target_spectra(name: str = ""):
 def nexsci_page():
     cat = _load_nexsci_catalog()
     indb, tname = _nexsci_db_membership(cat["data"], _db_path())
+    indb, tname = _mask_unseen_catalog_rows(indb, tname, lambda i: "")
     harps, n_harps = _harps_coord_membership(cat["data"])
     lamost, n_lamost = _lamost_coord_membership(cat["data"])
     jwst_targets = _load_jwst_targets()
@@ -4488,6 +4520,10 @@ def api_lco_clone(ident: str, request: Request):
         # Windows are date-specific and regenerated for a new epoch; ``requests``
         # is local monitoring bookkeeping (carries the old windows too), not a
         # form field. Drop both so a clone starts from a clean, future-dated slate.
+        if _is_denied(params.get("proposal"), _viewer_denied()):
+            return JSONResponse(
+                {"ok": False, "error": "Request not found"}, status_code=404
+            )
         params.pop("windows", None)
         params.pop("requests", None)
         return JSONResponse({"ok": True, "params": params, "source": source})
@@ -5148,7 +5184,11 @@ def api_lco_split_submit(request: Request, payload: dict = Body(...)):
 @lco_router.get("/monitored-requests", response_class=JSONResponse)
 def api_lco_monitored_requests():
     """Return locally persisted scheduler requests and pipeline progress."""
-    return JSONResponse({"ok": True, "requests": lco_monitor.list_requests()})
+    denied = _viewer_denied()
+    rows = [
+        r for r in lco_monitor.list_requests() if not _is_denied(r.get("proposal"), denied)
+    ]
+    return JSONResponse({"ok": True, "requests": rows})
 
 
 def _require_own_archive_token(request: Request) -> None:
@@ -5324,6 +5364,7 @@ def api_lco_archive_exofop(
             "ok": True,
             "match_mode": "exofop",
             "toi": report["toi"],
+            "tic": report.get("tic"),
             "time_series": report["time_series"],
             "total": report["total"],
         }
@@ -5359,6 +5400,8 @@ def api_lco_archive_exofop_download(request: Request, payload: dict = Body(...))
         reduction_level = str(payload.get("reduction_level") or "91")
         rows = exofop.archive_search_by_target_date(
             target, tsdate, reduction_level=reduction_level, user_name=_request_user(request),
+            site=str(payload.get("site") or "").strip(),
+            instrument=str(payload.get("exofop_instrument") or "").strip(),
         )
         if not rows:
             return JSONResponse(
@@ -5374,6 +5417,7 @@ def api_lco_archive_exofop_download(request: Request, payload: dict = Body(...))
             overwrite=bool(payload.get("overwrite")),
             auto_ingest=True,
             user_name=request.state.user,
+            server_side=True,
         )
         _persist_lco_archive_download_row(_lco_archive_download_row(job))
         return JSONResponse({"ok": True, **job})
@@ -5418,6 +5462,29 @@ def api_lco_archive_download(request: Request, payload: dict = Body(...)):
         return JSONResponse({"ok": True, "results": results})
     except lco.LcoError as e:
         return _lco_error_response(e)
+
+
+@lco_router.post("/archive/download/{job_id}/cancel", response_class=JSONResponse)
+def api_lco_archive_download_cancel(job_id: str):
+    try:
+        job = lco.cancel_archive_download(job_id)
+        _persist_lco_archive_download_row(_lco_archive_download_row(job))
+        return JSONResponse({"ok": True, **job})
+    except lco.LcoError as e:
+        return _lco_error_response(e)
+
+
+@lco_router.get("/archive/downloads", response_class=JSONResponse)
+def api_lco_archive_downloads():
+    """Live archive-download jobs of this server process, newest first.
+
+    Light per-job rows (no frame/result lists) for pages that mirror download
+    state, e.g. the ExoFOP obslog table on the LCO archive page.
+    """
+    rows = _visible_jobs([_lco_archive_download_row(job) for job in lco.archive_download_jobs()])
+    keys = ("key", "run_id", "state", "inst", "date", "target", "run_name",
+            "error_desc", "started_at", "user_name")
+    return JSONResponse({"ok": True, "jobs": [{k: r.get(k) for k in keys} for r in rows]})
 
 
 @lco_router.get("/archive/download/{job_id}", response_class=JSONResponse)
@@ -6485,12 +6552,36 @@ def _lco_archive_download_rows() -> list[dict]:
     return rows
 
 
+def _orphaned_lco_archive_row(row: dict) -> dict:
+    """Terminal copy of a persisted in-flight row whose worker thread is gone.
+
+    Archive downloads run on in-process threads, so a server restart (or a
+    ``--reload``) abandons them while their persisted row still says
+    ``running``; nothing would ever move it on.
+    """
+    out = dict(row)
+    if row.get("state") == "cancelling":
+        out["state"] = "cancelled"
+        return out
+    out["state"] = "error"
+    out["error_desc"] = "Interrupted: the server restarted while this download was running"
+    return out
+
+
 def _jobs_with_lco_archive_rows() -> list[dict]:
+    live = _lco_archive_download_rows()
+    live_keys = {row["key"] for row in live}
     merged: dict[str, dict] = {}
     for job in get_job_store().all():
-        row = _adapt_persisted_lco_archive_row(job) if job.get("type") == "lco_archive_download" else job
+        if job.get("type") != "lco_archive_download":
+            merged[job["key"]] = job
+            continue
+        row = _adapt_persisted_lco_archive_row(job)
+        if row.get("state") in ("running", "pending", "cancelling") and row["key"] not in live_keys:
+            row = _orphaned_lco_archive_row(row)
+            _persist_lco_archive_download_row(row)
         merged[row["key"]] = row
-    for row in _lco_archive_download_rows():
+    for row in live:
         merged[row["key"]] = row
     return list(merged.values())
 
@@ -6792,7 +6883,10 @@ def _legacy_artifact_hidden(inst: str, date: str, name: str) -> bool:
     """Legacy (pre-run-dir) products sit directly under the night as
     ``<target>_<inst>_...``; hide those whose target the viewer may not see.
     Night-level files such as calibration masters carry no target."""
-    hidden = _night_visibility().hidden_objects(inst, date)
+    nights = _night_visibility()
+    if nights.unknown_night(inst, date):
+        return True
+    hidden = nights.hidden_objects(inst, date)
     stem = name.casefold()
     return any(stem.startswith(obj + "_") for obj in hidden)
 
@@ -6973,6 +7067,28 @@ def photometry_postprocess(payload: dict = Body(...)):
     return JSONResponse(result)
 
 
+@photometry_router.post("/postprocess/restore")
+def photometry_postprocess_restore(payload: dict = Body(...)):
+    """Undo the run's post-process clip: put back the band CSVs and summary
+    figure saved before the first ``apply``."""
+    inst = (payload.get("inst") or "").strip()
+    date = (payload.get("date") or "").strip()
+    target = (payload.get("target") or "").strip()
+    run = (payload.get("run") or "").strip()
+    if inst not in INSTRUMENTS or not phot.valid_date(date) or not target:
+        return JSONResponse(
+            {"ok": False, "error": "invalid instrument, date or target"},
+            status_code=400,
+        )
+    if not run:
+        return JSONResponse({"ok": False, "error": "a run is required"}, status_code=400)
+    _require_visible_night(inst, date, target)
+    result = postproc.restore_clip(inst, date, target, run)
+    if not result.get("ok"):
+        return JSONResponse(result, status_code=400)
+    return JSONResponse(result)
+
+
 @photometry_router.get("/status")
 def photometry_status(inst: str, date: str, target: str, run: str = ""):
     # Drain the queue so a pending full job is promoted once the slot frees,
@@ -7138,10 +7254,16 @@ def api_set_identified(obj: str, payload: dict = Body(...)):
 
 @target_router.put("/{obj}/norm-name")
 def api_set_norm_name(obj: str, payload: dict = Body(...)):
+    db = _db_path()
+    # Admin only (#228): a rename moves the raw OBJECT into another target's
+    # group, which changes who else can see its frames. The check comes first
+    # so a non-admin gets the same 403 whether or not the target exists.
+    user = _CURRENT_USER.get()
+    if not user or not is_admin_user(db, user):
+        raise HTTPException(403, "only an admin may rename a target")
     norm_name = (payload.get("norm_name") or "").strip()
     if len(norm_name) > 200:
         raise HTTPException(400, "norm_name too long (max 200 chars)")
-    db = _db_path()
     _require_visible_object(db, obj)
     _set_norm_name_override(db, obj, norm_name)
     return JSONResponse({"ok": True, "object": obj, "norm_name": norm_name})

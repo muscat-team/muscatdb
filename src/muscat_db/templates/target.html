@@ -241,6 +241,261 @@
     </div>
   </details>
 
+  <details class="adv" id="exofop-obslog-details" style="margin-top: 1rem;">
+    <summary><span id="exofop-obslog-summary">ExoFOP obslog</span>
+      <a id="exofop-obslog-link" href="#" target="_blank" rel="noopener noreferrer" style="display: none; font-size: 0.8rem; font-weight: normal; margin-left: 0.5rem;">Open on ExoFOP</a></summary>
+    <div style="margin-top: 0.5rem;">
+      <p class="hint" id="exofop-obslog-status" style="margin-top: 0;">Open this section to load the time-series observations reported on ExoFOP-TESS and check which are already in muscat-db.</p>
+      <div class="lco-actions" style="margin-bottom: 0.4rem; display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;">
+        <span class="hint" id="exofop-obslog-msg" style="margin: 0;"></span>
+        <a id="exofop-obslog-jobs" href="/jobs" style="display: none; font-size: 0.85rem;">To Jobs</a>
+      </div>
+      <div class="csv-wrap" id="exofop-obslog-wrap" style="display: none;">
+        <table id="exofop-obslog-table">
+          <thead>
+            <tr><th>Telescope</th><th>Camera</th><th>Filter</th><th>Date (UT)</th><th>Frames</th><th>Status</th><th>Download</th></tr>
+          </thead>
+          <tbody id="exofop-obslog-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </details>
+
+  <script>
+    (function () {
+      const details = document.getElementById('exofop-obslog-details');
+      if (!details) return;
+      const targetName = {{ target_name | tojson }};
+      const statusEl = document.getElementById('exofop-obslog-status');
+      const msgEl = document.getElementById('exofop-obslog-msg');
+      const wrap = document.getElementById('exofop-obslog-wrap');
+      const tbody = document.getElementById('exofop-obslog-tbody');
+      const jobsLink = document.getElementById('exofop-obslog-jobs');
+      const linkEl = document.getElementById('exofop-obslog-link');
+      const titleEl = document.getElementById('exofop-obslog-summary');
+      const ACTIVE = { pending: 1, running: 1, cancelling: 1 };
+      let loaded = false;
+      let loading = false;
+      let syncTimer = null;
+
+      function esc(v) {
+        return String(v == null ? '' : v).replace(/[&<>"']/g, function (c) {
+          return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+        });
+      }
+
+      // Observing-night labels (YYMMDD) a UT date may be filed under: the
+      // same +/-1 day window the server uses for its existence check.
+      function obsLabels(tsdate) {
+        const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(tsdate || ''));
+        if (!m) return [];
+        const base = Date.UTC(+m[1], +m[2] - 1, +m[3]);
+        return [-1, 0, 1].map(function (d) {
+          const t = new Date(base + d * 86400000);
+          return String(t.getUTCFullYear()).slice(2) +
+            String(t.getUTCMonth() + 1).padStart(2, '0') +
+            String(t.getUTCDate()).padStart(2, '0');
+        });
+      }
+
+      function matchJob(jobs, x) {
+        if (!x.lco || !x.instrument || !x.dates.length) return null;
+        let best = null;
+        jobs.forEach(function (j) {
+          const insts = String(j.inst || '').toLowerCase().split(',');
+          const dates = String(j.date || '').split(',');
+          if (insts.indexOf(x.instrument) < 0) return;
+          if (!dates.some(function (d) { return x.dates.indexOf(d) >= 0; })) return;
+          // Prefer an active job over a finished one, then the newest.
+          const rank = (ACTIVE[j.state] ? 1e12 : 0) + (j.started_at || 0);
+          if (!best || rank > best.rank) best = { job: j, rank: rank };
+        });
+        return best ? best.job : null;
+      }
+
+      function setCells(tr, statusHtml, actionHtml) {
+        tr.querySelector('.exofop-status').innerHTML = statusHtml;
+        tr.querySelector('.exofop-action').innerHTML = actionHtml;
+      }
+
+      function renderJob(tr, job) {
+        const x = tr._exo;
+        const label = job.run_name ? ' (' + esc(job.run_name) + ')' : '';
+        const jobsA = ' <a href="/jobs" title="Open the Jobs page">jobs</a>';
+        if (ACTIVE[job.state]) {
+          const cancelBtn = job.state === 'cancelling'
+            ? '<button type="button" class="btn sm" disabled>Cancelling…</button>'
+            : '<button type="button" class="btn sm danger exofop-cancel-btn" data-job-id="' + esc(job.run_id || '') + '">Cancel</button>';
+          const text = job.state === 'pending' ? 'Queued' : (job.state === 'cancelling' ? 'Cancelling…' : 'Downloading');
+          const cls = job.state === 'pending' ? 'badge-pending'
+            : (job.state === 'cancelling' ? 'badge-cancelled' : 'badge-amber pulse');
+          setCells(tr, '<span class="badge ' + cls + '">' + text + label + '</span>' + jobsA, cancelBtn);
+          x.jobId = job.run_id || '';
+          return;
+        }
+        if (job.state === 'done' || x.exists) return;
+        const cls = job.state === 'cancelled' ? 'badge-cancelled' : 'badge-error';
+        const word = job.state === 'cancelled' ? 'Cancelled' : 'Failed';
+        const err = job.state === 'error' && job.error_desc ? ' title="' + esc(job.error_desc) + '"' : '';
+        setCells(tr, '<span class="badge ' + cls + '"' + err + '>' + word + '</span>' + jobsA, x.actionHtml);
+      }
+
+      function schedule(delay) {
+        if (syncTimer) clearTimeout(syncTimer);
+        syncTimer = setTimeout(sync, delay);
+      }
+
+      function sync() {
+        syncTimer = null;
+        const rows = Array.from(tbody.querySelectorAll('tr')).filter(function (tr) { return tr._exo && tr._exo.lco; });
+        if (!rows.length) return;
+        fetch('/api/lco/archive/downloads').then(function (r) { return r.json(); }).then(function (d) {
+          const jobs = d.jobs || [];
+          let anyActive = false, reload = false;
+          rows.forEach(function (tr) {
+            const x = tr._exo;
+            const job = matchJob(jobs, x);
+            if (job && ACTIVE[job.state]) {
+              anyActive = true;
+              renderJob(tr, job);
+            } else if (job && x.jobId && job.run_id === x.jobId) {
+              // The job this row was following has just finished.
+              if (job.state === 'done') reload = true; else renderJob(tr, job);
+              x.jobId = '';
+            } else if (x.jobId) {
+              // Job left the live list (e.g. server restart): re-check the DB.
+              x.jobId = '';
+              reload = true;
+            } else if (job && !x.exists && job.state !== 'done') {
+              renderJob(tr, job);
+            }
+          });
+          if (reload) { load(); return; }
+          if (anyActive) schedule(3000);
+        }).catch(function () { schedule(8000); });
+      }
+
+      function render(report) {
+        tbody.innerHTML = '';
+        const rows = report.time_series || [];
+        titleEl.textContent = 'ExoFOP obslog (' + (report.toi ? 'TOI ' + report.toi : 'TIC ' + report.tic) + ')';
+        linkEl.href = 'https://exofop.ipac.caltech.edu/tess/target.php?id=' +
+          encodeURIComponent(report.toi ? 'TOI-' + report.toi : report.tic);
+        linkEl.style.display = '';
+        if (!rows.length) {
+          wrap.style.display = 'none';
+          statusEl.textContent = 'No ExoFOP time-series entries reported for this target.';
+          return;
+        }
+        let missing = 0;
+        rows.forEach(function (r) {
+          const exists = !!r.exists;
+          if (!exists && r.exists_checked) missing++;
+          const statusHtml = r.exists_checked
+            ? (exists
+                ? '<span class="badge badge-green">In muscat-db' + (r.dataset_local_frames ? ' (' + r.dataset_local_frames + ' fr)' : '') + '</span>'
+                : '<span class="badge badge-amber">Not in database</span>')
+            : '<span class="badge badge-filter-other">N/A</span>';
+          // LCO telescopes only: other facilities are not in the LCO archive.
+          const actionHtml = (!exists && r.tsdate && r.lco)
+            ? '<button type="button" class="btn sm exofop-dl-btn" data-date="' + esc(r.tsdate) +
+              '" data-site="' + esc(r.site || '') + '" data-inst="' + esc(r.instrument || '') + '">Download</button>'
+            : '';
+          const tr = document.createElement('tr');
+          tr._exo = {
+            lco: !!r.lco, instrument: String(r.instrument || '').toLowerCase(),
+            dates: obsLabels(r.tsdate), exists: exists, actionHtml: actionHtml, jobId: ''
+          };
+          tr.innerHTML =
+            '<td>' + esc(r.tstel || '') + '</td>' +
+            '<td>' + esc(r.tscam || '') + '</td>' +
+            '<td>' + esc(r.tsfilt || '') + '</td>' +
+            '<td class="mono">' + esc(r.tsdate || '') + '</td>' +
+            '<td class="mono">' + esc(r.tsnum !== undefined ? r.tsnum : '') + '</td>' +
+            '<td class="exofop-status">' + statusHtml + '</td>' +
+            '<td class="exofop-action" style="text-align:center;">' + actionHtml + '</td>';
+          tbody.appendChild(tr);
+        });
+        wrap.style.display = '';
+        statusEl.textContent = (rows.length - missing) + '/' + rows.length + ' reported in muscat-db, ' + missing + ' missing.';
+        schedule(0);
+      }
+
+      function load() {
+        if (loading) return;
+        loading = true;
+        statusEl.textContent = 'Checking ExoFOP for ' + targetName + '…';
+        fetch('/api/lco/archive/exofop?OBJECT=' + encodeURIComponent(targetName))
+          .then(function (r) { return r.json(); })
+          .then(function (d) {
+            loaded = true;
+            if (!d.ok) {
+              wrap.style.display = 'none';
+              statusEl.textContent = d.error || 'No ExoFOP time-series cross-check for this target.';
+              return;
+            }
+            render(d);
+          })
+          .catch(function (e) { statusEl.textContent = 'ExoFOP check failed: ' + e; })
+          .finally(function () { loading = false; });
+      }
+
+      tbody.addEventListener('click', function (e) {
+        const dl = e.target.closest ? e.target.closest('.exofop-dl-btn') : null;
+        if (dl && !dl.disabled) {
+          dl.disabled = true;
+          dl.textContent = 'Queued…';
+          fetch('/api/lco/archive/exofop-download', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              target: targetName, tsdate: dl.getAttribute('data-date') || '',
+              reduction_level: '91', overwrite: false,
+              background: true, site: dl.getAttribute('data-site') || '',
+              exofop_instrument: dl.getAttribute('data-inst') || ''
+            })
+          }).then(function (r) { return r.json(); }).then(function (d) {
+            if (!d.ok) {
+              msgEl.textContent = d.error || 'ExoFOP download failed';
+              dl.disabled = false; dl.textContent = 'Download';
+              return;
+            }
+            msgEl.textContent = 'Download queued.';
+            if (jobsLink) jobsLink.style.display = '';
+            schedule(300);
+          }).catch(function (err) {
+            msgEl.textContent = String(err);
+            dl.disabled = false; dl.textContent = 'Download';
+          });
+          return;
+        }
+        const cancel = e.target.closest ? e.target.closest('.exofop-cancel-btn') : null;
+        if (cancel && !cancel.disabled) {
+          const id = cancel.getAttribute('data-job-id');
+          if (!id) return;
+          cancel.disabled = true;
+          cancel.textContent = 'Cancelling…';
+          fetch('/api/lco/archive/download/' + encodeURIComponent(id) + '/cancel', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}'
+          }).then(function (r) { return r.json(); }).then(function (d) {
+            if (!d.ok) {
+              msgEl.textContent = d.error || 'Cancel failed';
+              cancel.disabled = false; cancel.textContent = 'Cancel';
+              return;
+            }
+            schedule(500);
+          }).catch(function (err) {
+            msgEl.textContent = String(err);
+            cancel.disabled = false; cancel.textContent = 'Cancel';
+          });
+        }
+      });
+
+      details.addEventListener('toggle', function () {
+        if (details.open && !loaded) load();
+      });
+    })();
+  </script>
+
   <details class="adv" id="ads-details" style="margin-top: 1rem;">
     <summary>NASA ADS Publications</summary>
     <div style="margin-top: 0.5rem;">

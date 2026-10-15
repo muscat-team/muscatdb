@@ -30,6 +30,7 @@ from muscat_db.obsdate_normalize import (
     dedupe_conflicts,
     plan_all,
 )
+from muscat_db.build_status import build_age
 from muscat_db.propid_backfill import PROPID_INSTRUMENTS
 from muscat_db import scan_failures, scanner
 from muscat_db.audit import DEFAULT_MIN_AGE_DAYS
@@ -308,6 +309,32 @@ def scan_yesterday_cmd(
             f"[red]Scan failed for {obsdate}: {', '.join(failed)} "
             "-- recorded for retry; see `muscat-db scan-failures`[/]"
         )
+
+
+@app.command(name="build-status", cls=_Cmd)
+def build_status_cmd(
+    db: str = _db_option(),
+    max_age_hours: float = typer.Option(
+        36.0, "--max-age-hours", min=0.0,
+        help="Exit 1 if the last build-db is older than this (default 36)",
+    ),
+):
+    """Report the age of the last build-db; exit 1 if stale or unknown (#237)."""
+    age = build_age(db)
+    if age is None:
+        console.print(
+            f"[red]No last_build_at in {db}: cannot tell when it was last built[/]",
+            soft_wrap=True,
+        )
+        raise typer.Exit(1)
+    hours = age.total_seconds() / 3600
+    if hours > max_age_hours:
+        console.print(
+            f"[red]{db} was last built {hours:.1f} h ago (limit {max_age_hours:g} h)[/]",
+            soft_wrap=True,
+        )
+        raise typer.Exit(1)
+    console.print(f"[green]{db} was last built {hours:.1f} h ago[/]", soft_wrap=True)
 
 
 @app.command(name="scan-failures", cls=_Cmd)
@@ -1219,13 +1246,12 @@ def _warn_restriction_gaps(db: str, proposal_id: str) -> None:
     """Say loudly what a new restriction does not yet cover."""
     from muscat_db import access
 
-    pending = access.pending_backfill_dates(db)
-    if pending:
-        detail = ", ".join(f"{inst}: {n}" for inst, n in sorted(pending.items()))
+    blank = access.blank_propid_frames(db)
+    if blank:
+        detail = ", ".join(f"{inst}: {n}" for inst, n in sorted(blank.items()))
         console.print(
-            "[bold yellow]WARNING: the PROPID backfill has not processed every date "
-            f"({detail} date(s) pending).[/]\n"
-            "[yellow]Frames on those dates carry an empty proposal_id, so any of "
+            f"[bold yellow]WARNING: some frames have no PROPID ({detail} frame(s)).[/]\n"
+            "[yellow]Those frames carry an empty proposal_id, so any of "
             f"them taken under {proposal_id} stay visible to everyone until "
             "`muscat-db backfill-propid` covers them.[/]"
         )
@@ -1297,7 +1323,7 @@ def access_grant(
             "htpasswd add`, or has never logged in). Granting anyway.[/]"
         )
     restricted = {r["proposal_id"].upper() for r in access.list_restrictions(db)}
-    if proposal_id.upper() not in restricted:
+    if proposal_id.upper() not in restricted and not access.is_scoped(db, username):
         console.print(
             f"[yellow]{proposal_id} is not restricted, so this grant has no effect "
             "until it is.[/]"
@@ -1321,6 +1347,36 @@ def access_revoke(
         console.print(f"[yellow]{username} had no grant for {proposal_id}[/]")
         raise typer.Exit(1)
     console.print(f"[green]{username} revoked from {proposal_id}[/]")
+
+
+@access_app.command("scope")
+def access_scope(
+    username: str = typer.Argument(..., help="nginx username"),
+    off: bool = typer.Option(False, "--off", help="Return the user to blocklist behaviour"),
+):
+    """Make a user a scoped viewer: they see only the proposals granted to them
+    (`access grant`), and nothing else, including frames with no PROPID."""
+    from muscat_db import access
+    from muscat_db.database import db_path
+
+    db = db_path()
+    if access.is_admin_user(db, username):
+        console.print(f"[red]Error: '{username}' is an admin; admins are never scoped[/]")
+        raise typer.Exit(1)
+    changed = access.set_scoped(db, username, not off)
+    if off:
+        verb = "is no longer scoped" if changed else "was not scoped"
+        console.print(f"[green]{username} {verb}[/]")
+        return
+    console.print(
+        f"[green]{username} is scoped[/]" if changed else f"[yellow]{username} is already scoped[/]"
+    )
+    grants = access.list_grants(db, username)
+    if not grants:
+        console.print(
+            f"[yellow]{username} has no grants, so they see nothing. Add one with "
+            f"`muscat-db access grant {username} <PROPOSAL>`.[/]"
+        )
 
 
 @access_app.command("list")
@@ -1365,6 +1421,80 @@ def access_list(
             ", ".join(r["grantees"]) or "-",
         )
     console.print(table)
+
+
+@access_app.command("explain")
+def access_explain(
+    username: str = typer.Argument(..., help="nginx username"),
+    target: str | None = typer.Option(
+        None, "--target", "-t", help="Also list this target's nights and their visibility"
+    ),
+):
+    """Show what a user sees and why, per proposal (read-only).
+
+    Uses the same computation as the web, so run it before and after a
+    `restrict`, `grant` or `revoke` to check nothing went dark by mistake.
+    """
+    from muscat_db import access
+    from muscat_db.database import db_path
+
+    db = db_path()
+    info = access.explain_user(db, username)
+    if not access.user_exists(db, username):
+        console.print(
+            f"[yellow]{username} has no users row; explained as an ordinary viewer "
+            "with no grants.[/]"
+        )
+    if info["admin"]:
+        console.print(f"[green]{username} is an admin: nothing is hidden.[/]")
+
+    table = Table(title=f"Proposals as seen by {username}")
+    table.add_column("Proposal", style="cyan")
+    table.add_column("Restricted")
+    table.add_column("Granted")
+    table.add_column("Sees")
+    table.add_column("Target-nights", justify="right")
+    table.add_column("Targets", justify="right")
+    for p in info["proposals"]:
+        table.add_row(
+            p["proposal_id"] or "(blank)",
+            "yes" if p["restricted"] else "no",
+            "yes" if p["granted"] else "no",
+            "[green]yes[/]" if p["visible"] else "[red]no[/]",
+            str(p["target_nights"]),
+            str(p["objects"]),
+        )
+    console.print(table)
+    hidden = sum(p["target_nights"] for p in info["proposals"] if not p["visible"])
+    total = sum(p["target_nights"] for p in info["proposals"])
+    console.print(f"{total - hidden} of {total} target-nights visible, {hidden} hidden")
+    for pid in info["unmatched_grants"]:
+        console.print(
+            f"[yellow]Grant {pid} matches no observation, so it shows {username} nothing.[/]"
+        )
+    for pid in info["unmatched_restrictions"]:
+        console.print(f"[yellow]Restriction {pid} matches no observation.[/]")
+
+    if target is not None:
+        rows = access.explain_target(db, username, target)
+        if not rows:
+            console.print(f"[yellow]No observation of {target!r} (spaces and case ignored).[/]")
+            return
+        detail = Table(title=f"{target}")
+        detail.add_column("Instrument")
+        detail.add_column("Date")
+        detail.add_column("Proposal", style="cyan")
+        detail.add_column("Sees")
+        for r in rows:
+            detail.add_row(
+                r["instrument"], r["obsdate"], r["proposal_id"] or "(blank)",
+                "[green]yes[/]" if r["visible"] else "[red]no[/]",
+            )
+        console.print(detail)
+        seen = any(r["visible"] for r in rows)
+        console.print(
+            f"{target}: " + ("visible" if seen else "hidden (answers as an unknown target)")
+        )
 
 
 # ---------------------------------------------------------------------------
