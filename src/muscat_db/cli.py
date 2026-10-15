@@ -758,6 +758,38 @@ def backfill_propid_cmd(
         raise typer.Exit(1)
 
 
+@app.command(name="backfill-products", cls=_Cmd)
+def backfill_products_cmd(
+    ctx: typer.Context,
+    db: str = _db_option(),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Report what would be written without writing any record",
+    ),
+):
+    """Write product records for runs made before they existed (issue #208).
+
+    Rebuilds each photometry, transit-fit and TTV run's record from its job
+    row. Runs whose inputs cannot be established exactly get a record with
+    undetermined inputs and stay admin-only. Idempotent; never overwrites.
+    """
+    _log_startup_banner(f"backfill-products --db {db}")
+    _require_existing_db(ctx, db, "backfill-products")
+    from muscat_db.product_backfill import backfill_products
+
+    stats = backfill_products(db, dry_run=dry_run)
+    verb = "would write" if dry_run else "wrote"
+    n = (stats.determined + stats.undetermined) if dry_run else stats.written
+    console.print(
+        f"{verb} {n} record(s): {stats.determined} with inputs, "
+        f"{stats.undetermined} undetermined; {stats.already} already had one, "
+        f"{stats.missing_dir} run dir(s) missing, {stats.errors} error(s)"
+    )
+    for reason, count in sorted(stats.by_reason.items(), key=lambda kv: -kv[1]):
+        console.print(f"  [yellow]undetermined[/] x{count}: {reason}")
+    if stats.errors:
+        raise typer.Exit(1)
+
+
 _LCO_INST_CHOICES = click.Choice([*LCO_INSTRUMENTS, "all"])
 
 

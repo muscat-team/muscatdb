@@ -321,6 +321,71 @@ def _conda_env_python(env: str) -> str | None:
     return None
 
 
+_PROSE_VERSION: str | None = None
+_PROSE_VERSION_LOCK = threading.Lock()
+_PROSE_DISTRIBUTIONS = ("prose2", "prose")
+
+
+def prose_version() -> str:
+    """Installed prose version in the prose conda env, cached after first lookup."""
+    global _PROSE_VERSION
+    if _PROSE_VERSION is not None:
+        return _PROSE_VERSION
+    with _PROSE_VERSION_LOCK:
+        if _PROSE_VERSION is not None:
+            return _PROSE_VERSION
+        found = "unknown"
+        prose_py = _conda_env_python(prose_conda_env())
+        if prose_py is not None:
+            code = (
+                "from importlib.metadata import version, PackageNotFoundError\n"
+                f"for n in {_PROSE_DISTRIBUTIONS!r}:\n"
+                "    try:\n        print(version(n)); break\n"
+                "    except PackageNotFoundError:\n        pass\n"
+            )
+            try:
+                result = subprocess.run(
+                    [prose_py, "-c", code], capture_output=True, text=True, timeout=10,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    found = result.stdout.strip()
+            except Exception:  # a version lookup must never fail a launch
+                logger.debug("prose version lookup failed", exc_info=True)
+        _PROSE_VERSION = found
+    return _PROSE_VERSION
+
+
+def _write_run_product(
+    rdir: Path,
+    *,
+    inst: str,
+    date: str,
+    target: str,
+    opts: dict,
+    test_run: bool,
+    user_name: str | None,
+    site: str,
+    telescope: str,
+    mode: str,
+    run_name: str,
+) -> None:
+    """Record a photometry run's inputs, settings, versions and author (#208)."""
+    from muscat_db import __version__
+    from muscat_db import product_record
+
+    record = product_record.build_record(
+        "photometry",
+        author=user_name,
+        inputs=[product_record.frame_input(database.db_path(), inst, date, target)],
+        settings={
+            "options": opts, "test_run": bool(test_run),
+            "site": site, "telescope": telescope, "mode": mode, "run_name": run_name,
+        },
+        tool_versions={"muscat_db": __version__, "prose": prose_version()},
+    )
+    product_record.write_record(rdir, record)
+
+
 def _prose_prefix(module: str = _MODULE, console_script: str | None = "photometry") -> list[str]:
     """Resolve how to invoke a prose pipeline entrypoint, most robust first.
 
@@ -1803,6 +1868,7 @@ def start_run(
         rdir.mkdir(parents=True, exist_ok=True)
 
         _write_run_meta(rdir, inst=inst, date=date, target=target, run_id=run_id, site=site, telescope=telescope, mode=mode, run_name=run_name, run_type=run_type)
+        _write_run_product(rdir, inst=inst, date=date, target=target, opts=opts, test_run=test_run, user_name=user_name, site=site, telescope=telescope, mode=mode, run_name=run_name)
         cmd = build_command(inst, date, target, opts, test_run=test_run, run_id=run_id)
         log_path = _run_log_path(rdir, inst, date, target, run_id)
         logf = open(log_path, "w")
@@ -2504,6 +2570,7 @@ def sync_jobs() -> None:
                 rdir.mkdir(parents=True, exist_ok=True)
                 run_type = "test" if test_run else "full"
                 _write_run_meta(rdir, inst=inst, date=date, target=target, run_id=run_id, site=site, telescope=telescope, mode=mode, run_name=run_name, run_type=run_type)
+                _write_run_product(rdir, inst=inst, date=date, target=target, opts=opts, test_run=test_run, user_name=entry.get("user_name"), site=site, telescope=telescope, mode=mode, run_name=run_name)
                 pending_log_path = _run_log_path(rdir, inst, date, target, run_id)
                 try:
                     logf = open(pending_log_path, "w")
