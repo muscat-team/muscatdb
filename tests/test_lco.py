@@ -1999,9 +1999,67 @@ class ExofopTimeSeriesTest(unittest.TestCase):
         self.assertEqual(fts.call_args.kwargs["tic"], "434398831")
 
     def test_build_report_non_toi(self):
-        with patch("muscat_db.exofop.resolve_toi_number", return_value=None):
+        with patch("muscat_db.exofop.resolve_toi_number", return_value=None), \
+                patch("muscat_db.exofop.fetch_by_name", return_value=None), \
+                patch("muscat_db.exofop.resolve_tic_via_simbad", return_value=None):
             r = exofop.build_time_series_report("WASP-12")
         self.assertFalse(r["ok"])
+        self.assertTrue(r["needs_tic"])
+
+    def test_build_report_resolves_name_via_exofop(self):
+        rows = [{"tstel": "LCO-CTIO", "tsdate": "2024-05-01"}]
+        with patch("muscat_db.exofop.resolve_toi_number", return_value=None), \
+                patch("muscat_db.exofop.fetch_by_name", return_value=("166527623", rows)), \
+                patch("muscat_db.exofop.resolve_tic_via_simbad") as sim, \
+                patch("muscat_db.exofop.fetch_time_series") as fts:
+            r = exofop.build_time_series_report("HIP67522")
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["tic"], "166527623")
+        self.assertEqual(r["total"], 1)
+        sim.assert_not_called()
+        fts.assert_not_called()
+
+    def test_fetch_by_name_rejects_unknown_target(self):
+        class _Resp:
+            def json(self):
+                raise ValueError("not json")
+        exofop._exofop_cache.clear()
+        with patch("muscat_db.exofop.catalog._sync_get", return_value=_Resp()):
+            self.assertIsNone(exofop.fetch_by_name("NOTAREALSTAR123"))
+
+    def test_build_report_resolves_tic_via_simbad(self):
+        with patch("muscat_db.exofop.resolve_toi_number", return_value=None), \
+                patch("muscat_db.exofop.fetch_by_name", return_value=None), \
+                patch("muscat_db.exofop.resolve_tic_via_simbad", return_value="166527623"), \
+                patch("muscat_db.exofop.fetch_time_series", return_value=[]) as fts:
+            r = exofop.build_time_series_report("HIP67522")
+        self.assertTrue(r["ok"])
+        self.assertEqual(fts.call_args.kwargs["tic"], "166527623")
+
+    def test_build_report_user_tic_overrides_name(self):
+        with patch("muscat_db.exofop.resolve_toi_number", return_value=None) as toi, \
+                patch("muscat_db.exofop.fetch_time_series", return_value=[]) as fts:
+            r = exofop.build_time_series_report("HIP67522", tic="TIC 166527623")
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["tic"], "166527623")
+        self.assertEqual(fts.call_args.kwargs["tic"], "166527623")
+        toi.assert_not_called()
+
+    def test_build_report_rejects_invalid_user_tic(self):
+        r = exofop.build_time_series_report("HIP67522", tic="abc")
+        self.assertFalse(r["ok"])
+        self.assertTrue(r["needs_tic"])
+
+    def test_resolve_tic_via_simbad_picks_tic_alias(self):
+        import sys, types
+        simbad = types.ModuleType("astroquery.simbad")
+        simbad.Simbad = types.SimpleNamespace(
+            query_objectids=lambda n: [["HIP 67522"], ["TIC  166527623"], ["HD 120411"]]
+        )
+        exofop._SIMBAD_TIC_CACHE.clear()
+        with patch.dict(sys.modules, {"astroquery.simbad": simbad}):
+            self.assertEqual(exofop.resolve_tic_via_simbad("HIP 67522"), "166527623")
+        exofop._SIMBAD_TIC_CACHE.clear()
 
     def test_archive_search_by_target_date_queries_by_coords_and_date_window(self):
         """Real case: tstag is ExoFOP's own internal Data Tag, not an LCO
