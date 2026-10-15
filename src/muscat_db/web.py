@@ -82,7 +82,7 @@ from muscat_db.access import (
 from muscat_db.auth import (
     PROXY_SECRET_HEADER,
     authentication_required as _authentication_required,
-    trusted_forwarded_user,
+    resolve_forwarded_identity,
     request_user as _request_user,
     settings_auth_error as _settings_auth_error,
     is_same_origin as _is_same_origin,
@@ -451,10 +451,10 @@ def _sse_response(generator: AsyncIterator[bytes]) -> StreamingResponse:
 async def _nginx_auth_middleware(request: Request, call_next):
     client_host = request.client.host if request.client else None
     forwarded = request.headers.get("X-Forwarded-User")
-    user = trusted_forwarded_user(
+    user, identity = resolve_forwarded_identity(
         forwarded, client_host, request.headers.get(PROXY_SECRET_HEADER)
     )
-    if forwarded and user is None:
+    if forwarded and user is None and identity != "unknown_email":
         logger.warning(
             "ignoring untrusted X-Forwarded-User=%r from peer %s "
             "(proxy address or shared secret did not validate)",
@@ -476,6 +476,13 @@ async def _nginx_auth_middleware(request: Request, call_next):
             raw_path == "/healthz"
             or raw_path.startswith("/static/")
         )
+        if protected and identity == "unknown_email":
+            # A validated Access identity with no users row: refuse it rather
+            # than fall through as anonymous, and never auto-provision (#50).
+            logger.warning("rejecting unmapped Access identity %r", forwarded)
+            return JSONResponse(
+                {"ok": False, "error": "account not provisioned"}, status_code=403
+            )
         if _authentication_required() and protected and not user:
             return JSONResponse(
                 {"ok": False, "error": "authentication required"},

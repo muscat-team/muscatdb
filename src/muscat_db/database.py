@@ -393,6 +393,11 @@ _MIGRATIONS = [
     # 2026-10-13: issue #202 -- a scoped viewer sees only their allowlisted
     # proposals; users without the flag keep the #144 blocklist behaviour.
     "ALTER TABLE users ADD COLUMN scoped INTEGER NOT NULL DEFAULT 0",
+    # 2026-10-15: issue #50 -- a Cloudflare Access identity arrives as an email;
+    # the stable username (which grants and scopes hang off) is looked up by it.
+    "ALTER TABLE users ADD COLUMN email TEXT",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(lower(email)) "
+    "WHERE email IS NOT NULL",
 ]
 
 

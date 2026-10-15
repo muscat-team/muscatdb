@@ -1091,6 +1091,12 @@ def htpasswd_add(
     ),
 ):
     """Add or update a user in the nginx htpasswd file."""
+    if "@" in username:
+        console.print(
+            "[red]Error: usernames cannot contain '@'; a forwarded value with '@' is "
+            "treated as a Cloudflare Access email (see `htpasswd set-email`)[/]"
+        )
+        raise typer.Exit(1)
     if password_stdin:
         if password is not None:
             console.print("[red]Error: --password and --password-stdin are mutually exclusive[/]")
@@ -1140,6 +1146,52 @@ def htpasswd_add(
         console.print(f"[yellow]Warning: could not update users table: {exc}[/]")
 
     console.print(f"[green]User '{username}' added to {ht_path}[/]")
+
+
+@htpasswd_app.command("set-email")
+def htpasswd_set_email(
+    username: str = typer.Argument(..., help="Stable username (grants and scopes hang off it)"),
+    email: str = typer.Argument(..., help="Email as it appears in the Cloudflare Access identity"),
+    clear: bool = typer.Option(False, "--clear", help="Remove the email instead of setting it"),
+):
+    """Map a Cloudflare Access email to a username (#50).
+
+    Creates the user row (no htpasswd entry, no password) when it does not
+    exist, so an Access-only collaborator never has a Basic Auth credential.
+    An unknown email is refused with 403; it is never auto-provisioned.
+    """
+    from muscat_db import auth
+    from muscat_db.database import _apply_schema, db_path, get_conn
+
+    username = username.strip()
+    if not username or "@" in username:
+        console.print("[red]Error: username must be non-empty and contain no '@'[/]")
+        raise typer.Exit(1)
+    normalized = None
+    if not clear:
+        normalized = auth.normalize_email(email)
+        if normalized is None:
+            console.print(f"[red]Error: {email!r} is not an email address[/]")
+            raise typer.Exit(1)
+    with get_conn(db_path()) as conn:
+        _apply_schema(conn)
+        if normalized is not None:
+            owner = conn.execute(
+                "SELECT username FROM users WHERE lower(email) = ?", (normalized,)
+            ).fetchone()
+            if owner and owner[0] != username:
+                console.print(f"[red]Error: {normalized} already belongs to '{owner[0]}'[/]")
+                raise typer.Exit(1)
+        conn.execute(
+            "INSERT OR IGNORE INTO users (username, display_name) VALUES (?, ?)",
+            (username, username),
+        )
+        conn.execute("UPDATE users SET email = ? WHERE username = ?", (normalized, username))
+        conn.commit()
+    if clear:
+        console.print(f"[green]Cleared the email of '{username}'[/]")
+    else:
+        console.print(f"[green]'{username}' now maps from {normalized}[/]")
 
 
 @htpasswd_app.command("delete")

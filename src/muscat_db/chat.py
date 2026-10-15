@@ -26,7 +26,12 @@ from collections import deque
 from . import access
 from . import chat_agent
 from . import jobs
-from .auth import PROXY_SECRET_HEADER, authentication_required, trusted_forwarded_user
+from .auth import (
+    PROXY_SECRET_HEADER,
+    UNKNOWN_EMAIL,
+    authentication_required,
+    resolve_forwarded_identity,
+)
 from . import database as db
 from .web import sio
 
@@ -76,8 +81,8 @@ def _valid_loop() -> asyncio.AbstractEventLoop | None:
 
 
 # ----- helpers -------------------------------------------------------------
-def _extract_identity(environ: dict) -> str | None:
-    """Return the trusted nginx user for a websocket handshake, or None.
+def _resolve_identity(environ: dict) -> tuple[str | None, str]:
+    """``(username, outcome)`` for a websocket handshake.
 
     python-socketio's ASGI layer exposes handshake headers as WSGI-style
     ``HTTP_*`` keys and the peer address via the ASGI scope / ``REMOTE_ADDR``.
@@ -92,7 +97,12 @@ def _extract_identity(environ: dict) -> str | None:
         client_host = scope["client"][0]
     if client_host is None:
         client_host = environ.get("REMOTE_ADDR")
-    return trusted_forwarded_user(forwarded, client_host, presented_secret)
+    return resolve_forwarded_identity(forwarded, client_host, presented_secret)
+
+
+def _extract_identity(environ: dict) -> str | None:
+    """Return the trusted nginx user for a websocket handshake, or None."""
+    return _resolve_identity(environ)[0]
 
 
 def _display(user: str | None) -> str:
@@ -199,7 +209,10 @@ async def connect(sid, environ):
     global _LOOP
     if _LOOP is None:
         _LOOP = asyncio.get_running_loop()
-    user = _extract_identity(environ)
+    user, identity = _resolve_identity(environ)
+    if identity == UNKNOWN_EMAIL:
+        logger.warning("rejected chat connection %s: unmapped Access identity", sid)
+        raise ConnectionRefusedError("account not provisioned")
     # Fail closed exactly like the HTTP middleware. socket.io is mounted as an
     # ASGI wrapper *in front of* the app, so /socket.io never passes through
     # that middleware: without this, a peer bypassing nginx (straight to the
