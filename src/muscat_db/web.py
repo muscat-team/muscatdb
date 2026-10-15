@@ -5342,6 +5342,7 @@ def api_lco_archive_frames(
 def api_lco_archive_exofop(
     OBJECT: str = "",
     instrument: str = "",
+    tic: str = "",
 ):
     """Cross-check an ExoFOP target's reported LCO ``time_series`` against the DB.
 
@@ -5356,9 +5357,17 @@ def api_lco_archive_exofop(
             {"ok": False, "error": "Enter a target name to check ExoFOP time series."},
             status_code=400,
         )
-    report = exofop.build_time_series_report(target, denied=_viewer_denied())
+    report = exofop.build_time_series_report(
+        target, tic=(tic or "").strip() or None, denied=_viewer_denied()
+    )
     if not report.get("ok"):
-        return JSONResponse({"ok": False, "error": report.get("error", "not a TOI")})
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": report.get("error", "not a TOI"),
+                "needs_tic": bool(report.get("needs_tic")),
+            }
+        )
     return JSONResponse(
         {
             "ok": True,

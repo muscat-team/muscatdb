@@ -248,6 +248,11 @@
       <p class="hint" id="exofop-obslog-status" style="margin-top: 0;">Open this section to load the time-series observations reported on ExoFOP-TESS and check which are already in muscat-db.</p>
       <div class="lco-actions" style="margin-bottom: 0.4rem; display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;">
         <span class="hint" id="exofop-obslog-msg" style="margin: 0;"></span>
+        <form id="exofop-tic-form" style="display: none; margin: 0.4rem 0;">
+          <label for="exofop-tic-input" class="hint">TIC id</label>
+          <input id="exofop-tic-input" type="text" inputmode="numeric" placeholder="e.g. 166527623" autocomplete="off" style="width: 11rem;">
+          <button type="submit" class="btn sm">Check ExoFOP</button>
+        </form>
         <a id="exofop-obslog-jobs" href="/jobs" style="display: none; font-size: 0.85rem;">To Jobs</a>
       </div>
       <div class="csv-wrap" id="exofop-obslog-wrap" style="display: none;">
@@ -421,17 +426,24 @@
         schedule(0);
       }
 
+      const ticForm = document.getElementById('exofop-tic-form');
+      const ticInput = document.getElementById('exofop-tic-input');
+      let ticOverride = '';
+
       function load() {
         if (loading) return;
         loading = true;
         statusEl.textContent = 'Checking ExoFOP for ' + targetName + '…';
-        fetch('/api/lco/archive/exofop?OBJECT=' + encodeURIComponent(targetName))
+        ticForm.style.display = 'none';
+        fetch('/api/lco/archive/exofop?OBJECT=' + encodeURIComponent(targetName) +
+              (ticOverride ? '&tic=' + encodeURIComponent(ticOverride) : ''))
           .then(function (r) { return r.json(); })
           .then(function (d) {
             loaded = true;
             if (!d.ok) {
               wrap.style.display = 'none';
               statusEl.textContent = d.error || 'No ExoFOP time-series cross-check for this target.';
+              if (d.needs_tic) { ticForm.style.display = ''; ticInput.focus(); }
               return;
             }
             render(d);
@@ -439,6 +451,12 @@
           .catch(function (e) { statusEl.textContent = 'ExoFOP check failed: ' + e; })
           .finally(function () { loading = false; });
       }
+
+      ticForm.addEventListener('submit', function (e) {
+        e.preventDefault();
+        ticOverride = ticInput.value.trim();
+        if (ticOverride) load();
+      });
 
       tbody.addEventListener('click', function (e) {
         const dl = e.target.closest ? e.target.closest('.exofop-dl-btn') : null;
