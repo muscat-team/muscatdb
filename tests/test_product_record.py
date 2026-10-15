@@ -36,6 +36,10 @@ def db(tmp_path, monkeypatch) -> str:
             (INST, DATE, "f2.fits", "TOI-1234", "KEY2026B-001"),
             (INST, DATE, "f3.fits", "TOI-1234", "OTHER-9"),
             (INST, DATE, "f4.fits", "WASP-1", "KEY2026B-001"),
+            ("muscat2", DATE, "m1.fits", "BLANKTGT", ""),
+            ("muscat2", DATE, "m2.fits", "BLANKTGT", ""),
+            ("muscat2", DATE, "m3.fits", "MIXEDTGT", ""),
+            ("muscat2", DATE, "m4.fits", "MIXEDTGT", "KEY2026B-001"),
         ],
     )
     conn.commit()
@@ -372,3 +376,77 @@ def test_start_ttv_fit_writes_record_with_author_and_inputs(db, monkeypatch):
     finally:
         for job in ttv._TTV_JOBS.values():
             job.logf.close()
+
+
+# -- review of #245: record contents must not over-expose ---------------------
+
+
+def test_frame_input_keeps_blank_proposal_ids(db):
+    """A blank PROPID is a real value (#230 treats it as denied for scoped
+    viewers); dropping it makes 'every input visible' vacuously true."""
+    blank = pr.frame_input(db, "muscat2", DATE, "BLANKTGT")
+    assert blank["resolved"] is True
+    assert blank["n_frames"] == 2
+    assert blank["proposal_ids"] == [""]
+    assert blank["blank_frames"] == 2
+    mixed = pr.frame_input(db, "muscat2", DATE, "MIXEDTGT")
+    assert mixed["proposal_ids"] == ["", "KEY2026B-001"]
+    assert mixed["blank_frames"] == 1
+
+
+def test_live_photometry_run_with_no_matching_frames_is_undetermined(db, tmp_path):
+    rdir = tmp_path / "run"
+    rdir.mkdir()
+    phot._write_run_product(
+        rdir, inst=INST, date=DATE, target="GHOST", opts={}, test_run=True,
+        user_name="alice", site="", telescope="", mode="", run_name="",
+    )
+    rec = pr.read_record(rdir)
+    assert rec["inputs"] is None
+    assert rec["note"]
+
+
+def test_ttv_empty_inputs_with_times_is_undetermined(db, tmp_path):
+    rdir = tmp_path / "ttv"
+    rdir.mkdir()
+    ttv.write_ttv_inputs(rdir, "c", "i", _ttv_options(inputs=[]), user_name="carol")
+    rec = pr.read_record(rdir)
+    assert rec["inputs"] is None
+    assert rec["note"]
+
+
+def test_ttv_empty_inputs_for_a_fit_with_no_times_is_empty(db, tmp_path):
+    rdir = tmp_path / "ttv"
+    rdir.mkdir()
+    opts = _ttv_options(inputs=[], csv_content="planet,epoch,tc,tc_unc\n# nothing\n")
+    ttv.write_ttv_inputs(rdir, "c", "i", opts, user_name="carol")
+    assert pr.read_record(rdir)["inputs"] == []
+
+
+def test_prose_version_retries_after_a_failed_lookup(monkeypatch):
+    calls = []
+
+    class _R:
+        def __init__(self, rc, out):
+            self.returncode, self.stdout = rc, out
+
+    outcomes = [_R(1, ""), _R(0, "2.0.1\n")]
+
+    def fake_run(*_a, **_k):
+        calls.append(1)
+        return outcomes[len(calls) - 1]
+
+    monkeypatch.setattr(phot, "_PROSE_VERSION", None)
+    monkeypatch.setattr(phot, "_PROSE_VERSION_FAILED_AT", None, raising=False)
+    monkeypatch.setattr(phot, "_conda_env_python", lambda _env: "/bin/python")
+    monkeypatch.setattr(phot.subprocess, "run", fake_run)
+    t0 = 1000.0
+    clock = iter([t0, t0 + 1, t0 + phot._PROSE_VERSION_RETRY_S + 1])
+    monkeypatch.setattr(phot.time, "monotonic", lambda: next(clock))
+
+    assert phot.prose_version() == "unknown"       # lookup fails
+    assert phot.prose_version() == "unknown"       # inside the retry window: no new lookup
+    assert len(calls) == 1
+    assert phot.prose_version() == "2.0.1"         # after the window: retried and cached
+    assert phot.prose_version() == "2.0.1"
+    assert len(calls) == 2

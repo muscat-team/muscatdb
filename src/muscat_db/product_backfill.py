@@ -90,9 +90,7 @@ def _params(row: dict) -> dict:
 
 
 def _photometry_record(db_path: str, row: dict, params: dict, created: str | None):
-    entry = product_record.frame_input(db_path, row["instrument"], row["obsdate"], row["target"])
-    inputs = [entry] if entry["resolved"] else None
-    note = None if inputs else "no frames matched this target on this night"
+    inputs, note = product_record.frames_inputs(db_path, row["instrument"], row["obsdate"], row["target"])
     settings = {
         "options": params.get("options") or {},
         "test_run": bool(params.get("test_run", True)),

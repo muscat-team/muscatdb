@@ -377,11 +377,17 @@ def _write_ttv_product(rdir: pathlib.Path, options: dict, user_name: str | None)
 
     submitted = options.get("inputs")
     inputs = None
+    note = None
     if submitted is not None:
         inputs, err = product_record.ttv_inputs_from_points(submitted)
         if err:
             logger.warning("invalid TTV inputs for %s: %s", rdir, err)
-            inputs = None
+            inputs, note = None, "submitted inputs were invalid"
+        elif not inputs and _csv_has_times(options.get("csv_content") or ""):
+            # An empty list is a real answer only for a fit with no times.
+            inputs, note = None, "inputs were empty but the fit has transit times"
+    else:
+        note = "client did not submit inputs"
     # csv_content / ini_content are the staged data inputs, already in meta.yaml.
     settings = {k: v for k, v in options.items() if k not in ("csv_content", "ini_content", "inputs")}
     product_record.write_record(rdir, product_record.build_record(
@@ -390,7 +396,15 @@ def _write_ttv_product(rdir: pathlib.Path, options: dict, user_name: str | None)
         inputs=inputs,
         settings=settings,
         tool_versions={"muscat_db": __version__, "harmonic": _harmonic_version()},
+        note=note,
     ))
+
+
+def _csv_has_times(csv_content: str) -> bool:
+    """True when the TTV CSV has at least one data row after its header."""
+    rows = [ln.strip() for ln in csv_content.splitlines()]
+    data = [ln for ln in rows[1:] if ln and not ln.startswith("#")]
+    return bool(data)
 
 
 def validate_ttv_options(options: dict | None) -> str | None:

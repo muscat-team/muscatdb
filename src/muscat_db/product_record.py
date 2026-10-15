@@ -22,7 +22,9 @@ Record layout (``_product.json`` in the run directory)::
 ``inputs`` is an exact manifest. ``null`` means *undetermined*: the record is
 there but the inputs could not be established, so the product must be treated
 as admin-only until someone can supply them. An empty list is a real answer
-("no inputs") and is not used as a stand-in for unknown.
+("no inputs") only for a product that has none, such as a TTV fit with no
+times; it is never a stand-in for unknown. A frames input keeps blank PROPIDs
+as ``""`` so a rule that treats blank as denied can see them.
 """
 
 from __future__ import annotations
@@ -159,10 +161,32 @@ def frame_input(
         "instrument": instrument,
         "obsdate": obsdate,
         "target": target,
-        "proposal_ids": sorted({p for p, _ in matched if p}),
+        # A blank PROPID is kept as "": it is what the table says, and a rule
+        # that treats blank as denied (scoped viewers, #230) must see it.
+        "proposal_ids": sorted({p for p, _ in matched}),
         "n_frames": sum(n for _, n in matched),
+        "blank_frames": sum(n for p, n in matched if not p),
         "resolved": bool(matched),
     }
+
+
+def frames_inputs(
+    db_path: str,
+    instrument: str,
+    obsdate: str,
+    target: str,
+    normalize: Callable[[str], str] | None = None,
+) -> tuple[list[dict] | None, str | None]:
+    """``(inputs, note)`` for a photometry run on one night and target.
+
+    No matching frame means the inputs are undetermined (``None``), not a
+    resolved entry with no proposals, so a visibility rule never has to know
+    to look at ``resolved``.
+    """
+    entry = frame_input(db_path, instrument, obsdate, target, normalize)
+    if not entry["resolved"]:
+        return None, "no frames matched this target on this night"
+    return [entry], None
 
 
 def lightcurve_input(instrument: str, obsdate: str, target: str, csv_path: Path, runs_root: Path | None) -> dict:

@@ -322,19 +322,31 @@ def _conda_env_python(env: str) -> str | None:
 
 
 _PROSE_VERSION: str | None = None
+_PROSE_VERSION_FAILED_AT: float | None = None
 _PROSE_VERSION_LOCK = threading.Lock()
 _PROSE_DISTRIBUTIONS = ("prose2", "prose")
+_PROSE_VERSION_TIMEOUT_S = 5
+_PROSE_VERSION_RETRY_S = 300.0
 
 
 def prose_version() -> str:
-    """Installed prose version in the prose conda env, cached after first lookup."""
-    global _PROSE_VERSION
+    """Installed prose version in the prose conda env.
+
+    A success is cached for the life of the process. A failure is remembered
+    only for ``_PROSE_VERSION_RETRY_S``: a missing env or one slow lookup must
+    not label every later run ``unknown`` until the next restart, and must not
+    make every launch in that window wait on the subprocess again.
+    """
+    global _PROSE_VERSION, _PROSE_VERSION_FAILED_AT
     if _PROSE_VERSION is not None:
         return _PROSE_VERSION
+    now = time.monotonic()
+    if _PROSE_VERSION_FAILED_AT is not None and now - _PROSE_VERSION_FAILED_AT < _PROSE_VERSION_RETRY_S:
+        return "unknown"
     with _PROSE_VERSION_LOCK:
         if _PROSE_VERSION is not None:
             return _PROSE_VERSION
-        found = "unknown"
+        found = None
         prose_py = _conda_env_python(prose_conda_env())
         if prose_py is not None:
             code = (
@@ -345,12 +357,16 @@ def prose_version() -> str:
             )
             try:
                 result = subprocess.run(
-                    [prose_py, "-c", code], capture_output=True, text=True, timeout=10,
+                    [prose_py, "-c", code], capture_output=True, text=True,
+                    timeout=_PROSE_VERSION_TIMEOUT_S,
                 )
                 if result.returncode == 0 and result.stdout.strip():
                     found = result.stdout.strip()
             except Exception:  # a version lookup must never fail a launch
                 logger.debug("prose version lookup failed", exc_info=True)
+        if found is None:
+            _PROSE_VERSION_FAILED_AT = now
+            return "unknown"
         _PROSE_VERSION = found
     return _PROSE_VERSION
 
@@ -373,10 +389,12 @@ def _write_run_product(
     from muscat_db import __version__
     from muscat_db import product_record
 
+    inputs, note = product_record.frames_inputs(database.db_path(), inst, date, target)
     record = product_record.build_record(
         "photometry",
         author=user_name,
-        inputs=[product_record.frame_input(database.db_path(), inst, date, target)],
+        inputs=inputs,
+        note=note,
         settings={
             "options": opts, "test_run": bool(test_run),
             "site": site, "telescope": telescope, "mode": mode, "run_name": run_name,
