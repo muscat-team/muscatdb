@@ -1142,9 +1142,41 @@ def _render_markdown(text: str) -> str:
     )
 
 
+def _visible_project_cards(db: str, denied: frozenset[str]) -> list[dict]:
+    """``list_project_tags`` narrowed to what a viewer denied *denied* may see.
+
+    A project's target_count counts only targets the viewer may see, and a
+    project whose attached targets are all hidden from the viewer is not listed
+    (its name and size would otherwise leak). A project with no attached targets
+    is listed as before. A target with no observations at all is not hidden,
+    the same rule :func:`muscat_db.access.object_hidden` applies.
+    """
+    projects = _list_project_tags(db)
+    if not denied:
+        return projects
+    overrides = _get_norm_name_overrides(db)
+    observed = {_normalize_target_name(t["object"], overrides) for t in _get_targets(db)}
+    visible = {
+        _normalize_target_name(t["object"], overrides)
+        for t in _visible_targets(db, denied)
+    }
+    hidden = observed - visible
+    cards = []
+    for project in projects:
+        attached = set(_get_targets_for_tag(db, project["tag"]))
+        if not attached:
+            cards.append(project)
+            continue
+        count = len(attached - hidden)
+        if count:
+            cards.append({**project, "target_count": count})
+    return cards
+
+
 @app.get("/projects", response_class=HTMLResponse)
 def projects_page():
-    return _render("projects.html", projects=_list_project_tags(_db_path()))
+    db = _db_path()
+    return _render("projects.html", projects=_visible_project_cards(db, _viewer_denied()))
 
 
 @app.get("/tags", response_class=RedirectResponse)

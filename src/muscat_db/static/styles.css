@@ -124,6 +124,10 @@ nav .spacer { flex: 1; }
   border-radius: 10px;
   padding: 1.25rem;
 }
+/* A long unbroken name must wrap inside its grid cell instead of widening it.
+   Scoped to grid cards: on a plain .card, overflow-wrap: anywhere is inherited
+   by every button and select inside it and lets their labels break mid-word. */
+.card-grid > .card { min-width: 0; overflow-wrap: anywhere; }
 .card a { color: var(--text); text-decoration: none; }
 .card .name  { font-size: 1.1rem; font-weight: 600; }
 .card .meta  { font-size: 0.85rem; color: var(--text-dim); margin-top: 0.35rem; }
