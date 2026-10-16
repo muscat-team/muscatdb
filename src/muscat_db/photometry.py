@@ -389,7 +389,10 @@ def _write_run_product(
     from muscat_db import __version__
     from muscat_db import product_record
 
-    inputs, note = product_record.frames_inputs(database.db_path(), inst, date, target)
+    db = database.db_path()
+    inputs, note = product_record.frames_inputs(
+        db, inst, date, target, product_record.target_normalizer(db)
+    )
     record = product_record.build_record(
         "photometry",
         author=user_name,

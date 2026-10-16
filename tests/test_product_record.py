@@ -450,3 +450,51 @@ def test_prose_version_retries_after_a_failed_lookup(monkeypatch):
     assert phot.prose_version() == "2.0.1"         # after the window: retried and cached
     assert phot.prose_version() == "2.0.1"
     assert len(calls) == 2
+
+
+# -- target spelling (#221, #245) ---------------------------------------------
+
+VARIANT_INST = "muscat3"
+VARIANT_DATE = "260202"
+
+
+@pytest.fixture
+def variant_frames(db):
+    """Frames filed as 'TOI 55.01'; runs name the same target 'TOI-55'."""
+    conn = sqlite3.connect(db)
+    conn.executemany(
+        "INSERT INTO frames (instrument, obsdate, ccd, filename, object, proposal_id) "
+        "VALUES (?, ?, 1, ?, ?, ?)",
+        [(VARIANT_INST, VARIANT_DATE, f"v{i}.fits", "TOI 55.01", "P-55") for i in range(2)],
+    )
+    conn.commit()
+    conn.close()
+    return db
+
+
+def test_live_photometry_resolves_a_spelling_variant_of_the_target(variant_frames, tmp_path):
+    rdir = tmp_path / "run"
+    rdir.mkdir()
+    phot._write_run_product(
+        rdir, inst=VARIANT_INST, date=VARIANT_DATE, target="TOI-55", opts={}, test_run=True,
+        user_name="alice", site="", telescope="", mode="", run_name="",
+    )
+    rec = pr.read_record(rdir)
+    assert rec["inputs"] is not None
+    assert rec["inputs"][0]["proposal_ids"] == ["P-55"]
+    assert rec["inputs"][0]["n_frames"] == 2
+
+
+def test_backfill_photometry_resolves_a_spelling_variant_of_the_target(variant_frames):
+    _insert_job(variant_frames, type="photometry", instrument=VARIANT_INST, obsdate=VARIANT_DATE,
+                target="TOI-55", run_id="r1", user_name="alice")
+    rdir = phot.run_output_dir(VARIANT_INST, VARIANT_DATE, "TOI-55", "r1")
+    rdir.mkdir(parents=True)
+    stats = backfill_products(variant_frames)
+    assert (stats.determined, stats.undetermined) == (1, 0)
+    assert pr.read_record(rdir)["inputs"][0]["proposal_ids"] == ["P-55"]
+
+
+def test_target_normalizer_matches_the_catalog_name_rules(variant_frames):
+    norm = pr.target_normalizer(variant_frames)
+    assert norm("TOI-55") == norm("TOI 55.01")
