@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import hmac
 import os
+import re
+import sqlite3
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -48,6 +50,81 @@ def configured_proxy_secret() -> str | None:
         return None
 
 
+# Outcomes of :func:`resolve_forwarded_identity` other than "ok".
+ANONYMOUS = "anonymous"  # no X-Forwarded-User header
+UNTRUSTED = "untrusted"  # header present but peer/secret did not validate
+UNKNOWN_EMAIL = "unknown_email"  # a valid email with no users row
+OK = "ok"
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def normalize_email(value: str | None) -> str | None:
+    """Lower-cased, stripped email, or ``None`` when *value* is not one."""
+    email = (value or "").strip().casefold()
+    return email if _EMAIL_RE.match(email) else None
+
+
+def is_email_identity(value: str | None) -> bool:
+    """Whether a forwarded identity is an email (Cloudflare Access, #50) rather
+    than an htpasswd username. ``htpasswd add`` refuses usernames with ``@``."""
+    return bool(value) and "@" in value
+
+
+def username_for_email(email: str) -> str | None:
+    """The stable username whose ``users.email`` is *email* (case-insensitive).
+
+    ``None`` for an unknown or malformed email, and when the lookup cannot be
+    made at all: an identity that cannot be mapped must never be admitted.
+    """
+    normalized = normalize_email(email)
+    if normalized is None:
+        return None
+    from muscat_db.database import db_path, get_conn
+
+    try:
+        with get_conn(db_path()) as conn:
+            row = conn.execute(
+                "SELECT username FROM users WHERE lower(email) = ?", (normalized,)
+            ).fetchone()
+    except sqlite3.Error:
+        return None
+    return row[0] if row else None
+
+
+def resolve_forwarded_identity(
+    forwarded_user: str | None,
+    client_host: str | None,
+    presented_proxy_secret: str | None = None,
+) -> tuple[str | None, str]:
+    """``(username, outcome)`` for a request's ``X-Forwarded-User``.
+
+    The trust rule is unchanged: the header is honored only from a loopback
+    proxy peer presenting the shared secret. A trusted value that is an email
+    (nginx copies it from a validated ``Cf-Access-Jwt-Assertion``) is then
+    mapped to the stable username on ``users.email``; an email with no row is
+    :data:`UNKNOWN_EMAIL` and is never auto-provisioned or treated as anonymous.
+    """
+    user = forwarded_user or None
+    if user is not None and client_host not in TRUSTED_PROXY_HOSTS:
+        return None, UNTRUSTED
+    expected = configured_proxy_secret()
+    if user is not None and authentication_required() and expected is None:
+        return None, UNTRUSTED
+    if expected is not None and not hmac.compare_digest(
+        presented_proxy_secret or "", expected
+    ):
+        return None, UNTRUSTED
+    if user is None:
+        return None, ANONYMOUS
+    if is_email_identity(user):
+        mapped = username_for_email(user)
+        if mapped is None:
+            return None, UNKNOWN_EMAIL
+        return mapped, OK
+    return user, OK
+
+
 def trusted_forwarded_user(
     forwarded_user: str | None,
     client_host: str | None,
@@ -58,18 +135,9 @@ def trusted_forwarded_user(
     ``forwarded_user`` is the raw ``X-Forwarded-User`` header value (may be
     ``None`` or empty). It is honored only when ``client_host`` is a loopback
     proxy address; a non-loopback peer that sets the header itself is ignored.
+    An email is mapped to its username (see :func:`resolve_forwarded_identity`).
     """
-    user = forwarded_user or None
-    if user is not None and client_host not in TRUSTED_PROXY_HOSTS:
-        return None
-    expected = configured_proxy_secret()
-    if user is not None and authentication_required() and expected is None:
-        return None
-    if expected is not None and not hmac.compare_digest(
-        presented_proxy_secret or "", expected
-    ):
-        return None
-    return user
+    return resolve_forwarded_identity(forwarded_user, client_host, presented_proxy_secret)[0]
 
 
 def request_user(request: Request) -> str | None:
