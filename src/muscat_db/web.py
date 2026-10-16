@@ -90,6 +90,7 @@ from muscat_db.auth import (
 )
 from muscat_db import transit_fit as fit
 from muscat_db import ttv_fit as ttv
+from muscat_db import ttv_selection
 from muscat_db import lco
 from muscat_db.lco import _annotate_lco_archive_results
 from muscat_db import exofop
@@ -7578,6 +7579,53 @@ def ttv_fit_delta_bic(target: str = "", run_name: str = ""):
     return JSONResponse(result, status_code=200 if result.get("ok") else 400)
 
 
+def _transit_fit_available() -> Callable[[str, str, str, str], bool]:
+    """Whether a completed full transit fit exists for (instrument, night,
+    target, run); the same jobs ``/api/ephemeris/calculate`` plots from."""
+    norm_overrides = _get_norm_name_overrides(_db_path())
+    with _DB_LOCK:
+        fit.sync_jobs()
+        jobs = get_job_store().all()
+        existing_keys = {j["key"] for j in jobs if j["type"] == "transit_fit"}
+        jobs.extend(fit._discover_orphan_fits(existing_keys))
+    keys = {
+        (j["instrument"], j["obsdate"], _normalize_target_name(j["target"], norm_overrides), j.get("run_id") or "")
+        for j in jobs
+        if j["type"] == "transit_fit" and j["state"] == "done" and _is_full_transit_fit_job(j)
+    }
+    return lambda inst, date, target, run_id: (
+        inst, date, _normalize_target_name(target, norm_overrides), run_id or "",
+    ) in keys
+
+
+def _resolve_ttv_options(options: dict) -> tuple[dict | None, str | None]:
+    """TTV options with the transit times and recorded inputs set by the server.
+
+    A client names the O-C points it selected (``selection``, with the
+    ephemeris ``planets_ephem`` it used to number the epochs) and the server
+    reads each time from the stored transit fit, so ``csv_content`` and
+    ``inputs`` can never disagree (#221). Both are overwritten if the client
+    sent them. Without a selection (an older page, a direct API call) the
+    client's ``inputs`` are dropped, so the record is undetermined and
+    admin-only rather than trusted.
+    """
+    cleaned = {k: v for k, v in options.items() if k not in ("selection", "planets_ephem", "inputs")}
+    selection = options.get("selection")
+    if selection is None:
+        return {**cleaned, "inputs": None}, None
+    resolved, err = ttv_selection.resolve_selection(
+        selection,
+        str(options.get("planet_letters") or ""),
+        options.get("planets_ephem") or {},
+        fitted_params=_get_run_fitted_params,
+        is_available=_transit_fit_available(),
+        is_hidden=_night_hidden,
+    )
+    if err:
+        return None, err
+    return {**cleaned, "csv_content": resolved.csv_content, "inputs": resolved.inputs}, None
+
+
 @ttv_fit_router.post("/start", response_class=JSONResponse)
 def api_start_ttv_fit(request: Request, payload: dict = Body(...)):
     target = (payload.get("target") or "").strip()
@@ -7585,6 +7633,9 @@ def api_start_ttv_fit(request: Request, payload: dict = Body(...)):
     if not target:
         return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
     _require_visible_ttv_target(target)
+    options, err = _resolve_ttv_options(options)
+    if err:
+        return JSONResponse({"ok": False, "error": err}, status_code=400)
     result = ttv.start_ttv_fit(target, options, request.state.user)
     return JSONResponse(result)
 
