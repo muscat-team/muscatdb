@@ -4469,29 +4469,34 @@
     return hasPoints ? csv : '';
   }
 
-  // The transit fits behind the checked O-C points that buildCSVContent()
-  // sends, so the TTV run records which nights it used (#208). Same filter as
-  // the CSV: planets selected in planet_letters, checked, with an uncertainty.
-  function buildProductInputs() {
+  // The checked O-C points that buildCSVContent() sends, named so the server can
+  // read each time from its stored transit fit and record which nights the TTV
+  // run used (#208, #221). The server rebuilds the CSV and the recorded inputs
+  // from this list; a manual point is the only one whose values travel with it.
+  // Same filter as the CSV: planets selected in planet_letters, checked, with an
+  // uncertainty.
+  function buildSelection() {
     if (!fitResults) return [];
     const letters = (document.getElementById('opt-planet_letters').value || '').toLowerCase().split('');
-    const inputs = [];
+    const selection = [];
     for (const pl in fitResults) {
       if (letters.indexOf(pl.toLowerCase()) === -1) continue;
       const res = fitResults[pl];
       ((res && res.points) || []).forEach(p => {
         if (!p.checked || p.tc_unc === null || p.tc_unc === undefined) return;
         if (p.manual) {
-          inputs.push({ kind: 'manual', note: p.note || '' });
+          selection.push({
+            kind: 'manual', planet: pl, epoch: p.epoch, tc: p.bjd, tc_unc: p.tc_unc, note: p.note || ''
+          });
         } else {
-          inputs.push({
-            kind: 'product', instrument: p.instrument, date: p.date,
+          selection.push({
+            kind: 'product', planet: pl, instrument: p.instrument, date: p.date,
             target: p.target, run_id: p.run_id || ''
           });
         }
       });
     }
-    return inputs;
+    return selection;
   }
 
   function collectOptions() {
@@ -4515,7 +4520,8 @@
     
     return {
       csv_content: csv,
-      inputs: buildProductInputs(),
+      selection: buildSelection(),
+      planets_ephem: (collectFitRequest(false) || {}).planets_ephem || {},
       ini_content: ini,
       walkers: walkers,
       steps: steps,

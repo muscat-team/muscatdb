@@ -129,6 +129,21 @@ def read_record(rdir: Path) -> dict | None:
     return data
 
 
+def target_normalizer(db_path: str) -> Callable[[str], str]:
+    """The catalog's target-name normalizer, with this database's overrides.
+
+    A run names its target as a job directory does (``TOI-55``) while the frames
+    carry the header's ``object`` (``TOI 55.01``). Without this the lookup in
+    :func:`frame_input` matches only identical spellings, and the record is
+    undetermined, which over-restricts once visibility reads it (#221).
+    """
+    from muscat_db.catalog import _normalize_target_name
+    from muscat_db.database import get_norm_name_overrides
+
+    overrides = get_norm_name_overrides(db_path)
+    return lambda name: _normalize_target_name(name, overrides)
+
+
 def frame_input(
     db_path: str,
     instrument: str,
@@ -242,6 +257,10 @@ def ttv_inputs_from_points(points: Any) -> tuple[list[dict], str | None]:
             fields = {}
             for key in ("instrument", "date", "target"):
                 val = p.get(key)
+                if key == "date" and val is None:
+                    # A point already recorded here spells the night "obsdate", so
+                    # validating it again (the server derives inputs, #221) is a no-op.
+                    val = p.get("obsdate")
                 if not isinstance(val, str) or not val.strip():
                     return [], f"inputs[{i}].{key} is required"
                 fields[key] = val.strip()

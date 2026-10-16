@@ -90,7 +90,10 @@ def _params(row: dict) -> dict:
 
 
 def _photometry_record(db_path: str, row: dict, params: dict, created: str | None):
-    inputs, note = product_record.frames_inputs(db_path, row["instrument"], row["obsdate"], row["target"])
+    inputs, note = product_record.frames_inputs(
+        db_path, row["instrument"], row["obsdate"], row["target"],
+        product_record.target_normalizer(db_path),
+    )
     settings = {
         "options": params.get("options") or {},
         "test_run": bool(params.get("test_run", True)),
