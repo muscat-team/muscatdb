@@ -259,6 +259,8 @@ ENV_VARS: tuple[EnvVar, ...] = (
     EnvVar("MUSCAT_STATIC_SITE", "0", "Set to 1 by the static-site build so templates omit live-only features (chat)"),
     EnvVar("MUSCAT_PROXY_SECRET", "", "Shared secret nginx presents so X-Forwarded-User can be trusted", secret=True),
     EnvVar("MUSCAT_PROXY_SECRET_FILE", "/etc/muscat-db/proxy-secret", "File holding the proxy secret when not passed by env"),
+    EnvVar("MUSCAT_CF_TEAM_DOMAIN", "", "Cloudflare Access team domain (e.g. myteam.cloudflareaccess.com) for JWT validation on the Access listener (#50)"),
+    EnvVar("MUSCAT_CF_AUD", "", "Cloudflare Access application AUD tag the JWT must carry (#50)"),
     EnvVar("MUSCAT_HTPASSWD_FILE", "", "htpasswd file managed by the CLI user commands"),
     EnvVar("MUSCAT_NGINX_GROUP", "www-data", "Group given read access to the htpasswd file"),
 
