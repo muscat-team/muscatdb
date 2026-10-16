@@ -388,6 +388,66 @@ def test_project_page_hides_restricted_members(client, db):
     assert "MIXEDTGT" in denied
 
 
+def _tag_projects(client, db) -> None:
+    """alpha: MIXEDTGT (partly open); beta: HIDDENTGT only (restricted);
+    gamma: OPENTGT (open to everyone)."""
+    _set_admin(db, "root")
+    for tag, obj in (("alpha", "MIXEDTGT"), ("beta", "HIDDENTGT"), ("gamma", "OPENTGT")):
+        client.post("/api/tags", json={"tag": tag}, headers=_headers("root"))
+        client.put(f"/api/targets/{obj}/tags", json={"tag": tag}, headers=_headers("root"))
+
+
+def _project_cards(html: str) -> dict[str, str]:
+    """Card name -> the card's meta text, from /projects."""
+    cards = {}
+    for block in html.split('<div class="card">')[1:]:
+        name = re.search(r'<div class="name">([^<]+)</div>', block)
+        meta = re.search(r'<div class="meta">([^<]+)</div>', block)
+        if name:
+            cards[name.group(1)] = meta.group(1) if meta else ""
+    return cards
+
+
+def test_projects_cards_follow_viewer_access(client, db):
+    _tag_projects(client, db)
+
+    # alice holds no grant to the restricted proposal: she can see the
+    # partly-open MIXEDTGT and OPENTGT, never beta's only target.
+    alice = _project_cards(client.get("/projects", headers=_headers("alice")).text)
+    assert set(alice) == {"alpha", "gamma"}
+    assert alice["alpha"] == "1 target"
+    assert alice["gamma"] == "1 target"
+
+
+def test_projects_card_counts_only_visible_targets(client, db):
+    _tag_projects(client, db)
+    client.put("/api/targets/HIDDENTGT/tags", json={"tag": "alpha"}, headers=_headers("root"))
+
+    alice = _project_cards(client.get("/projects", headers=_headers("alice")).text)
+    assert alice["alpha"] == "1 target"  # HIDDENTGT is not counted for alice
+
+
+def test_projects_cards_for_granted_user_admin_and_anonymous(client, db):
+    _tag_projects(client, db)
+    access.grant(db, "bob", _RESTRICTED, "root")
+
+    bob = _project_cards(client.get("/projects", headers=_headers("bob")).text)
+    assert set(bob) == {"alpha", "beta", "gamma"}
+
+    root = _project_cards(client.get("/projects", headers=_headers("root")).text)
+    assert set(root) == {"alpha", "beta", "gamma"}
+
+    anonymous = _project_cards(client.get("/projects").text)
+    assert set(anonymous) == {"alpha", "gamma"}
+
+
+def test_project_with_only_hidden_targets_is_not_listed(client, db):
+    _tag_projects(client, db)
+    html = client.get("/projects", headers=_headers("alice")).text
+    assert "beta" not in _project_cards(html)
+    assert "HIDDENTGT" not in html
+
+
 # ── admin-only writes ───────────────────────────────────────────────────
 
 
