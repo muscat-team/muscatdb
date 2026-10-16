@@ -340,8 +340,9 @@ def write_ttv_inputs(
     csv_content: str,
     ini_content: str,
     options: dict,
+    user_name: str | None = None,
 ) -> pathlib.Path:
-    """Stage harmonic's inputs and write this run's meta.yaml.
+    """Stage harmonic's inputs and write this run's meta.yaml and product record.
 
     Returns the staging directory ``-i``/``-c`` should point at.
     """
@@ -360,11 +361,60 @@ def write_ttv_inputs(
     }
     with open(rdir / "meta.yaml", "w") as f:
         yaml.dump(meta, f, Dumper=_MetaDumper, default_flow_style=False, sort_keys=False)
+    _write_ttv_product(rdir, options, user_name)
     return input_dir
+
+
+def _write_ttv_product(rdir: pathlib.Path, options: dict, user_name: str | None) -> None:
+    """Record a TTV fit's input transit fits, settings, versions and author (#208).
+
+    ``options["inputs"]`` is the list of checked O-C points the page submits.
+    A client that sends none (an older page, a direct API call) leaves the
+    inputs undetermined, which marks the fit admin-only once visibility reads
+    the record; it is never recorded as an empty list.
+    """
+    from muscat_db import product_record
+
+    submitted = options.get("inputs")
+    inputs = None
+    note = None
+    if submitted is not None:
+        inputs, err = product_record.ttv_inputs_from_points(submitted)
+        if err:
+            logger.warning("invalid TTV inputs for %s: %s", rdir, err)
+            inputs, note = None, "submitted inputs were invalid"
+        elif not inputs and _csv_has_times(options.get("csv_content") or ""):
+            # An empty list is a real answer only for a fit with no times.
+            inputs, note = None, "inputs were empty but the fit has transit times"
+    else:
+        note = "client did not submit inputs"
+    # csv_content / ini_content are the staged data inputs, already in meta.yaml.
+    settings = {k: v for k, v in options.items() if k not in ("csv_content", "ini_content", "inputs")}
+    product_record.write_record(rdir, product_record.build_record(
+        "ttv_fit",
+        author=user_name,
+        inputs=inputs,
+        settings=settings,
+        tool_versions={"muscat_db": __version__, "harmonic": _harmonic_version()},
+        note=note,
+    ))
+
+
+def _csv_has_times(csv_content: str) -> bool:
+    """True when the TTV CSV has at least one data row after its header."""
+    rows = [ln.strip() for ln in csv_content.splitlines()]
+    data = [ln for ln in rows[1:] if ln and not ln.startswith("#")]
+    return bool(data)
 
 
 def validate_ttv_options(options: dict | None) -> str | None:
     o = options or {}
+    if o.get("inputs") is not None:
+        from muscat_db import product_record
+
+        _, inputs_err = product_record.ttv_inputs_from_points(o["inputs"])
+        if inputs_err:
+            return inputs_err
     csv_lines_raw = (o.get("csv_content") or "").strip()
     if not csv_lines_raw:
         return "Transit time data is required"
@@ -478,7 +528,7 @@ def start_ttv_fit(
 
     csv_content = options.get("csv_content", "")
     ini_content = options.get("ini_content", "")
-    input_dir = write_ttv_inputs(rdir, csv_content, ini_content, options)
+    input_dir = write_ttv_inputs(rdir, csv_content, ini_content, options, user_name=user_name)
 
     cmd = [
         *_harmonic_prefix(),
@@ -1415,7 +1465,7 @@ def sync_jobs() -> None:
                 rdir.mkdir(parents=True, exist_ok=True)
                 csv_content = opts.get("csv_content", "")
                 ini_content = opts.get("ini_content", "")
-                input_dir = write_ttv_inputs(rdir, csv_content, ini_content, opts)
+                input_dir = write_ttv_inputs(rdir, csv_content, ini_content, opts, user_name=entry.get("user_name"))
                 cmd = [
                     *_harmonic_prefix(),
                     "-i", str(input_dir / "data.csv"),

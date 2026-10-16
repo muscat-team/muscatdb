@@ -758,6 +758,38 @@ def backfill_propid_cmd(
         raise typer.Exit(1)
 
 
+@app.command(name="backfill-products", cls=_Cmd)
+def backfill_products_cmd(
+    ctx: typer.Context,
+    db: str = _db_option(),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Report what would be written without writing any record",
+    ),
+):
+    """Write product records for runs made before they existed (issue #208).
+
+    Rebuilds each photometry, transit-fit and TTV run's record from its job
+    row. Runs whose inputs cannot be established exactly get a record with
+    undetermined inputs and stay admin-only. Idempotent; never overwrites.
+    """
+    _log_startup_banner(f"backfill-products --db {db}")
+    _require_existing_db(ctx, db, "backfill-products")
+    from muscat_db.product_backfill import backfill_products
+
+    stats = backfill_products(db, dry_run=dry_run)
+    verb = "would write" if dry_run else "wrote"
+    n = (stats.determined + stats.undetermined) if dry_run else stats.written
+    console.print(
+        f"{verb} {n} record(s): {stats.determined} with inputs, "
+        f"{stats.undetermined} undetermined; {stats.already} already had one, "
+        f"{stats.missing_dir} run dir(s) missing, {stats.errors} error(s)"
+    )
+    for reason, count in sorted(stats.by_reason.items(), key=lambda kv: -kv[1]):
+        console.print(f"  [yellow]undetermined[/] x{count}: {reason}")
+    if stats.errors:
+        raise typer.Exit(1)
+
+
 _LCO_INST_CHOICES = click.Choice([*LCO_INSTRUMENTS, "all"])
 
 
@@ -1091,6 +1123,12 @@ def htpasswd_add(
     ),
 ):
     """Add or update a user in the nginx htpasswd file."""
+    if "@" in username:
+        console.print(
+            "[red]Error: usernames cannot contain '@'; a forwarded value with '@' is "
+            "treated as a Cloudflare Access email (see `htpasswd set-email`)[/]"
+        )
+        raise typer.Exit(1)
     if password_stdin:
         if password is not None:
             console.print("[red]Error: --password and --password-stdin are mutually exclusive[/]")
@@ -1140,6 +1178,52 @@ def htpasswd_add(
         console.print(f"[yellow]Warning: could not update users table: {exc}[/]")
 
     console.print(f"[green]User '{username}' added to {ht_path}[/]")
+
+
+@htpasswd_app.command("set-email")
+def htpasswd_set_email(
+    username: str = typer.Argument(..., help="Stable username (grants and scopes hang off it)"),
+    email: str = typer.Argument(..., help="Email as it appears in the Cloudflare Access identity"),
+    clear: bool = typer.Option(False, "--clear", help="Remove the email instead of setting it"),
+):
+    """Map a Cloudflare Access email to a username (#50).
+
+    Creates the user row (no htpasswd entry, no password) when it does not
+    exist, so an Access-only collaborator never has a Basic Auth credential.
+    An unknown email is refused with 403; it is never auto-provisioned.
+    """
+    from muscat_db import auth
+    from muscat_db.database import _apply_schema, db_path, get_conn
+
+    username = username.strip()
+    if not username or "@" in username:
+        console.print("[red]Error: username must be non-empty and contain no '@'[/]")
+        raise typer.Exit(1)
+    normalized = None
+    if not clear:
+        normalized = auth.normalize_email(email)
+        if normalized is None:
+            console.print(f"[red]Error: {email!r} is not an email address[/]")
+            raise typer.Exit(1)
+    with get_conn(db_path()) as conn:
+        _apply_schema(conn)
+        if normalized is not None:
+            owner = conn.execute(
+                "SELECT username FROM users WHERE lower(email) = ?", (normalized,)
+            ).fetchone()
+            if owner and owner[0] != username:
+                console.print(f"[red]Error: {normalized} already belongs to '{owner[0]}'[/]")
+                raise typer.Exit(1)
+        conn.execute(
+            "INSERT OR IGNORE INTO users (username, display_name) VALUES (?, ?)",
+            (username, username),
+        )
+        conn.execute("UPDATE users SET email = ? WHERE username = ?", (normalized, username))
+        conn.commit()
+    if clear:
+        console.print(f"[green]Cleared the email of '{username}'[/]")
+    else:
+        console.print(f"[green]'{username}' now maps from {normalized}[/]")
 
 
 @htpasswd_app.command("delete")
@@ -1421,6 +1505,65 @@ def access_list(
             ", ".join(r["grantees"]) or "-",
         )
     console.print(table)
+
+
+@access_app.command("groups-seed")
+def access_groups_seed(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be added, write nothing"),
+) -> None:
+    """Express the proposal blocklist as allow-only groups and grants (#228).
+
+    Idempotent and additive. Nothing reads these tables yet, so this changes no
+    visibility; run `access groups-check` afterwards to confirm parity.
+    """
+    from muscat_db import access_groups
+    from muscat_db.database import db_path
+
+    report = access_groups.seed_from_blocklist(db_path(), dry_run=dry_run)
+    verb = "Would add" if dry_run else "Added"
+    console.print(
+        f"{verb}: {report.groups} group(s), {len(report.everyone_grants)} `everyone` grant(s), "
+        f"{len(report.user_grants)} user grant(s), {len(report.exclusions)} exclusion(s)"
+    )
+    for line in report.everyone_grants:
+        console.print(f"  everyone  {line}")
+    for user, pid in report.user_grants:
+        console.print(f"  user:{user}  proposal_id={pid}")
+    for user in report.exclusions:
+        console.print(f"  everyone excludes {user} (scoped)")
+    if report.blank_lco_instruments:
+        console.print(
+            "[yellow]LCO instruments with frames that have no PROPID: "
+            f"{', '.join(report.blank_lco_instruments)}; `everyone` got a blank-PROPID grant "
+            "to match the blocklist.[/]"
+        )
+    if not report.changes:
+        console.print("[green]Already seeded; nothing to do.[/]")
+
+
+@access_app.command("groups-check")
+def access_groups_check(
+    limit: int = typer.Option(20, "--limit", help="Mismatches to print"),
+) -> None:
+    """Compare what the group model and the blocklist each let every viewer see.
+
+    Exits 1 on any mismatch, so it can gate the call-site switch (#228).
+    """
+    from muscat_db import access_groups
+    from muscat_db.database import db_path
+
+    mismatches = access_groups.parity(db_path())
+    if not mismatches:
+        console.print("[green]Group model and blocklist agree for every viewer.[/]")
+        return
+    users = sorted({m["user"] or "(anonymous)" for m in mismatches})
+    console.print(f"[red]{len(mismatches)} mismatch(es) across: {', '.join(users)}[/]")
+    for m in mismatches[:limit]:
+        console.print(
+            f"  {m['user'] or '(anonymous)'}: {m['instrument']} {m['obsdate']} "
+            f"{m['object']} [{m['proposal_id'] or '-'}] blocklist={m['blocklist']} groups={m['groups']}"
+        )
+    raise typer.Exit(1)
 
 
 @access_app.command("explain")

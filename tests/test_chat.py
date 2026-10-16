@@ -624,7 +624,46 @@ def test_addressed_only_history_drops_public_messages(chat_db):
     save_chat_message("alice", "public note", kind="user")
     save_chat_message("system", "Photometry for X done", kind="system", visible_to="andrew")
     save_chat_message("system", "someone else's job", kind="system", visible_to="bob")
-    texts = [m["text"] for m in get_recent_chat_messages(days=7, user="andrew", addressed_only=True)]
+    texts = [
+        m["text"] for m in get_recent_chat_messages(days=7, user="andrew", addressed_only=True)
+    ]
     assert texts == ["Photometry for X done"]
     everyone = [m["text"] for m in get_recent_chat_messages(days=7, user="andrew")]
     assert "public note" in everyone and "someone else's job" not in everyone
+
+
+def _run_job_finished(monkeypatch, sio_harness, owner):
+    """Drive on_job_finished with a loop stand-in that runs the emit inline."""
+    import asyncio
+
+    monkeypatch.setattr(chat, "_valid_loop", lambda: object())
+    monkeypatch.setattr(chat, "_job_user_name", lambda _key: owner)
+    monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", lambda coro, _loop: asyncio.run(coro))
+    chat.on_job_finished(
+        job_key="photometry:sinistro/2026-07-18/HIDDENTGT",
+        type_="photometry",
+        target="HIDDENTGT",
+        inst="sinistro",
+        date="2026-07-18",
+        state="done",
+    )
+    return [kw.get("room") for _e, _p, kw in sio_harness.emits]
+
+
+def test_job_finished_with_owner_reaches_only_the_owner_room(chat_db, sio_harness, monkeypatch):
+    """A restricted target named in a job-finished message must not be
+    broadcast to the shared room when the job has an owner (#144 chat item)."""
+    rooms = _run_job_finished(monkeypatch, sio_harness, "andrew")
+    assert rooms == ["user:andrew"]
+
+
+def test_ownerless_job_finished_is_public_only_and_hidden_from_scoped_history(
+    chat_db, sio_harness, monkeypatch
+):
+    """With no owner the message goes to the shared room, which a scoped viewer
+    never joins, and the addressed-only backfill drops it."""
+    rooms = _run_job_finished(monkeypatch, sio_harness, None)
+    assert rooms == [chat._PUBLIC_ROOM]
+    scoped = get_recent_chat_messages(days=7, user="andrew", addressed_only=True)
+    assert all("HIDDENTGT" not in m["text"] for m in scoped)
+    assert any("HIDDENTGT" in m["text"] for m in get_recent_chat_messages(days=7))

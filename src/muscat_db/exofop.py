@@ -29,6 +29,7 @@ from __future__ import annotations
 import datetime
 import re
 import threading
+from urllib.parse import quote
 
 from muscat_db import catalog, lco
 
@@ -54,6 +55,53 @@ def resolve_tic_number(target: str) -> str | None:
     """Return the numeric TIC id for a ``TIC434398831`` / ``TIC-434398831`` name."""
     m = _TIC_NAME_RE.match((target or "").strip())
     return m.group(1) if m else None
+
+
+def normalize_tic_input(value: str | int | None) -> str | None:
+    """Return the digits of a user-supplied TIC id (``"67522"``, ``"TIC 67522"``).
+
+    None when *value* is empty or not a plain TIC id.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return None
+    m = re.match(r"^(?:TIC[\s_-]*)?0*(\d+)$", text, re.IGNORECASE)
+    return m.group(1) if m else None
+
+
+_SIMBAD_TIC_CACHE: dict[str, str | None] = {}
+_SIMBAD_TIC_RE = re.compile(r"^TIC\s+0*(\d+)$", re.IGNORECASE)
+
+
+def resolve_tic_via_simbad(target: str) -> str | None:
+    """Return the TIC id SIMBAD lists among the aliases of *target*, or None.
+
+    Covers stellar names that are neither a TOI nor a ``TIC`` designation
+    (``HIP 67522``). Best effort: any network/astroquery failure yields None so
+    the caller can ask the user for the TIC id instead.
+    """
+    name = (target or "").strip()
+    if not name:
+        return None
+    key = name.upper()
+    if key in _SIMBAD_TIC_CACHE:
+        return _SIMBAD_TIC_CACHE[key]
+    tic = None
+    try:
+        from astroquery.simbad import Simbad
+
+        table = Simbad.query_objectids(name)
+        for row in table or []:
+            ident = str(row[0]).strip()
+            m = _SIMBAD_TIC_RE.match(" ".join(ident.split()))
+            if m:
+                tic = m.group(1)
+                break
+    except Exception:
+        tic = None
+    if tic is not None:  # don't cache a failure: it may be a transient outage
+        _SIMBAD_TIC_CACHE[key] = tic
+    return tic
 
 
 def _toi_float(value):
@@ -167,6 +215,41 @@ def fetch_time_series(
     with _exofop_cache_lock:
         _exofop_cache[cache_key] = (now, [dict(e) for e in entries])
     return entries
+
+
+def fetch_by_name(name: str, *, _now: float | None = None) -> tuple[str, list[dict]] | None:
+    """Ask ExoFOP to resolve *name* itself (``target.php?id=HIP67522``).
+
+    Returns ``(tic_id, time_series)`` when ExoFOP knows the name, else None
+    (it answers an unknown id with a plain-text "No TIC object found" page).
+    Cached like :func:`fetch_time_series`, under the upper-cased name.
+    """
+    ident = (name or "").strip()
+    if not ident:
+        return None
+    cache_key = f"name:{ident.upper()}"
+    now = _now if _now is not None else datetime.datetime.now(datetime.timezone.utc).timestamp()
+    with _exofop_cache_lock:
+        hit = _exofop_cache.get(cache_key)
+        if hit is not None and now - hit[0] < _EXOFOP_CACHE_TTL_S:
+            return hit[1][0], [dict(r) for r in hit[1][1]]
+    try:
+        resp = catalog._sync_get(
+            f"https://exofop.ipac.caltech.edu/tess/target.php?id={quote(ident)}&json",
+            headers={"User-Agent": "MuSCAT-db/0.1.0"},
+            timeout=20,
+        )
+        data = resp.json()
+    except Exception:
+        return None
+    info = data.get("basic_info") if isinstance(data, dict) else None
+    tic = normalize_tic_input((info or {}).get("tic_id"))
+    if tic is None:
+        return None
+    entries = [dict(e) for e in (data.get("time_series") or [])]
+    with _exofop_cache_lock:
+        _exofop_cache[cache_key] = (now, (tic, [dict(e) for e in entries]))
+    return tic, entries
 
 
 # --------------------------------------------------------------------------- #
@@ -460,7 +543,11 @@ def check_time_series_exists(
 
 
 def build_time_series_report(
-    target: str, *, _now: float | None = None, denied: frozenset[str] = frozenset()
+    target: str,
+    *,
+    tic: str | None = None,
+    _now: float | None = None,
+    denied: frozenset[str] = frozenset(),
 ) -> dict:
     """Fetch ExoFOP time series for *target* and annotate db existence.
 
@@ -468,16 +555,35 @@ def build_time_series_report(
     (``total`` counts only rows with a resolvable observation, mirroring the
     archive page's convention of reporting dataset count alongside frames).
     """
-    toi = resolve_toi_number(target)
-    tic = None
-    if toi is None:
-        tic = resolve_tic_number(target)
-        if tic is None:
-            return {
-                "ok": False,
-                "error": "Target does not resolve to a known TOI or TIC id",
-            }
-    entries = fetch_time_series(toi or "", tic=tic or "", _now=_now)
+    toi = None
+    entries: list[dict] | None = None
+    if tic and normalize_tic_input(tic) is None:
+        return {"ok": False, "error": f"Invalid TIC id: {tic!r}", "needs_tic": True}
+    tic = normalize_tic_input(tic)
+    if tic is None:
+        # Name -> TOI, then TIC designation, then SIMBAD aliases (HIP, HD, ...).
+        toi = resolve_toi_number(target)
+        if toi is None:
+            tic = resolve_tic_number(target)
+        if toi is None and tic is None:
+            # Not a TOI/TIC name: let ExoFOP resolve the name itself (HIP, HD,
+            # Gaia, ...), then fall back to SIMBAD's TIC alias.
+            by_name = fetch_by_name(target, _now=_now)
+            if by_name is not None:
+                tic, entries = by_name
+            else:
+                tic = resolve_tic_via_simbad(target)
+            if tic is None:
+                return {
+                    "ok": False,
+                    "needs_tic": True,
+                    "error": (
+                        "Target does not resolve to a known TOI or TIC id. "
+                        "Enter its TIC id to check ExoFOP."
+                    ),
+                }
+    if entries is None:
+        entries = fetch_time_series(toi or "", tic=tic or "", _now=_now)
     rows = [check_time_series_exists(e, target=target, denied=denied) for e in entries]
     return {
         "ok": True,

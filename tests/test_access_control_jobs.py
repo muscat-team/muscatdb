@@ -522,3 +522,107 @@ def test_scoped_viewer_jobs_and_runs_follow_the_allowlist(client, env):
     assert "260102" not in picker
     hidden = _get(client, "/photometry", user="andrew", inst=INST, date="260103", target="HIDDENTGT").text
     assert RUN not in hidden
+
+
+# ── deleting finished job records ───────────────────────────────────────
+
+
+def _owned_job(owner: str, *, state: str = "done", target: str = "OPENTGT", date: str = "260101") -> str:
+    """Store a photometry job for *owner* and return its row key."""
+    get_job_store().save(
+        type_="photometry", inst=INST, date=date, target=target, state=state,
+        returncode=0 if state == "done" else None, elapsed=1, started_at=time.time(),
+        run_id="owned-run", run_name="owned-run", run_type="full", user_name=owner,
+    )
+    return next(
+        j["key"] for j in get_job_store().all()
+        if j.get("run_id") == "owned-run" and j.get("date") == date and j.get("target") == target
+    )
+
+
+def _stored(key: str) -> bool:
+    return any(j["key"] == key for j in get_job_store().all())
+
+
+def test_job_owner_can_delete_finished_job(client):
+    key = _owned_job("alice")
+    r = _post(client, "/api/jobs/delete", {"key": key}, user="alice")
+    assert r.status_code == 200
+    assert not _stored(key)
+
+
+def test_other_user_cannot_delete_job(client):
+    key = _owned_job("alice")
+    r = _post(client, "/api/jobs/delete", {"key": key}, user="bob")
+    assert r.status_code == 403
+    assert _stored(key)
+
+
+def test_admin_can_delete_anyones_job(client):
+    key = _owned_job("alice")
+    r = _post(client, "/api/jobs/delete", {"key": key}, user="root")
+    assert r.status_code == 200
+    assert not _stored(key)
+
+
+@pytest.mark.parametrize("state", ["running", "pending"])
+def test_unfinished_job_cannot_be_deleted(client, state):
+    key = _owned_job("alice", state=state)
+    r = _post(client, "/api/jobs/delete", {"key": key}, user="root")
+    assert r.status_code == 409
+    assert _stored(key)
+
+
+def test_delete_unknown_or_missing_key(client):
+    assert _post(client, "/api/jobs/delete", {"key": "photometry:nope"}).status_code == 404
+    assert _post(client, "/api/jobs/delete", {}).status_code == 400
+
+
+def test_delete_does_not_expose_hidden_jobs(client):
+    # HIDDENTGT's night is restricted: alice may not even learn the job exists.
+    key = _owned_job("alice", target="HIDDENTGT", date="260102")
+    r = _post(client, "/api/jobs/delete", {"key": key}, user="alice")
+    assert r.status_code == 404
+    assert _stored(key)
+
+
+def test_jobs_page_offers_delete_only_to_owner_or_admin(client):
+    key = _owned_job("alice")
+    mine = _get(client, "/jobs", user="alice").text
+    theirs = _get(client, "/jobs", user="bob").text
+    admin = _get(client, "/jobs", user="root").text
+
+    def button(html: str) -> str:
+        i = html.index(f'data-key="{key}"')
+        return html[i : i + 3000]
+
+    assert 'data-job-action="delete" data-key="' + key + '"' in mine
+    assert 'data-job-action="delete" data-key="' + key + '"' in admin
+    assert 'data-job-action="delete" data-key="' + key + '"' not in theirs
+    assert "Only the job&#39;s owner or an admin can delete it" in theirs or \
+        "Only the job's owner or an admin can delete it" in theirs
+    assert "data-job-action=\"hide\"" not in mine
+    assert button(mine)
+
+
+def test_running_job_row_has_no_delete_button(client):
+    key = _owned_job("alice", state="running")
+    html = _get(client, "/jobs", user="alice").text
+    assert 'data-job-action="delete" data-key="' + key + '"' not in html
+
+
+def test_deleting_live_lco_archive_download_drops_it_from_memory(client, monkeypatch):
+    from muscat_db import lco
+
+    monkeypatch.setattr(lco, "_ARCHIVE_DOWNLOAD_JOBS", {})
+    job_id = "livejob0000000000"
+    lco._ARCHIVE_DOWNLOAD_JOBS[job_id] = {
+        "job_id": job_id, "state": "done", "frames": [], "frames_total": 0, "results": [],
+        "funpack_results": [], "phase": "done", "started_at": time.time() - 5,
+        "finished_at": time.time(), "error": None, "user_name": "alice",
+    }
+    key = f"lco_archive_download:{job_id}"
+    assert _post(client, "/api/jobs/delete", {"key": key}, user="bob").status_code == 403
+    assert job_id in lco._ARCHIVE_DOWNLOAD_JOBS
+    assert _post(client, "/api/jobs/delete", {"key": key}, user="alice").status_code == 200
+    assert job_id not in lco._ARCHIVE_DOWNLOAD_JOBS

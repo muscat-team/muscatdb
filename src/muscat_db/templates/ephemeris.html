@@ -4469,6 +4469,31 @@
     return hasPoints ? csv : '';
   }
 
+  // The transit fits behind the checked O-C points that buildCSVContent()
+  // sends, so the TTV run records which nights it used (#208). Same filter as
+  // the CSV: planets selected in planet_letters, checked, with an uncertainty.
+  function buildProductInputs() {
+    if (!fitResults) return [];
+    const letters = (document.getElementById('opt-planet_letters').value || '').toLowerCase().split('');
+    const inputs = [];
+    for (const pl in fitResults) {
+      if (letters.indexOf(pl.toLowerCase()) === -1) continue;
+      const res = fitResults[pl];
+      ((res && res.points) || []).forEach(p => {
+        if (!p.checked || p.tc_unc === null || p.tc_unc === undefined) return;
+        if (p.manual) {
+          inputs.push({ kind: 'manual', note: p.note || '' });
+        } else {
+          inputs.push({
+            kind: 'product', instrument: p.instrument, date: p.date,
+            target: p.target, run_id: p.run_id || ''
+          });
+        }
+      });
+    }
+    return inputs;
+  }
+
   function collectOptions() {
     const csv = buildCSVContent();
     const ini = document.getElementById('opt-ini_content').value;
@@ -4490,6 +4515,7 @@
     
     return {
       csv_content: csv,
+      inputs: buildProductInputs(),
       ini_content: ini,
       walkers: walkers,
       steps: steps,

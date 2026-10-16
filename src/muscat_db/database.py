@@ -368,6 +368,50 @@ CREATE TABLE IF NOT EXISTS user_proposal_access (
     granted_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (username, proposal_id)
 );
+
+-- Issue #228, rollout step 1 (schema only -- nothing gates on these yet; see
+-- access_groups.py). Allow-only: a frame is visible to a user iff some grant
+-- of some group they belong to matches it. App-owned, like the tables above.
+CREATE TABLE IF NOT EXISTS groups (
+    name        TEXT PRIMARY KEY COLLATE NOCASE,
+    description TEXT NOT NULL DEFAULT '',
+    builtin     INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS group_members (
+    groupname TEXT NOT NULL COLLATE NOCASE,
+    username  TEXT NOT NULL,
+    added_by  TEXT NOT NULL DEFAULT '',
+    added_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (groupname, username)
+);
+
+-- A user removed from a group they would otherwise be in (``everyone``, for a
+-- scoped viewer).
+CREATE TABLE IF NOT EXISTS group_exclusions (
+    groupname TEXT NOT NULL COLLATE NOCASE,
+    username  TEXT NOT NULL,
+    PRIMARY KEY (groupname, username)
+);
+
+-- One row = one rule; the fields are ANDed and NULL means "any". '' in
+-- proposal_id matches frames with no PROPID.
+CREATE TABLE IF NOT EXISTS group_grants (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    groupname   TEXT NOT NULL COLLATE NOCASE,
+    proposal_id TEXT COLLATE NOCASE,
+    instrument  TEXT COLLATE NOCASE,
+    target      TEXT,
+    date_from   TEXT,
+    date_to     TEXT,
+    note        TEXT NOT NULL DEFAULT '',
+    granted_by  TEXT NOT NULL DEFAULT '',
+    granted_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK (proposal_id IS NOT NULL OR instrument IS NOT NULL
+           OR target IS NOT NULL OR date_from IS NOT NULL)
+);
+CREATE INDEX IF NOT EXISTS idx_group_grants_group ON group_grants(groupname);
 """
 
 # Idempotent schema migrations for columns added after initial deployment.
@@ -393,6 +437,11 @@ _MIGRATIONS = [
     # 2026-10-13: issue #202 -- a scoped viewer sees only their allowlisted
     # proposals; users without the flag keep the #144 blocklist behaviour.
     "ALTER TABLE users ADD COLUMN scoped INTEGER NOT NULL DEFAULT 0",
+    # 2026-10-15: issue #50 -- a Cloudflare Access identity arrives as an email;
+    # the stable username (which grants and scopes hang off) is looked up by it.
+    "ALTER TABLE users ADD COLUMN email TEXT",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(lower(email)) "
+    "WHERE email IS NOT NULL",
 ]
 
 
@@ -850,6 +899,10 @@ _APP_OWNED_TABLES = (
     "tag_descriptions",
     "restricted_proposals",
     "user_proposal_access",
+    "groups",
+    "group_members",
+    "group_exclusions",
+    "group_grants",
 )
 
 
