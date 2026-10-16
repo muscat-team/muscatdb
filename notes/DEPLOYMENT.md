@@ -115,6 +115,50 @@ driven by `deploy/pull-deploy.sh` from cron, which restarts the matching session
 after a `git reset --hard` in the dedicated checkout; since `--reload` is gone,
 HTML/JavaScript changes require that deploy restart before they are live.
 
+### Release order (test → main)
+
+Merging to `main` deploys nothing by itself; the cron entry for `main` takes the
+commit within 5 minutes. Do the steps in this order.
+
+1. **Back up `muscat.db` before the merge**, with SQLite's backup API (not `cp`,
+   the file is live and about 2.6 GB). A backup taken after the merge already
+   holds the new schema and cannot show the old one.
+   ```bash
+   python3 -c "import sqlite3; s=sqlite3.connect('file:$MUSCAT_DB_PATH?mode=ro',uri=True); d=sqlite3.connect('$HOME/temp/muscat.db.pre-<release>.<date>'); s.backup(d); d.close(); s.close()"
+   ```
+2. **Merge the release PR (`test` → `main`) with a merge commit**, never a squash,
+   once CI is green on the final `test` head. A later push to `test` dismisses the
+   approval.
+3. **Wait for the cron deploy** and read `$HOME/deploy/main/app/logs/pull-deploy.log`.
+   A migration on the live database can push startup past the health-check limit;
+   the first attempt then fails (Slack alert) and the next poll retries. The
+   `main` cron line sets `PULL_DEPLOY_HEALTH_TIMEOUT_S=120` for that reason (the
+   default is 30).
+4. **Verify**: the log says `deployed main at <sha>`, that SHA equals
+   `git ls-remote origin refs/heads/main`, `curl 127.0.0.1:8001/healthz` returns
+   `{"ok":true}`, and any new tables or columns are in the live database.
+5. **Run host-side data steps from `deploy/main/app`**, only after step 4, each as
+   `--dry-run` first. They need the deployed code, which is why they follow the
+   deploy.
+
+When a PR reads data that an earlier PR only writes or that a command backfills,
+ship them in separate releases and run the data step between them. Do not merge the
+reader until the data step has run on production:
+
+| Writer (released first) | Data step on the host | Reader (released after) |
+|---|---|---|
+| Product records written per run (#208, #245) | `muscat-db backfill-products` | Visibility read from `_product.json` |
+| Group/grant tables (#228 step 1, #247) | `muscat-db access groups-seed`, then `access groups-check` must exit 0 | Call sites switched from the blocklist to groups (#228 step 2) |
+
+`groups-check` compares what the group model and the blocklist let every viewer
+see; run it again after any `access restrict`, `grant` or `scope` change while both
+models exist.
+
+The files under `/etc/nginx/sites-available/` are root-owned copies, not links to
+`deploy/`. A change to `deploy/nginx*.conf` does not reach nginx on a deploy: diff
+the live file against the repo, copy it over, then `sudo nginx -t && sudo systemctl
+reload nginx`.
+
 ---
 
 ## Cluster inventory
