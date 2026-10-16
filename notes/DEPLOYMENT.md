@@ -275,6 +275,22 @@ printf 'export MUSCAT_POSTGRES_DSN=postgresql://muscatdb:%s@localhost:5432/musca
    ```
 4. `uv run` and `--reload` only restart on Python changes; templates and JavaScript need a manual restart (see CLAUDE.md).
 
+### Dev server (`:8888`): who runs its full runs
+
+The worker fleet serves one profile at a time (`deploy/workers.py status` prints `installed profile prod but selected dev` when they differ). While the fleet is installed for `prod`, its workers read `muscatdb_prod`, so a job queued on the dev server (`muscatdb_dev`) has no worker to claim it.
+
+A dev server that was started with `MUSCAT_WORKER_MAX_SLOTS=0` (queue-only) therefore leaves every full run `pending`. Seen on 2026-10-16: a full photometry run queued on 2026-10-15 sat `pending` for a day, and a TTV run from the ephemeris page would have done the same.
+
+Do not switch the fleet to `dev` to fix this: `:8001` is queue-only and depends on the same workers. Let the dev server run its own full jobs instead. In the pane that hosts it (trace the process as in the previous section), with nothing queued or running:
+
+```bash
+source ~/.config/muscatdb/pg.env && export MUSCAT_CONTROL_PLANE=postgres \
+  MUSCAT_WORKER_MAX_SLOTS=2 MUSCAT_MAX_FULL_JOBS=2 \
+  && uv run muscat-db restart --port=8888 --reload
+```
+
+`MUSCAT_WORKER_MAX_SLOTS=2` lets this process run two full jobs per pipeline itself; `MUSCAT_MAX_FULL_JOBS=2` matches `max_full_jobs` under `[profiles.dev]` in `deploy/workers.toml` (a server launched before that line existed still carries the default 6). Restarting makes the process claim any row still `pending`, so cancel stale queued jobs first or they start at once.
+
 ### Warning: the Postgres test suite truncates its tables
 
 `tests/test_job_store_postgres.py` runs `TRUNCATE jobs, job_concurrency_slots` in its fixture. Point it at a database nothing else uses:
