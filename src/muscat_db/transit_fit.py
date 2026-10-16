@@ -1474,6 +1474,36 @@ def _fit_reduction_exists(
     return rdir.is_dir()
 
 
+def _write_fit_product(
+    rdir: pathlib.Path,
+    inst: str,
+    date: str,
+    target: str,
+    csvs: list[pathlib.Path],
+    options: dict,
+    test_run: bool,
+    user_name: str | None,
+) -> None:
+    """Record a transit fit's input light curves, settings, versions and
+    author (#208). Each input names the photometry run its CSV came from."""
+    from muscat_db import product_record
+
+    try:
+        runs_root = output_base() / inst / date / "_runs" / _target_dir_name(target)
+    except ValueError:
+        runs_root = None
+    inputs = [
+        product_record.lightcurve_input(inst, date, target, c, runs_root) for c in csvs
+    ]
+    product_record.write_record(rdir, product_record.build_record(
+        "transit_fit",
+        author=user_name,
+        inputs=inputs,
+        settings={"options": options, "test_run": bool(test_run)},
+        tool_versions={"muscat_db": __version__, "timer": _timer_version()},
+    ))
+
+
 def start_fit(
     inst: str,
     date: str,
@@ -1618,6 +1648,7 @@ def start_fit(
         rdir, inst, date, target, csvs, options,
         site=site, telescope=telescope, mode=mode, run_name=run_name, run_id=run_id,
         run_type=run_type)
+    _write_fit_product(rdir, inst, date, target, csvs, options, test_run, user_name)
 
     # Clear cached outputs so the next page load reads fresh results from disk.
     _fit_outputs_cache.clear()
@@ -2573,6 +2604,7 @@ def sync_jobs() -> None:
                     rdir, inst, date, target, csvs, opts,
                     site=site, telescope=telescope, mode=mode, run_name=run_name, run_id=run_id,
                     run_type=run_type)
+                _write_fit_product(rdir, inst, date, target, csvs, opts, test_run, entry.get("user_name"))
                 _fit_outputs_cache.clear()
                 cmd = _fit_command(rdir, run_type)
                 log_path = rdir / "timer-fit.log"
