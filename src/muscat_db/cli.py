@@ -1455,6 +1455,65 @@ def access_list(
     console.print(table)
 
 
+@access_app.command("groups-seed")
+def access_groups_seed(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be added, write nothing"),
+) -> None:
+    """Express the proposal blocklist as allow-only groups and grants (#228).
+
+    Idempotent and additive. Nothing reads these tables yet, so this changes no
+    visibility; run `access groups-check` afterwards to confirm parity.
+    """
+    from muscat_db import access_groups
+    from muscat_db.database import db_path
+
+    report = access_groups.seed_from_blocklist(db_path(), dry_run=dry_run)
+    verb = "Would add" if dry_run else "Added"
+    console.print(
+        f"{verb}: {report.groups} group(s), {len(report.everyone_grants)} `everyone` grant(s), "
+        f"{len(report.user_grants)} user grant(s), {len(report.exclusions)} exclusion(s)"
+    )
+    for line in report.everyone_grants:
+        console.print(f"  everyone  {line}")
+    for user, pid in report.user_grants:
+        console.print(f"  user:{user}  proposal_id={pid}")
+    for user in report.exclusions:
+        console.print(f"  everyone excludes {user} (scoped)")
+    if report.blank_lco_instruments:
+        console.print(
+            "[yellow]LCO instruments with frames that have no PROPID: "
+            f"{', '.join(report.blank_lco_instruments)}; `everyone` got a blank-PROPID grant "
+            "to match the blocklist.[/]"
+        )
+    if not report.changes:
+        console.print("[green]Already seeded; nothing to do.[/]")
+
+
+@access_app.command("groups-check")
+def access_groups_check(
+    limit: int = typer.Option(20, "--limit", help="Mismatches to print"),
+) -> None:
+    """Compare what the group model and the blocklist each let every viewer see.
+
+    Exits 1 on any mismatch, so it can gate the call-site switch (#228).
+    """
+    from muscat_db import access_groups
+    from muscat_db.database import db_path
+
+    mismatches = access_groups.parity(db_path())
+    if not mismatches:
+        console.print("[green]Group model and blocklist agree for every viewer.[/]")
+        return
+    users = sorted({m["user"] or "(anonymous)" for m in mismatches})
+    console.print(f"[red]{len(mismatches)} mismatch(es) across: {', '.join(users)}[/]")
+    for m in mismatches[:limit]:
+        console.print(
+            f"  {m['user'] or '(anonymous)'}: {m['instrument']} {m['obsdate']} "
+            f"{m['object']} [{m['proposal_id'] or '-'}] blocklist={m['blocklist']} groups={m['groups']}"
+        )
+    raise typer.Exit(1)
+
+
 @access_app.command("explain")
 def access_explain(
     username: str = typer.Argument(..., help="nginx username"),
