@@ -1274,6 +1274,26 @@ _TRIPLE_RE = re.compile(r"^-?\d+(\.\d+)?,-?\d+(\.\d+)?,-?\d+(\.\d+)?$")
 _PAIR_RE = re.compile(r"^-?\d+(\.\d+)?,-?\d+(\.\d+)?$")
 _INTPAIR_RE = re.compile(r"^\d+,\d+$")
 _BAND_RE = re.compile(r"^[A-Za-z0-9_]+$")
+# Comma-separated options become one argv element per item in build_command, so
+# an item that is not a plain number could be read by prose2's argparse as a flag
+# of its own (--data_dir, --results_dir, ...) and override the ones set here.
+# Ids and Julian dates are digits only; anything else is refused by
+# validate_run_options and dropped by build_command.
+_INT_ITEM_RE = re.compile(r"[0-9]+")
+_JD_ITEM_RE = re.compile(r"[0-9]+(\.[0-9]+)?")
+
+
+def _list_items(value) -> list[str]:
+    return [item.strip() for item in str(value or "").split(",") if item.strip()]
+
+
+def _numeric_items(value, item_re: re.Pattern) -> list[str]:
+    """The items of a comma-separated option that are plain numbers."""
+    return [item for item in _list_items(value) if item_re.fullmatch(item)]
+
+
+def _all_numeric(value, item_re: re.Pattern) -> bool:
+    return len(_numeric_items(value, item_re)) == len(_list_items(value))
 
 
 def normalize_run_options(raw: dict | None) -> dict:
@@ -1438,6 +1458,17 @@ def validate_run_options(o: dict, inst: str | None = None) -> str | None:
     mode = (o.get("mode") or "").strip()
     if mode and mode not in SINISTRO_MODES:
         return f"mode must be one of {', '.join(SINISTRO_MODES)}"
+    for key, label in (("comparison_ids", "comparison IDs"), ("avoid_comparison_ids", "avoid comparison IDs")):
+        if not _all_numeric(o.get(key), _INT_ITEM_RE):
+            return f"{label} must be comma-separated integers"
+    for key, label in (("exclude_after_jd", "exclude after JD"), ("exclude_before_jd", "exclude before JD")):
+        if not _all_numeric(o.get(key), _JD_ITEM_RE):
+            return f"{label} must be comma-separated Julian dates (digits and one decimal point)"
+    target_id = str(o.get("target_id") or "").strip()
+    if target_id and not _INT_ITEM_RE.fullmatch(target_id):
+        return "target ID must be an integer"
+    if str(o.get("calib_dir") or "").strip():
+        return "the calibration directory cannot be set; it is always the night's own"
     return None
 
 
@@ -1514,24 +1545,22 @@ def build_command(
                 # a negative declination (e.g. -45:00:42) as a CLI flag.
                 dec = f" {dec}"
             args += ["--target_coord", ra, dec]
-    if o.get("target_id") not in (None, ""):
-        args += ["--tID", o["target_id"]]
-    if o.get("comparison_ids") not in (None, ""):
-        cids = [c.strip() for c in o["comparison_ids"].split(",") if c.strip()]
-        if cids:
-            args += ["--cID", *cids]
-    if o.get("avoid_comparison_ids") not in (None, ""):
-        aids = [a.strip() for a in o["avoid_comparison_ids"].split(",") if a.strip()]
-        if aids:
-            args += ["--avoid_cids", *aids]
-    if o.get("exclude_after_jd") not in (None, ""):
-        vals = [v.strip() for v in o["exclude_after_jd"].split(",") if v.strip()]
-        if vals:
-            args += ["--exclude_after_jd", *vals]
-    if o.get("exclude_before_jd") not in (None, ""):
-        vals = [v.strip() for v in o["exclude_before_jd"].split(",") if v.strip()]
-        if vals:
-            args += ["--exclude_before_jd", *vals]
+    # Only plain numbers are forwarded, even though validate_run_options already
+    # refuses anything else: queued and stored options reach this function
+    # without it (the fleet worker, sync_jobs), and a stray flag here would
+    # override --data_dir or --results_dir.
+    target_id = str(o.get("target_id") or "").strip()
+    if _INT_ITEM_RE.fullmatch(target_id):
+        args += ["--tID", target_id]
+    for flag, key, item_re in (
+        ("--cID", "comparison_ids", _INT_ITEM_RE),
+        ("--avoid_cids", "avoid_comparison_ids", _INT_ITEM_RE),
+        ("--exclude_after_jd", "exclude_after_jd", _JD_ITEM_RE),
+        ("--exclude_before_jd", "exclude_before_jd", _JD_ITEM_RE),
+    ):
+        items = _numeric_items(o.get(key), item_re)
+        if items:
+            args += [flag, *items]
     if o.get("avoid_nearby_star_mode") != "off":
         nearby = o.get("avoid_nearby_star")
         if o.get("avoid_nearby_star_mode") == "auto" or nearby in (None, ""):
@@ -1588,7 +1617,8 @@ def build_command(
         if mode:
             args += ["--mode", mode]
     if inst in ("muscat", "muscat2"):
-        args += ["--calib_dir", o.get("calib_dir") or str(results_dir(inst, date)) + "_calibrated"]
+        # Never taken from the options: prose2 writes calibration masters here.
+        args += ["--calib_dir", str(results_dir(inst, date)) + "_calibrated"]
     if o.get("make_gif", False):
         args.append("--gif")
     if o.get("plot_gaia_sources", True):
