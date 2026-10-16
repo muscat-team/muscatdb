@@ -355,6 +355,7 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 from fastapi import APIRouter
 from muscat_db.directory_listing import ListingStaticFiles
 from muscat_db.proxy import router as proxy_router
+from muscat_db.cf_access import AUTH_PATH as _CF_AUTH_PATH, router as cf_access_router
 
 photometry_router = APIRouter(prefix="/api/photometry", tags=["photometry"])
 transit_fit_router = APIRouter(prefix="/api/transit-fit", tags=["transit-fit"])
@@ -475,6 +476,9 @@ async def _nginx_auth_middleware(request: Request, call_next):
         protected = not (
             raw_path == "/healthz"
             or raw_path.startswith("/static/")
+            # nginx auth_request target: it carries no user yet (it produces the
+            # identity) and does its own loopback + shared-secret check.
+            or raw_path == _CF_AUTH_PATH
         )
         if protected and identity == "unknown_email":
             # A validated Access identity with no users row: refuse it rather
@@ -510,6 +514,7 @@ async def _nginx_auth_middleware(request: Request, call_next):
 # a request such as ``/tess-quicklook/available-sectors`` look like an
 # instrument/date page and returns HTML where the QuickLook client expects JSON.
 app.include_router(proxy_router)
+app.include_router(cf_access_router)
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
