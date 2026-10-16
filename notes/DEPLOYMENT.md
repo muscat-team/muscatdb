@@ -115,6 +115,50 @@ driven by `deploy/pull-deploy.sh` from cron, which restarts the matching session
 after a `git reset --hard` in the dedicated checkout; since `--reload` is gone,
 HTML/JavaScript changes require that deploy restart before they are live.
 
+### Release order (test → main)
+
+Merging to `main` deploys nothing by itself; the cron entry for `main` takes the
+commit within 5 minutes. Do the steps in this order.
+
+1. **Back up `muscat.db` before the merge**, with SQLite's backup API (not `cp`,
+   the file is live and about 2.6 GB). A backup taken after the merge already
+   holds the new schema and cannot show the old one.
+   ```bash
+   python3 -c "import sqlite3; s=sqlite3.connect('file:$MUSCAT_DB_PATH?mode=ro',uri=True); d=sqlite3.connect('$HOME/temp/muscat.db.pre-<release>.<date>'); s.backup(d); d.close(); s.close()"
+   ```
+2. **Merge the release PR (`test` → `main`) with a merge commit**, never a squash,
+   once CI is green on the final `test` head. A later push to `test` dismisses the
+   approval.
+3. **Wait for the cron deploy** and read `$HOME/deploy/main/app/logs/pull-deploy.log`.
+   A migration on the live database can push startup past the health-check limit;
+   the first attempt then fails (Slack alert) and the next poll retries. The
+   `main` cron line sets `PULL_DEPLOY_HEALTH_TIMEOUT_S=120` for that reason (the
+   default is 30).
+4. **Verify**: the log says `deployed main at <sha>`, that SHA equals
+   `git ls-remote origin refs/heads/main`, `curl 127.0.0.1:8001/healthz` returns
+   `{"ok":true}`, and any new tables or columns are in the live database.
+5. **Run host-side data steps from `deploy/main/app`**, only after step 4, each as
+   `--dry-run` first. They need the deployed code, which is why they follow the
+   deploy.
+
+When a PR reads data that an earlier PR only writes or that a command backfills,
+ship them in separate releases and run the data step between them. Do not merge the
+reader until the data step has run on production:
+
+| Writer (released first) | Data step on the host | Reader (released after) |
+|---|---|---|
+| Product records written per run (#208, #245) | `muscat-db backfill-products` | Visibility read from `_product.json` |
+| Group/grant tables (#228 step 1, #247) | `muscat-db access groups-seed`, then `access groups-check` must exit 0 | Call sites switched from the blocklist to groups (#228 step 2) |
+
+`groups-check` compares what the group model and the blocklist let every viewer
+see; run it again after any `access restrict`, `grant` or `scope` change while both
+models exist.
+
+The files under `/etc/nginx/sites-available/` are root-owned copies, not links to
+`deploy/`. A change to `deploy/nginx*.conf` does not reach nginx on a deploy: diff
+the live file against the repo, copy it over, then `sudo nginx -t && sudo systemctl
+reload nginx`.
+
 ---
 
 ## Cluster inventory
@@ -230,6 +274,22 @@ printf 'export MUSCAT_POSTGRES_DSN=postgresql://muscatdb:%s@localhost:5432/musca
      && uv run muscat-db restart --port=8888 --reload
    ```
 4. `uv run` and `--reload` only restart on Python changes; templates and JavaScript need a manual restart (see CLAUDE.md).
+
+### Dev server (`:8888`): who runs its full runs
+
+The worker fleet serves one profile at a time (`deploy/workers.py status` prints `installed profile prod but selected dev` when they differ). While the fleet is installed for `prod`, its workers read `muscatdb_prod`, so a job queued on the dev server (`muscatdb_dev`) has no worker to claim it.
+
+A dev server that was started with `MUSCAT_WORKER_MAX_SLOTS=0` (queue-only) therefore leaves every full run `pending`. Seen on 2026-10-16: a full photometry run queued on 2026-10-15 sat `pending` for a day, and a TTV run from the ephemeris page would have done the same.
+
+Do not switch the fleet to `dev` to fix this: `:8001` is queue-only and depends on the same workers. Let the dev server run its own full jobs instead. In the pane that hosts it (trace the process as in the previous section), with nothing queued or running:
+
+```bash
+source ~/.config/muscatdb/pg.env && export MUSCAT_CONTROL_PLANE=postgres \
+  MUSCAT_WORKER_MAX_SLOTS=2 MUSCAT_MAX_FULL_JOBS=2 \
+  && uv run muscat-db restart --port=8888 --reload
+```
+
+`MUSCAT_WORKER_MAX_SLOTS=2` lets this process run two full jobs per pipeline itself; `MUSCAT_MAX_FULL_JOBS=2` matches `max_full_jobs` under `[profiles.dev]` in `deploy/workers.toml` (a server launched before that line existed still carries the default 6). Restarting makes the process claim any row still `pending`, so cancel stale queued jobs first or they start at once.
 
 ### Warning: the Postgres test suite truncates its tables
 
