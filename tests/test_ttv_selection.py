@@ -175,3 +175,35 @@ def test_start_rejects_an_invalid_selection_before_launching(started):
     assert r.status_code == 400
     assert "selection[0]" in r.json()["error"]
     assert "options" not in started
+
+
+# -- the resolved inputs must survive the code that consumes them -------------
+
+
+def test_resolved_inputs_pass_ttv_validation_and_are_recorded_unchanged(tmp_path, monkeypatch):
+    """start_ttv_fit validates options['inputs'] and write_ttv_inputs records
+    them, both through ttv_inputs_from_points. The resolver's output must go
+    through that unchanged (an endpoint test that stubs start_ttv_fit misses it)."""
+    from muscat_db import product_record as pr
+    from muscat_db import ttv_fit as ttv
+
+    monkeypatch.setattr(ttv, "_harmonic_version", lambda: "7.7.7")
+    out, err = _resolve([_fit(), _manual()])
+    assert err is None
+    options = {"csv_content": out.csv_content, "ini_content": "[INIT]\na_bc = 0.001\n", "inputs": out.inputs,
+               "planet_letters": "bc"}
+    assert ttv.validate_ttv_options(options) is None
+
+    rdir = tmp_path / "ttv"
+    rdir.mkdir()
+    ttv.write_ttv_inputs(rdir, out.csv_content, "i", options, user_name="carol")
+    assert pr.read_record(rdir)["inputs"] == out.inputs
+
+
+def test_ttv_points_accept_the_recorded_obsdate_spelling():
+    from muscat_db import product_record as pr
+
+    recorded = {"kind": "product", "level": "transit_fit", "instrument": "sinistro",
+                "obsdate": "260101", "target": "TOI-1", "run_id": "r1"}
+    again, err = pr.ttv_inputs_from_points([recorded])
+    assert err is None and again == [recorded]

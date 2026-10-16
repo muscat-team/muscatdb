@@ -257,6 +257,10 @@ def ttv_inputs_from_points(points: Any) -> tuple[list[dict], str | None]:
             fields = {}
             for key in ("instrument", "date", "target"):
                 val = p.get(key)
+                if key == "date" and val is None:
+                    # A point already recorded here spells the night "obsdate", so
+                    # validating it again (the server derives inputs, #221) is a no-op.
+                    val = p.get("obsdate")
                 if not isinstance(val, str) or not val.strip():
                     return [], f"inputs[{i}].{key} is required"
                 fields[key] = val.strip()
