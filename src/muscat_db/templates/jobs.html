@@ -17,6 +17,16 @@
 
 {% set status_order = ['running', 'pending', 'done', 'error', 'cancelled'] %}
 {% set status_labels = {'running': 'Running', 'pending': 'Pending', 'done': 'Done', 'error': 'Failed', 'cancelled': 'Cancelled'} %}
+{% macro delete_button(j, style='') -%}
+  {%- if j.state in ('done', 'error', 'cancelled') -%}
+    {%- if j.can_delete -%}
+      <button class="btn sm danger" data-job-action="delete" data-key="{{ j.key }}" title="Delete this job record (output files are kept)"{% if style %} style="{{ style }}"{% endif %}>Delete</button>
+    {%- else -%}
+      <button class="btn sm" disabled title="{% if not j.stored %}This row is derived from files on disk and has no stored record{% else %}Only the job's owner or an admin can delete it{% endif %}"{% if style %} style="{{ style }}"{% endif %}>Delete</button>
+    {%- endif -%}
+  {%- endif -%}
+{%- endmacro %}
+
 {% macro render_job_rows(job_list) -%}
   {% for j in job_list %}
     {% set link_url -%}
@@ -29,6 +39,7 @@
     <tr class="job-row" data-key="{{ j.key }}" data-status="{{ j.state }}" data-type="{{ j.type }}"
         data-started-at="{{ j.started_at | default(0) | int }}"
         data-user-name="{{ j.user_name or '' }}"
+        data-stored="{% if j.stored %}1{% else %}0{% endif %}"
         data-action-inst="{{ j.action_inst or '' }}"
         data-action-date="{{ j.action_date or '' }}"
         data-job-inst="{{ j.inst }}"
@@ -48,7 +59,7 @@
         {% if j.photometry_url %}
           <a class="btn sm" href="{{ j.photometry_url }}" title="Open this dataset in Photometry" aria-label="Open this dataset in Photometry">🔭</a>
         {% endif %}
-        <button class="btn sm hide-btn" data-job-action="hide" data-key="{{ j.key }}" title="Hide this row">Hide</button>
+        {{ delete_button(j) }}
       </td>
       {% endif %}
       <td><strong><a href="{{ link_url }}">{{ j.target }}</a></strong></td>
@@ -133,7 +144,7 @@
           <button class="btn sm" data-job-action="rerun" data-key="{{ j.key }}" title="Re-run this job">⟳ Re-run</button>
         {% endif %}
         <button class="btn sm log-btn" data-job-action="log" data-type="{{ j.type }}" data-inst="{{ j.inst }}" data-date="{{ j.date }}" data-target="{{ j.target }}" data-run="{{ j.run_id }}" title="View log" style="margin-left:0.25rem;">📄 Log</button>
-        <button class="btn sm hide-btn" data-job-action="hide" data-key="{{ j.key }}" title="Hide this row" style="margin-left:0.25rem;">✕</button>
+        {{ delete_button(j, 'margin-left:0.25rem;') }}
       </td>
       {% endif %}
       <td class="mono user-cell" style="font-size:0.8rem;color:var(--text-dim);">{{ j.user_name or '—' }}</td>
@@ -271,11 +282,12 @@
 
 <div id="hide-confirm-overlay">
   <div class="modal-box">
-    <p style="margin-bottom:0.75rem;font-size:0.95rem;font-weight:600;">Hide this job?</p>
-    <p style="color:var(--text-dim);font-size:0.85rem;margin-bottom:1.5rem;line-height:1.5;">It will reappear when triggered from the Photometry or Transit Fit page.</p>
+    <p style="margin-bottom:0.75rem;font-size:0.95rem;font-weight:600;">Delete this job record?</p>
+    <p style="color:var(--text-dim);font-size:0.85rem;margin-bottom:1.5rem;line-height:1.5;">The row is removed for all users. Output files (frames, lightcurves, fits) are not deleted.</p>
+    <p id="delete-confirm-error" style="color:var(--red);font-size:0.85rem;margin-bottom:1rem;display:none;"></p>
     <div style="display:flex;gap:0.5rem;justify-content:flex-end;">
-      <button class="btn" onclick="closeHideConfirm()">Cancel</button>
-      <button class="btn danger" onclick="confirmHide()">Hide</button>
+      <button class="btn" onclick="closeDeleteConfirm()">Cancel</button>
+      <button class="btn danger" id="delete-confirm-btn" onclick="confirmDelete()">Delete</button>
     </div>
   </div>
 </div>
@@ -306,8 +318,37 @@
   var searchInput = document.getElementById('job-search');
   var searchStatus = document.getElementById('search-status');
 
+  // Rows used to be hideable per browser; that is replaced by Delete. Drop the
+  // old list so rows hidden that way show again (and can now be deleted).
   var hiddenKeys = [];
-  try { var s = localStorage.getItem('jobs:hidden'); if (s) hiddenKeys = JSON.parse(s); } catch (_) {}
+  try { localStorage.removeItem('jobs:hidden'); } catch (_) {}
+  var JOBS_USER = {{ (current_user or '') | tojson }};
+  var JOBS_IS_ADMIN = {{ 'true' if is_admin else 'false' }};
+  var TERMINAL = { done: 1, error: 1, cancelled: 1 };
+
+  // Mirrors the server rule (which is what actually enforces it): a finished,
+  // stored job may be deleted by its owner or an admin.
+  function canDeleteRow(row, state) {
+    if (!TERMINAL[state]) return false;
+    if (row.getAttribute('data-stored') === '0') return false;
+    if (JOBS_IS_ADMIN) return true;
+    var owner = (row.getAttribute('data-user-name') || 'anonymous');
+    return owner === (JOBS_USER || 'anonymous');
+  }
+  function deleteButton(row, state, extraStyle) {
+    var allowed = canDeleteRow(row, state);
+    var b = actionButton('Delete', 'btn sm' + (allowed ? ' danger' : ''), allowed ? 'delete' : '', {key: row.getAttribute('data-key') || ''});
+    if (!allowed) {
+      b.disabled = true;
+      b.title = row.getAttribute('data-stored') === '0'
+        ? 'This row is derived from files on disk and has no stored record'
+        : 'Only the job\'s owner or an admin can delete it';
+    } else {
+      b.title = 'Delete this job record (output files are kept)';
+    }
+    if (extraStyle) b.style.marginLeft = extraStyle;
+    return b;
+  }
 
   var activeType = '';
   var activeInst = '';
@@ -409,6 +450,8 @@
     row.setAttribute('data-type', 'lco_archive_download');
     row.setAttribute('data-started-at', Math.round(job.started_at || 0));
     row.setAttribute('data-user-name', job.user_name || '');
+    // Live archive jobs are persisted by the server, so they have a stored record.
+    row.setAttribute('data-stored', '1');
     row.setAttribute('data-action-inst', job.action_inst || '');
     row.setAttribute('data-action-date', job.action_date || '');
     row.setAttribute('data-job-inst', job.inst || '');
@@ -565,9 +608,7 @@
         busy.disabled = true;
         td.appendChild(busy);
       }
-      var hideLco = actionButton('Hide', 'btn sm hide-btn', 'hide', {key: key});
-      hideLco.title = 'Hide this row';
-      td.appendChild(hideLco);
+      if (TERMINAL[state]) td.appendChild(deleteButton(row, state));
       return;
     }
     var attrs = {key: key, type: type, inst: inst, date: date, target: target, run: runId};
@@ -588,10 +629,7 @@
     log.title = 'View log';
     log.style.marginLeft = '0.25rem';
     td.appendChild(log);
-    var hide = actionButton('✕', 'btn sm hide-btn', 'hide', {key: key});
-    hide.title = 'Hide this row';
-    hide.style.marginLeft = '0.25rem';
-    td.appendChild(hide);
+    if (TERMINAL[state]) td.appendChild(deleteButton(row, state, '0.25rem'));
   }
 
   function updateErrorDesc(row, text) {
@@ -738,26 +776,55 @@
 
   if (searchInput) searchInput.addEventListener('input', function() { applyFilters(); reconcileSectionsForFilter(); saveFilters(); });
 
-  // ── Hide row (with confirmation) ─────────────────────────────────────────
-  var pendingHideKey = null;
+  // ── Delete row (with confirmation) ───────────────────────────────────────
+  var pendingDeleteKey = null;
 
-  window.hideRow = function(btn, key) {
-    pendingHideKey = key;
+  window.deleteRow = function(btn, key) {
+    pendingDeleteKey = key;
+    var err = document.getElementById('delete-confirm-error');
+    err.style.display = 'none';
+    err.textContent = '';
     document.getElementById('hide-confirm-overlay').classList.add('visible');
   };
 
-  window.confirmHide = function() {
-    if (pendingHideKey) {
-      if (hiddenKeys.indexOf(pendingHideKey) === -1) hiddenKeys.push(pendingHideKey);
-      try { localStorage.setItem('jobs:hidden', JSON.stringify(hiddenKeys)); } catch (_) {}
+  window.confirmDelete = function() {
+    var key = pendingDeleteKey;
+    if (!key) { closeDeleteConfirm(); return; }
+    var btn = document.getElementById('delete-confirm-btn');
+    var err = document.getElementById('delete-confirm-error');
+    btn.disabled = true;
+    fetch('/api/jobs/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: key })
+    })
+    .then(function(r) {
+      return r.json().catch(function() { return {}; }).then(function(d) {
+        if (!r.ok) throw new Error(d.detail || d.error || ('HTTP ' + r.status));
+        return d;
+      });
+    })
+    .then(function() {
+      var row = rowByKey(key);
+      if (row) {
+        var logRow = row.nextElementSibling;
+        if (logRow && logRow.classList.contains('log-row')) logRow.remove();
+        row.remove();
+        allRows = allRows.filter(function(r) { return r !== row; });
+      }
       applyFilters();
-    }
-    closeHideConfirm();
+      closeDeleteConfirm();
+    })
+    .catch(function(e) {
+      err.textContent = e.message;
+      err.style.display = '';
+    })
+    .finally(function() { btn.disabled = false; });
   };
 
-  window.closeHideConfirm = function() {
+  window.closeDeleteConfirm = function() {
     document.getElementById('hide-confirm-overlay').classList.remove('visible');
-    pendingHideKey = null;
+    pendingDeleteKey = null;
   };
 
   // ── Cancel job (in-place) ────────────────────────────────────────────────
@@ -819,11 +886,6 @@
     })
     .then(function(r) { if (!r.ok) return r.json().then(function(e) { throw new Error(e.error || 'Failed'); }); return r.json(); })
     .then(function() {
-      var hidx = hiddenKeys.indexOf(key);
-      if (hidx !== -1) {
-        hiddenKeys.splice(hidx, 1);
-        try { localStorage.setItem('jobs:hidden', JSON.stringify(hiddenKeys)); } catch (_) {}
-      }
       var row = rowByKey(key);
       if (row) {
         row.setAttribute('data-status', 'running');
@@ -877,7 +939,7 @@
     var action = button.getAttribute('data-job-action');
     if (action === 'cancel') cancelJob(button);
     else if (action === 'rerun') reRunJob(button, button.getAttribute('data-key') || '');
-    else if (action === 'hide') hideRow(button, button.getAttribute('data-key') || '');
+    else if (action === 'delete') deleteRow(button, button.getAttribute('data-key') || '');
     else if (action === 'log') viewLog(
       button,
       button.getAttribute('data-type') || '',

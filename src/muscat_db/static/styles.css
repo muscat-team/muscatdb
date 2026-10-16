@@ -957,6 +957,14 @@ th.drag-over-right {
 .job-count-bar-spacer { flex: 1; }
 
 .job-actions { white-space: nowrap; }
+/* Let Re-run / Log / Delete wrap onto a second line instead of being clipped
+   by the generic td overflow:hidden when the Actions column is narrow. */
+.jobs-table td.job-actions {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+}
+.jobs-table td.job-actions .btn { margin-top: 0.1rem; margin-bottom: 0.1rem; }
 
 .jobs-table[data-job-type="lco_archive_download"] {
   min-width: 980px;
