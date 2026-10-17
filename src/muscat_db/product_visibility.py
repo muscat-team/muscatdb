@@ -21,6 +21,7 @@ is re-run under a run id.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from pathlib import Path
 
@@ -31,7 +32,11 @@ from muscat_db.access import NightVisibility, is_denied
 # two hops). A chain this long is a corrupt record, and fails closed.
 _MAX_DEPTH = 4
 
+logger = logging.getLogger(__name__)
+
 RunDirResolver = Callable[[str, str, str, str, str], Path]
+# Owner of the job-table row behind a run, or None when there is no such row.
+JobOwnerResolver = Callable[[str, str, str, str, str], "str | None"]
 
 
 def default_run_dir(level: str, inst: str, date: str, target: str, run_id: str) -> Path:
@@ -52,6 +57,28 @@ def default_run_dir(level: str, inst: str, date: str, target: str, run_id: str) 
     raise ValueError(f"unknown product level {level!r}")
 
 
+def default_job_owner(level: str, inst: str, date: str, target: str, run_id: str) -> str | None:
+    """``user_name`` of the job row that will write this run, or None when the
+    table has no such row (or cannot be read: a run nobody can vouch for stays
+    hidden)."""
+    from muscat_db.job_store import get_job_store
+
+    if level == "ttv_fit":  # filed under "_/_" with the slugged run name
+        from muscat_db.jobs import slugify_run_name
+
+        inst = date = "_"
+        run_id = slugify_run_name(run_id)
+    key = f"{level}:{inst}/{date}/{target.replace(' ', '')}"
+    if run_id:
+        key = f"{key}/{run_id}"
+    try:
+        row = get_job_store().get(key)
+    except Exception:
+        logger.warning("job owner lookup failed for %s", key, exc_info=True)
+        return None
+    return None if row is None else str(row.get("user_name") or "")
+
+
 class ProductVisibility:
     """Per-request product visibility for one viewer.
 
@@ -65,11 +92,13 @@ class ProductVisibility:
         denied: frozenset[str],
         nights: NightVisibility,
         run_dir: RunDirResolver = default_run_dir,
+        job_owner: JobOwnerResolver = default_job_owner,
     ) -> None:
         self.username = (username or "").strip().casefold()
         self.denied = denied
         self.nights = nights
         self._run_dir = run_dir
+        self._job_owner = job_owner
         self._memo: dict[tuple[str, str, str, str, str], bool] = {}
 
     def hidden(
@@ -94,6 +123,8 @@ class ProductVisibility:
             rdir = self._run_dir(level, inst, date, target, run_id)
         except ValueError:
             return True
+        if not rdir.exists():
+            return self._unstarted_hidden(level, inst, date, target, run_id, required=True)
         record = product_record.read_record(rdir)
         if record is None or record.get("level") != level:
             return True
@@ -103,10 +134,7 @@ class ProductVisibility:
         """Like :meth:`hidden`, for a row of the job table.
 
         A job that has not written its run directory yet (queued, or failed
-        before output) has no record to read. A photometry or transit-fit job
-        is then gated by the night it will read, even for its owner, since
-        access may have changed since it was queued; a TTV job has no night,
-        so it stays hidden.
+        before output) has no record to read: see :meth:`_unstarted_hidden`.
         """
         if not self.denied:
             return False
@@ -115,8 +143,25 @@ class ProductVisibility:
         except ValueError:
             return True
         if not started:
-            return level == "ttv_fit" or self.nights.hidden(inst, date, target)
+            return self._unstarted_hidden(level, inst, date, target, run_id, required=False)
         return self.hidden(level, inst, date, target, run_id)
+
+    def _unstarted_hidden(
+        self, level: str, inst: str, date: str, target: str, run_id: str, *, required: bool
+    ) -> bool:
+        """A run with no directory yet (queued, or failed before output) has no
+        record. A photometry or transit-fit job is gated by the night it will
+        read, even for its owner, since access may have changed since it was
+        queued. A TTV job has no night: its owner, read from the job row, sees
+        it so they can follow and cancel it, and anyone else does not. With
+        *required*, no job row at all means there is nothing to show, so it is
+        hidden."""
+        owner = self._job_owner(level, inst, date, target, run_id)
+        if owner is None and required:
+            return True
+        if level != "ttv_fit":
+            return self.nights.hidden(inst, date, target)
+        return not (owner and owner.strip().casefold() == self.username)
 
     def _record_visible(self, record: dict, depth: int) -> bool:
         author = str(record.get("author") or "").strip().casefold()

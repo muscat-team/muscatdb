@@ -742,3 +742,134 @@ def test_postprocess_of_a_hidden_run_is_404(client, env):
     body = {"inst": INST, "date": "260103", "target": "OPENTGT", "run": RUN}
     assert _post(client, "/api/photometry/postprocess", body).status_code == 404
     assert _post(client, "/api/photometry/postprocess/restore", body).status_code == 404
+
+
+# ── queued runs ─────────────────────────────────────────────────────────
+# A full job waiting for a free slot has no run directory and no record yet.
+# Its owner must still see its status and be able to cancel it.
+
+QUEUED = "queuedrun"
+
+
+@pytest.fixture(autouse=False)
+def slots_busy(monkeypatch):
+    """Every full-job slot is taken, so a queued job stays queued."""
+    monkeypatch.setattr(type(get_job_store()), "claim_slot", lambda *a, **k: False)
+
+
+def _enqueue(type_: str, date: str, target: str, owner: str) -> None:
+    get_job_store().enqueue(
+        type_=type_, inst="_" if type_ == "ttv_fit" else INST,
+        date="_" if type_ == "ttv_fit" else date, target=target,
+        started_at=time.time(), run_type="full", run_id=QUEUED, run_name=QUEUED,
+        user_name=owner,
+    )
+
+
+_QUEUED_ROUTES = [
+    ("photometry", "/api/photometry", {"inst": INST, "date": "260103", "target": "OPENTGT", "run": QUEUED}),
+    ("transit_fit", "/api/transit-fit", {"inst": INST, "date": "260103", "target": "OPENTGT", "run": QUEUED}),
+    ("ttv_fit", "/api/ttv-fit", {"target": "OPENTGT", "run_name": QUEUED}),
+]
+
+
+@pytest.mark.parametrize(("type_", "prefix", "params"), _QUEUED_ROUTES)
+def test_owner_sees_and_cancels_their_queued_run(client, slots_busy, type_, prefix, params):
+    _enqueue(type_, "260103", "OPENTGT", "alice")
+    assert _get(client, f"{prefix}/status", **params).json()["state"] == "pending"
+    assert _post(client, f"{prefix}/cancel", params).status_code != 404
+
+
+@pytest.mark.parametrize(("type_", "prefix", "params"), _QUEUED_ROUTES)
+def test_queued_run_of_someone_else_follows_the_night_rule(client, slots_busy, type_, prefix, params):
+    _enqueue(type_, "260103", "OPENTGT", "someone-else")
+    seen = _get(client, f"{prefix}/status", **params).json()["state"]
+    # Photometry and transit fit follow the night they will read, which is
+    # open; a TTV job has no night, so it stays owner/admin-only.
+    assert seen == ("none" if type_ == "ttv_fit" else "pending")
+    assert _get(client, f"{prefix}/status", user="root", **params).json()["state"] == "pending"
+
+
+def test_queued_run_with_no_job_row_is_hidden(client):
+    params = {"inst": INST, "date": "260103", "target": "OPENTGT", "run": "nosuchrun"}
+    assert _get(client, "/api/photometry/status", **params).json() == _NONE
+
+
+# ── a hidden run on an open night ───────────────────────────────────────
+# The night rule alone must not be what hides these: OPENTGT on 260101 is open.
+
+
+def test_run_without_record_on_open_night_is_hidden_from_pages_and_status(client, env):
+    rdir = phot.run_output_dir(INST, "260101", "OPENTGT", "orphanrun")
+    rdir.mkdir(parents=True)
+    (rdir / "_webrun_meta.json").write_text(
+        '{"run_id":"orphanrun","run_name":"orphanrun","site":"","mode":""}'
+    )
+    (rdir / f"OPENTGT_{INST}_gp_260101.csv").write_text("BJD_TDB,Flux\n1,1\n")
+    fdir = fit.fit_output_dir(INST, "260101", "OPENTGT", "orphanfit")
+    _record(fdir, "transit_fit", [{
+        "kind": "product", "level": "photometry", "instrument": INST,
+        "obsdate": "260101", "target": "OPENTGT", "run_id": "orphanrun",
+    }])
+    (fdir / "out").mkdir()
+    (fdir / "out" / "summary.csv").write_text("parameter,mean\nt0[0],1.0\n")
+
+    params = {"inst": INST, "date": "260101", "target": "OPENTGT"}
+    for page, name in (("/photometry", "orphanrun"), ("/transit-fit", "orphanrun"), ("/transit-fit", "orphanfit")):
+        assert name not in _get(client, page, **params).text
+        assert name in _get(client, page, user="root", **params).text
+    assert _get(client, "/api/transit-fit/status", **params, run="orphanfit").json() == _NONE
+
+
+# The call sites that take a light curve or a fit as input, each checked on an
+# open night so the night rule cannot be what refuses them.
+
+
+def _hide_run_on_open_night() -> None:
+    """OPENTGT on 260103 is open, but this run's record makes it undetermined."""
+    _record(phot.run_output_dir(INST, "260103", "OPENTGT", RUN), "photometry", None)
+
+
+def test_logp_reads_no_light_curve_from_a_hidden_run(client, env, monkeypatch):
+    _hide_run_on_open_night()
+    seen = {}
+    monkeypatch.setattr(
+        fit, "compute_logp", lambda *a, selected_csvs=None, **k: seen.update(csvs=selected_csvs) or {"ok": True}
+    )
+    body = {"inst": INST, "date": "260103", "target": "OPENTGT", "options": {}}
+    assert _post(client, "/api/transit-fit/logp", body).status_code == 200
+    assert seen["csvs"] == []
+    assert _post(client, "/api/transit-fit/logp", body, user="root").status_code == 200
+    assert seen["csvs"] is None or len(seen["csvs"]) == 1
+
+
+def test_rerun_of_a_fit_reads_no_light_curve_from_a_hidden_run(client, env, monkeypatch):
+    # The fit itself is visible (manual input); only its light curve is not.
+    _record(fit.fit_output_dir(INST, "260103", "OPENTGT", RUN), "transit_fit", [{"kind": "manual", "note": ""}])
+    _hide_run_on_open_night()
+    seen = {}
+    monkeypatch.setattr(
+        fit, "start_fit", lambda *a, selected_csvs=None, **k: seen.update(csvs=selected_csvs) or {"ok": True}
+    )
+    key = f"transit_fit:{INST}/260103/OPENTGT/{RUN}"
+    assert _post(client, "/api/jobs/rerun", {"key": key}).status_code == 200
+    assert seen["csvs"] == []
+
+
+def test_ttv_start_refuses_a_hidden_fit_on_an_open_night(client, env, monkeypatch):
+    fdir = fit.fit_output_dir(INST, "260101", "OPENTGT", "orphanfit")
+    (fdir / "out").mkdir(parents=True)  # no record: undetermined, so hidden
+    started = {}
+    monkeypatch.setattr(ttv, "start_ttv_fit", lambda t, options, user: started.update(options=options) or {"ok": True})
+    monkeypatch.setattr(web, "_transit_fit_available", lambda: (lambda *a: True))
+    monkeypatch.setattr(web, "_get_run_fitted_params", lambda *a: {"b": {"tc": 2460004.02, "unc": 0.002}})
+    body = {"target": "OPENTGT", "options": {
+        "planet_letters": "b",
+        "planets_ephem": {"b": {"t0": 2460000.0, "period": 2.0}},
+        "selection": [{"kind": "product", "planet": "b", "instrument": INST, "date": "260101",
+                       "target": "OPENTGT", "run_id": "orphanfit"}],
+    }}
+    refused = _post(client, "/api/ttv-fit/start", body)
+    assert refused.status_code == 400
+    assert "options" not in started
+    assert _post(client, "/api/ttv-fit/start", body, user="root").status_code == 200

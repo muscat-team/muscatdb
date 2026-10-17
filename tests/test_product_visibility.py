@@ -34,9 +34,12 @@ def _frames(*proposals, resolved=True):
     }
 
 
-def _viewer(tmp_path: Path, user="viewer", denied=DENIED, nights=None):
+def _viewer(tmp_path: Path, user="viewer", denied=DENIED, nights=None, owners=None):
+    """*owners* maps (level, run_id) to the owner of a queued job row."""
+    owners = owners or {}
     return ProductVisibility(
         user, denied, nights or _Nights(),
+        job_owner=lambda level, inst, date, target, run_id: owners.get((level, run_id)),
         run_dir=lambda level, inst, date, target, run_id: tmp_path / level / inst / date / target / run_id,
     )
 
@@ -197,3 +200,37 @@ def test_a_three_level_chain_is_followed(tmp_path):
     assert _viewer(tmp_path).hidden("ttv_fit", INST, DATE, TARGET, "t")
     _put(tmp_path, "photometry", [_frames(OPEN)], run_id="p")
     assert not _viewer(tmp_path).hidden("ttv_fit", INST, DATE, TARGET, "t")
+
+
+def test_queued_ttv_run_is_visible_to_its_owner_only(tmp_path):
+    v = _viewer(tmp_path, owners={("ttv_fit", "q"): "Viewer"})
+    assert not v.hidden("ttv_fit", "", "", TARGET, "q")
+    assert _viewer(tmp_path, owners={("ttv_fit", "q"): "other"}).hidden("ttv_fit", "", "", TARGET, "q")
+
+
+@pytest.mark.parametrize("level", ["photometry", "transit_fit"])
+def test_queued_run_follows_the_night_even_for_its_owner(tmp_path, level):
+    owners = {(level, "q"): "viewer"}
+    assert not _viewer(tmp_path, owners=owners).hidden(level, INST, DATE, TARGET, "q")
+    assert _viewer(tmp_path, nights=_Nights({TARGET}), owners=owners).hidden(level, INST, DATE, TARGET, "q")
+
+
+def test_run_with_no_directory_and_no_job_row_is_hidden(tmp_path):
+    assert _viewer(tmp_path).hidden("photometry", INST, DATE, TARGET, "q")
+
+
+def test_job_row_with_a_blank_owner_does_not_vouch_for_a_blank_viewer(tmp_path):
+    v = _viewer(tmp_path, user=None, owners={("ttv_fit", "q"): ""})
+    assert v.hidden("ttv_fit", "", "", TARGET, "q")
+
+
+def test_job_owner_lookup_follows_the_job_store_key(tmp_path, monkeypatch):
+    from muscat_db.job_store import get_job_store
+    from muscat_db.product_visibility import default_job_owner
+
+    monkeypatch.setenv("MUSCAT_DB_PATH", str(tmp_path / "muscat.db"))
+    store = get_job_store()
+    store.enqueue(type_="ttv_fit", inst="_", date="_", target="TOI 1", started_at=1.0,
+                  run_id="my_run", run_name="My Run", user_name="alice")
+    assert default_job_owner("ttv_fit", "", "", "TOI 1", "My Run") == "alice"
+    assert default_job_owner("ttv_fit", "", "", "TOI 1", "other") is None
