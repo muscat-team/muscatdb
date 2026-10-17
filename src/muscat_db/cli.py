@@ -1463,6 +1463,57 @@ def access_scope(
         )
 
 
+@access_app.command("grant-target")
+def access_grant_target(
+    username: str = typer.Argument(..., help="nginx username (must be a scoped viewer)"),
+    target: str = typer.Argument(..., help="Target name; spaces and case are ignored"),
+    granted_by: str = typer.Option(
+        None, "--by", help="Recorded as the granting admin (default: your OS user)"
+    ),
+):
+    """Let a scoped viewer see one target under any proposal (#228).
+
+    Everything else in the target's proposals stays hidden. Only scoped viewers
+    (`access scope`) take target grants; for anyone else the grant would have no
+    effect, so it is refused.
+    """
+    from muscat_db import access
+    from muscat_db.database import db_path
+
+    db = db_path()
+    target = target.strip()
+    if not access.is_scoped(db, username):
+        console.print(
+            f"[red]Error: '{username}' is not a scoped viewer, so a target grant would have "
+            f"no effect. Run `muscat-db access scope {username}` first.[/]"
+        )
+        raise typer.Exit(1)
+    if not access.target_matches_observations(db, target):
+        console.print(
+            f"[yellow]{target} matches no observed object, so it shows {username} nothing "
+            "until one is ingested.[/]"
+        )
+    if access.grant_target(db, username, target, granted_by or getpass.getuser()):
+        console.print(f"[green]{username} granted target {target}[/]")
+    else:
+        console.print(f"[yellow]{username} already has target {target}[/]")
+
+
+@access_app.command("revoke-target")
+def access_revoke_target(
+    username: str = typer.Argument(..., help="nginx username"),
+    target: str = typer.Argument(..., help="Target name"),
+):
+    """Remove a scoped viewer's target grant."""
+    from muscat_db import access
+    from muscat_db.database import db_path
+
+    if not access.revoke_target(db_path(), username, target.strip()):
+        console.print(f"[yellow]{username} had no target grant for {target}[/]")
+        raise typer.Exit(1)
+    console.print(f"[green]{username} revoked from target {target}[/]")
+
+
 @access_app.command("list")
 def access_list(
     username: str | None = typer.Option(None, "--user", "-u", help="Show one user's grants"),
@@ -1611,6 +1662,8 @@ def access_explain(
     hidden = sum(p["target_nights"] for p in info["proposals"] if not p["visible"])
     total = sum(p["target_nights"] for p in info["proposals"])
     console.print(f"{total - hidden} of {total} target-nights visible, {hidden} hidden")
+    for g in info["target_grants"]:
+        console.print(f"Target grant: {g['target']} (by {g['granted_by'] or '-'}, {g['granted_at']})")
     for pid in info["unmatched_grants"]:
         console.print(
             f"[yellow]Grant {pid} matches no observation, so it shows {username} nothing.[/]"

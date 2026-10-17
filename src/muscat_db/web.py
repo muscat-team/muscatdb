@@ -654,7 +654,13 @@ _CURRENT_USER: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 def _viewer_denied() -> frozenset[str]:
     """Restricted proposals the current request's viewer may not see (issue
     #144); empty for admins and whenever nothing is restricted."""
-    return denied_proposal_ids_for(_db_path(), _CURRENT_USER.get())
+    db = _db_path()
+
+    def normalize(name: str) -> str:
+        # Called only when a scoped viewer has target grants to resolve.
+        return _normalize_target_name(name, _get_norm_name_overrides(db))
+
+    return denied_proposal_ids_for(db, _CURRENT_USER.get(), normalize)
 
 
 def _night_visibility(denied: frozenset[str] | None = None) -> NightVisibility:
@@ -802,7 +808,12 @@ def _denied_cache_suffix(denied: frozenset[str]) -> str:
     a filtered view keys on the denied set too."""
     # repr() of the sorted tuple, not a join: no proposal id can make two
     # different sets collide.
-    return "|" + repr(tuple(sorted(denied))) if denied else ""
+    if not denied:
+        return ""
+    # A scoped viewer's target grants change what they see without changing the
+    # denied proposals, so they key the cache too.
+    rules = [r.sql() for r in getattr(denied, "rules", ())]
+    return "|" + repr(tuple(sorted(denied))) + (repr(rules) if rules else "")
 
 
 def _render(name: str, **kwargs) -> str:

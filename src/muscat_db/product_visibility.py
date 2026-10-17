@@ -27,6 +27,7 @@ from pathlib import Path
 
 from muscat_db import product_record
 from muscat_db.access import NightVisibility, is_denied
+from muscat_db.database import ScopedDenied
 
 # Longest chain of product inputs followed (TTV -> transit fit -> photometry is
 # two hops). A chain this long is a corrupt record, and fails closed.
@@ -172,6 +173,24 @@ class ProductVisibility:
             return False
         return all(self._input_visible(entry, depth) for entry in inputs)
 
+    def _proposal_denied(self, proposal: str, entry: dict) -> bool:
+        """Whether one proposal of a frames input is hidden from the viewer.
+
+        A scoped viewer's target grants (#228) look at the frames' ``object``,
+        which the record holds only as the run's own target spelling, so the
+        raw spellings are resolved on that night. The proposal is visible when
+        any of them is granted; a night that resolves to none stays hidden.
+        """
+        if not (isinstance(self.denied, ScopedDenied) and self.denied.rules):
+            return is_denied(proposal, self.denied)
+        inst = str(entry.get("instrument") or "")
+        date = str(entry.get("obsdate") or "")
+        objects = self.nights.matched_objects(inst, date, str(entry.get("target") or ""))
+        return all(
+            is_denied(proposal, self.denied, instrument=inst, obsdate=date, obj=obj)
+            for obj in objects or [None]
+        )
+
     def _input_visible(self, entry: object, depth: int) -> bool:
         if not isinstance(entry, dict):
             return False
@@ -182,7 +201,7 @@ class ProductVisibility:
             proposals = entry.get("proposal_ids")
             if not entry.get("resolved") or not isinstance(proposals, list) or not proposals:
                 return False
-            return not any(is_denied(p, self.denied) for p in proposals)
+            return not any(self._proposal_denied(p, entry) for p in proposals)
         if kind == "product":
             return not self.hidden(
                 str(entry.get("level") or ""),

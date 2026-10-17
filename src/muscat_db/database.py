@@ -1415,14 +1415,49 @@ class ScopedDenied(frozenset):
     SQL built from it is ``IN (allowed)`` instead of ``NOT IN (denied)``: a
     proposal first ingested after this set was computed is hidden by default
     rather than visible by default.
+
+    ``rules`` are extra allow-grants (issue #228) that admit rows outside the
+    proposal allowlist, e.g. one target of an otherwise hidden proposal. Each
+    needs ``matches(instrument, obsdate, obj, proposal_id)`` and ``sql()``
+    (the :class:`muscat_db.access_groups.Grant` interface).
     """
 
     allowed: frozenset[str]
+    rules: tuple
 
-    def __new__(cls, denied, allowed):
+    def __new__(cls, denied, allowed, rules=()):
         obj = super().__new__(cls, denied)
         obj.allowed = frozenset(allowed)
+        obj.rules = tuple(rules)
         return obj
+
+
+def _sql_scoped_allowed(denied: ScopedDenied, column: str) -> tuple[str, list]:
+    """Allow-clause for a scoped viewer: allowlisted proposals OR any extra rule."""
+    parts: list[str] = []
+    params: list = []
+    if denied.allowed:
+        placeholders = ",".join("?" for _ in denied.allowed)
+        parts.append(f"COALESCE({column}, '') COLLATE NOCASE IN ({placeholders})")
+        params.extend(sorted(denied.allowed))
+    if denied.rules:
+        # Rules address summaries/frames columns; only the plain or aliased
+        # proposal column can be mapped back to a table alias.
+        if column == "proposal_id":
+            alias = ""
+        elif column.endswith(".proposal_id"):
+            alias = column[: -len(".proposal_id")]
+        else:
+            raise ValueError(f"cannot apply target grants to column {column!r}")
+        for rule in denied.rules:
+            clause, rule_params = rule.sql(alias)
+            if clause == "0":
+                continue
+            parts.append(clause)
+            params.extend(rule_params)
+    if not parts:
+        return "0", []
+    return ("(" + " OR ".join(parts) + ")" if len(parts) > 1 else parts[0]), params
 
 
 def sql_not_denied(denied: frozenset[str], column: str = "proposal_id") -> tuple[str, list[str]]:
@@ -1438,13 +1473,7 @@ def sql_not_denied(denied: frozenset[str], column: str = "proposal_id") -> tuple
     if not denied:
         return "1", []
     if isinstance(denied, ScopedDenied):
-        if not denied.allowed:
-            return "0", []
-        placeholders = ",".join("?" for _ in denied.allowed)
-        return (
-            f"COALESCE({column}, '') COLLATE NOCASE IN ({placeholders})",
-            sorted(denied.allowed),
-        )
+        return _sql_scoped_allowed(denied, column)
     placeholders = ",".join("?" for _ in denied)
     return (
         f"COALESCE({column}, '') COLLATE NOCASE NOT IN ({placeholders})",
@@ -1498,7 +1527,7 @@ def objects_with_restricted_proposal(
     visible, params = sql_not_denied(restricted)  # type: ignore[arg-type]
     with get_conn(db_path) as conn:
         cur = conn.execute(
-            f"SELECT DISTINCT object FROM summaries WHERE NOT ({visible})", params
+            f"SELECT DISTINCT object FROM summaries WHERE NOT COALESCE(({visible}), 0)", params
         )
         return {r[0] for r in cur.fetchall() if r[0]}
 

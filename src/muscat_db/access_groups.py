@@ -250,6 +250,61 @@ def load_access(
     return Access(user, admin, groups, grants)
 
 
+def scoped_target_rules(
+    conn: sqlite3.Connection,
+    user: str,
+    normalize: Callable[[str], str] | None = None,
+) -> tuple[Grant, ...]:
+    """Target grants that widen a *scoped* viewer's proposal allowlist.
+
+    Only grants that name a target, from the viewer's own groups other than
+    ``everyone`` and ``admin``: a scoped viewer is outside ``everyone`` by
+    definition, and plain proposal grants already live in their allowlist
+    (#202). Missing group tables mean no grants.
+    """
+    try:
+        groups = _group_names_for(conn, user, False) - {EVERYONE, ADMIN}
+        if not groups:
+            return ()
+        rows = conn.execute(
+            "SELECT id, groupname, proposal_id, instrument, target, date_from, date_to "
+            f"FROM group_grants WHERE target IS NOT NULL AND groupname IN "
+            f"({','.join('?' for _ in groups)}) ORDER BY id",
+            sorted(groups),
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        if _missing_table(exc):
+            return ()
+        raise
+    if not rows:
+        return ()
+    objects = [r[0] for r in conn.execute("SELECT DISTINCT object FROM summaries")]
+    resolved = _resolve_objects({r[4] for r in rows}, objects, normalize)
+    return tuple(
+        Grant(
+            id=r[0],
+            group=r[1],
+            proposal_id=r[2],
+            instrument=r[3],
+            target=r[4],
+            date_from=r[5],
+            date_to=r[6],
+            objects=resolved[r[4]],
+        )
+        for r in rows
+    )
+
+
+def remove_target_grants(conn: sqlite3.Connection, group: str, target: str) -> int:
+    """Delete *group*'s grants on *target* (case-insensitive). Returns the count."""
+    cur = conn.execute(
+        "DELETE FROM group_grants WHERE groupname = ? AND target IS NOT NULL "
+        "AND lower(target) = lower(?)",
+        (group, target),
+    )
+    return cur.rowcount
+
+
 # ── writes (CLI only) ───────────────────────────────────────────────────
 
 
@@ -431,10 +486,10 @@ def parity(db_path: str, normalize: Callable[[str], str] | None = None) -> list[
                 raise
     mismatches: list[dict] = []
     for user in sorted(users, key=lambda u: (u is not None, u or "")):
-        denied = access.denied_proposal_ids_for(db_path, user)
+        denied = access.denied_proposal_ids_for(db_path, user, normalize)
         grants = load_access(db_path, user, normalize)
         for inst, date, obj, pid in keys:
-            old = not access.is_denied(pid, denied)
+            old = not access.is_denied(pid, denied, instrument=inst, obsdate=date, obj=obj)
             new = grants.frame_visible(inst, date, obj, pid)
             if old != new:
                 mismatches.append(

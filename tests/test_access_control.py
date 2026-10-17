@@ -731,3 +731,239 @@ def test_cli_grant_to_scoped_user_does_not_warn_about_unrestricted(db, monkeypat
     result = CliRunner().invoke(cli_app, ["access", "grant", "andrew", _OPEN])
     assert result.exit_code == 0, result.output
     assert "no effect" not in result.output
+
+
+# ── target grants for a scoped viewer (issue #228 acceptance case) ──────
+
+
+def _grant_target(db: str, user: str, target: str, **kwargs) -> None:
+    from muscat_db import access_groups
+
+    with sqlite3.connect(db) as conn:
+        access_groups.ensure_group(conn, access_groups.user_group(user))
+        access_groups.add_member(conn, access_groups.user_group(user), user)
+        access_groups.add_grant(
+            conn, access_groups.user_group(user), target=target, granted_by="admin", **kwargs
+        )
+
+
+def test_target_grant_shows_that_target_under_a_restricted_proposal(client, db):
+    _scope(db, "andrew", _OPEN)
+    _grant_target(db, "andrew", "HIDDENTGT")
+    rows = _export_rows(client, "andrew")
+    assert set(rows) == {"MIXEDTGT", "HIDDENTGT"}
+    assert rows["HIDDENTGT"]["n_frames"] == "1"
+
+
+def test_target_grant_leaves_the_rest_of_the_proposal_hidden(client, db):
+    # MIXEDTGT's 260102 night is also under the restricted proposal.
+    _scope(db, "andrew", _OPEN)
+    _grant_target(db, "andrew", "HIDDENTGT")
+    rows = _export_rows(client, "andrew")
+    assert rows["MIXEDTGT"]["n_frames"] == "2"  # the 3 restricted frames stay hidden
+
+
+def test_target_grant_alone_gives_only_that_target(client, db):
+    access.set_scoped(db, "andrew")
+    _grant_target(db, "andrew", "MIXEDTGT")
+    rows = _export_rows(client, "andrew")
+    assert set(rows) == {"MIXEDTGT"}
+    assert rows["MIXEDTGT"]["n_frames"] == "5"  # every proposal's frames of the target
+    html = client.get("/targets", headers=_headers("andrew")).text
+    assert "HIDDENTGT" not in html and "OPENTGT" not in html
+
+
+def test_target_grant_matches_spelling_with_case_and_spaces_ignored(db):
+    access.set_scoped(db, "andrew")
+    _grant_target(db, "andrew", "hidden tgt")
+    denied = access.denied_proposal_ids_for(db, "andrew")
+    assert not access.is_denied(
+        _RESTRICTED, denied, instrument="muscat3", obsdate="260201", obj="HIDDENTGT"
+    )
+
+
+def test_target_grant_can_be_narrowed_by_date(db):
+    access.set_scoped(db, "andrew")
+    _grant_target(db, "andrew", "MIXEDTGT", date_from="260102", date_to="260102")
+    denied = access.denied_proposal_ids_for(db, "andrew")
+    kw = {"instrument": "sinistro", "obj": "MIXEDTGT"}
+    assert not access.is_denied(_RESTRICTED, denied, obsdate="260102", **kw)
+    assert access.is_denied(_OPEN, denied, obsdate="260101", **kw)
+
+
+def test_is_denied_without_row_detail_fails_closed_for_target_grants(db):
+    access.set_scoped(db, "andrew")
+    _grant_target(db, "andrew", "HIDDENTGT")
+    denied = access.denied_proposal_ids_for(db, "andrew")
+    assert access.is_denied(_RESTRICTED, denied)  # no object given: not enough to allow
+
+
+def test_target_grant_is_not_applied_to_other_viewers(client, db):
+    _scope(db, "andrew", _OPEN)
+    _grant_target(db, "andrew", "HIDDENTGT")
+    _scope(db, "bob", _OPEN)
+    assert set(_export_rows(client, "bob")) == {"MIXEDTGT"}
+
+
+def test_rendered_page_cache_is_not_shared_between_different_target_grants(client, db):
+    _scope(db, "andrew", _OPEN)
+    _scope(db, "bob", _OPEN)
+    _grant_target(db, "andrew", "HIDDENTGT")
+    assert "HIDDENTGT" in client.get("/targets", headers=_headers("andrew")).text
+    assert "HIDDENTGT" not in client.get("/targets", headers=_headers("bob")).text
+    assert "HIDDENTGT" in client.get("/targets", headers=_headers("andrew")).text
+
+
+def test_target_grant_night_is_visible_and_other_nights_are_not(db):
+    _scope(db, "andrew", _OPEN)
+    _grant_target(db, "andrew", "HIDDENTGT")
+    nights = access.NightVisibility(db, access.denied_proposal_ids_for(db, "andrew"))
+    assert not nights.hidden("muscat3", "260201", "HIDDENTGT")
+    assert nights.hidden("sinistro", "260102", "MIXEDTGT")
+
+
+def test_explain_target_reports_target_grant_rows_as_visible(db):
+    _scope(db, "andrew", _OPEN)
+    _grant_target(db, "andrew", "HIDDENTGT")
+    assert all(r["visible"] for r in access.explain_target(db, "andrew", "HIDDENTGT"))
+    mixed = {r["obsdate"]: r["visible"] for r in access.explain_target(db, "andrew", "MIXEDTGT")}
+    assert mixed == {"260101": True, "260102": False}
+
+
+def test_cli_grant_target_roundtrip(db, monkeypatch):
+    monkeypatch.setenv("MUSCAT_DB_PATH", db)
+    runner = CliRunner()
+    access.set_scoped(db, "andrew")
+    result = runner.invoke(cli_app, ["access", "grant-target", "andrew", "HIDDENTGT"])
+    assert result.exit_code == 0, result.output
+    denied = access.denied_proposal_ids_for(db, "andrew")
+    assert not access.is_denied(
+        _RESTRICTED, denied, instrument="muscat3", obsdate="260201", obj="HIDDENTGT"
+    )
+    again = runner.invoke(cli_app, ["access", "grant-target", "andrew", "HIDDENTGT"])
+    assert again.exit_code == 0 and "already" in again.output
+    revoked = runner.invoke(cli_app, ["access", "revoke-target", "andrew", "HIDDENTGT"])
+    assert revoked.exit_code == 0, revoked.output
+    assert access.is_denied(
+        _RESTRICTED,
+        access.denied_proposal_ids_for(db, "andrew"),
+        instrument="muscat3", obsdate="260201", obj="HIDDENTGT",
+    )
+    assert runner.invoke(cli_app, ["access", "revoke-target", "andrew", "HIDDENTGT"]).exit_code == 1
+
+
+def test_cli_grant_target_refuses_an_unscoped_user(db, monkeypatch):
+    # A blocklist viewer cannot be given a target exception yet; saying nothing
+    # would leave the grant silently inert.
+    monkeypatch.setenv("MUSCAT_DB_PATH", db)
+    result = CliRunner().invoke(cli_app, ["access", "grant-target", "alice", "HIDDENTGT"])
+    assert result.exit_code == 1 and "scoped" in result.output
+
+
+def test_cli_grant_target_warns_when_target_matches_nothing(db, monkeypatch):
+    monkeypatch.setenv("MUSCAT_DB_PATH", db)
+    access.set_scoped(db, "andrew")
+    result = CliRunner().invoke(cli_app, ["access", "grant-target", "andrew", "NOSUCHTGT"])
+    assert result.exit_code == 0 and "matches no" in result.output
+
+
+# ── products built from a target-granted night (review of #262) ─────────
+
+
+def _product_viewer(db: str, tmp_path, user: str, normalize=None):
+    from muscat_db.product_visibility import ProductVisibility
+
+    denied = access.denied_proposal_ids_for(db, user, normalize)
+    return ProductVisibility(
+        user,
+        denied,
+        access.NightVisibility(db, denied, normalize),
+        run_dir=lambda level, inst, date, target, run_id: (
+            tmp_path / level / inst / date / target / run_id
+        ),
+        job_owner=lambda *a: None,
+    )
+
+
+def _put_product(tmp_path, level, inst, date, target, run_id, inputs):
+    from muscat_db import product_record as pr
+
+    rdir = tmp_path / level / inst / date / target / run_id
+    rdir.mkdir(parents=True, exist_ok=True)
+    assert pr.write_record(rdir, pr.build_record(level, author="someone", inputs=inputs))
+
+
+def _frames_input(inst, date, target, *proposals):
+    return {
+        "kind": "frames", "instrument": inst, "obsdate": date, "target": target,
+        "proposal_ids": sorted(proposals), "n_frames": 1, "blank_frames": 0, "resolved": True,
+    }
+
+
+@pytest.mark.parametrize("spelling", ["HIDDENTGT", "hidden tgt"])
+def test_target_grant_shows_photometry_run_of_the_granted_target(db, tmp_path, spelling):
+    _scope(db, "andrew", _OPEN)
+    _grant_target(db, "andrew", "HIDDENTGT")
+    _put_product(
+        tmp_path, "photometry", "muscat3", "260201", spelling, "r1",
+        [_frames_input("muscat3", "260201", spelling, _RESTRICTED)],
+    )
+    viewer = _product_viewer(db, tmp_path, "andrew")
+    assert not viewer.hidden("photometry", "muscat3", "260201", spelling, "r1")
+
+
+def test_target_grant_shows_transit_fit_built_on_the_granted_run(db, tmp_path):
+    _scope(db, "andrew", _OPEN)
+    _grant_target(db, "andrew", "HIDDENTGT")
+    _put_product(
+        tmp_path, "photometry", "muscat3", "260201", "HIDDENTGT", "r1",
+        [_frames_input("muscat3", "260201", "HIDDENTGT", _RESTRICTED)],
+    )
+    _put_product(
+        tmp_path, "transit_fit", "muscat3", "260201", "HIDDENTGT", "f1",
+        [{"kind": "product", "level": "photometry", "instrument": "muscat3",
+          "obsdate": "260201", "target": "HIDDENTGT", "run_id": "r1"}],
+    )
+    viewer = _product_viewer(db, tmp_path, "andrew")
+    assert not viewer.hidden("transit_fit", "muscat3", "260201", "HIDDENTGT", "f1")
+
+
+def test_target_grant_does_not_show_runs_of_other_targets_in_the_proposal(db, tmp_path):
+    _scope(db, "andrew", _OPEN)
+    _grant_target(db, "andrew", "HIDDENTGT")
+    _put_product(
+        tmp_path, "photometry", "sinistro", "260102", "MIXEDTGT", "r1",
+        [_frames_input("sinistro", "260102", "MIXEDTGT", _RESTRICTED)],
+    )
+    viewer = _product_viewer(db, tmp_path, "andrew")
+    assert viewer.hidden("photometry", "sinistro", "260102", "MIXEDTGT", "r1")
+
+
+def test_target_grant_run_resolves_job_spelling_through_the_normalizer(db, tmp_path):
+    # A run names its target as the job directory does ("TGT-HIDDEN"), the frames
+    # carry the header's object; only the app normalizer links them.
+    def normalize(name: str) -> str:
+        return "HIDDENTGT" if name.replace("-", "").upper() in {"TGTHIDDEN", "HIDDENTGT"} else name
+
+    _scope(db, "andrew", _OPEN)
+    _grant_target(db, "andrew", "HIDDENTGT")
+    _put_product(
+        tmp_path, "photometry", "muscat3", "260201", "TGT-HIDDEN", "r1",
+        [_frames_input("muscat3", "260201", "TGT-HIDDEN", _RESTRICTED)],
+    )
+    viewer = _product_viewer(db, tmp_path, "andrew", normalize)
+    assert not viewer.hidden("photometry", "muscat3", "260201", "TGT-HIDDEN", "r1")
+
+
+def test_groups_parity_covers_target_grants(db):
+    from muscat_db import access_groups
+
+    _scope(db, "andrew", _OPEN)
+    access_groups.seed_from_blocklist(db)
+    _grant_target(db, "andrew", "HIDDENTGT")
+    assert access_groups.parity(db) == []
+
+    # Without row detail the blocklist side would hide the granted night and
+    # the check would report a mismatch for it, so this fails if detail is lost.
+    nights = {(m["instrument"], m["obsdate"]) for m in access_groups.parity(db)}
+    assert ("muscat3", "260201") not in nights
