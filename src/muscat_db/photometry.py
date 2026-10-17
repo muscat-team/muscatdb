@@ -1830,25 +1830,21 @@ def start_run(
         overwrite = opts.get("overwrite", True)
         logger.info(f"start_run: {inst}/{date}/{target} run_id={run_id} overwrite={overwrite} existing={existing is not None}")
 
+        # A live run is never restarted by a repeat launch, overwrite or not:
+        # a double click or a second server process would otherwise kill a
+        # 20+ minute reduction (or, from another process whose _JOBS cannot
+        # see it, wipe the run directory under it). Restart means Cancel first.
+        # The pid file covers jobs launched by a different server process.
         if existing is not None and existing.proc.poll() is None:
-            if overwrite:
-                logger.info(f"start_run: cancelling existing job for {key} (overwrite=True)")
-                try:
-                    existing.cancelled = True
-                    jobs.terminate_pg(existing.proc)
-                    if existing.logf:
-                        try:
-                            existing.logf.close()
-                        except OSError:
-                            pass
-                except OSError:
-                    pass
-                if existing.run_type == "full":
-                    get_job_store().release_slot("photometry", key)
-                _JOBS.pop(key, None)
-            else:
-                logger.info(f"start_run: reusing existing job for {key} (overwrite=False)")
-                return {"ok": True, "key": key, "already_running": True, "run_id": run_id}
+            live = True
+        else:
+            try:
+                live = _detect_process_running(run_output_dir(inst, date, target, run_id))
+            except ValueError:
+                live = False
+        if live:
+            logger.info(f"start_run: {key} is already running; ignoring relaunch (overwrite={overwrite})")
+            return {"ok": True, "key": key, "already_running": True, "run_id": run_id}
 
         if _reduction_products_exist(inst, date, target, run_id) and not overwrite:
             logger.info(f"start_run: refusing to overwrite existing reduction for {key} (overwrite=False)")

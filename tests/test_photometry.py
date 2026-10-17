@@ -1344,6 +1344,80 @@ class TestStartRun:
             with phot._LOCK:
                 phot._JOBS.clear()
 
+    def _patch_raw_dir(self, monkeypatch, tmp_path):
+        from dataclasses import replace
+        from muscat_db.instruments import INSTRUMENTS
+
+        raw_root = tmp_path / "raw"
+        (raw_root / DATE).mkdir(parents=True)
+        monkeypatch.setenv("MUSCAT_PROSE_DIR", str(tmp_path / "out"))
+        patched = dict(INSTRUMENTS)
+        patched[INST] = replace(INSTRUMENTS[INST], data_subdir=str(raw_root))
+        monkeypatch.setattr("muscat_db.photometry.INSTRUMENTS", patched)
+
+    def test_overwrite_true_does_not_restart_live_in_memory_job(self, monkeypatch, tmp_path):
+        """A second launch for a live key is rejected even with overwrite=True."""
+
+        class RunningProc:
+            pid = 12345
+
+            def poll(self):
+                return None
+
+        self._patch_raw_dir(monkeypatch, tmp_path)
+        monkeypatch.setattr(
+            phot.jobs, "terminate_pg",
+            lambda *_a, **_k: pytest.fail("a live job must not be terminated by a relaunch"),
+        )
+        log_path = tmp_path / "running.log"
+        logf = log_path.open("w")
+        key = phot.job_key(INST, DATE, TARGET, "default")
+        with phot._LOCK:
+            phot._JOBS.clear()
+            phot._JOBS[key] = phot.Job(
+                key=key, inst=INST, date=DATE, target=TARGET, cmd=["prose"],
+                proc=RunningProc(), logf=logf, log_path=log_path,
+                run_type="full", run_id="default", run_name="default",
+            )
+        try:
+            result = phot.start_run(
+                INST, DATE, TARGET, options={"overwrite": True}, test_run=False
+            )
+            assert result == {
+                "ok": True, "key": key, "already_running": True, "run_id": "default",
+            }
+            assert phot._JOBS[key].proc.poll() is None
+        finally:
+            logf.close()
+            with phot._LOCK:
+                phot._JOBS.clear()
+
+    def test_overwrite_true_does_not_wipe_run_held_by_another_process(self, monkeypatch, tmp_path):
+        """A live photometry.pid (job launched by another server process) blocks
+        the relaunch and leaves the run directory untouched."""
+        self._patch_raw_dir(monkeypatch, tmp_path)
+        rdir = phot.run_output_dir(INST, DATE, TARGET, "default")
+        rdir.mkdir(parents=True)
+        product = rdir / "keep_me.csv"
+        product.write_text("x")
+        (rdir / phot._PID_FILE_NAME).write_text(str(os.getpid()))
+        real_popen = phot.subprocess.Popen
+
+        def guarded_popen(cmd, *a, **k):
+            if "--target_name" in cmd:
+                pytest.fail("must not launch a second pipeline")
+            return real_popen(cmd, *a, **k)
+
+        monkeypatch.setattr(phot.subprocess, "Popen", guarded_popen)
+        with phot._LOCK:
+            phot._JOBS.clear()
+        result = phot.start_run(
+            INST, DATE, TARGET, options={"overwrite": True}, test_run=False
+        )
+        key = phot.job_key(INST, DATE, TARGET, "default")
+        assert result == {"ok": True, "key": key, "already_running": True, "run_id": "default"}
+        assert product.read_text() == "x"
+
     def test_full_runs_refused_when_cap_is_zero(self, monkeypatch, tmp_path):
         """A zero cap must refuse, not queue.
 
