@@ -39,8 +39,11 @@ class _FakeProc:
     def __init__(self, rc=None):
         self._rc = rc
         self.pid = os.getpid()
+        # Set on the first poll(): the stream has started reading the job.
+        self.first_polled = threading.Event()
 
     def poll(self):
+        self.first_polled.set()
         return self._rc
 
     def wait(self, timeout=None):
@@ -58,9 +61,13 @@ def _parse_sse_events(text: str) -> list[dict]:
 
 
 def _flip_to_terminal(proc, log_path, marker: str, delay=0.05):
-    """Mutate the fake job's process/log from a real background thread after
-    a short delay, so the blocking test request has something to observe."""
+    """Mutate the fake job's process/log from a real background thread once
+    the stream has first read the job, plus a short delay, so the blocking test
+    request always observes the running state first. Anchoring on the first
+    poll (not on thread start) keeps this independent of how long a loaded CI
+    runner takes to start the request."""
     def run():
+        proc.first_polled.wait(timeout=10)
         time.sleep(delay)
         proc._rc = 0
         with open(log_path, "a") as f:
