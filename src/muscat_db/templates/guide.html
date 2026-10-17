@@ -715,6 +715,8 @@ graph TD
 
     %% Server-side download
     H --> I["Send Selected Frame URLs\n/api/lco/archive/download"]:::pipeline
+    R0["Request ID\n(whole request, no row selection)"]:::default --> R1["Download Request\n/api/lco/archive/request-download"]:::pipeline
+    R1 --> J
     I --> J["Server Validates Paths\n(No overwrite by default)"]:::default
     J -->|Overwrite Disabled| K["Check if files exist locally"]:::default
     K -->|Files exist| L["Skip existing files\nShow 'already exists' status"]:::default

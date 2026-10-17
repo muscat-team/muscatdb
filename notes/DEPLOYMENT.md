@@ -26,6 +26,8 @@ muscat-db runs behind nginx (HTTP Basic Auth) reverse-proxying to uvicorn, insid
 
 **Cron status (2026-09-10):** both entries are installed and verified. Both went in on 2026-09-06, but staging's next real target hit a real outage the old `send-keys` relaunch could not recover from (fixed in #146 — see `notes/deploy-staging-plan.md` Gate F for the full incident and fix timeline); both entries were pulled by hand before production's poll could hit the same failure. With the fix merged to `test` (`257173d`), staging's entry alone was reinstalled and reverified against a real unattended tick on 2026-09-07. Once #146 released to `main` via #148 (`70de9ec`), production's entry was reinstalled on 2026-09-10 and its first unattended tick deployed `5923c3d -> 70de9ec` cleanly via `respawn-pane -k`, confirmed by `:8001/healthz` returning 200 right after. The Slack failure-alert webhook (`/etc/muscat-db/slack-webhook-url`) was installed on 2026-09-08, so a failed deploy now pages Slack in addition to logging `FAILED`. Gate F (#26, #131) is closed.
 
+Keep nginx's `client_max_body_size` (20m in every `deploy/nginx*.conf`) above `MUSCAT_LCO_ARCHIVE_MAX_PAYLOAD_BYTES` (16 MiB by default). Selecting every row of a large LCO archive search posts several MB of frame metadata, and nginx would otherwise refuse it with an HTML 413 before the app can answer in JSON. A whole-request download posts only the request ID.
+
 The README "Multi-User Deployment" section has the full walkthrough; the essentials:
 
 ```bash
