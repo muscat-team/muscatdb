@@ -243,6 +243,21 @@ class NightVisibility:
             matched = [visible for obj, visible in rows if self.normalize(obj) == norm]
         return not any(matched)
 
+    def matched_objects(self, instrument: str, obsdate: str, target: str) -> list[str]:
+        """Raw ``object`` spellings on this night that *target* names, matched
+        like :meth:`hidden` (spaces and case ignored, then the normalizer).
+
+        A run records its target as the job directory spells it, not as the
+        header's ``object``; target grants are stated on the latter.
+        """
+        rows = self._night(instrument, obsdate)
+        want = _compact(target)
+        found = {obj for obj, _ in rows if _compact(obj) == want}
+        if not found and self.normalize is not None:
+            norm = self.normalize(target)
+            found = {obj for obj, _ in rows if self.normalize(obj) == norm}
+        return sorted(found)
+
     def night_has_denied(self, instrument: str, obsdate: str) -> bool:
         """True when any object on this night is under a denied proposal.
 
