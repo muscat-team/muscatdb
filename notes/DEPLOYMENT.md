@@ -50,6 +50,9 @@ uv run muscat-db access explain <user> [--target <name>]   # read-only: what <us
 uv run muscat-db access list [--user <user>]
 # Scoped viewer (issue #202): sees only the proposals granted to them
 uv run muscat-db access scope <user> [--off]
+# Scoped viewer + one target under any proposal (issue #228)
+uv run muscat-db access grant-target <user> <target>
+uv run muscat-db access revoke-target <user> <target>
 ```
 
 A restricted proposal is hidden from `/targets`, `/target`, project pages and
@@ -65,6 +68,14 @@ allowlist are hidden, including proposals ingested later. They get no shared
 chat (only a private `@bot` exchange and messages addressed to them), and
 `/toi` and `/nexsci` do not flag or link targets outside their scope. Admins are
 never scoped. A scoped user with no grants sees nothing.
+
+A scoped viewer can also be given single targets with `access grant-target
+<user> <target>` (spaces and case ignored, resolved to the raw `object`
+spellings): they then see every observation of that target under any proposal,
+and nothing else of the proposals it is in. Target grants apply to scoped
+viewers only; the command refuses anyone else. `access explain <user>` lists
+them. A target first observed under a new spelling after the viewer's grants
+were resolved is picked up on the next request.
 
 Connect to production via SSH tunnel: `ssh -L 8000:localhost:8000 <user>@muscat-ut2` → http://localhost:8000. Staging's public port is `:8002` (`ssh -L 8002:localhost:8002`).
 
