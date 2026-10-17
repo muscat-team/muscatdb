@@ -474,6 +474,48 @@ def test_ttv_start_on_fully_hidden_target_is_404(client):
     assert _post(client, "/api/ttv-fit/start", {"target": "HIDDENTGT"}).status_code == 404
 
 
+# The two consumers of a fitted TTV model besides /api/ttv-fit/*: the schedule
+# page's run list and the windows built from a run's predicted mid-times (#261).
+_MODEL = {"ok": True, "run_name": RUN, "t_offset": 0.0,
+          "points": {"b": [{"tc": 2461000.5, "epoch": 0}]}}
+
+
+@pytest.fixture
+def ttv_model(monkeypatch):
+    monkeypatch.setattr(ttv, "get_ttv_outputs", lambda t, r: {"has_any": True, "has_model": True})
+    monkeypatch.setattr(ttv, "get_ttv_model", lambda t, r, end="": dict(_MODEL))
+
+
+def _windows(client, target, user="alice"):
+    return _post(client, "/api/lco/windows", {
+        "source": "ttv", "target": target, "ttv_run": RUN, "planet": "b",
+        "duration": 2.0, "range_start": "2025-01-01", "range_end": "2030-01-01",
+    }, user=user)
+
+
+@_TTV_HIDDEN
+def test_ttv_windows_of_hidden_run_look_absent(client, ttv_model, target):
+    assert _windows(client, target).status_code == 404
+    assert _windows(client, target, user="root").status_code == 200
+
+
+def test_ttv_windows_of_visible_run_unchanged(client, ttv_model):
+    response = _windows(client, "OPENTGT")
+    assert response.status_code == 200
+    assert response.json()["windows"]
+
+
+@_TTV_HIDDEN
+def test_target_info_hides_ttv_runs_of_hidden_run(client, ttv_model, target):
+    assert _get(client, "/api/ephemeris/target-info", target=target).json()["ttv_runs"] == []
+    assert _get(client, "/api/ephemeris/target-info", user="root", target=target).json()["ttv_runs"] != []
+
+
+def test_target_info_lists_visible_ttv_run(client, ttv_model):
+    runs = _get(client, "/api/ephemeris/target-info", target="OPENTGT").json()["ttv_runs"]
+    assert [r["run_name"] for r in runs] == [RUN]
+
+
 # ── ephemeris (built from completed transit fits) ───────────────────────
 
 
