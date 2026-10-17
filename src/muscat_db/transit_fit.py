@@ -1593,7 +1593,10 @@ def start_fit(
     with _FIT_LOCK:
         existing = _FIT_JOBS.get(key)
 
-        if existing is not None and existing.proc.poll() is None:
+        # The pid file covers a fit launched by another server process, which
+        # _FIT_JOBS cannot see; launching over it would truncate its log and
+        # overwrite its pid file.
+        if jobs.run_is_live(existing.proc if existing else None, rdir / "timer-fit.pid"):
             return {"ok": True, "key": key, "already_running": True, "run_id": run_id}
 
         # Test runs take no durable slot, so cap them here instead (refuse, not
