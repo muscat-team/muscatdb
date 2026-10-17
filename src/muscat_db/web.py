@@ -5511,7 +5511,7 @@ def api_lco_archive_request_download(request: Request, payload: dict = Body(...)
             return JSONResponse(
                 {
                     "ok": False,
-                    "error": f"Request {req} has more than {lco._ARCHIVE_MAX_FRAMES} frames; "
+                    "error": f"Request {req} reached the archive search limit of {lco._ARCHIVE_MAX_FRAMES} frames; "
                              "choose a reduction level to narrow it.",
                 },
                 status_code=413,
@@ -5528,6 +5528,7 @@ def api_lco_archive_request_download(request: Request, payload: dict = Body(...)
             auto_ingest=True,
             user_name=request.state.user,
             server_side=True,
+            request_id=req,
         )
         _persist_lco_archive_download_row(_lco_archive_download_row(job))
         return JSONResponse({"ok": True, "request_id": req, **job})

@@ -175,3 +175,32 @@ def test_an_oversized_selection_is_still_refused(mock_db, no_worker):
 
     assert r.status_code == 413
     assert lco._ARCHIVE_DOWNLOAD_JOBS == {}
+
+
+def test_a_second_click_on_the_same_request_is_refused_while_the_first_runs(mock_db, no_worker, archive):
+    first = _post("/api/lco/archive/request-download", {"request_id": "4236675"})
+    second = _post("/api/lco/archive/request-download", {"request_id": "4236675"})
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 409
+    assert "4236675" in second.json()["error"]
+    assert len(lco._ARCHIVE_DOWNLOAD_JOBS) == 1
+
+
+def test_the_duplicate_guard_is_per_user_per_request_and_ends_with_the_job(no_worker):
+    frames = [_frame(0)]
+
+    lco.start_archive_download(frames, user_name="alice", request_id="1", server_side=True)
+    with pytest.raises(lco.LcoError) as refused:
+        lco.start_archive_download(frames, user_name="alice", request_id="1", server_side=True)
+    assert refused.value.status == 409
+
+    # Another user, or no request ID at all, is not affected.
+    lco.start_archive_download(frames, user_name="bob", request_id="1", server_side=True)
+    lco.start_archive_download(frames, user_name="alice", server_side=True)
+
+    # Once alice's request job finishes, she can download it again.
+    for job in lco._ARCHIVE_DOWNLOAD_JOBS.values():
+        if job["user_name"] == "alice" and job.get("request_id") == "1":
+            job["state"] = "done"
+    lco.start_archive_download(frames, user_name="alice", request_id="1", server_side=True)

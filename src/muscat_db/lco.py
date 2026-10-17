@@ -1657,6 +1657,7 @@ def start_archive_download(
     frames: list[dict], overwrite: bool = False, auto_ingest: bool = False,
     user_name: str | None = None,
     server_side: bool = False,
+    request_id: str | None = None,
 ) -> dict:
     """Queue an LCO archive download in a dedicated worker and return its state.
 
@@ -1664,6 +1665,10 @@ def start_archive_download(
     download's own archive search). The payload-size cap exists to bound
     client-posted bodies, so it does not apply to those: a 3000+ frame night
     would otherwise be refused for a body that never crossed the wire.
+
+    ``request_id`` names the LCO request a whole-request download covers. A
+    user may have only one active job per request, so a double click cannot
+    queue two jobs that write the same files at once.
     """
     if not isinstance(frames, list) or not frames:
         raise LcoError("no frames selected", status=400)
@@ -1690,6 +1695,7 @@ def start_archive_download(
         "frames": compact_frames,
         "frames_total": len(compact_frames),
         "user_name": user_key,
+        "request_id": request_id or None,
         "overwrite": overwrite,
         "results": [],
         "funpack_results": [],
@@ -1704,11 +1710,14 @@ def start_archive_download(
     }
     with _ARCHIVE_DOWNLOAD_LOCK:
         _prune_archive_download_jobs(now, reserve_slots=1)
-        active_for_user = sum(
-            1 for existing in _ARCHIVE_DOWNLOAD_JOBS.values()
+        active_jobs = [
+            existing for existing in _ARCHIVE_DOWNLOAD_JOBS.values()
             if existing.get("state") in {"pending", "running", "cancelling"}
             and existing.get("user_name", "anonymous") == user_key
-        )
+        ]
+        if request_id and any(existing.get("request_id") == request_id for existing in active_jobs):
+            raise LcoError(f"Request {request_id} is already downloading", status=409)
+        active_for_user = len(active_jobs)
         if active_for_user >= _ARCHIVE_DOWNLOAD_MAX_PER_USER:
             raise LcoError(
                 "Too many active LCO archive downloads for this user",

@@ -566,15 +566,24 @@
     if (!reqId) { msg('msg-request', 'Enter a request ID', 'err'); return; }
     if (!/^[0-9]+$/.test(reqId)) { msg('msg-request', 'Request ID must be numeric', 'err'); return; }
     msg('msg-request', 'Searching request ' + reqId + ' and queuing its download…');
+    // Disabled until the server answers, so a double click sends one request.
+    // The server also refuses a second active job for the same request.
+    var button = el('btn-download-request');
+    button.disabled = true;
     var body = { request_id: reqId, reduction_level: val('dl-req-rlevel'), overwrite: chk('dl-overwrite') };
     fetch('/api/lco/archive/request-download', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
       .then(function (r) { return r.json(); }).then(function (d) {
+        button.disabled = false;
         if (!d.ok) { msg('msg-request', (d.error || 'failed') + (d.detail ? ': ' + d.detail : ''), 'err'); return; }
-        msg('msg-request', 'Download of request ' + reqId + ' queued: 0/' + (d.frames_total || 0) + ' frames…');
+        var locText = (d.dest_dirs && d.dest_dirs.length) ? '; saving to ' + d.dest_dirs.join(', ') : '';
+        msg('msg-request', 'Download of request ' + reqId + ' queued: 0/' + (d.frames_total || 0) + ' frames…' + locText);
         var link = el('link-to-jobs');
         if (link) link.style.display = '';
-        pollArchiveDownload(d.job_id, '', 'msg-request');
-      }).catch(function (e) { msg('msg-request', String(e), 'err'); });
+        pollArchiveDownload(d.job_id, locText, 'msg-request');
+      }).catch(function (e) {
+        button.disabled = false;
+        msg('msg-request', String(e), 'err');
+      });
   });
 
   // Persist the open/collapsed state of each section-fold card across page
