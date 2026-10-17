@@ -2238,6 +2238,14 @@ def delete_reduction(inst: str, date: str, target: str, run_id: str = "") -> dic
     the web-run log. Also clears the persisted job record so the Jobs page
     no longer shows a stale entry. Never touches other targets.
     """
+    try:
+        rdir = run_output_dir(inst, date, target, run_id or None)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    with _LOCK:
+        job = _JOBS.get(job_key(inst, date, target, run_id))
+    if jobs.run_is_live(job.proc if job else None, rdir / _PID_FILE_NAME):
+        return {"ok": False, "error": jobs.LIVE_RUN_DELETE_ERROR}
     ok, removed, error = _delete_reduction_files(inst, date, target, run_id)
     if not ok:
         return {"ok": False, "error": error or "failed to delete reduction"}

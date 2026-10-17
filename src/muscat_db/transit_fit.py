@@ -1877,6 +1877,11 @@ def delete_fit(inst: str, date: str, target: str, run_id: str = "") -> dict:
     except ValueError:
         return {"ok": False, "error": "invalid target"}
 
+    with _FIT_LOCK:
+        job = _FIT_JOBS.get(fit_job_key(inst, date, target, run_id))
+    if jobs.run_is_live(job.proc if job else None, rdir / "timer-fit.pid"):
+        return {"ok": False, "error": jobs.LIVE_RUN_DELETE_ERROR}
+
     removed = 0
     if run_id:
         # Named run subdirectory — remove the whole thing.

@@ -828,6 +828,10 @@ def delete_ttv_fit(target: str, run_name: str = "") -> dict:
         rdir = ttv_output_dir(target, run_name)
     except ValueError:
         return {"ok": False, "error": "invalid target"}
+    with _TTV_LOCK:
+        job = _TTV_JOBS.get(ttv_job_key(target, run_name))
+    if jobs.run_is_live(job.proc if job else None, rdir / "harmonic.pid"):
+        return {"ok": False, "error": jobs.LIVE_RUN_DELETE_ERROR}
     removed = 0
     if rdir.is_dir():
         try:
