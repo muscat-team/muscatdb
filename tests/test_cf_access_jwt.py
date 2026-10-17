@@ -198,3 +198,14 @@ def test_access_listener_never_forwards_a_client_identity():
     assert code.count("proxy_set_header X-Forwarded-User $cf_email;") == 2
     assert "$remote_user" not in code and "$http_x_forwarded_user" not in code.lower()
     assert 'proxy_set_header X-Forwarded-User "";' in code  # the subrequest itself
+
+
+def test_access_listener_logs_the_validated_email():
+    """Every request reaches this listener from cloudflared on loopback, so
+    only the validated email and Cloudflare's client address attribute it."""
+    conf = (Path(__file__).resolve().parents[1] / "deploy" / "nginx-access.conf").read_text()
+    code = "\n".join(l for l in conf.splitlines() if not l.lstrip().startswith("#"))
+    fmt = code[code.index("log_format muscat_access"):code.index("server {")]
+    assert '"$cf_email"' in fmt and "$http_cf_connecting_ip" in fmt
+    server = code[code.index("server {"):]
+    assert "access_log /var/log/nginx/muscat-db-access.log muscat_access;" in server
