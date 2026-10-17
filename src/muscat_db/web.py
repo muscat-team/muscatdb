@@ -4832,6 +4832,7 @@ def api_lco_windows(request: Request, payload: dict = Body(...)):
                     {"ok": False, "error": "transit duration (hours) is required"},
                     status_code=400,
                 )
+            _require_visible_ttv_run(target, payload.get("ttv_run") or "")
             result = _ttv_windows(payload, float(duration))
             if not result.get("ok"):
                 return JSONResponse(result, status_code=400)
@@ -6266,6 +6267,7 @@ def api_ephemeris_target_info(target: str, request: Request):
 
     planets_sorted = sorted(list(seen_planets))
 
+    products = _product_visibility()
     return JSONResponse({
         "ok": True,
         "target": target,
@@ -6282,7 +6284,8 @@ def api_ephemeris_target_info(target: str, request: Request):
         # TTV model rather than a linear ephemeris.
         "ttv_runs": [
             run for run in ttv.list_ttv_runs(target)
-            if ttv.get_ttv_outputs(target, run.get("run_name", "")).get("has_model")
+            if not _ttv_run_hidden(target, run.get("run_name", ""), products)
+            and ttv.get_ttv_outputs(target, run.get("run_name", "")).get("has_model")
         ],
     })
 
