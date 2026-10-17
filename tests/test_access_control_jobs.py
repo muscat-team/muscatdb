@@ -29,6 +29,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from muscat_db import database, web
+from muscat_db import product_record
 from muscat_db import photometry as phot
 from muscat_db import transit_fit as fit
 from muscat_db import ttv_fit as ttv
@@ -81,9 +82,28 @@ def _build_db(db_path: str) -> None:
     conn.close()
 
 
-def _make_phot_run(date: str, target: str) -> Path:
+def _record(rdir: Path, level: str, inputs, author: str = "someone-else") -> None:
+    rdir.mkdir(parents=True, exist_ok=True)
+    assert product_record.write_record(
+        rdir, product_record.build_record(level, author=author, inputs=inputs)
+    )
+
+
+def _lightcurve_input(date: str, target: str) -> dict:
+    return {"kind": "product", "level": "photometry", "instrument": INST,
+            "obsdate": date, "target": target, "run_id": RUN}
+
+
+def _fit_input(date: str, target: str) -> dict:
+    return {"kind": "product", "level": "transit_fit", "instrument": INST,
+            "obsdate": date, "target": target, "run_id": RUN}
+
+
+def _make_phot_run(db: str, date: str, target: str) -> Path:
     rdir = phot.run_output_dir(INST, date, target, RUN)
     rdir.mkdir(parents=True)
+    inputs, _ = product_record.frames_inputs(db, INST, date, target)
+    _record(rdir, "photometry", inputs)
     stem = f"{target}_{INST}_{date}"
     (rdir / f"{stem}_lightcurves.png").write_bytes(b"\x89PNG\r\n")
     (rdir / f"{target}_{INST}_gp_{date}.csv").write_text("BJD_TDB,Flux\n1,1\n")
@@ -97,6 +117,7 @@ def _make_phot_run(date: str, target: str) -> Path:
 
 def _make_fit_run(date: str, target: str) -> Path:
     rdir = fit.fit_output_dir(INST, date, target, RUN)
+    _record(rdir, "transit_fit", [_lightcurve_input(date, target)])
     (rdir / "out").mkdir(parents=True)
     (rdir / "out" / "fit.png").write_bytes(b"\x89PNG\r\n")
     (rdir / "out" / "summary.csv").write_text("parameter,mean\nt0[0],1.0\n")
@@ -104,9 +125,19 @@ def _make_fit_run(date: str, target: str) -> Path:
     return rdir
 
 
+# The nights each TTV fixture run was fitted on. MIXTGT's run used one night
+# the viewer may not see, which is what hides it.
+_TTV_NIGHTS = {
+    "HIDDENTGT": [("260102", "HIDDENTGT")],
+    "MIXTGT": [("260103", "OPENTGT"), ("260103", "HIDDENTGT")],
+    "OPENTGT": [("260103", "OPENTGT")],
+}
+
+
 def _make_ttv_run(target: str) -> Path:
     rdir = ttv.ttv_output_dir(target, RUN)
     rdir.mkdir(parents=True)
+    _record(rdir, "ttv_fit", [_fit_input(d, t) for d, t in _TTV_NIGHTS[target]])
     (rdir / "data.csv").write_text("epoch,tc\n0,1\n")
     (rdir / "harmonic.log").write_text("ttv log\n")
     return rdir
@@ -137,7 +168,7 @@ def env(tmp_path, monkeypatch):
     web._index_cache.clear()
 
     for date, target in (("260102", "HIDDENTGT"), ("260103", "HIDDENTGT"), ("260103", "OPENTGT")):
-        _make_phot_run(date, target)
+        _make_phot_run(str(db), date, target)
         _make_fit_run(date, target)
         _save_job("photometry", date, target)
         _save_job("transit_fit", date, target)
@@ -400,9 +431,8 @@ def test_rerun_of_hidden_job_is_404(client):
 # ── TTV fits ────────────────────────────────────────────────────────────
 
 
-# MIXTGT has one open and one restricted night. Its fit may have used the
-# restricted night's timing, and no run records which nights it used (#208),
-# so it is hidden like a fully restricted target.
+# MIXTGT's fit used one restricted night, so its record makes it hidden. A TTV
+# run is hidden by what it was fitted on (#208), not by its target's name.
 _TTV_HIDDEN = pytest.mark.parametrize("target", ["HIDDENTGT", "MIXTGT"])
 
 
@@ -434,10 +464,14 @@ def test_ttv_admin_sees_hidden_target(client, target):
 
 
 @_TTV_HIDDEN
-@pytest.mark.parametrize("path", ["/api/ttv-fit/start", "/api/ttv-fit/cancel", "/api/ttv-fit/delete"])
-def test_ttv_writes_on_hidden_target_are_404(client, path, target):
+@pytest.mark.parametrize("path", ["/api/ttv-fit/cancel", "/api/ttv-fit/delete"])
+def test_ttv_writes_on_hidden_run_are_404(client, path, target):
     assert _post(client, path, {"target": target, "run_name": RUN}).status_code == 404
     assert ttv.ttv_output_dir(target, RUN).is_dir()
+
+
+def test_ttv_start_on_fully_hidden_target_is_404(client):
+    assert _post(client, "/api/ttv-fit/start", {"target": "HIDDENTGT"}).status_code == 404
 
 
 # ── ephemeris (built from completed transit fits) ───────────────────────
@@ -626,3 +660,85 @@ def test_deleting_live_lco_archive_download_drops_it_from_memory(client, monkeyp
     assert job_id in lco._ARCHIVE_DOWNLOAD_JOBS
     assert _post(client, "/api/jobs/delete", {"key": key}, user="alice").status_code == 200
     assert job_id not in lco._ARCHIVE_DOWNLOAD_JOBS
+
+
+# ── visibility read from the run's record (#144 PR 5b) ──────────────────
+
+
+def _status(client, user, date, target, run=RUN, prefix="/api/photometry"):
+    return _get(client, f"{prefix}/status", user=user, inst=INST, date=date, target=target, run=run).json()
+
+
+def test_record_with_a_denied_input_hides_a_run_on_an_open_night(client, env):
+    """The target is open, but this run's own record names restricted frames."""
+    rdir = phot.run_output_dir(INST, "260103", "OPENTGT", RUN)
+    _record(rdir, "photometry", [{
+        "kind": "frames", "instrument": INST, "obsdate": "260103", "target": "OPENTGT",
+        "proposal_ids": [_RESTRICTED], "n_frames": 1, "blank_frames": 0, "resolved": True,
+    }])
+    assert _status(client, "alice", "260103", "OPENTGT") == _NONE
+    assert _status(client, "root", "260103", "OPENTGT")["state"] == "done"
+    assert _get(client, "/api/photometry/file/sinistro/260101/OPENTGT/run/" + RUN + "/OPENTGT_sinistro_260101_lightcurves.png").status_code == 404
+
+
+def test_author_sees_their_own_run_whose_inputs_are_denied(client, env):
+    rdir = phot.run_output_dir(INST, "260103", "HIDDENTGT", RUN)
+    inputs, _ = product_record.frames_inputs(env, INST, "260103", "HIDDENTGT")
+    _record(rdir, "photometry", inputs, author="Alice")
+    assert _status(client, "alice", "260103", "HIDDENTGT")["state"] == "done"
+    assert _status(client, "bob", "260103", "HIDDENTGT") == _NONE
+
+
+def test_run_with_undetermined_inputs_is_admin_only(client, env):
+    _record(phot.run_output_dir(INST, "260103", "OPENTGT", RUN), "photometry", None)
+    assert _status(client, "alice", "260103", "OPENTGT") == _NONE
+    assert _status(client, "root", "260103", "OPENTGT")["state"] == "done"
+
+
+def test_run_with_no_record_is_admin_only(client, env):
+    (phot.run_output_dir(INST, "260103", "OPENTGT", RUN) / "_product.json").unlink()
+    assert _status(client, "alice", "260103", "OPENTGT") == _NONE
+    assert _status(client, "root", "260103", "OPENTGT")["state"] == "done"
+
+
+def test_transit_fit_follows_its_light_curves(client, env):
+    _record(phot.run_output_dir(INST, "260103", "OPENTGT", RUN), "photometry", None)
+    assert _status(client, "alice", "260103", "OPENTGT", prefix="/api/transit-fit") == _NONE
+
+
+def test_ttv_run_follows_the_fits_it_used(client, env):
+    _record(fit.fit_output_dir(INST, "260103", "OPENTGT", RUN), "transit_fit", None)
+    assert _get(client, "/api/ttv-fit/runs", target="OPENTGT").json()["runs"] == []
+    assert _get(client, "/api/ttv-fit/runs", user="root", target="OPENTGT").json()["runs"] != []
+
+
+def test_transit_fit_download_all_follows_the_record(client, env):
+    url = f"/api/transit-fit/download-all/{INST}/260103/OPENTGT/run/{RUN}"
+    assert _get(client, url).status_code == 200
+    _record(fit.fit_output_dir(INST, "260103", "OPENTGT", RUN), "transit_fit", None)
+    assert _get(client, url).status_code == 404
+    assert _get(client, url, user="root").status_code == 200
+
+
+def test_transit_fit_cannot_read_light_curves_from_a_hidden_run(client, env, monkeypatch):
+    """A fit's author sees it, so it must never be built from a run they cannot see."""
+    _record(phot.run_output_dir(INST, "260103", "OPENTGT", RUN), "photometry", None)
+    seen = {}
+
+    def fake_start(inst, date, target, options, **kw):
+        seen["csvs"] = kw["selected_csvs"]
+        return {"ok": True}
+
+    monkeypatch.setattr(fit, "start_fit", fake_start)
+    body = {"inst": INST, "date": "260103", "target": "OPENTGT", "options": {}}
+    assert _post(client, "/api/transit-fit/run", body).status_code == 200
+    assert seen["csvs"] == []
+    assert _post(client, "/api/transit-fit/run", body, user="root").status_code == 200
+    assert seen["csvs"] is None or len(seen["csvs"]) == 1
+
+
+def test_postprocess_of_a_hidden_run_is_404(client, env):
+    _record(phot.run_output_dir(INST, "260103", "OPENTGT", RUN), "photometry", None)
+    body = {"inst": INST, "date": "260103", "target": "OPENTGT", "run": RUN}
+    assert _post(client, "/api/photometry/postprocess", body).status_code == 404
+    assert _post(client, "/api/photometry/postprocess/restore", body).status_code == 404

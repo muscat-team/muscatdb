@@ -139,9 +139,8 @@ def started(monkeypatch):
     captured = {}
     monkeypatch.setattr("muscat_db.web.ttv.start_ttv_fit",
                         lambda target, options, user: captured.update(options=options) or {"ok": True})
-    monkeypatch.setattr("muscat_db.web._require_visible_ttv_target", lambda t: None)
     monkeypatch.setattr("muscat_db.web._transit_fit_available", lambda: (lambda *a: True))
-    monkeypatch.setattr("muscat_db.web._night_hidden", lambda *a: False)
+    monkeypatch.setattr("muscat_db.web._run_hidden", lambda *a: False)
     monkeypatch.setattr("muscat_db.web._get_run_fitted_params",
                         lambda inst, date, target, run_id: {"b": {"tc": 2460004.02, "unc": 0.002}})
     return captured
