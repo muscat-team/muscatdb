@@ -31,6 +31,7 @@ import logging
 import sqlite3
 from collections.abc import Callable, Iterable
 
+from muscat_db import access_groups
 from muscat_db.database import ScopedDenied, get_conn, sql_not_denied
 
 logger = logging.getLogger(__name__)
@@ -101,15 +102,21 @@ def _observed_ids(conn: sqlite3.Connection) -> frozenset[str]:
     return frozenset((r[0] or "").upper() for r in rows)
 
 
-def denied_proposal_ids_for(db_path: str, username: str | None) -> frozenset[str]:
+def denied_proposal_ids_for(
+    db_path: str,
+    username: str | None,
+    normalize: Callable[[str], str] | None = None,
+) -> frozenset[str]:
     """Proposal ids (upper-cased) this viewer may not see.
 
     Empty when nothing is restricted or the viewer is an admin. A scoped
     viewer (``users.scoped``, issue #202) is denied everything that is not on
     their allowlist, including frames with no PROPID, and gets a
     :class:`ScopedDenied` so SQL filters fail closed on proposals ingested
-    later. Any database error other than a missing table propagates: failing
-    open here would silently expose restricted data.
+    later. Target grants (issue #228) ride on that set as ``rules``; *normalize*
+    is the app's target-name normalizer, used to resolve them to the raw
+    ``object`` spellings. Any database error other than a missing table
+    propagates: failing open here would silently expose restricted data.
     """
     with get_conn(db_path) as conn:
         if username is not None and _is_scoped(conn, username):
@@ -117,7 +124,8 @@ def denied_proposal_ids_for(db_path: str, username: str | None) -> frozenset[str
                 return frozenset()
             allowed = _granted_ids(conn, username)
             denied = (_observed_ids(conn) | _restricted_ids(conn) | {""}) - allowed
-            return ScopedDenied(denied, allowed)
+            rules = access_groups.scoped_target_rules(conn, username, normalize)
+            return ScopedDenied(denied, allowed, rules)
         restricted = _restricted_ids(conn)
         if not restricted:
             return frozenset()
@@ -128,14 +136,31 @@ def denied_proposal_ids_for(db_path: str, username: str | None) -> frozenset[str
         return restricted - _granted_ids(conn, username)
 
 
-def is_denied(proposal_id: str | None, denied: frozenset[str]) -> bool:
+def is_denied(
+    proposal_id: str | None,
+    denied: frozenset[str],
+    *,
+    instrument: str | None = None,
+    obsdate: str | None = None,
+    obj: str | None = None,
+) -> bool:
     """Whether one row's ``proposal_id`` falls in a denied set from
-    :func:`denied_proposal_ids_for`."""
+    :func:`denied_proposal_ids_for`.
+
+    A scoped viewer's target grants (issue #228) also look at the row's
+    *instrument*, *obsdate* and *obj*. A caller that omits them cannot match a
+    grant on those fields, so it fails closed.
+    """
     if not denied:
         return False
     pid = (proposal_id or "").upper()
     if isinstance(denied, ScopedDenied):
-        return pid not in denied.allowed
+        if pid in denied.allowed:
+            return False
+        return not any(
+            rule.matches(instrument or "", obsdate or "", obj, proposal_id)
+            for rule in denied.rules
+        )
     return pid in denied
 
 
@@ -184,7 +209,13 @@ class NightVisibility:
                     (instrument, obsdate),
                 ).fetchall()
             self._rows[key] = [
-                (obj or "", not is_denied(pid, self.denied)) for obj, pid in rows
+                (
+                    obj or "",
+                    not is_denied(
+                        pid, self.denied, instrument=instrument, obsdate=obsdate, obj=obj
+                    ),
+                )
+                for obj, pid in rows
             ]
         return self._rows[key]
 
@@ -485,6 +516,60 @@ def blank_propid_frames(
     return {inst: n for inst, n in rows if n}
 
 
+# ── Target grants for scoped viewers (issue #228, CLI only) ─────────────
+
+
+def grant_target(db_path: str, username: str, target: str, granted_by: str) -> bool:
+    """Let scoped viewer *username* see every observation of *target*, whatever
+    its proposal. Returns False when the grant already exists."""
+    group = access_groups.user_group(username)
+    with get_conn(db_path) as conn:
+        _ensure_schema(conn)
+        access_groups.ensure_group(conn, group, f"direct grants for {username}")
+        access_groups.add_member(conn, group, username, granted_by)
+        created = access_groups.add_grant(
+            conn, group, target=target, note="target grant", granted_by=granted_by
+        )
+        conn.commit()
+    return created
+
+
+def revoke_target(db_path: str, username: str, target: str) -> bool:
+    with get_conn(db_path) as conn:
+        _ensure_schema(conn)
+        removed = access_groups.remove_target_grants(
+            conn, access_groups.user_group(username), target
+        )
+        conn.commit()
+    return removed > 0
+
+
+def target_matches_observations(db_path: str, target: str) -> bool:
+    """Whether *target* names any observed object (spaces and case ignored)."""
+    want = _compact(target)
+    with get_conn(db_path) as conn:
+        return any(
+            _compact(r[0] or "") == want
+            for r in conn.execute("SELECT DISTINCT object FROM summaries")
+        )
+
+
+def list_target_grants(db_path: str, username: str) -> list[dict]:
+    """*username*'s own target grants, oldest first."""
+    with get_conn(db_path, row_factory=sqlite3.Row) as conn:
+        try:
+            rows = conn.execute(
+                "SELECT target, granted_by, granted_at FROM group_grants "
+                "WHERE groupname = ? AND target IS NOT NULL ORDER BY id",
+                (access_groups.user_group(username),),
+            ).fetchall()
+        except sqlite3.OperationalError as exc:
+            if _missing_table(exc):
+                return []
+            raise
+    return [dict(r) for r in rows]
+
+
 # ── Explain (read-only, CLI) ────────────────────────────────────────────
 
 
@@ -526,6 +611,7 @@ def explain_user(db_path: str, username: str) -> dict:
         "admin": admin,
         "proposals": proposals,
         # a grant on a proposal no summary carries gives the user nothing
+        "target_grants": list_target_grants(db_path, username),
         "unmatched_grants": sorted(granted - observed),
         "unmatched_restrictions": sorted(restricted - observed),
     }
@@ -547,7 +633,9 @@ def explain_target(db_path: str, username: str, target: str) -> list[dict]:
             "obsdate": date,
             "object": obj,
             "proposal_id": pid,
-            "visible": not is_denied(pid, denied),
+            "visible": not is_denied(
+                pid, denied, instrument=inst, obsdate=date, obj=obj
+            ),
         }
         for inst, date, obj, pid in rows
         if _compact(obj or "") == want
