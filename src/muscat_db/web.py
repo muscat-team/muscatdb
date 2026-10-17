@@ -5479,6 +5479,62 @@ def api_lco_archive_exofop_download(request: Request, payload: dict = Body(...))
         return _lco_error_response(e)
 
 
+@lco_router.post("/archive/request-download", response_class=JSONResponse)
+def api_lco_archive_request_download(request: Request, payload: dict = Body(...)):
+    """Download every frame of one LCO observation request (issue #256).
+
+    The server runs the same request-ID search as "Fetch request" and queues
+    the result as one background download and ingest job, so a whole night
+    takes a request ID and one click. The browser never posts the frame list,
+    so the client payload cap does not apply. A search that hits the archive
+    frame limit is refused rather than downloaded as a silent subset.
+    """
+    try:
+        _require_own_archive_token(request)
+        req = str(payload.get("request_id") or "").strip()
+        if not req.isdigit():
+            return JSONResponse(
+                {"ok": False, "error": f"Request ID must be numeric, got '{req}'."},
+                status_code=400,
+            )
+        reduction_level = str(payload.get("reduction_level", "91")).strip()
+        if reduction_level and not reduction_level.isdigit():
+            return JSONResponse(
+                {"ok": False, "error": f"Reduction level must be numeric, got '{reduction_level}'."},
+                status_code=400,
+            )
+        # limit=1000 is the archive's max page size, as in the request-ID search.
+        filters = {"request_id": req, "reduction_level": reduction_level, "limit": "1000"}
+        result = lco.archive_search_all(filters, _request_user(request))
+        rows = result.get("results") or []
+        if result.get("truncated"):
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": f"Request {req} has more than {lco._ARCHIVE_MAX_FRAMES} frames; "
+                             "choose a reduction level to narrow it.",
+                },
+                status_code=413,
+            )
+        if not rows:
+            return JSONResponse(
+                {"ok": False, "error": f"No frames found in the LCO archive for request {req}."},
+                status_code=404,
+            )
+        annotated, _dataset_count = _annotate_lco_archive_results("", rows, denied=_viewer_denied())
+        job = lco.start_archive_download(
+            [dict(f) for f in annotated],
+            overwrite=bool(payload.get("overwrite")),
+            auto_ingest=True,
+            user_name=request.state.user,
+            server_side=True,
+        )
+        _persist_lco_archive_download_row(_lco_archive_download_row(job))
+        return JSONResponse({"ok": True, "request_id": req, **job})
+    except lco.LcoError as e:
+        return _lco_error_response(e)
+
+
 @lco_router.post("/archive/download", response_class=JSONResponse)
 def api_lco_archive_download(request: Request, payload: dict = Body(...)):
     try:
