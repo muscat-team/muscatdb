@@ -61,7 +61,7 @@ def _product_row(
     ephem: dict,
     fitted_params: Callable[[str, str, str, str], dict],
     is_available: Callable[[str, str, str, str], bool],
-    is_hidden: Callable[[str, str, str], bool],
+    is_hidden: Callable[[str, str, str, str], bool],
 ) -> tuple[tuple[int, float, float] | None, dict | None, str | None]:
     """``((epoch, tc, unc), input, error)`` for one selected transit fit."""
     fields = {}
@@ -78,7 +78,7 @@ def _product_row(
     # A hidden night and a missing fit read the same, so the message does not
     # confirm that a night the viewer may not see exists.
     unavailable = f"selection[{i}]: no completed transit fit for this night and run"
-    if is_hidden(inst, date, target) or not is_available(inst, date, target, run_id):
+    if is_hidden(inst, date, target, run_id) or not is_available(inst, date, target, run_id):
         return None, None, unavailable
     stored = _lookup(fitted_params(inst, date, target, run_id) or {}, planet) or {}
     tc, unc = _finite(stored.get("tc")), _finite(stored.get("unc"))
@@ -107,13 +107,13 @@ def resolve_selection(
     *,
     fitted_params: Callable[[str, str, str, str], dict],
     is_available: Callable[[str, str, str, str], bool],
-    is_hidden: Callable[[str, str, str], bool],
+    is_hidden: Callable[[str, str, str, str], bool],
 ) -> tuple[Resolved | None, str | None]:
     """``(resolved, error)`` for the O-C points a client selected.
 
     *fitted_params* reads a stored transit fit's per-planet ``tc``/``unc``,
     *is_available* says whether a completed transit fit exists for the night
-    and run, and *is_hidden* whether the viewer may not see that night. The
+    and run, and *is_hidden* whether the viewer may not see that fit. The
     planet column of the CSV is the index of the letter in *planet_letters*.
     """
     if not isinstance(selection, list):

@@ -176,6 +176,9 @@ def test_ttv_output_file_opens_inline_not_download(tmp_path, monkeypatch):
     import gzip
 
     monkeypatch.setenv("MUSCAT_TTV_DIR", str(tmp_path / "ttv"))
+    # An empty database: nothing restricted, so no product record is needed. The
+    # default path is the repo's real muscat.db, which restricts a proposal.
+    monkeypatch.setenv("MUSCAT_DB_PATH", str(tmp_path / "empty.db"))
     run_dir = tmp_path / "ttv" / "TOI123" / "_runs" / "default"
     run_dir.mkdir(parents=True)
     (run_dir / "data.csv").write_text("bjd,flux\n1.0,0.99\n")
@@ -3692,7 +3695,7 @@ def test_list_ttv_runs_empty_for_unknown_or_unsafe_target(tmp_path, monkeypatch)
     assert ttv.list_ttv_runs("../etc") == []
 
 
-def test_ttv_fit_runs_endpoint(tmp_path, monkeypatch):
+def test_ttv_fit_runs_endpoint(tmp_path, monkeypatch, mock_db):
     monkeypatch.setenv("MUSCAT_TTV_DIR", str(tmp_path))
     _make_ttv_run(tmp_path, "HIP67522", "default")
 
@@ -3705,7 +3708,7 @@ def test_ttv_fit_runs_endpoint(tmp_path, monkeypatch):
     assert client.get("/api/ttv-fit/runs", params={"target": ""}).status_code == 400
 
 
-def test_ttv_fit_model_endpoint_uses_selected_run_and_end_date(monkeypatch):
+def test_ttv_fit_model_endpoint_uses_selected_run_and_end_date(monkeypatch, mock_db):
     captured = {}
 
     def fake_model(target, run_name, end_date):
@@ -3834,7 +3837,7 @@ def test_ttv_model_rejects_invalid_date_before_starting_harmonic(tmp_path, monke
     assert result == {"ok": False, "error": "end_date must be YYYY-MM-DD"}
 
 
-def test_ttv_download_all_uses_disk_backed_archive(tmp_path, monkeypatch):
+def test_ttv_download_all_uses_disk_backed_archive(tmp_path, monkeypatch, mock_db):
     monkeypatch.setenv("MUSCAT_TTV_DIR", str(tmp_path))
     run_dir = _make_ttv_run(tmp_path, "HIP67522", "default")
     (run_dir / "samples.csv.gz").write_bytes(b"samples")

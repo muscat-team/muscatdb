@@ -79,6 +79,7 @@ from muscat_db.access import (
     object_hidden as _object_hidden,
     sql_not_denied as _sql_not_denied,
 )
+from muscat_db.product_visibility import ProductVisibility
 from muscat_db.auth import (
     PROXY_SECRET_HEADER,
     authentication_required as _authentication_required,
@@ -691,25 +692,55 @@ def _require_no_denied_night(inst: str, date: str) -> None:
         raise HTTPException(404, f"night {inst} {date} not found")
 
 
-def _ttv_target_hidden(target: str, denied: frozenset[str] | None = None) -> bool:
-    """A TTV fit combines transit times from many nights, and no run records
-    which ones it used (#208). It is therefore hidden when *any* night of its
-    target is denied, not only when every night is (the /targets rule): a
-    model fitted to a denied night's timing would expose it."""
+def _product_visibility(denied: frozenset[str] | None = None) -> ProductVisibility:
+    """Per-request product visibility (issue #144, #208): who may see a run is
+    computed from its ``_product.json``; see :mod:`muscat_db.product_visibility`."""
     denied = _viewer_denied() if denied is None else denied
+    return ProductVisibility(_CURRENT_USER.get(), denied, _night_visibility(denied))
+
+
+def _run_hidden(level: str, inst: str, date: str, target: str, run_id: str = "") -> bool:
+    return _product_visibility().hidden(level, inst, date, target, run_id)
+
+
+def _require_visible_run(level: str, inst: str, date: str, target: str, run_id: str = "") -> None:
+    """404 an action on a run the viewer may not see, as for a missing run."""
+    if _run_hidden(level, inst, date, target, run_id):
+        raise HTTPException(404, f"target {target!r} not found")
+
+
+def _photometry_run_of_csv(csv: pathlib.Path) -> str:
+    """Run id of a light-curve CSV: its directory under ``_runs``, else the
+    legacy night directory (``""``)."""
+    return csv.parent.name if phot._RUNS_DIR_NAME in csv.parts else ""
+
+
+def _restrict_csv_selection(inst: str, date: str, target: str, selected: list | None) -> list | None:
+    """The light curves a transit fit may read: *selected* (all when None)
+    minus those from photometry runs the viewer may not see. Without this a
+    viewer could author a fit whose inputs include a hidden run, and the
+    author rule would then show them the result (#144)."""
+    denied = _viewer_denied()
     if not denied:
-        return False
-    db = _db_path()
-    norm_overrides = _get_norm_name_overrides(db)
-    norm_name = _normalize_target_name(target, norm_overrides)
-    return norm_name in {
-        _normalize_target_name(o, norm_overrides)
-        for o in _objects_with_restricted_proposal(db, denied)
-    }
+        return selected
+    products = _product_visibility(denied)
+    chosen = None if selected is None else {str(p) for p in selected}
+    return [
+        str(c) for c in fit.get_csv_lightcurves(inst, date, target)
+        if (chosen is None or str(c) in chosen)
+        and not products.hidden("photometry", inst, date, target, _photometry_run_of_csv(c))
+    ]
 
 
-def _require_visible_ttv_target(target: str) -> None:
-    if _ttv_target_hidden(target):
+def _ttv_run_hidden(target: str, run_name: str = "", products: ProductVisibility | None = None) -> bool:
+    """Whether the viewer may not see one TTV run, from its record (a TTV fit
+    has no instrument or night of its own)."""
+    products = _product_visibility() if products is None else products
+    return products.hidden("ttv_fit", "", "", target.strip(), (run_name or "").strip())
+
+
+def _require_visible_ttv_run(target: str, run_name: str = "") -> None:
+    if _ttv_run_hidden(target, run_name):
         raise HTTPException(404, f"target {target!r} not found")
 
 
@@ -718,7 +749,7 @@ def _require_visible_ttv_target(target: str) -> None:
 _NO_JOB_STATUS = {"state": "none", "log": "", "returncode": None, "elapsed": 0}
 
 
-def _job_hidden(job: dict, nights: NightVisibility) -> bool:
+def _job_hidden(job: dict, products: ProductVisibility) -> bool:
     """Whether a Jobs-page row belongs to data the viewer may not see.
 
     An LCO archive download lists every instrument, night and object it
@@ -727,17 +758,18 @@ def _job_hidden(job: dict, nights: NightVisibility) -> bool:
     """
     job_type = job.get("type", "photometry")
     target = str(job.get("target") or "")
+    run_id = str(job.get("run_id") or "")
     if job_type == "ttv_fit":
-        return _ttv_target_hidden(target, nights.denied)
+        return products.job_hidden("ttv_fit", "", "", target, run_id)
     inst = str(job.get("inst") or job.get("instrument") or "")
     date = str(job.get("date") or job.get("obsdate") or "")
-    if job_type != "lco_archive_download":
-        return nights.hidden(inst, date, target)
+    if job_type in ("photometry", "transit_fit"):
+        return products.job_hidden(job_type, inst, date, target, run_id)
     insts = [i.strip() for i in inst.split(",") if i.strip() in INSTRUMENTS]
     dates = [d.strip() for d in date.split(",") if phot.valid_date(d.strip())]
     objects = [o.strip() for o in target.split(",") if o.strip()]
     return any(
-        nights.hidden(i, d, o) for i in insts for d in dates for o in objects
+        products.nights.hidden(i, d, o) for i in insts for d in dates for o in objects
     )
 
 
@@ -746,7 +778,8 @@ def _visible_jobs(jobs: list[dict]) -> list[dict]:
     if not denied:
         return jobs
     nights = _night_visibility(denied)
-    return [j for j in jobs if not _job_hidden(j, nights)]
+    products = ProductVisibility(_CURRENT_USER.get(), denied, nights)
+    return [j for j in jobs if not _job_hidden(j, products)]
 
 
 def _visible_obsdates(db: str, inst: str, denied: frozenset[str]) -> list[str]:
@@ -2249,6 +2282,14 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
         raw_missing = not phot.raw_data_dir(inst, date).is_dir()
     elif inst and date and target:
         runs, run_outputs = phot.list_photometry_runs(inst, date, target)
+        if denied:
+            # Issue #144: a run's own record decides whether it is shown.
+            products = _product_visibility(denied)
+            runs = [r for r in runs if not products.hidden("photometry", inst, date, target, r.run_id)]
+            run_outputs = {
+                rid: out for rid, out in run_outputs.items()
+                if not products.hidden("photometry", inst, date, target, rid or "")
+            }
         if inst in phot.MULTISITE_INSTRUMENTS:
             if site:
                 runs = [r for r in runs if r.is_legacy or r.site == site or not r.site]
@@ -2500,14 +2541,17 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
     if inst and date and target and not nights.hidden(inst, date, target):
         import datetime
         rows = []
+        products = _product_visibility(denied)
         for c in fit.get_csv_lightcurves(inst, date, target):
+            if denied and products.hidden("photometry", inst, date, target, _photometry_run_of_csv(c)):
+                continue
             try:
                 mtime = c.stat().st_mtime
                 created_at = datetime.datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M:%S')
             except Exception:
                 mtime, created_at = 0.0, "Unknown"
             csite, ctelescope, cmode = fit.csv_site_mode(c.name, inst) if inst in phot.MULTISITE_INSTRUMENTS else (None, None, None)
-            crun = c.parent.name if "_runs" in c.parts else ""
+            crun = _photometry_run_of_csv(c)
             rows.append({"path": str(c), "name": c.name, "created_at": created_at,
                          "_mtime": mtime, "_site": csite, "_telescope": ctelescope, "_mode": cmode, "run_id": crun})
 
@@ -2542,7 +2586,10 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
         # a time, defaulting to the newest, selectable via the results-run chips.
         # ``run`` unspecified -> newest; ``__legacy__`` -> the legacy single-dir
         # run (run_id ""); an explicit run_id -> that run.
-        runs = fit.list_fit_runs(inst, date, target)
+        runs = [
+            r for r in fit.list_fit_runs(inst, date, target)
+            if not products.hidden("transit_fit", inst, date, target, r.run_id)
+        ]
         if inst in phot.MULTISITE_INSTRUMENTS:
             if sel_site:
                 runs = [r for r in runs if r.is_legacy or r.site == sel_site or not r.site]
@@ -2576,6 +2623,7 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
     # instrument and date the user currently has selected.
     all_runs: list[dict] = []
     seen_run_keys: set = set()
+    all_runs_products = _product_visibility(denied)
     if target:
         import yaml as _yaml
         for inst_name in INSTRUMENTS:
@@ -2585,6 +2633,8 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
                 if nights.hidden(inst_name, d, target):
                     continue
                 for r in fit.list_fit_runs(inst_name, d, target):
+                    if all_runs_products.hidden("transit_fit", inst_name, d, target, r.run_id):
+                        continue
                     key = (inst_name, d, r.run_id)
                     if key not in seen_run_keys:
                         seen_run_keys.add(key)
@@ -2945,7 +2995,11 @@ async def transit_fit_query_archive(target: str, source: str = "nasa", inst: str
         import yaml
         from muscat_db.transit_fit import list_fit_runs, fit_output_dir
 
-        runs = [] if _night_hidden(inst, date, target) else list_fit_runs(inst, date, target)
+        products = _product_visibility()
+        runs = [
+            r for r in list_fit_runs(inst, date, target)
+            if not products.hidden("transit_fit", inst, date, target, r.run_id)
+        ]
         if not runs:
             return JSONResponse({"ok": False, "error": f"No previous fit runs found for {target} at {inst}/{date}"})
 
@@ -3296,7 +3350,7 @@ async def transit_fit_query_archive(target: str, source: str = "nasa", inst: str
 @transit_fit_router.get("/status")
 def transit_fit_status(inst: str, date: str, target: str, run: str = ""):
     fit.sync_jobs()
-    if _night_hidden(inst, date, target):
+    if _run_hidden("transit_fit", inst, date, target, (run or "").strip()):
         return JSONResponse(dict(_NO_JOB_STATUS))
     return JSONResponse(fit.job_status(inst, date, target, run_id=(run or "").strip()))
 
@@ -3305,7 +3359,7 @@ def transit_fit_status(inst: str, date: str, target: str, run: str = ""):
 async def transit_fit_log_stream(request: Request, inst: str, date: str, target: str, run: str = ""):
     """SSE counterpart to ``/status`` (architecture issue #51, step 4)."""
     run_id = (run or "").strip()
-    hidden = _night_hidden(inst, date, target)
+    hidden = _run_hidden("transit_fit", inst, date, target, run_id)
     return _sse_response(_sse_job_stream(
         request,
         lambda: dict(_NO_JOB_STATUS) if hidden else fit.job_status(inst, date, target, run_id=run_id),
@@ -3323,6 +3377,7 @@ def transit_fit_run(request: Request, payload: dict = Body(...)):
     selected_csvs = payload.get("selected_csvs") if "selected_csvs" in payload else None
     user_name = request.state.user
     _require_visible_night(inst, date, target)
+    selected_csvs = _restrict_csv_selection(inst, date, target, selected_csvs)
     result = fit.start_fit(inst, date, target, options, test_run=test_run, selected_csvs=selected_csvs, user_name=user_name)
     if not result.get("ok"):
         return JSONResponse(result, status_code=400)
@@ -3337,6 +3392,7 @@ def transit_fit_logp(payload: dict = Body(...)):
     options = payload.get("options") or {}
     selected_csvs = payload.get("selected_csvs") if "selected_csvs" in payload else None
     _require_visible_night(inst, date, target)
+    selected_csvs = _restrict_csv_selection(inst, date, target, selected_csvs)
     result = fit.compute_logp(inst, date, target, options, selected_csvs=selected_csvs)
     if not result.get("ok"):
         return JSONResponse(result, status_code=400)
@@ -3349,7 +3405,7 @@ def transit_fit_cancel(payload: dict = Body(...)):
     date = (payload.get("date") or "").strip()
     target = (payload.get("target") or "").strip()
     run_id = (payload.get("run_id") or payload.get("run") or "").strip()
-    _require_visible_night(inst, date, target)
+    _require_visible_run("transit_fit", inst, date, target, run_id)
     result = fit.cancel_fit(inst, date, target, run_id=run_id)
     if not result.get("ok"):
         return JSONResponse(result, status_code=400)
@@ -3368,7 +3424,7 @@ def transit_fit_delete(payload: dict = Body(...)):
         return JSONResponse({"ok": False, "error": "invalid date"}, status_code=400)
     if not (target or "").strip():
         return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
-    _require_visible_night(inst, date, target)
+    _require_visible_run("transit_fit", inst, date, target, run_id)
     result = fit.delete_fit(inst, date, target, run_id=run_id)
     return JSONResponse(result)
 
@@ -3385,7 +3441,7 @@ def _serve_transit_file(inst: str, date: str, target: str, name: str, run_id: st
         rdir = fit.fit_output_dir(inst, date, target, run_id or None)
     except ValueError:
         raise HTTPException(400, "invalid target")
-    if _night_hidden(inst, date, target):
+    if _run_hidden("transit_fit", inst, date, target, run_id or ""):
         raise HTTPException(404, "file not found")
     out_dir = rdir / "out"
 
@@ -3509,7 +3565,7 @@ def _transit_fit_download_all(inst: str, date: str, target: str, run_id: str | N
     except ValueError:
         raise HTTPException(400, "invalid target")
 
-    if not rdir.is_dir() or _night_hidden(inst, date, target):
+    if not rdir.is_dir() or _run_hidden("transit_fit", inst, date, target, run_id or ""):
         raise HTTPException(404, "no fit directory found")
 
     files_to_zip = []
@@ -5490,6 +5546,63 @@ def api_lco_archive_exofop_download(request: Request, payload: dict = Body(...))
         return _lco_error_response(e)
 
 
+@lco_router.post("/archive/request-download", response_class=JSONResponse)
+def api_lco_archive_request_download(request: Request, payload: dict = Body(...)):
+    """Download every frame of one LCO observation request (issue #256).
+
+    The server runs the same request-ID search as "Fetch request" and queues
+    the result as one background download and ingest job, so a whole night
+    takes a request ID and one click. The browser never posts the frame list,
+    so the client payload cap does not apply. A search that hits the archive
+    frame limit is refused rather than downloaded as a silent subset.
+    """
+    try:
+        _require_own_archive_token(request)
+        req = str(payload.get("request_id") or "").strip()
+        if not req.isdigit():
+            return JSONResponse(
+                {"ok": False, "error": f"Request ID must be numeric, got '{req}'."},
+                status_code=400,
+            )
+        reduction_level = str(payload.get("reduction_level", "91")).strip()
+        if reduction_level and not reduction_level.isdigit():
+            return JSONResponse(
+                {"ok": False, "error": f"Reduction level must be numeric, got '{reduction_level}'."},
+                status_code=400,
+            )
+        # limit=1000 is the archive's max page size, as in the request-ID search.
+        filters = {"request_id": req, "reduction_level": reduction_level, "limit": "1000"}
+        result = lco.archive_search_all(filters, _request_user(request))
+        rows = result.get("results") or []
+        if result.get("truncated"):
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": f"Request {req} reached the archive search limit of {lco._ARCHIVE_MAX_FRAMES} frames; "
+                             "choose a reduction level to narrow it.",
+                },
+                status_code=413,
+            )
+        if not rows:
+            return JSONResponse(
+                {"ok": False, "error": f"No frames found in the LCO archive for request {req}."},
+                status_code=404,
+            )
+        annotated, _dataset_count = _annotate_lco_archive_results("", rows, denied=_viewer_denied())
+        job = lco.start_archive_download(
+            [dict(f) for f in annotated],
+            overwrite=bool(payload.get("overwrite")),
+            auto_ingest=True,
+            user_name=request.state.user,
+            server_side=True,
+            request_id=req,
+        )
+        _persist_lco_archive_download_row(_lco_archive_download_row(job))
+        return JSONResponse({"ok": True, "request_id": req, **job})
+    except lco.LcoError as e:
+        return _lco_error_response(e)
+
+
 @lco_router.post("/archive/download", response_class=JSONResponse)
 def api_lco_archive_download(request: Request, payload: dict = Body(...)):
     try:
@@ -6837,7 +6950,7 @@ def job_log(type_: str, inst: str, date: str, target: str, run: str = ""):
         path = fit.log_path(inst, date, target, run_id=(run or "").strip())
     else:
         raise HTTPException(400, "unknown job type")
-    if path is None or _night_hidden(inst, date, target):
+    if path is None or _run_hidden(type_, inst, date, target, (run or "").strip()):
         raise HTTPException(404, "log not found")
     return FileResponse(str(path))
 
@@ -6847,7 +6960,7 @@ def ttv_job_log(target: str, run: str = ""):
     # `run` is the job's run_id (an already-slugified segment); log_path
     # validates it and resolves the default run when it is empty.
     path = ttv.log_path(target, (run or "").strip())
-    if path is None or _ttv_target_hidden(target):
+    if path is None or _ttv_run_hidden(target, run):
         raise HTTPException(404, "log not found")
     return FileResponse(str(path))
 
@@ -6962,7 +7075,7 @@ def jobs_rerun(request: Request, payload: dict = Body(...)):
     if job["type"] == "photometry":
         result = phot.start_run(inst, date, target, options=options, test_run=p.get("test_run", True), user_name=user_name)
     elif job["type"] == "transit_fit":
-        result = fit.start_fit(inst, date, target, options=options, test_run=p.get("test_run", False), selected_csvs=p.get("selected_csvs"), user_name=user_name)
+        result = fit.start_fit(inst, date, target, options=options, test_run=p.get("test_run", False), selected_csvs=_restrict_csv_selection(inst, date, target, p.get("selected_csvs")), user_name=user_name)
     elif job["type"] == "ttv_fit":
         from muscat_db.ttv_fit import start_ttv_fit
         result = start_ttv_fit(target, options, user_name)
@@ -7017,7 +7130,7 @@ def photometry_ref_time_preview(inst: str, date: str, target: str, jd: float):
 @photometry_router.get("/file/{inst}/{date}/{target}/run/{run_id}/{name}")
 def photometry_file_run(inst: str, date: str, target: str, run_id: str, name: str):
     path = phot.safe_run_artifact_path(inst, date, target, run_id, name)
-    if path is None or _night_hidden(inst, date, target):
+    if path is None or _run_hidden("photometry", inst, date, target, run_id):
         raise HTTPException(404, "artifact not found")
     return FileResponse(str(path), headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"})
 
@@ -7052,7 +7165,7 @@ def _photometry_download_all(inst: str, date: str, target: str, run_id: str | No
         rdir = phot.run_output_dir(inst, date, target, run_id or None)
     except ValueError:
         raise HTTPException(400, "invalid target")
-    if _night_hidden(inst, date, target):
+    if _run_hidden("photometry", inst, date, target, run_id or ""):
         raise HTTPException(404, "no files to download")
 
     outputs = phot.list_outputs(inst, date, target, run_id=run_id or None)
@@ -7192,7 +7305,7 @@ def photometry_postprocess(payload: dict = Body(...)):
         )
     if not run:
         return JSONResponse({"ok": False, "error": "a run is required"}, status_code=400)
-    _require_visible_night(inst, date, target)
+    _require_visible_run("photometry", inst, date, target, run)
     result = postproc.postprocess(
         inst,
         date,
@@ -7225,7 +7338,7 @@ def photometry_postprocess_restore(payload: dict = Body(...)):
         )
     if not run:
         return JSONResponse({"ok": False, "error": "a run is required"}, status_code=400)
-    _require_visible_night(inst, date, target)
+    _require_visible_run("photometry", inst, date, target, run)
     result = postproc.restore_clip(inst, date, target, run)
     if not result.get("ok"):
         return JSONResponse(result, status_code=400)
@@ -7237,7 +7350,7 @@ def photometry_status(inst: str, date: str, target: str, run: str = ""):
     # Drain the queue so a pending full job is promoted once the slot frees,
     # even when only the photometry page (not the Jobs page) is polling.
     phot.sync_jobs()
-    if _night_hidden(inst, date, target):
+    if _run_hidden("photometry", inst, date, target, (run or "").strip()):
         return JSONResponse(dict(_NO_JOB_STATUS))
     return JSONResponse(phot.job_status(inst, date, target, run_id=(run or "").strip()))
 
@@ -7248,7 +7361,7 @@ async def photometry_log_stream(request: Request, inst: str, date: str, target: 
     change instead of waiting for the client's next poll (architecture issue
     #51, step 4)."""
     run_id = (run or "").strip()
-    hidden = _night_hidden(inst, date, target)
+    hidden = _run_hidden("photometry", inst, date, target, run_id)
     return _sse_response(_sse_job_stream(
         request,
         lambda: dict(_NO_JOB_STATUS) if hidden else phot.job_status(inst, date, target, run_id=run_id),
@@ -7289,7 +7402,7 @@ def photometry_status_batch(payload: dict = Body(...)):
             status_code=400,
         )
 
-    nights = _night_visibility()
+    products = _product_visibility()
     results = []
     for job_spec in jobs:
         if not isinstance(job_spec, dict):
@@ -7308,7 +7421,7 @@ def photometry_status_batch(payload: dict = Body(...)):
             results.append({"error": "job fields are too long"})
             continue
 
-        if nights.hidden(inst, date, target):
+        if products.hidden("photometry", inst, date, target, run):
             status = dict(_NO_JOB_STATUS)
         else:
             status = phot.job_status(inst, date, target, run_id=run)
@@ -7329,7 +7442,7 @@ def photometry_cancel(payload: dict = Body(...)):
     date = (payload.get("date") or "").strip()
     target = (payload.get("target") or "").strip()
     run_id = (payload.get("run_id") or payload.get("run") or "").strip()
-    _require_visible_night(inst, date, target)
+    _require_visible_run("photometry", inst, date, target, run_id)
     result = phot.cancel_run(inst, date, target, run_id=run_id)
     if not result.get("ok"):
         return JSONResponse(result, status_code=400)
@@ -7348,7 +7461,7 @@ def photometry_delete(payload: dict = Body(...)):
     if not (target or "").strip():
         return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
     run_id = (payload.get("run_id") or payload.get("run") or "").strip()
-    _require_visible_night(inst, date, target)
+    _require_visible_run("photometry", inst, date, target, run_id)
     result = phot.delete_reduction(inst, date, target, run_id=run_id)
     return JSONResponse(result)
 
@@ -7568,7 +7681,7 @@ def api_export_tag_csv(tag: str):
 def ttv_fit_outputs(target: str = "", run_name: str = ""):
     if not target:
         return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
-    if _ttv_target_hidden(target.strip()):
+    if _ttv_run_hidden(target, run_name):
         outputs = ttv.empty_ttv_outputs()
     else:
         outputs = ttv.get_ttv_outputs(target.strip(), run_name)
@@ -7579,7 +7692,11 @@ def ttv_fit_outputs(target: str = "", run_name: str = ""):
 def ttv_fit_runs(target: str = ""):
     if not target:
         return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
-    runs = [] if _ttv_target_hidden(target.strip()) else ttv.list_ttv_runs(target.strip())
+    products = _product_visibility()
+    runs = [
+        r for r in ttv.list_ttv_runs(target.strip())
+        if not _ttv_run_hidden(target, r["run_name"], products)
+    ]
     return JSONResponse({"ok": True, "runs": runs})
 
 
@@ -7592,7 +7709,7 @@ _TTV_NO_MODEL = {"ok": False, "error": "saved run has no complete TTV model outp
 def ttv_fit_model(target: str = "", run_name: str = "", end_date: str = ""):
     if not target:
         return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
-    if _ttv_target_hidden(target.strip()):
+    if _ttv_run_hidden(target, run_name):
         # Keep get_ttv_model's own end_date check ahead of the missing-output
         # answer, so a hidden target errors exactly like an absent one.
         try:
@@ -7616,7 +7733,7 @@ def ttv_fit_delta_bic(target: str = "", run_name: str = ""):
     """
     if not target:
         return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
-    if _ttv_target_hidden(target.strip()):
+    if _ttv_run_hidden(target, run_name):
         return JSONResponse(dict(_TTV_NO_MODEL), status_code=400)
     result = ttv.compute_delta_bic(target.strip(), run_name)
     return JSONResponse(result, status_code=200 if result.get("ok") else 400)
@@ -7662,7 +7779,7 @@ def _resolve_ttv_options(options: dict) -> tuple[dict | None, str | None]:
         options.get("planets_ephem") or {},
         fitted_params=_get_run_fitted_params,
         is_available=_transit_fit_available(),
-        is_hidden=_night_hidden,
+        is_hidden=lambda inst, date, target, run_id: _run_hidden("transit_fit", inst, date, target, run_id),
     )
     if err:
         return None, err
@@ -7675,7 +7792,9 @@ def api_start_ttv_fit(request: Request, payload: dict = Body(...)):
     options = payload.get("options") or {}
     if not target:
         return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
-    _require_visible_ttv_target(target)
+    # A fit starts only on a target the viewer can see something of; the inputs
+    # it may use are checked one by one in _resolve_ttv_options.
+    _require_visible_object(_db_path(), target)
     options, err = _resolve_ttv_options(options)
     if err:
         return JSONResponse({"ok": False, "error": err}, status_code=400)
@@ -7689,7 +7808,7 @@ def api_cancel_ttv_fit(payload: dict = Body(...)):
     run_name = (payload.get("run_name") or "").strip()
     if not target:
         return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
-    _require_visible_ttv_target(target)
+    _require_visible_ttv_run(target, run_name)
     res = ttv.cancel_ttv_fit(target, run_name)
     return JSONResponse(res)
 
@@ -7700,7 +7819,7 @@ def api_delete_ttv_fit(payload: dict = Body(...)):
     run_name = (payload.get("run_name") or "").strip()
     if not target:
         return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
-    _require_visible_ttv_target(target)
+    _require_visible_ttv_run(target, run_name)
     res = ttv.delete_ttv_fit(target, run_name)
     return JSONResponse(res)
 
@@ -7709,7 +7828,7 @@ def api_delete_ttv_fit(payload: dict = Body(...)):
 def ttv_fit_status(target: str = "", run_name: str = ""):
     if not target:
         return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
-    if _ttv_target_hidden(target.strip()):
+    if _ttv_run_hidden(target, run_name):
         return JSONResponse(dict(_NO_JOB_STATUS))
     status = ttv.job_status(target.strip(), run_name)
     return JSONResponse(status)
@@ -7721,7 +7840,7 @@ async def ttv_fit_log_stream(request: Request, target: str = "", run_name: str =
     if not target:
         raise HTTPException(status_code=400, detail="target is required")
     target = target.strip()
-    hidden = _ttv_target_hidden(target)
+    hidden = _ttv_run_hidden(target, run_name)
     return _sse_response(_sse_job_stream(
         request, lambda: dict(_NO_JOB_STATUS) if hidden else ttv.job_status(target, run_name)
     ))
@@ -7763,7 +7882,7 @@ def ttv_fit_output_file(target: str = "", run_name: str = "", file: str = ""):
     if not target:
         return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
     filepath = ttv.safe_output_file(target.strip(), run_name, file)
-    if filepath is None or _ttv_target_hidden(target.strip()):
+    if filepath is None or _ttv_run_hidden(target, run_name):
         if not file or pathlib.PurePath(file).name != file:
             raise HTTPException(400, "invalid filename")
         raise HTTPException(404, f"file not found: {file}")
@@ -7775,7 +7894,7 @@ def ttv_fit_download_all(target: str = "", run_name: str = ""):
     if not target:
         return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
     output_dir = ttv.ttv_output_dir(target.strip(), run_name)
-    if not output_dir.is_dir() or _ttv_target_hidden(target.strip()):
+    if not output_dir.is_dir() or _ttv_run_hidden(target, run_name):
         raise HTTPException(404, "output directory not found")
     files = [
         (path, path.name)

@@ -108,6 +108,30 @@ def test_denied_viewer_without_own_token_cannot_exofop_download(client, searches
     assert searches["search"] == 0
 
 
+def test_denied_viewer_without_own_token_cannot_request_download(client, searches, monkeypatch):
+    _own_token(monkeypatch)
+    r = client.post(
+        "/api/lco/archive/request-download",
+        headers=_headers("alice"),
+        json={"request_id": "4236675"},
+    )
+    assert r.status_code == 403
+    assert searches["search"] == 0
+    assert searches["download"] == 0
+
+
+def test_denied_viewer_with_own_token_can_request_download(client, searches, monkeypatch):
+    _own_token(monkeypatch, "alice")
+    r = client.post(
+        "/api/lco/archive/request-download",
+        headers=_headers("alice"),
+        json={"request_id": "4236675"},
+    )
+    # The fake archive is empty, so the search runs and finds nothing.
+    assert r.status_code == 404
+    assert searches["search"] == 1
+
+
 def test_anonymous_viewer_is_refused_when_something_is_restricted(client, searches, monkeypatch):
     _own_token(monkeypatch)
     assert _search(client).status_code == 403
