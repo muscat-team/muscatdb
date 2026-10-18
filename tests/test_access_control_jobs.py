@@ -192,6 +192,34 @@ def _post(client, path, payload, user="alice"):
     return client.post(path, headers=_headers(user), json=payload)
 
 
+@pytest.mark.parametrize("endpoint", ["runs", "outputs"])
+def test_photometry_discovery_respects_proposal_access(client, endpoint):
+    params = dict(inst=INST, date="260102", target="HIDDENTGT")
+    if endpoint == "outputs":
+        params["run"] = RUN
+    hidden = _get(client, f"/api/photometry/{endpoint}", **params)
+    assert hidden.status_code == 200
+    assert hidden.json() == ({"runs": []} if endpoint == "runs" else phot.empty_outputs())
+    admin = _get(client, f"/api/photometry/{endpoint}", user="root", **params)
+    assert admin.status_code == 200
+    assert admin.json()["runs"] if endpoint == "runs" else admin.json()["has_any"]
+
+
+def test_photometry_discovery_hides_a_restricted_run_on_a_visible_night(client, env):
+    # The night is visible, but this named run includes restricted inputs.
+    directory = phot.run_output_dir(INST, "260103", "OPENTGT", "mixed-inputs")
+    inputs, _ = product_record.frames_inputs(env, INST, "260103", "HIDDENTGT")
+    assert inputs[0]["resolved"] and inputs[0]["proposal_ids"] == [_RESTRICTED]
+    _record(directory, "photometry", inputs)
+    (directory / "OPENTGT_sinistro_gp_260103.csv").write_text("BJD_TDB,Flux\n1,1\n")
+    params = dict(inst=INST, date="260103", target="OPENTGT")
+    runs = _get(client, "/api/photometry/runs", **params)
+    assert RUN in {r["run_id"] for r in runs.json()["runs"]}
+    assert "mixed-inputs" not in runs.text
+    outputs = _get(client, "/api/photometry/outputs", run="mixed-inputs", **params)
+    assert outputs.json() == phot.empty_outputs()
+
+
 # ── NightVisibility / hidden_obsdates ───────────────────────────────────
 
 

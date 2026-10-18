@@ -6,3 +6,52 @@ Deploy, schema, engines, and host paths still live in the in-app Guide
 Host inventory and nginx: [notes/DEPLOYMENT.md](https://github.com/muscat-team/muscatdb/blob/test/notes/DEPLOYMENT.md) on GitHub.
 
 This section will grow. It is not a dump of `guide.html`.
+
+## Photometry HTTP API
+
+The running app's `/docs` and `/openapi.json` describe the photometry request
+fields and JSON responses. Requests use the same authentication and proposal
+access rules as the browser. Through the existing SSH tunnel, scripts can use
+the browser listener's Basic authentication; a separate API token is not
+required. Mutating requests must also send an `Origin` matching the app URL.
+
+To preview a command, POST to `/api/photometry/command` with a JSON body such as:
+
+```json
+{
+  "inst": "muscat4",
+  "date": "250512",
+  "target": "TOI-6715",
+  "test_run": true,
+  "options": {"bands": ["gp", "rp"], "overwrite": false}
+}
+```
+
+Use the same body at `/api/photometry/run` to start the job. Set `test_run`
+explicitly: it defaults to `true` for `/run` and `false` for `/command`.
+Poll `/api/photometry/status` with `inst`, `date`, `target`, and the returned
+`run_id` as the `run` query parameter. `pending`, `running`, `cancelling`, and
+`finalizing` are live states; `done`, `error`, and `cancelled` are terminal.
+`none` means there is no tracked job. The log stream carries the same status
+payload as server-sent events. `/status-batch` accepts up to 100 job selectors
+and returns an error for each malformed entry while preserving valid entries.
+
+GET `/api/photometry/runs` with `inst`, `date`, and `target` to discover runs
+with products, newest first. GET `/api/photometry/outputs` with those selectors
+and `run=<run_id>` to discover a run's filenames. An empty `run` selects legacy
+products in the night's directory. Optional `site`, `telescope`, and `mode`
+parameters select a multi-site reduction's products. Fetch named-run files
+through `/api/photometry/file/{inst}/{date}/{target}/run/{run_id}/{name}` and
+legacy files (including calibration masters) through
+`/api/photometry/file/{inst}/{date}/{name}`. The corresponding `/download-all`
+routes return ZIP archives. Hidden runs return empty discovery results.
+
+Unknown request fields are ignored for compatibility with saved form settings.
+Numeric options accept numbers, numeric strings, and the form's empty string;
+blank run options keep pipeline defaults. A blank post-process `sigma` instead
+disables sigma clipping. Comma-separated IDs and JD lists remain strings and
+retain the pipeline's syntax validation. Type/shape errors return HTTP 422;
+existing option rules still apply, with their existing error responses.
+
+These contracts cover photometry. Transit-fit and TTV-fit models are subsequent
+parts of issue #264.

@@ -23,6 +23,7 @@ dependencies = [
     "markdown>=3.10.3",
     "nh3>=0.3.7",
     "pyjwt[crypto]>=2.8",
+    "pydantic>=2",
 ]
 
 [project.optional-dependencies]
