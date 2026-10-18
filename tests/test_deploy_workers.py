@@ -147,6 +147,28 @@ def test_no_shipped_profile_points_at_the_pytest_database(profile):
     assert w.load_config(w.DEFAULT_CONFIG, profile=profile).database != "muscatdb_test"
 
 
+def test_engine_envs_reach_both_web_and_workers():
+    data = _profiled()
+    data["profiles"]["prod"]["engine_envs"] = {
+        "prose": "prose-prod-01234567", "timer": "timer-prod-89abcdef",
+    }
+    prod = w.parse_config(data, profile="prod")
+    worker = w.render_env(prod, prod.hosts["ut3"], "muscat-ut3")
+    web = w.web_env(prod)
+    for key, name in (("PROSE", "prose-prod-01234567"), ("TIMER", "timer-prod-89abcdef")):
+        assert f"MUSCAT_{key}_CONDA_ENV={name}\n" in worker
+        assert f"export MUSCAT_{key}_CONDA_ENV={name}\n" in web
+    assert "CONDA_ENV" not in w.web_env(w.parse_config(data, profile="dev"))
+
+
+@pytest.mark.parametrize("envs", [{"unknown": "foo"}, {"prose": "bad\nINJECT=1"}, []])
+def test_engine_envs_reject_unknown_engines_and_unsafe_names(envs):
+    data = _profiled()
+    data["profiles"]["prod"]["engine_envs"] = envs
+    with pytest.raises(w.ConfigError, match="engine_envs"):
+        w.parse_config(data, profile="prod")
+
+
 # -- rendering ----------------------------------------------------------------
 
 

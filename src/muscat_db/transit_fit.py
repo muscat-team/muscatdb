@@ -33,6 +33,7 @@ from muscat_db.photometry import (
     MULTISITE_MODES, _TELESCOPE_PREFIX, timer_conda_env,
 )
 from muscat_db.cache import register_cache
+from muscat_db.engine_identity import version_probe
 
 _REPO_ROOT = pathlib.Path(__file__).parent.parent.parent.resolve()
 logger = logging.getLogger(__name__)
@@ -55,7 +56,7 @@ def _timer_version() -> str:
         else:
             try:
                 result = subprocess.run(
-                    [timer_py, "-c", "from importlib.metadata import version; print(version('timer'))"],
+                    [timer_py, "-c", version_probe(("timer",))],
                     capture_output=True, text=True, timeout=10,
                 )
                 _TIMER_VERSION = result.stdout.strip() if result.returncode == 0 and result.stdout.strip() else "unknown"

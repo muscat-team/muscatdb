@@ -349,12 +349,8 @@ def prose_version() -> str:
         found = None
         prose_py = _conda_env_python(prose_conda_env())
         if prose_py is not None:
-            code = (
-                "from importlib.metadata import version, PackageNotFoundError\n"
-                f"for n in {_PROSE_DISTRIBUTIONS!r}:\n"
-                "    try:\n        print(version(n)); break\n"
-                "    except PackageNotFoundError:\n        pass\n"
-            )
+            from muscat_db.engine_identity import version_probe
+            code = version_probe(_PROSE_DISTRIBUTIONS)
             try:
                 result = subprocess.run(
                     [prose_py, "-c", code], capture_output=True, text=True,
