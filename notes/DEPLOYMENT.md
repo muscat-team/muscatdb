@@ -603,6 +603,138 @@ the `photometry` console script from the conda env directly, matching how transi
 and TTV already resolved `timer-fit`/`harmonic`), so the env's installed package is
 authoritative for all three pipelines once the `-prod` envs exist.
 
+#### Pinned production engines
+
+`deploy/engines.toml` records owner repositories, full commits, and revision-specific
+production environment names. `deploy/engines.py` audits the development baseline,
+clones its working dependencies into a **new** environment, replaces the editable
+engine with the pinned non-editable Git install, and verifies repository, commit,
+interpreter, import location, and `pip check`. It refuses to overwrite an existing
+environment. A failed provision leaves an unapproved environment for diagnosis;
+do not select it for production. An existing environment must pass `verify` before use.
+
+The initial candidates, audited on 2026-10-18, are:
+
+| Engine | Owner repository | Commit | Candidate environment |
+|---|---|---|---|
+| prose2 | `jpdeleon/prose2` | `6029ea8777121bd4ba4de9248735744a101ab425` | `prose-prod-6029ea87` |
+| timer | `john-livingston/timer` | `b8428258c9b62266532173af4abd7fbafee6dcef` | `timer-prod-b8428258` |
+
+These retain the working baseline's Python (prose 3.10.15, timer 3.13.13) and
+science dependencies. Prose's one explicit dependency override is
+`matplotlib==3.8.4`: the working environment's 3.9.3 violates the current
+owner package's `matplotlib<3.9` constraint (the old editable metadata did not
+report this). The override is recorded in `engines.toml` and verified against the
+installed version. On success,
+`<environment>/muscat-engine.json` records the installation identity, exact conda
+package URLs, and full pip freeze. Preserve this record with each deployment.
+Cloning is a migration from an audited working baseline, not a portable lockfile
+installer: a later clone of a changed development environment may have different
+dependencies even at the same engine commit. Compare dependency records before
+accepting any rebuilt environment.
+
+Prepared on ut2 on 2026-10-18; **not activated** in the web app or fleet.
+Both installations pass metadata/import-location checks and `pip check` on ut2
+and ut3–ut7. The dependency records are also checked in under
+`deploy/conda/production/{prose,timer}.json`. The baseline/pinned comparisons in
+`tests/test_pinned_engines_slow.py` passed for photometry preview and full reduction
+and for timer optimize-only and seeded sampling. The real Sinistro/260624
+TIC88297141 light curve is identical (311 rows), and timer's real KIC multi-band
+smoke fit has identical posterior means. The sampling check uses only 20 tuning
+and 20 draws; it tests migration compatibility, not scientific convergence.
+
+**Production photometry uses a frozen effective telescope configuration.**
+`MUSCAT_PROSE_FROZEN_CONFIG=1` routes both reductions and postprocessing through
+the standalone `_prose_launcher.py` adapter in the selected conda interpreter,
+passing `--config <path-to-_prose_telescopes.yaml>` explicitly. This is one
+authoritative, version-controlled configuration, not independently maintained
+configuration directories for each environment. An explicit path must contain
+the approved snapshot: missing or changed files fail without falling back to
+`~/.prose`.
+Before importing prose, it checks the packaged `_prose_telescopes.yaml` checksum
+and matching installed engine commit, then supplies a read-only `ConfigManager`
+initialized from the snapshot. The original initializer never runs, so it cannot
+read development telescope symlinks, create shared config files or download the
+unused Ballet model. HOME, `~/.prose` and the engine checkout are unchanged.
+All configuration write methods are rejected, including `set()` before it can
+mutate settings, builtin updates, legacy file migrations and model downloads.
+The read-only contract concerns configuration APIs and filesystem side effects;
+the engine's in-memory working dictionaries remain ordinary dictionaries.
+
+The snapshot preserves all 94 effective aliases, including builtin/custom
+definitions, resolved duplicate-name precedence, and YAML tuple types. It records
+the source telescope-file hashes. No camera values or header precedence are
+changed by freezing them. The digest is printed in each run log and stored as
+`tool_versions.prose_config_sha256` in `_product.json`; `engines.py verify` also
+imports the real engine with the adapter and verifies the digest against its pin.
+The YAML is included in the installed muscat-db wheel.
+
+Forked workers inherit this configuration. The adapter requires the pinned
+Python 3.10/Linux `fork` start method and refuses spawn/forkserver, which could
+re-import prose without the adapter. The engine has no supported explicit,
+read-only configuration loading API yet;
+[jpdeleon/prose2#15](https://github.com/jpdeleon/prose2/issues/15) tracks that API
+so this adapter can eventually be removed. Independent directories are not a
+requirement: installations may load the same approved configuration file.
+
+To prepare a future configuration update, `deploy/engines.py capture-config
+--snapshot <new-file>` captures the effective configuration using clean engine
+code at the approved commit. It refuses to overwrite an existing snapshot. Review
+the candidate's scientific settings, then update the packaged YAML and both
+recorded SHA-256 values (launcher and `engines.toml`) together. Never regenerate
+the production snapshot automatically at launch or by following live symlinks.
+
+Harmonic is not yet covered by #101: the live editable install is the
+`jpdeleon/harmonic` fork at `f616614568f7655858da29fbc46fb9edfdb022ee`.
+The owner's upstream `john-livingston/harmonic` at
+`a32fb8e32ca776e0e6e7dc92ad4232cef1f12194` lacks the custom-prior flags
+`--mu-min-me`, `--mu-max-me`, and `--z-max` sent by muscat-db (#77).
+Do not pin the fork or silently discard requested priors. Resolve compatibility
+before adding harmonic to the production pins; keep #101 open until then.
+
+Prepare without changing any live process:
+
+```bash
+uv run python deploy/engines.py audit
+uv run python deploy/engines.py install
+uv run python deploy/engines.py verify
+```
+
+Use `--conda /absolute/path/to/miniconda3/bin/conda` for another installation.
+Temporary build files go under `~/temp` (`--scratch` overrides this).
+Verify on **each** worker host as well as ut2, and exercise the installed
+`photometry` and `timer-fit` entrypoints against isolated output directories.
+Check telescope resources and both test/full execution paths. Run the fast suite
+with `uv run pytest`; heavyweight integration checks must use separate databases,
+output trees and obslog paths, never a default production run directory.
+
+Roll out only after the PR is merged, released and taken by the deploy host:
+
+1. Take a verified SQLite backup; record the current web and worker engine settings.
+2. Confirm `deploy/engines.py verify` succeeds everywhere and that no jobs are active.
+3. `deploy/workers.toml [profiles.prod].engine_envs` selects pinned prose and timer
+   for **both** `render_env` and `web-env`; `prose_frozen_config = true` enables
+   the adapter in both processes. Development keeps its existing environments
+   and exports `MUSCAT_PROSE_FROZEN_CONFIG=0`.
+   Apply with `uv run python deploy/workers.py --profile prod up`. Busy workers are
+   deliberately left unchanged; re-run after they drain and check all units.
+4. Merge the `web-env` engine exports into production's existing `.web-env`, preserving
+   its Postgres and control-plane settings. Do not replace that file with only the
+   generated fragment. Ensure `MUSCAT_PROSE_PYTHON` is unset in both `.env` and the
+   launch environment, since it takes precedence over `MUSCAT_PROSE_CONDA_ENV`.
+5. Restart the production web process in `muscatdbgui`, verify `/healthz`, then run
+   one queued job per migrated pipeline and check its log and `_product.json`.
+   Pinned engines now record `version+git.<full SHA>` in the existing version fields.
+
+Rollback: stop admitting new work and let active jobs finish, restore the recorded
+web exports and worker `engine_envs` (an operator-local config can select the old
+envs), reapply the fleet configuration, and restart the web process in `muscatdbgui`.
+When reverting to editable prose, also set `prose_frozen_config = false` for the
+workers and `MUSCAT_PROSE_FROZEN_CONFIG=0` for the web process; the frozen launcher
+deliberately refuses editable engines.
+No old engine environment is removed by this workflow. Future upgrades provision
+new environment names and repeat this process; never upgrade an in-use env in place.
+
 ### Cross-mounted raids
 Three NFS servers auto-mount each other's storage:
 - ut2 exports `/raid_ut2`

@@ -1,0 +1,25 @@
+# Owner repositories and full commits only. Environment names include the
+# revision: create a new environment for upgrades rather than changing one
+# while workers may still be using it.
+[engines.prose]
+repository = "https://github.com/jpdeleon/prose2"
+commit = "6029ea8777121bd4ba4de9248735744a101ab425"
+environment = "prose-prod-6029ea87"
+source_environment = "prose"
+module = "prose"
+frozen_config_sha256 = "39503fce597e2d5fd349fa8009ed5068222fc6e31f098cf50e62f2a17f314a08"
+# The working editable metadata predates prose2's matplotlib<3.9 requirement.
+# Pin the newest compatible 3.8 release rather than bypassing pip check.
+[engines.prose.dependency_overrides]
+matplotlib = "3.8.4"
+
+[engines.timer]
+repository = "https://github.com/john-livingston/timer"
+commit = "b8428258c9b62266532173af4abd7fbafee6dcef"
+environment = "timer-prod-b8428258"
+source_environment = "timer"
+module = "timer"
+
+# harmonic is deliberately not pinned to the fork. Owner upstream a32fb8e3
+# lacks --mu-min-me/--mu-max-me/--z-max used by muscat-db (#77). Keep its
+# current environment until the compatibility decision is resolved.

@@ -185,6 +185,16 @@ def test_photometry_run_records_author_inputs_settings_versions(db, tmp_path):
     assert rec["inputs"][0]["proposal_ids"] == ["KEY2026B-001", "OTHER-9"]
 
 
+def test_frozen_photometry_records_configuration_digest(db, tmp_path, monkeypatch):
+    from muscat_db._prose_launcher import SNAPSHOT_SHA256
+    monkeypatch.setenv("MUSCAT_PROSE_FROZEN_CONFIG", "1")
+    phot._write_run_product(
+        tmp_path, inst=INST, date=DATE, target=TARGET, opts={}, test_run=False,
+        user_name="alice", site="", telescope="", mode="", run_name="frozen",
+    )
+    assert pr.read_record(tmp_path)["tool_versions"]["prose_config_sha256"] == SNAPSHOT_SHA256
+
+
 def test_transit_fit_records_each_selected_lightcurve(db, tmp_path):
     runs = phot.output_base() / INST / DATE / "_runs" / "TOI-1234"
     csv = runs / "coj-full" / "TOI-1234_sinistro_g.csv"

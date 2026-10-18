@@ -61,6 +61,7 @@ ENV_VARS: tuple[EnvVar, ...] = (
     EnvVar("MUSCAT_PROSE_PROJECT", "<repo>/../ext_tools/prose2", "prose2 repository path"),
     EnvVar("MUSCAT_PROSE_PYTHON", None, "Explicit prose interpreter (highest priority)"),
     EnvVar("MUSCAT_PROSE_CONDA_ENV", "prose", "Conda env supplying prose dependencies"),
+    EnvVar("MUSCAT_PROSE_FROZEN_CONFIG", "0", "Use the versioned production telescope snapshot"),
     EnvVar(
         "MUSCAT_TIMER_DIR",
         str(Path.home() / "ql" / "timer"),

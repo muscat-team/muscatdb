@@ -1,0 +1,36 @@
+{
+  "engine": "prose",
+  "pin": {
+    "repository": "https://github.com/jpdeleon/prose2",
+    "commit": "6029ea8777121bd4ba4de9248735744a101ab425",
+    "environment": "prose-prod-6029ea87",
+    "source_environment": "prose",
+    "module": "prose",
+    "frozen_config_sha256": "39503fce597e2d5fd349fa8009ed5068222fc6e31f098cf50e62f2a17f314a08",
+    "dependency_overrides": {
+      "matplotlib": "3.8.4"
+    }
+  },
+  "installed": {
+    "version": "3.3.4",
+    "python": "3.10.15 (main, Oct  3 2024, 07:27:34) [GCC 11.2.0]",
+    "prefix": "/ut2/jerome/miniconda3/envs/prose-prod-6029ea87",
+    "executable": "/ut2/jerome/miniconda3/envs/prose-prod-6029ea87/bin/python",
+    "module_file": "/ut2/jerome/miniconda3/envs/prose-prod-6029ea87/lib/python3.10/site-packages/prose/__init__.py",
+    "dependencies": {
+      "matplotlib": "3.8.4"
+    },
+    "direct_url": {
+      "url": "https://github.com/jpdeleon/prose2",
+      "vcs_info": {
+        "commit_id": "6029ea8777121bd4ba4de9248735744a101ab425",
+        "requested_revision": "6029ea8777121bd4ba4de9248735744a101ab425",
+        "vcs": "git"
+      }
+    },
+    "prose_config_sha256": "39503fce597e2d5fd349fa8009ed5068222fc6e31f098cf50e62f2a17f314a08",
+    "telescope_aliases": 94
+  },
+  "conda_explicit": "# This file may be used to create an environment using:\n# $ conda create --name <env> --file <this file>\n# platform: linux-64\n@EXPLICIT\nhttps://repo.anaconda.com/pkgs/main/linux-64/_libgcc_mutex-0.1-main.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/ca-certificates-2024.11.26-h06a4308_0.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/ld_impl_linux-64-2.40-h12ee557_0.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/libstdcxx-ng-11.2.0-h1234567_1.conda\nhttps://repo.anaconda.com/pkgs/main/noarch/tzdata-2024b-h04d1e81_0.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/libgomp-11.2.0-h1234567_1.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/_openmp_mutex-5.1-1_gnu.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/libgcc-ng-11.2.0-h1234567_1.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/bzip2-1.0.8-h5eee18b_6.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/libffi-3.4.4-h6a678d5_1.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/libuuid-1.41.5-h5eee18b_0.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/ncurses-6.4-h6a678d5_0.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/openssl-3.0.15-h5eee18b_0.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/xz-5.4.6-h5eee18b_1.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/zlib-1.2.13-h5eee18b_1.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/readline-8.2-h5eee18b_0.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/tk-8.6.14-h39e8969_0.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/sqlite-3.45.3-h5eee18b_0.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/python-3.10.15-he870216_1.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/setuptools-75.1.0-py310h06a4308_0.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/wheel-0.44.0-py310h06a4308_0.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/pip-24.2-py310h06a4308_0.conda\n",
+  "pip_freeze": "anyio==4.13.0\nargon2-cffi==25.1.0\nargon2-cffi-bindings==25.1.0\narrow==1.4.0\nastroplan==0.10.1\nastropy==5.3.4\nastroquery==0.4.7\nasttokens==3.0.0\nasync-lru==2.3.0\nattrs==26.1.0\nbabel==2.18.0\nbackports.tarfile==1.2.0\nbarycorrpy==0.4.4\nbeautifulsoup4==4.12.3\nbleach==6.4.0\ncelerite2==0.3.2\ncertifi==2024.8.30\ncffi==1.17.1\ncharset-normalizer==3.4.0\nclick==8.4.1\ncomm==0.2.2\ncontourpy==1.3.1\ncorner==2.2.3\ncryptography==44.0.0\ncycler==0.12.1\ndebugpy==1.8.9\ndecorator==5.1.1\ndefusedxml==0.7.1\ndill==0.3.9\nemcee==3.1.6\nentrypoints==0.4\nexceptiongroup==1.2.2\nexecuting==2.1.0\nfastjsonschema==2.21.2\nfonttools==4.55.2\nfqdn==1.5.1\ngit-filter-repo==2.47.0\nh11==0.16.0\nhtml5lib==1.1\nhttpcore==1.0.9\nhttpx==0.28.1\nidna==3.10\nimageio==2.36.1\nimageio-ffmpeg==0.5.1\nimportlib_metadata==8.5.0\niniconfig==2.0.0\nipykernel==6.29.5\nipython==8.30.0\nipywidgets==8.1.8\nisoduration==20.11.0\njaraco.classes==3.4.0\njaraco.context==6.0.1\njaraco.functools==4.1.0\njedi==0.19.2\njeepney==0.8.0\nJinja2==3.1.6\njoblib==1.5.1\njplephem==2.22\njson5==0.14.0\njsonpointer==3.1.1\njsonschema==4.26.0\njsonschema-specifications==2025.9.1\njupyter==1.1.1\njupyter-console==6.6.3\njupyter-events==0.12.1\njupyter-lsp==2.3.1\njupyter_client==8.6.3\njupyter_core==5.7.2\njupyter_server==2.19.0\njupyter_server_terminals==0.5.4\njupyterlab==4.5.8\njupyterlab_pygments==0.3.0\njupyterlab_server==2.28.0\njupyterlab_widgets==3.0.16\nkeyring==25.5.0\nkiwisolver==1.4.7\nlark==1.3.1\nlazy_loader==0.4\nmarkdown-it-py==4.2.0\nMarkupSafe==3.0.3\nmatplotlib==3.8.4\nmatplotlib-inline==0.1.7\nmdurl==0.1.2\nmistune==3.2.1\nmore-itertools==10.5.0\nmultiprocess==0.70.17\nnbclient==0.11.0\nnbconvert==7.17.1\nnbformat==5.10.4\nnest-asyncio==1.6.0\nnetworkx==3.4.2\nnotebook==7.5.7\nnotebook_shim==0.2.4\nnumpy==1.26.4\noverrides==7.7.0\npackaging==24.2\npandas==2.2.3\npandocfilters==1.5.1\npapermill==2.7.0\nparso==0.8.4\npexpect==4.9.0\nphotutils==1.13.0\npillow==11.0.0\npip @ file:///croot/pip_1723484598856/work\nplatformdirs==4.3.6\npluggy==1.5.0\nprometheus_client==0.25.0\nprompt_toolkit==3.0.48\nprose @ git+https://github.com/jpdeleon/prose2@6029ea8777121bd4ba4de9248735744a101ab425\npsutil==6.1.0\nptyprocess==0.7.0\npure_eval==0.2.3\npycparser==2.22\npyerfa==2.0.1.5\nPygments==2.18.0\npyparsing==3.2.0\npytest==8.3.4\npython-dateutil==2.9.0.post0\npython-json-logger==4.1.0\npytz==2024.2\npyvo==1.6\nPyWavelets==1.8.0\nPyYAML==6.0.2\npyzmq==26.2.0\nreferencing==0.37.0\nrequests==2.32.3\nrfc3339-validator==0.1.4\nrfc3986-validator==0.1.1\nrfc3987-syntax==1.1.0\nrich==15.0.0\nrpds-py==0.30.0\nruff==0.15.16\nscikit-image==0.21.0\nscipy==1.14.1\nseaborn==0.13.2\nSecretStorage==3.3.3\nSend2Trash==2.1.0\nsep==1.2.1\nsetuptools==75.1.0\nsix==1.17.0\nsoupsieve==2.6\nstack-data==0.6.3\ntabulate==0.9.0\ntenacity==9.1.4\nterminado==0.18.1\ntifffile==2024.9.20\ntinycss2==1.5.1\ntomli==2.2.1\ntornado==6.4.2\ntqdm==4.67.1\ntraitlets==5.14.3\ntwirl==0.4.0\ntyping_extensions==4.12.2\ntzdata==2024.2\nuri-template==1.3.0\nurllib3==2.2.3\nwcwidth==0.2.13\nwebcolors==25.10.0\nwebencodings==0.5.1\nwebsocket-client==1.9.0\nwheel==0.44.0\nwidgetsnbextension==4.0.15\nzipp==3.21.0\n"
+}

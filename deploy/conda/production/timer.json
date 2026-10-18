@@ -1,0 +1,28 @@
+{
+  "engine": "timer",
+  "pin": {
+    "repository": "https://github.com/john-livingston/timer",
+    "commit": "b8428258c9b62266532173af4abd7fbafee6dcef",
+    "environment": "timer-prod-b8428258",
+    "source_environment": "timer",
+    "module": "timer"
+  },
+  "installed": {
+    "version": "0.2.1",
+    "python": "3.13.13 | packaged by Anaconda, Inc. | (main, Apr 14 2026, 06:19:41) [GCC 14.3.0]",
+    "prefix": "/ut2/jerome/miniconda3/envs/timer-prod-b8428258",
+    "executable": "/ut2/jerome/miniconda3/envs/timer-prod-b8428258/bin/python",
+    "module_file": "/ut2/jerome/miniconda3/envs/timer-prod-b8428258/lib/python3.13/site-packages/timer/__init__.py",
+    "dependencies": {},
+    "direct_url": {
+      "url": "https://github.com/john-livingston/timer",
+      "vcs_info": {
+        "commit_id": "b8428258c9b62266532173af4abd7fbafee6dcef",
+        "requested_revision": "b8428258c9b62266532173af4abd7fbafee6dcef",
+        "vcs": "git"
+      }
+    }
+  },
+  "conda_explicit": "# This file may be used to create an environment using:\n# $ conda create --name <env> --file <this file>\n# platform: linux-64\n@EXPLICIT\nhttps://repo.anaconda.com/pkgs/main/linux-64/_libgcc_mutex-0.1-main.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/_openmp_mutex-5.1-52_gnu.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/ca-certificates-2026.5.14-h06a4308_0.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/ld_impl_linux-64-2.44-h9e0c5a2_3.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/python_abi-3.13-3_cp313.conda\nhttps://repo.anaconda.com/pkgs/main/noarch/tzdata-2026b-he532380_0.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/libgcc-15.2.0-h69a1729_8.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/libgcc-ng-15.2.0-h166f726_8.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/libstdcxx-15.2.0-h39759b7_8.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/libzlib-1.3.2-h47b2149_0.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/openssl-3.5.7-h1b28b03_0.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/xz-5.8.2-h448239c_0.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/bzip2-1.0.8-h5eee18b_6.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/libexpat-2.8.1-h7354ed3_0.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/libffi-3.4.8-hc5d346e_2.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/libmpdec-4.0.0-h5eee18b_0.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/libuuid-1.41.5-h5eee18b_0.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/ncurses-6.5-h7934f7d_0.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/pthread-stubs-0.3-h0ce48e5_1.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/xorg-libxau-1.0.12-h9b100fa_0.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/xorg-libxdmcp-1.1.5-h9b100fa_0.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/xorg-xorgproto-2024.1-h5eee18b_1.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/zlib-1.3.2-h47b2149_0.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/libxcb-1.17.0-h9b100fa_0.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/readline-8.3-hc2a1206_0.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/sqlite-3.53.2-h795bf6d_0.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/xorg-libx11-1.8.12-h9b100fa_1.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/tk-8.6.15-h54e0aa7_0.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/python-3.13.13-hb7b561f_100_cp313.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/packaging-26.0-py313h06a4308_0.conda\nhttps://repo.anaconda.com/pkgs/main/linux-64/wheel-0.46.3-py313h06a4308_0.conda\nhttps://repo.anaconda.com/pkgs/main/noarch/pip-26.1.1-pyhc872135_1.conda\n",
+  "pip_freeze": "arviz==0.23.4\narviz-base==1.2.0\narviz-plots==1.2.0\narviz-stats==1.2.0\nastropy==7.2.0\nastropy-iers-data==0.2026.6.8.17.49.5\ncachetools==6.2.6\ncelerite2==0.3.2\ncloudpickle==3.1.2\ncons==0.4.7\ncontourpy==1.3.3\ncorner==2.2.3\ncycler==0.12.1\ndill==0.4.1\netuples==0.3.10\nexoplanet==0.6.0\nexoplanet_core==0.3.1\nfilelock==3.29.3\nfonttools==4.63.0\nh5netcdf==1.8.1\nh5py==3.16.0\nkiwisolver==1.5.0\nlazy-loader==0.5\nlimbdark @ git+https://github.com/john-livingston/limbdark@8c932ff67adabf8b2a743bed49fbd7a451f0af01\nllvmlite==0.47.0\nlogical-unification==0.4.7\nmarkdown-it-py==4.2.0\nmatplotlib==3.11.0\nmdurl==0.1.2\nminiKanren==1.0.5\nmultipledispatch==1.0.0\nnumba==0.65.1\nnumpy==2.4.6\npackaging==26.0\npandas==3.0.3\npatsy==1.0.2\npillow==12.2.0\npip @ file:///home/task_178032272205047/croot/pip_1780323467325/work\nplatformdirs==4.11.8\npyerfa==2.0.1.5\nPygments==2.20.0\npymc==5.28.5\npyparsing==3.3.2\npytensor==2.38.3\npython-dateutil==2.9.0.post0\nPyYAML==6.0.3\nrich==15.0.0\nscipy==1.17.1\nsetuptools==80.10.2\nsix==1.17.0\nthreadpoolctl==3.6.0\ntimer @ git+https://github.com/john-livingston/timer@b8428258c9b62266532173af4abd7fbafee6dcef\ntoolz==1.1.0\ntyping_extensions==4.15.0\nwheel==0.46.3\nxarray==2026.4.0\nxarray-einstats==0.10.0\n"
+}
