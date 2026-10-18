@@ -389,6 +389,11 @@ def _write_run_product(
     inputs, note = product_record.frames_inputs(
         db, inst, date, target, product_record.target_normalizer(db)
     )
+    tool_versions = {"muscat_db": __version__, "prose": prose_version()}
+    if os.environ.get("MUSCAT_PROSE_FROZEN_CONFIG") == "1":
+        from muscat_db._prose_launcher import snapshot_bytes, SNAPSHOT_SHA256
+        snapshot_bytes()
+        tool_versions["prose_config_sha256"] = SNAPSHOT_SHA256
     record = product_record.build_record(
         "photometry",
         author=user_name,
@@ -398,7 +403,7 @@ def _write_run_product(
             "options": opts, "test_run": bool(test_run),
             "site": site, "telescope": telescope, "mode": mode, "run_name": run_name,
         },
-        tool_versions={"muscat_db": __version__, "prose": prose_version()},
+        tool_versions=tool_versions,
     )
     product_record.write_record(rdir, record)
 
@@ -420,6 +425,11 @@ def _prose_prefix(module: str = _MODULE, console_script: str | None = "photometr
     invocation.
     """
     explicit = prose_python()
+    if os.environ.get("MUSCAT_PROSE_FROZEN_CONFIG") == "1":
+        python = explicit or _conda_env_python(prose_conda_env())
+        if python is None:
+            raise RuntimeError("frozen prose configuration requires its pinned environment")
+        return [python, "-I", str(_HERE / "_prose_launcher.py"), module]
     if explicit:
         return [explicit, "-m", module]
     env = prose_conda_env()

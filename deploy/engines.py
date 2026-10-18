@@ -9,6 +9,8 @@ It never overwrites an existing environment or changes a running service.
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
 import json
 import os
 import re
@@ -23,6 +25,8 @@ OWNERS = {
     "harmonic": "https://github.com/john-livingston/harmonic",
 }
 DEFAULT_CONFIG = Path(__file__).with_name("engines.toml")
+FROZEN_CONFIG = Path(__file__).resolve().parents[1] / "src/muscat_db/_prose_telescopes.yaml"
+PROSE_LAUNCHER = FROZEN_CONFIG.with_name("_prose_launcher.py")
 # Metadata and find_spec avoid importing engines (imports may create config
 # files, download reference data, or initialize numerical runtimes).
 PROBE = """
@@ -82,11 +86,53 @@ def validate_install(name: str, pin: dict, info: dict, prefix: Path) -> None:
             raise ValueError(f"{name}: {package} does not match pinned version {version}")
 
 
+def check_frozen_config(prefix: Path, pin: dict, info: dict) -> None:
+    output = run([str(prefix / "bin/python"), "-I", str(PROSE_LAUNCHER), "--check"])
+    config = json.loads(output.splitlines()[-1])
+    if config["prose_config_sha256"] != pin["frozen_config_sha256"]:
+        raise ValueError("prose: frozen configuration does not match the deployment pin")
+    info.update(config)
+
+
 def write_record(name: str, pin: dict, info: dict, conda: Path, dest: Path) -> None:
     record = {"engine": name, "pin": pin, "installed": info,
               "conda_explicit": run([str(conda), "list", "--prefix", str(dest), "--explicit"]),
               "pip_freeze": run([str(dest / "bin/python"), "-I", "-m", "pip", "freeze", "--all"])}
     (dest / "muscat-engine.json").write_text(json.dumps(record, indent=2) + "\n")
+
+
+def capture_config(python: Path, pin: dict, destination: Path) -> None:
+    """Capture resolved aliases, preserving YAML tuple types and shared entries."""
+    if destination.exists():
+        raise ValueError(f"{destination} exists; review a new snapshot before replacing it")
+    code = """
+import base64, hashlib, json, subprocess, yaml, prose
+from pathlib import Path
+from importlib.metadata import version, distribution
+direct = json.loads(distribution('prose').read_text('direct_url.json') or '{}')
+if direct.get('dir_info', {}).get('editable'):
+    source = str(Path(prose.__file__).parent)
+    head = subprocess.check_output(['git', '-C', source, 'rev-parse', 'HEAD'], text=True).strip()
+    if head != COMMIT or subprocess.run(['git', '-C', source, 'diff', '--quiet', 'HEAD', '--', '.']).returncode:
+        raise RuntimeError('capture requires clean prose code at the approved commit')
+elif direct.get('vcs_info', {}).get('commit_id') != COMMIT:
+    raise RuntimeError('capture requires the approved prose commit')
+record = dict(schema=1, settings=prose.CONFIG.config,
+    telescopes=prose.CONFIG.telescopes_dict,
+    files={p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+           for p in sorted(prose.CONFIG.folder_path.glob('*.telescope'))})
+record['engine_version'] = version('prose')
+record['engine_commit'] = COMMIT
+record['repository'] = REPOSITORY
+payload = yaml.dump(record, sort_keys=True).encode()
+print('MUSCAT_CONFIG:' + base64.b64encode(payload).decode())
+""".replace("COMMIT", repr(pin["commit"])).replace("REPOSITORY", repr(pin["repository"]))
+    output = run([str(python), "-I", "-c", code])
+    encoded = next(line.removeprefix("MUSCAT_CONFIG:") for line in output.splitlines()
+                   if line.startswith("MUSCAT_CONFIG:"))
+    data = base64.b64decode(encoded, validate=True)
+    destination.write_bytes(data)
+    print(f"{destination}: sha256 {hashlib.sha256(data).hexdigest()}")
 
 
 def install(name: str, pin: dict, conda: Path, root: Path, scratch: Path) -> None:
@@ -110,6 +156,8 @@ def install(name: str, pin: dict, conda: Path, root: Path, scratch: Path) -> Non
              *(f"{package}=={version}" for package, version in overrides.items())], env=env)
     info = probe(dest, name, pin["module"], overrides)
     validate_install(name, pin, info, dest)
+    if name == "prose":
+        check_frozen_config(dest, pin, info)
     run([python, "-I", "-m", "pip", "check"], env=env)
     write_record(name, pin, info, conda, dest)
     print(f"{name}: verified {pin['commit']}", flush=True)
@@ -117,13 +165,14 @@ def install(name: str, pin: dict, conda: Path, root: Path, scratch: Path) -> Non
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("audit", "install", "verify"))
+    parser.add_argument("command", choices=("audit", "install", "verify", "capture-config"))
     parser.add_argument("engines", nargs="*")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--conda", type=Path, default=Path.home() / "miniconda3/bin/conda")
     parser.add_argument("--scratch", type=Path, default=Path.home() / "temp")
     parser.add_argument("--record", action="store_true",
                         help="after successful verify, save the environment dependency record")
+    parser.add_argument("--snapshot", type=Path, default=FROZEN_CONFIG)
     args = parser.parse_args(argv)
     try:
         pins = load_pins(args.config)
@@ -132,6 +181,10 @@ def main(argv: list[str] | None = None) -> int:
         if unknown:
             raise ValueError(f"engines without approved pins: {sorted(unknown)}")
         root = args.conda.parent.parent / "envs"
+        if args.command == "capture-config":
+            capture_config(root / pins["prose"]["source_environment"] / "bin/python",
+                           pins["prose"], args.snapshot)
+            return 0
         for name in selected:
             pin = pins[name]
             if args.command == "install":
@@ -143,6 +196,8 @@ def main(argv: list[str] | None = None) -> int:
                 info = probe(prefix, name, pin["module"], pin.get("dependency_overrides"))
                 if args.command == "verify":
                     validate_install(name, pin, info, prefix)
+                    if name == "prose":
+                        check_frozen_config(prefix, pin, info)
                     run([str(prefix / "bin/python"), "-I", "-m", "pip", "check"])
                     if args.record:
                         write_record(name, pin, info, args.conda, prefix)

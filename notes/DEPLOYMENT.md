@@ -643,15 +643,35 @@ TIC88297141 light curve is identical (311 rows), and timer's real KIC multi-band
 smoke fit has identical posterior means. The sampling check uses only 20 tuning
 and 20 draws; it tests migration compatibility, not scientific convergence.
 
-**Photometry rollout is blocked on telescope configuration isolation.** The
-candidate wheel contains the engine code but does not isolate `~/.prose`:
-the telescope definitions described above still resolve through symlinks into the
-development checkout. A package SHA therefore does not pin camera definitions.
-Before selecting pinned prose for production, agree on a muscat-db launcher that
-loads a frozen configuration snapshot, or wait for the owner's engine to expose
-a separate configuration directory. Do not repoint the shared symlinks: development
-and production currently use the same account. This requires an explicit decision
-because these definitions affect time interpretation, gain, and noise estimates.
+**Production photometry uses a frozen effective telescope configuration.**
+`MUSCAT_PROSE_FROZEN_CONFIG=1` routes both reductions and postprocessing through
+the standalone `_prose_launcher.py` adapter in the selected conda interpreter.
+Before importing prose, it checks the packaged `_prose_telescopes.yaml` checksum
+and matching installed engine commit, then supplies a read-only `ConfigManager`
+initialized from the snapshot. The original initializer never runs, so it cannot
+read development telescope symlinks, create shared config files or download the
+unused Ballet model. HOME, `~/.prose` and the engine checkout are unchanged.
+
+The snapshot preserves all 94 effective aliases, including builtin/custom
+definitions, resolved duplicate-name precedence, and YAML tuple types. It records
+the source telescope-file hashes. No camera values or header precedence are
+changed by freezing them. The digest is printed in each run log and stored as
+`tool_versions.prose_config_sha256` in `_product.json`; `engines.py verify` also
+imports the real engine with the adapter and verifies the digest against its pin.
+The YAML is included in the installed muscat-db wheel.
+
+Forked workers inherit this configuration. The adapter requires the pinned
+Python 3.10/Linux `fork` start method and refuses spawn/forkserver, which could
+re-import prose without the adapter. The engine has no supported configuration
+root yet; [jpdeleon/prose2#15](https://github.com/jpdeleon/prose2/issues/15) tracks
+that API so this adapter can eventually be removed.
+
+To prepare a future configuration update, `deploy/engines.py capture-config
+--snapshot <new-file>` captures the effective configuration using clean engine
+code at the approved commit. It refuses to overwrite an existing snapshot. Review
+the candidate's scientific settings, then update the packaged YAML and both
+recorded SHA-256 values (launcher and `engines.toml`) together. Never regenerate
+the production snapshot automatically at launch or by following live symlinks.
 
 Harmonic is not yet covered by #101: the live editable install is the
 `jpdeleon/harmonic` fork at `f616614568f7655858da29fbc46fb9edfdb022ee`.
@@ -681,10 +701,10 @@ Roll out only after the PR is merged, released and taken by the deploy host:
 
 1. Take a verified SQLite backup; record the current web and worker engine settings.
 2. Confirm `deploy/engines.py verify` succeeds everywhere and that no jobs are active.
-3. `deploy/workers.toml [profiles.prod].engine_envs` currently selects pinned timer
-   for **both** `render_env` and `web-env`; development keeps its existing envs.
-   Prose is marked `rollout = false` in the pin manifest and is deliberately absent
-   from this profile until telescope configuration is isolated.
+3. `deploy/workers.toml [profiles.prod].engine_envs` selects pinned prose and timer
+   for **both** `render_env` and `web-env`; `prose_frozen_config = true` enables
+   the adapter in both processes. Development keeps its existing environments
+   and exports `MUSCAT_PROSE_FROZEN_CONFIG=0`.
    Apply with `uv run python deploy/workers.py --profile prod up`. Busy workers are
    deliberately left unchanged; re-run after they drain and check all units.
 4. Merge the `web-env` engine exports into production's existing `.web-env`, preserving
@@ -698,6 +718,9 @@ Roll out only after the PR is merged, released and taken by the deploy host:
 Rollback: stop admitting new work and let active jobs finish, restore the recorded
 web exports and worker `engine_envs` (an operator-local config can select the old
 envs), reapply the fleet configuration, and restart the web process in `muscatdbgui`.
+When reverting to editable prose, also set `prose_frozen_config = false` for the
+workers and `MUSCAT_PROSE_FROZEN_CONFIG=0` for the web process; the frozen launcher
+deliberately refuses editable engines.
 No old engine environment is removed by this workflow. Future upgrades provision
 new environment names and repeat this process; never upgrade an in-use env in place.
 

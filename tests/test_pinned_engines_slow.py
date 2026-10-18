@@ -69,13 +69,14 @@ def test_photometry_pinned_install_matches_baseline(tmp_path, monkeypatch, previ
     for label, python in zip(("baseline", "pinned"), interpreters):
         directory = tmp_path / label
         directory.mkdir()
+        monkeypatch.setenv("MUSCAT_PROSE_PYTHON", python)
+        monkeypatch.setenv("MUSCAT_PROSE_FROZEN_CONFIG", "1" if label == "pinned" else "0")
         command = phot.build_command("sinistro", "260624", "TIC88297141", options,
                                      test_run=preview)
-        # Exercise the exact package entrypoint without relying on PATH or cwd.
-        prefix_length = len(phot._prose_prefix())
-        command = [python, "-m", "prose.scripts.run_photometry", *command[prefix_length:]]
         command[command.index("--results_dir") + 1] = str(directory)
         _run(command, directory)
+        if label == "pinned":
+            assert "telescope snapshot sha256:" in (directory / "smoke.log").read_text()
         assert list(directory.glob("*_ref.png")), "reference diagnostic missing"
         outputs.append(directory)
     if not preview:

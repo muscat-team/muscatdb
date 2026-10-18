@@ -38,9 +38,9 @@ repo          = "/ut2/jerome/deploy/main/app"   # the deploy checkout of branch 
 queue_only    = true                            # :8001 queues full runs for the workers
 max_full_jobs = 6                              # 5 hosts + 1, as the fleet default
 # Provision and verify deploy/engines.toml before applying this profile.
-# Prose remains a candidate until telescope configuration is isolated; harmonic
-# remains on its existing env pending upstream prior support (#77).
-engine_envs = { timer = "timer-prod-b8428258" }
+# Harmonic remains on its existing env pending upstream prior support (#77).
+engine_envs = { prose = "prose-prod-6029ea87", timer = "timer-prod-b8428258" }
+prose_frozen_config = true
 
 [web]
 # true: the web app only queues full runs (MUSCAT_WORKER_MAX_SLOTS=0) and the
