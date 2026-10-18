@@ -492,7 +492,10 @@ def start_ttv_fit(
 
     with _TTV_LOCK:
         existing = _TTV_JOBS.get(key)
-        if existing is not None and existing.proc.poll() is None:
+        # The pid file covers a fit launched by another server process (see
+        # transit_fit.start_fit).
+        live_pid_file = ttv_output_dir(target, run_name) / "harmonic.pid"
+        if jobs.run_is_live(existing.proc if existing else None, live_pid_file):
             return {"ok": True, "key": key, "already_running": True}
 
         # Every ttv_fit job is "full" (no test-run concept here), so a zero cap
@@ -828,6 +831,10 @@ def delete_ttv_fit(target: str, run_name: str = "") -> dict:
         rdir = ttv_output_dir(target, run_name)
     except ValueError:
         return {"ok": False, "error": "invalid target"}
+    with _TTV_LOCK:
+        job = _TTV_JOBS.get(ttv_job_key(target, run_name))
+    if jobs.run_is_live(job.proc if job else None, rdir / "harmonic.pid"):
+        return {"ok": False, "error": jobs.LIVE_RUN_DELETE_ERROR}
     removed = 0
     if rdir.is_dir():
         try:

@@ -535,6 +535,21 @@ def pid_file_process_alive(pid_file: Path) -> bool:
     return is_pid_running(pid) or is_process_group_alive(pid)
 
 
+LIVE_RUN_DELETE_ERROR = "run is still in progress; cancel it before deleting"
+
+
+def run_is_live(proc, pid_file: Path) -> bool:
+    """True if a run is still executing: this process holds a Popen whose
+    ``poll()`` is None, or *pid_file* records a live process (a job launched by
+    another server process, or one whose launcher is gone).
+
+    Used to refuse destructive actions (delete) that would ``rmtree`` the run
+    directory, and with it the pid file and logs, under a live pipeline."""
+    if proc is not None and proc.poll() is None:
+        return True
+    return pid_file_process_alive(pid_file)
+
+
 def next_reconcile_attempt(attempts: int) -> tuple[str, int]:
     """Decide the outcome of one orphan-reconciliation pass over a running row
     with no evidence of completion and no live underlying process (see
