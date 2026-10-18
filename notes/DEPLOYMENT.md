@@ -645,12 +645,21 @@ and 20 draws; it tests migration compatibility, not scientific convergence.
 
 **Production photometry uses a frozen effective telescope configuration.**
 `MUSCAT_PROSE_FROZEN_CONFIG=1` routes both reductions and postprocessing through
-the standalone `_prose_launcher.py` adapter in the selected conda interpreter.
+the standalone `_prose_launcher.py` adapter in the selected conda interpreter,
+passing `--config <path-to-_prose_telescopes.yaml>` explicitly. This is one
+authoritative, version-controlled configuration, not independently maintained
+configuration directories for each environment. An explicit path must contain
+the approved snapshot: missing or changed files fail without falling back to
+`~/.prose`.
 Before importing prose, it checks the packaged `_prose_telescopes.yaml` checksum
 and matching installed engine commit, then supplies a read-only `ConfigManager`
 initialized from the snapshot. The original initializer never runs, so it cannot
 read development telescope symlinks, create shared config files or download the
 unused Ballet model. HOME, `~/.prose` and the engine checkout are unchanged.
+All configuration write methods are rejected, including `set()` before it can
+mutate settings, builtin updates, legacy file migrations and model downloads.
+The read-only contract concerns configuration APIs and filesystem side effects;
+the engine's in-memory working dictionaries remain ordinary dictionaries.
 
 The snapshot preserves all 94 effective aliases, including builtin/custom
 definitions, resolved duplicate-name precedence, and YAML tuple types. It records
@@ -662,9 +671,11 @@ The YAML is included in the installed muscat-db wheel.
 
 Forked workers inherit this configuration. The adapter requires the pinned
 Python 3.10/Linux `fork` start method and refuses spawn/forkserver, which could
-re-import prose without the adapter. The engine has no supported configuration
-root yet; [jpdeleon/prose2#15](https://github.com/jpdeleon/prose2/issues/15) tracks
-that API so this adapter can eventually be removed.
+re-import prose without the adapter. The engine has no supported explicit,
+read-only configuration loading API yet;
+[jpdeleon/prose2#15](https://github.com/jpdeleon/prose2/issues/15) tracks that API
+so this adapter can eventually be removed. Independent directories are not a
+requirement: installations may load the same approved configuration file.
 
 To prepare a future configuration update, `deploy/engines.py capture-config
 --snapshot <new-file>` captures the effective configuration using clean engine

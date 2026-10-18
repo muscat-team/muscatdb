@@ -1,6 +1,6 @@
 """Standalone adapter run by prose's Python, before importing the engine.
 
-The pinned prose2 ConfigManager has no configuration-directory argument. This
+The pinned prose2 ConfigManager has no explicit read-only loading API. This
 import adapter supplies its frozen configuration before prose.__init__ creates
 CONFIG; it never changes the engine checkout, HOME, or the shared ~/.prose tree.
 Keep this module compatible with prose's Python 3.10 and standard-library-only
@@ -23,16 +23,17 @@ SNAPSHOT_SHA256 = "39503fce597e2d5fd349fa8009ed5068222fc6e31f098cf50e62f2a17f314
 MODULES = {"prose.scripts.run_photometry", "prose.scripts.postprocess_lightcurves"}
 
 
-def snapshot_bytes() -> bytes:
-    data = SNAPSHOT.read_bytes()
+def snapshot_bytes(config_file: Path | None = None) -> bytes:
+    data = (SNAPSHOT if config_file is None else config_file).read_bytes()
     if hashlib.sha256(data).hexdigest() != SNAPSHOT_SHA256:
         raise RuntimeError("frozen prose telescope snapshot checksum mismatch")
     return data
 
 
-def install_config(snapshot: dict) -> None:
+def install_config(snapshot: dict, config_file: Path | None = None) -> None:
     if "prose" in sys.modules:
         raise RuntimeError("frozen configuration must be installed before importing prose")
+    config_file = SNAPSHOT if config_file is None else config_file
 
     class ConfigFinder(importlib.abc.MetaPathFinder):
         def find_spec(self, fullname, path=None, target=None):
@@ -52,8 +53,8 @@ def install_config(snapshot: dict) -> None:
 
                     class FrozenConfig(module.ConfigManager):
                         def __init__(self):
-                            self.folder_path = SNAPSHOT.parent
-                            self.config_file = SNAPSHOT
+                            self.folder_path = config_file.parent
+                            self.config_file = config_file
                             self.config = copy.deepcopy(snapshot["settings"])
                             self.telescopes_dict = self.build_telescopes_dict()
                             self.logs = []
@@ -75,6 +76,21 @@ def install_config(snapshot: dict) -> None:
                         def save_telescope_file(self, file):
                             raise RuntimeError("production prose configuration is frozen")
 
+                        def set(self, key, value):
+                            raise RuntimeError("production prose configuration is frozen")
+
+                        def update_builtins(self):
+                            raise RuntimeError("production prose configuration is frozen")
+
+                        def create_builtins_telescopes_files(self, force=False):
+                            raise RuntimeError("production prose configuration is frozen")
+
+                        def rename_id_files_to_telescopes(self):
+                            raise RuntimeError("production prose configuration is frozen")
+
+                        def check_ballet(self):
+                            raise RuntimeError("production prose configuration is frozen")
+
                     module.ConfigManager = FrozenConfig
 
             spec.loader = ConfigLoader()
@@ -85,10 +101,16 @@ def install_config(snapshot: dict) -> None:
 
 def main(argv=None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
+    config_file = SNAPSHOT
+    if args and args[0] == "--config":
+        if len(args) < 2 or args[1].startswith("--"):
+            raise ValueError("--config requires a configuration file")
+        config_file = Path(args[1]).resolve()
+        args = args[2:]
     checking = args == ["--check"]
     if not checking and (not args or args[0] not in MODULES):
         raise ValueError("expected a supported prose module followed by its arguments")
-    data = snapshot_bytes()
+    data = snapshot_bytes(config_file)
     import yaml
     snapshot = yaml.full_load(data)
     if snapshot.get("schema") != 1:
@@ -103,7 +125,7 @@ def main(argv=None) -> int:
     import multiprocess
     if multiprocess.get_start_method() != "fork":
         raise RuntimeError("frozen prose configuration currently requires fork workers")
-    install_config(snapshot)
+    install_config(snapshot, config_file)
     if checking:
         import prose
         print(json.dumps({"prose_config_sha256": SNAPSHOT_SHA256,

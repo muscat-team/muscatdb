@@ -17,7 +17,8 @@ def test_production_prefix_uses_adapter_for_photometry_and_postprocess(monkeypat
     monkeypatch.setattr(photometry, "_conda_env_python", lambda env: "/pinned/bin/python")
     for module in (photometry._MODULE, photometry._POSTPROCESS_MODULE):
         assert photometry._prose_prefix(module) == [
-            "/pinned/bin/python", "-I", str(Path(launcher.__file__)), module,
+            "/pinned/bin/python", "-I", str(Path(launcher.__file__)),
+            "--config", str(launcher.SNAPSHOT), module,
         ]
 
 
@@ -47,6 +48,17 @@ def test_checked_in_snapshot_matches_its_digest_and_deployment_pin():
     assert hashlib.sha256(launcher.snapshot_bytes()).hexdigest() == pin["frozen_config_sha256"]
 
 
+def test_explicit_configuration_is_checked_not_replaced_by_default(tmp_path):
+    config = tmp_path / "canonical.yaml"
+    config.write_bytes(launcher.snapshot_bytes())
+    assert launcher.snapshot_bytes(config) == launcher.snapshot_bytes()
+    config.write_bytes(b"modified")
+    with pytest.raises(RuntimeError, match="checksum"):
+        launcher.main(["--config", str(config), "--check"])
+    with pytest.raises(FileNotFoundError):
+        launcher.main(["--config", str(tmp_path / "missing"), "--check"])
+
+
 def test_launcher_rejects_an_engine_from_another_repository(monkeypatch):
     monkeypatch.setattr(launcher.importlib.metadata, "distribution", lambda name:
         SimpleNamespace(read_text=lambda filename: json.dumps({
@@ -65,6 +77,14 @@ def test_engine_never_initializes_development_config_and_fork_workers_inherit_sn
         "class ConfigManager:\n"
         "    def __init__(self):\n"
         "        raise RuntimeError('development configuration accessed')\n"
+        "    def set(self, key, value):\n"
+        "        self.config[key] = value\n"
+        "        self.save()\n"
+        "    def update_builtins(self):\n"
+        "        raise AssertionError('inherited write attempted')\n"
+        "    create_builtins_telescopes_files = update_builtins\n"
+        "    rename_id_files_to_telescopes = update_builtins\n"
+        "    check_ballet = update_builtins\n"
     )
     setup = f"import sys; sys.path.insert(0, {str(tmp_path)!r})\n"
     baseline = subprocess.run([sys.executable, "-c", setup + "import prose"],
@@ -76,12 +96,18 @@ adapter = runpy.run_path({launcher.__file__!r})
 adapter['install_config'](dict(settings={{'color': 'blue'}}, telescopes={{'camera': {{'gain': 17}}}}))
 import prose
 assert prose.CONFIG.telescopes_dict['camera']['gain'] == 17
-try:
-    prose.CONFIG.save()
-except RuntimeError:
-    pass
-else:
-    raise AssertionError('frozen configuration could be overwritten')
+for method, args in [('save', ()), ('set', ('color', 'red')),
+                     ('save_telescope_file', ({{'name': 'camera'}},)),
+                     ('update_builtins', ()), ('create_builtins_telescopes_files', (True,)),
+                     ('rename_id_files_to_telescopes', ()), ('check_ballet', ())]:
+    try:
+        getattr(prose.CONFIG, method)(*args)
+    except RuntimeError as exc:
+        assert 'frozen' in str(exc)
+        assert prose.CONFIG.config == {{'color': 'blue'}}
+    else:
+        raise AssertionError(method + ' did not reject a configuration write')
+assert prose.CONFIG.config == {{'color': 'blue'}}
 def read_gain(_):
     import prose
     return prose.CONFIG.telescopes_dict['camera']['gain']

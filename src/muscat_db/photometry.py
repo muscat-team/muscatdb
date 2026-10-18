@@ -429,7 +429,8 @@ def _prose_prefix(module: str = _MODULE, console_script: str | None = "photometr
         python = explicit or _conda_env_python(prose_conda_env())
         if python is None:
             raise RuntimeError("frozen prose configuration requires its pinned environment")
-        return [python, "-I", str(_HERE / "_prose_launcher.py"), module]
+        return [python, "-I", str(_HERE / "_prose_launcher.py"),
+                "--config", str(_HERE / "_prose_telescopes.yaml"), module]
     if explicit:
         return [explicit, "-m", module]
     env = prose_conda_env()
