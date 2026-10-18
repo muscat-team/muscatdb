@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -30,6 +31,14 @@ def _interpreters(engine):
              for key in ("source_environment", "environment")]
     if not all(paths):
         pytest.skip(f"{engine} baseline and pinned environments are required")
+    # A half-finished clone still has a Python executable, and may still import
+    # the baseline's editable checkout. Comparing it with itself would pass.
+    conda = Path(paths[1]).parents[3] / "bin/conda"
+    result = subprocess.run(
+        [sys.executable, str(_ROOT / "deploy/engines.py"), "verify", engine,
+         "--conda", str(conda)], capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
     return paths
 
 
