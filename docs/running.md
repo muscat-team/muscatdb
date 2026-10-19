@@ -49,7 +49,7 @@ routes return ZIP archives. Hidden runs return empty discovery results.
 Unknown request fields are ignored for compatibility with saved form settings.
 Numeric options accept numbers, numeric strings, and the form's empty string;
 blank run options keep pipeline defaults. A blank post-process `sigma` instead
-disables sigma clipping. Comma-separated IDs and JD lists remain strings and
+disables sigma clipping. Comma-separated IDs and JD lists are strings (a bare number is accepted and converted) and
 retain the pipeline's syntax validation. Type/shape errors return HTTP 422;
 existing option rules still apply, with their existing error responses.
 

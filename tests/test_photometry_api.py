@@ -87,6 +87,25 @@ def test_model_preserves_existing_option_semantics(options):
     assert phot.normalize_run_options(parsed) == phot.normalize_run_options(options)
 
 
+@pytest.mark.parametrize("key, value, text", [
+    ("ref_time", 2460000.5, "2460000.5"),
+    ("exclude_after_jd", 2460000.5, "2460000.5"),
+    ("exclude_before_jd", 2460000, "2460000"),
+    ("comparison_ids", 12, "12"),
+    ("avoid_comparison_ids", 3, "3"),
+])
+def test_numbers_are_accepted_for_text_options_as_before(key, value, text):
+    parsed = api.PhotometryOptions.model_validate({key: value}).model_dump(exclude_unset=True)
+    assert parsed == {key: text}
+    assert phot.normalize_run_options(parsed) == phot.normalize_run_options({key: value})
+
+
+@pytest.mark.parametrize("key", ["ref_time", "exclude_after_jd", "comparison_ids"])
+def test_text_options_still_reject_booleans(key):
+    with pytest.raises(ValidationError):
+        api.PhotometryOptions.model_validate({key: True})
+
+
 @pytest.mark.parametrize("key", ["target_id", "avoid_nearby_star", "cutout_size"])
 def test_numeric_fields_do_not_turn_booleans_into_valid_numbers(key):
     with pytest.raises(ValidationError):

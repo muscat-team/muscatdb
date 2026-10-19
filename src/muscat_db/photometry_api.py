@@ -19,6 +19,14 @@ def _form_number(value):
     return "" if isinstance(value, str) and not value.strip() else value
 
 
+def _form_text(value):
+    """Keep accepting a bare number where the pipeline takes comma-separated text."""
+    if isinstance(value, bool):
+        raise ValueError("a boolean is not a text option")
+    return str(value) if isinstance(value, (int, float)) else value
+
+
+FormText = Annotated[str, BeforeValidator(_form_text)]
 FormInt = Annotated[int | Literal[""] | None, BeforeValidator(_form_number)]
 FormFloat = Annotated[float | Literal[""] | None, BeforeValidator(_form_number)]
 
@@ -40,14 +48,14 @@ class PhotometryOptions(RequestModel):
     ref_band: str = ""
     refid: FormInt = ""
     ref_select: str = phot.RUN_DEFAULTS["ref_select"]
-    ref_time: str = Field("", description="HH:MM[:SS] UT, ISO UTC, or Julian date")
+    ref_time: FormText = Field("", description="HH:MM[:SS] UT, ISO UTC, or Julian date")
     ref_select_top_k: FormInt = phot.RUN_DEFAULTS["ref_select_top_k"]
     aper_unit: str = phot.RUN_DEFAULTS["aper_unit"]
     aper_radii: str = Field("", description="MIN,MAX,DR; requires annulus")
     annulus: str = Field("", description="RIN,ROUT; requires aper_radii")
     target_id: Annotated[str | int, BeforeValidator(_form_number)] = ""
-    comparison_ids: str = Field("", description="Comma-separated integer IDs")
-    avoid_comparison_ids: str = Field("", description="Comma-separated integer IDs; requires ref_band")
+    comparison_ids: FormText = Field("", description="Comma-separated integer IDs")
+    avoid_comparison_ids: FormText = Field("", description="Comma-separated integer IDs; requires ref_band")
     avoid_nearby_star_mode: str = phot.RUN_DEFAULTS["avoid_nearby_star_mode"]
     avoid_nearby_star: FormFloat = ""
     avoid_nearby_stars: bool = Field(True, description="Legacy flag used when mode is absent")
@@ -81,8 +89,8 @@ class PhotometryOptions(RequestModel):
     site: str = ""
     telescope: str = ""
     mode: str = ""
-    exclude_after_jd: str = Field("", description="Comma-separated Julian dates")
-    exclude_before_jd: str = Field("", description="Comma-separated Julian dates")
+    exclude_after_jd: FormText = Field("", description="Comma-separated Julian dates")
+    exclude_before_jd: FormText = Field("", description="Comma-separated Julian dates")
     post_sigma: FormFloat = phot.POSTPROCESS_DEFAULTS["post_sigma"]
     post_poly_deg: FormInt = phot.POSTPROCESS_DEFAULTS["post_poly_deg"]
     post_exclude_before_jd: FormFloat = ""
