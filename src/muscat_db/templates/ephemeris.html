@@ -1613,7 +1613,7 @@
         if (ds.planets_fitted && ds.planets_fitted.includes(p)) {
           const dsKey = `dataset_${dsIdx}`;
           const isSel = selectedSource === dsKey ? ' selected' : '';
-          const dsName = `${ds.instrument.toUpperCase()} (${ds.date}) - ${ds.run_name}`;
+          const dsName = `${escapeAttr(ds.instrument.toUpperCase())} (${escapeAttr(ds.date)}) - ${escapeAttr(ds.run_name)}`;
           datasetOptions += `<option value="${dsKey}"${isSel}>${dsName}</option>`;
         }
       });
@@ -2009,24 +2009,27 @@
       const transitsSummary = transitsList.length > 0 ? transitsList.join(' ') : '<span style="color: var(--text-dim); font-style: italic;">None</span>';
       const epochsSummary = epochsList.length > 0 ? epochsList.join(' ') : '<span style="color: var(--text-dim);">—</span>';
       
-      const detailsUrl = `/transit-fit?inst=${d.instrument}&date=${d.date}&target=${encodeURIComponent(d.target)}&run=${d.run_id}`;
+      const detailsUrl = `/transit-fit?inst=${encodeURIComponent(d.instrument)}&date=${encodeURIComponent(d.date)}&target=${encodeURIComponent(d.target)}&run=${encodeURIComponent(d.run_id || '')}`;
 
       const coverageSuffix = ['full', 'ing', 'egr'].includes(d.transit_coverage)
         ? ` (${d.transit_coverage})` : '';
 
+      // run_name and target are free text (a run name is whatever its author
+      // typed), and this row is shown to every viewer of the target, so every
+      // server value is escaped before it reaches innerHTML.
       tr.innerHTML = `
         <td style="text-align: center;">
           <input type="checkbox" class="dataset-checkbox" data-index="${idx}" ${isChecked ? 'checked' : ''} onchange="onDatasetCheckboxChange(this, ${idx})">
         </td>
-        <td class="mono">${d.instrument.toUpperCase()}</td>
-        ${showTargetColumn ? `<td><span class="badge" style="background: var(--surface); color: var(--text-dim); font-size: 0.8rem; border: 1px solid var(--border);">${d.target}</span></td>` : ''}
-        <td class="mono">${d.date}</td>
+        <td class="mono">${escapeAttr(d.instrument.toUpperCase())}</td>
+        ${showTargetColumn ? `<td><span class="badge" style="background: var(--surface); color: var(--text-dim); font-size: 0.8rem; border: 1px solid var(--border);">${escapeAttr(d.target)}</span></td>` : ''}
+        <td class="mono">${escapeAttr(d.date)}</td>
         <td>
-          <a href="${detailsUrl}" target="_blank" style="font-weight: 600; color: var(--text);" title="Click to view transit fit">
-            ${d.run_name}${coverageSuffix}
+          <a href="${escapeAttr(detailsUrl)}" target="_blank" style="font-weight: 600; color: var(--text);" title="Click to view transit fit">
+            ${escapeAttr(d.run_name)}${coverageSuffix}
           </a>
         </td>
-        <td class="mono" style="text-align: center;">${d.planets_fitted}</td>
+        <td class="mono" style="text-align: center;">${escapeAttr(d.planets_fitted)}</td>
         <td class="mono" style="text-align: center;">${epochsSummary}</td>
         <td>${transitsSummary}</td>
       `;
@@ -2332,7 +2335,7 @@
 
   function escapeAttr(v) {
     return String(v == null ? '' : v)
-      .replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+      .replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
       .replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
@@ -3469,8 +3472,8 @@
         if (p.target) lines.push(`Target: ${escapeAttr(p.target)}`);
         if (p.date) lines.push(`Date: ${escapeAttr(p.date)}`);
       } else {
-        lines.push(`<b>${p.instrument.toUpperCase()} (${p.date}) — ${p.run_name}</b>`);
-        lines.push(`Target: ${p.target}`);
+        lines.push(`<b>${escapeAttr(p.instrument.toUpperCase())} (${escapeAttr(p.date)}) — ${escapeAttr(p.run_name)}</b>`);
+        lines.push(`Target: ${escapeAttr(p.target)}`);
       }
       lines.push(`Epoch: ${p.epoch}`);
       lines.push(`BJD: ${p.bjd.toFixed(5)}`);
@@ -4266,10 +4269,10 @@
         html += `
           <figure class="fig">
             <figcaption class="cap">
-              <span>${p.file.replace(/\.png$/, '')} (Created: ${p.created_at})</span>
+              <span>${escapeAttr(p.file.replace(/\.png$/, ''))} (Created: ${escapeAttr(p.created_at)})</span>
             </figcaption>
-            <a href="${imgUrl}" target="_blank">
-              <img draggable="false" loading="lazy" src="${imgUrl}" alt="${p.file}">
+            <a href="${escapeAttr(imgUrl)}" target="_blank">
+              <img draggable="false" loading="lazy" src="${escapeAttr(imgUrl)}" alt="${escapeAttr(p.file)}">
             </a>
           </figure>
         `;
