@@ -8,6 +8,16 @@ written with ``inputs: null`` and a note, so the run is *known* to be
 undetermined rather than merely absent, and stays admin-only once visibility
 reads the record.
 
+Run directories with no job row (everything made before the ``jobs`` table
+existed) are then found by walking the output trees, because a run that no
+record describes is hidden from every non-admin once visibility reads the
+record. Their author is unknown, so they stay hidden from a viewer whose access
+is denied for any input. A photometry run's inputs are the night's frames; a
+transit fit's are the light curves its ``fit.yaml`` names, located by file name
+under the same night's photometry outputs. A name found in several photometry
+runs lists all of them, so the fit is visible only to a viewer who may see
+every candidate; a name found nowhere leaves the fit undetermined.
+
 Not recoverable, so left undetermined:
 
 * TTV fits. The submitted CSV holds only planet, epoch, tc and tc_unc; nothing
@@ -17,6 +27,8 @@ Not recoverable, so left undetermined:
   every light curve present at the time, which may differ from what is on disk
   now).
 * Light curves whose night/target has no frame rows to resolve against.
+* Transit fits whose ``fit.yaml`` is unreadable or names a light curve that is
+  no longer on disk.
 
 Tool versions are left empty: the versions installed now are not the ones that
 ran then, and recording them would be false provenance.
@@ -29,6 +41,7 @@ from __future__ import annotations
 import datetime
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -48,6 +61,7 @@ class BackfillStats:
     already: int = 0
     missing_dir: int = 0
     errors: int = 0
+    from_disk: int = 0
     by_reason: dict[str, int] = field(default_factory=dict)
 
     def note(self, reason: str) -> None:
@@ -137,6 +151,7 @@ def backfill_products(db_path: str, *, dry_run: bool = False) -> BackfillStats:
         cols = [d[0] for d in cur.description]
         rows = [dict(zip(cols, r)) for r in cur.fetchall()]
 
+    seen: set[Path] = set()
     for row in rows:
         level = JOB_LEVELS.get(row["type"])
         if level is None:
@@ -145,6 +160,7 @@ def backfill_products(db_path: str, *, dry_run: bool = False) -> BackfillStats:
         if rdir is None or not rdir.is_dir():
             stats.missing_dir += 1
             continue
+        seen.add(rdir.resolve(strict=False))
         if product_record.read_record(rdir) is not None:
             stats.already += 1
             continue
@@ -162,25 +178,134 @@ def backfill_products(db_path: str, *, dry_run: bool = False) -> BackfillStats:
             logger.warning("backfill failed for %s", row.get("key"), exc_info=True)
             stats.errors += 1
             continue
-        record = product_record.build_record(
-            level,
-            author=row.get("user_name"),
-            inputs=inputs,
-            settings=settings,
-            tool_versions={},
-            backfilled=True,
-            created_at=_iso(row.get("started_at")),
-            note=note,
-        )
-        if inputs is None:
-            stats.undetermined += 1
-            stats.note(note or "undetermined")
-        else:
-            stats.determined += 1
-        if dry_run:
-            continue
-        if product_record.write_record(rdir, record):
-            stats.written += 1
-        else:
-            stats.errors += 1
+        _store(stats, rdir, level, row.get("user_name"), inputs, settings, note,
+               _iso(row.get("started_at")), dry_run)
+    _backfill_disk_runs(db_path, stats, seen, dry_run)
     return stats
+
+
+def _store(stats, rdir, level, author, inputs, settings, note, created_at, dry_run) -> None:
+    """Build one backfilled record and write it, updating *stats*."""
+    record = product_record.build_record(
+        level,
+        author=author,
+        inputs=inputs,
+        settings=settings,
+        tool_versions={},
+        backfilled=True,
+        created_at=created_at,
+        note=note,
+    )
+    if inputs is None:
+        stats.undetermined += 1
+        stats.note(note or "undetermined")
+    else:
+        stats.determined += 1
+    if dry_run:
+        return
+    if product_record.write_record(rdir, record):
+        stats.written += 1
+    else:
+        stats.errors += 1
+
+
+def _subdirs(path: Path) -> list[Path]:
+    """Real (non-symlink) child directories, sorted; empty if unreadable."""
+    try:
+        return sorted(p for p in path.iterdir() if p.is_dir() and not p.is_symlink())
+    except OSError:
+        return []
+
+
+def _disk_photometry_runs(base: Path):
+    """``(inst, date, target, run_id, rdir)`` for each named run under *base*."""
+    for inst in _subdirs(base):
+        for night in _subdirs(inst):
+            for target in _subdirs(night / "_runs"):
+                for run in _subdirs(target):
+                    yield inst.name, night.name, target.name, run.name, run
+
+
+def _disk_fit_runs(base: Path):
+    """``(inst, date, target, run_id, rdir)`` for each transit-fit run on disk.
+
+    A run is the target directory itself (legacy, ``run_id == ""``) or one of its
+    children, and is recognised by the ``fit.yaml`` the page writes there. The
+    ``out`` directory timer writes below a run also holds a ``fit.yaml`` copy
+    and is not a run.
+    """
+    for inst in _subdirs(base):
+        for night in _subdirs(inst):
+            for target in _subdirs(night):
+                if (target / "fit.yaml").is_file():
+                    yield inst.name, night.name, target.name, "", target
+                for run in _subdirs(target):
+                    if run.name != "out" and (run / "fit.yaml").is_file():
+                        yield inst.name, night.name, target.name, run.name, run
+
+
+def _fit_yaml_files(rdir: Path) -> list[str] | None:
+    """Light-curve file names a run's ``fit.yaml`` lists, or ``None`` if unreadable."""
+    import yaml
+
+    try:
+        data = yaml.safe_load((rdir / "fit.yaml").read_text())
+        entries = data["data"].values()
+        names = [e["file"] for e in entries]
+    except (OSError, yaml.YAMLError, KeyError, TypeError, AttributeError):
+        return None
+    if not names or not all(isinstance(n, str) and n and os.path.basename(n) == n for n in names):
+        return None
+    return names
+
+
+def _disk_transit_record(inst: str, date: str, target: str, rdir: Path):
+    """``(inputs, settings, note)`` for a transit fit found only on disk."""
+    from muscat_db.photometry import output_base
+
+    names = _fit_yaml_files(rdir)
+    if names is None:
+        return None, {}, "fit.yaml is unreadable or lists no light curves"
+    night = output_base() / inst / date
+    runs_root = night / "_runs" / target
+    inputs, missing, ambiguous = [], [], False
+    for name in names:
+        found = [p for p in [night / name, *(r / name for r in _subdirs(runs_root))] if p.is_file()]
+        if not found:
+            missing.append(name)
+        ambiguous = ambiguous or len(found) > 1
+        inputs += [product_record.lightcurve_input(inst, date, target, p, runs_root) for p in found]
+    if missing:
+        return None, {}, f"light curve no longer on disk: {', '.join(missing)}"
+    note = "light curve name found in several runs; all are listed" if ambiguous else None
+    return inputs, {}, note
+
+
+def _backfill_disk_runs(db_path: str, stats: BackfillStats, seen: set[Path], dry_run: bool) -> None:
+    """Record every photometry and transit-fit run directory the job pass missed."""
+    from muscat_db import photometry, transit_fit
+
+    normalize = product_record.target_normalizer(db_path)
+    passes = (
+        ("photometry", _disk_photometry_runs(photometry.output_base())),
+        ("transit_fit", _disk_fit_runs(transit_fit.fit_output_dir("_", "_", "_").parents[2])),
+    )
+    for level, runs in passes:
+        for inst, date, target, run_id, rdir in runs:
+            if rdir.resolve(strict=False) in seen:
+                continue
+            if product_record.read_record(rdir) is not None:
+                stats.already += 1
+                continue
+            try:
+                if level == "photometry":
+                    inputs, note = product_record.frames_inputs(db_path, inst, date, target, normalize)
+                    settings = {}
+                else:
+                    inputs, settings, note = _disk_transit_record(inst, date, target, rdir)
+            except Exception:  # one bad directory must not stop the sweep
+                logger.warning("disk backfill failed for %s", rdir, exc_info=True)
+                stats.errors += 1
+                continue
+            stats.from_disk += 1
+            _store(stats, rdir, level, None, inputs, settings, note, None, dry_run)
