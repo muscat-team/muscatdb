@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 # Imported as a module (not by name) so the concrete store sees monkeypatched
 # muscat_db.database.save_job / get_persisted_jobs in tests and any runtime swap.
 from muscat_db import database
+from muscat_db.job_limits import JobLimitExceeded, queued_limit_message
 from muscat_db.jobs import CANCELLED_RC as _CANCELLED_RC
 
 if TYPE_CHECKING:
@@ -178,8 +179,15 @@ class JobQueue(Protocol):
         run_id: str = "",
         run_name: str = "",
         user_name: str | None = None,
+        max_queued: int | None = None,
     ) -> None:
-        """Record a job as pending (queued, not yet launched)."""
+        """Record a job as pending (queued, not yet launched).
+
+        With a positive *max_queued*, the count of *user_name*'s other pending
+        jobs and the insert are one atomic step, and an enqueue that would
+        exceed the cap raises :class:`muscat_db.job_limits.JobLimitExceeded`
+        instead of inserting (issue #265). Re-enqueueing a key that is already
+        pending adds no row, so it is never counted against the cap."""
         ...
 
     def pending(self, type_: str) -> list[dict]:
@@ -213,7 +221,15 @@ class JobConcurrency(Protocol):
     Celery/Redis backend replaces the SQLite-backed slot claim with
     broker-native concurrency limits without changing callers."""
 
-    def claim_slot(self, pipeline: str, holder_key: str, max_slots: int) -> bool:
+    def claim_slot(
+        self,
+        pipeline: str,
+        holder_key: str,
+        max_slots: int,
+        *,
+        user_name: str | None = None,
+        max_user_slots: int | None = None,
+    ) -> bool:
         """Atomically claim one of *max_slots* concurrency slots for
         *pipeline* under *holder_key* (the pipeline's own job key, unprefixed).
         Returns True only if this call newly claimed the slot; False if
@@ -225,7 +241,12 @@ class JobConcurrency(Protocol):
         orthogonal cap: total slots held by :func:`current_host` across every
         pipeline combined. Unset (the default), this call is unaffected --
         only the cluster-wide *pipeline* cap above applies. See
-        :data:`_WORKER_MAX_SLOTS`."""
+        :data:`_WORKER_MAX_SLOTS`.
+
+        *user_name* is recorded on the slot. With a positive *max_user_slots*
+        a third cap applies in the same atomic claim: slots *user_name* holds
+        across every pipeline combined (issue #265); False then means "queue
+        it", exactly like a full pipeline."""
         ...
 
     def release_slot(self, pipeline: str, holder_key: str) -> None:
@@ -413,8 +434,9 @@ class DatabaseJobStore(JobRepository, JobQueue, JobConcurrency):
         run_id: str = "",
         run_name: str = "",
         user_name: str | None = None,
+        max_queued: int | None = None,
     ) -> None:
-        self.save(
+        database.save_job(
             type_=type_,
             inst=inst,
             date=date,
@@ -428,6 +450,7 @@ class DatabaseJobStore(JobRepository, JobQueue, JobConcurrency):
             run_id=run_id,
             run_name=run_name,
             user_name=user_name,
+            max_pending=max_queued if max_queued and user_name else None,
         )
         # The signal is strictly best-effort: enqueue's durable write above
         # has already succeeded, and a failure to wake a waiter is fully
@@ -448,10 +471,18 @@ class DatabaseJobStore(JobRepository, JobQueue, JobConcurrency):
         rows.sort(key=lambda j: j.get("started_at") or 0)
         return rows
 
-    def claim_slot(self, pipeline: str, holder_key: str, max_slots: int) -> bool:
+    def claim_slot(
+        self,
+        pipeline: str,
+        holder_key: str,
+        max_slots: int,
+        *,
+        user_name: str | None = None,
+        max_user_slots: int | None = None,
+    ) -> bool:
         # A single INSERT ... SELECT ... WHERE statement is one atomic write:
-        # SQLite serializes writers even in WAL mode, so the capacity check
-        # (the COUNT subquery) and the claim (the INSERT) can never interleave
+        # SQLite serializes writers even in WAL mode, so the capacity checks
+        # (the COUNT subqueries) and the claim (the INSERT) can never interleave
         # with another connection's claim/release. OR IGNORE makes a repeat
         # claim for the same (pipeline, holder_key) a no-op (PRIMARY KEY
         # conflict) rather than an error, and rowcount then distinguishes "I
@@ -459,36 +490,32 @@ class DatabaseJobStore(JobRepository, JobQueue, JobConcurrency):
         # slot" (0 either way) -- the caller only ever gets True from the
         # single claim that actually won, so two racing launches for the same
         # key never both proceed.
+        columns = ["pipeline", "holder_key", "claimed_at"]
+        values: list = [pipeline, holder_key, time.time()]
+        predicates = ["(SELECT COUNT(*) FROM job_concurrency_slots WHERE pipeline = ?) < ?"]
+        predicate_values: list = [pipeline, max_slots]
+        if _WORKER_MAX_SLOTS is not None:
+            # Total slots held by this host across ALL pipelines combined must
+            # also be under _WORKER_MAX_SLOTS. Same single statement, so the
+            # writer serialization covers every count the same way.
+            columns.append("host")
+            values.append(_HOST)
+            predicates.append("(SELECT COUNT(*) FROM job_concurrency_slots WHERE host = ?) < ?")
+            predicate_values += [_HOST, _WORKER_MAX_SLOTS]
+        if user_name:
+            columns.append("user_name")
+            values.append(user_name)
+            if max_user_slots and max_user_slots > 0:
+                # Per-user running cap (issue #265), across every pipeline.
+                predicates.append("(SELECT COUNT(*) FROM job_concurrency_slots WHERE user_name = ?) < ?")
+                predicate_values += [user_name, max_user_slots]
         with database.get_conn() as conn:
             database._ensure_job_concurrency_slots_schema(conn)
-            if _WORKER_MAX_SLOTS is None:
-                # No host cap configured: run the exact query this method has
-                # always run, so an unconfigured host's behavior (and SQL) is
-                # byte-for-byte unchanged by this feature's existence.
-                cur = conn.execute(
-                    """
-                    INSERT OR IGNORE INTO job_concurrency_slots (pipeline, holder_key, claimed_at)
-                    SELECT ?, ?, ?
-                    WHERE (SELECT COUNT(*) FROM job_concurrency_slots WHERE pipeline = ?) < ?
-                    """,
-                    (pipeline, holder_key, time.time(), pipeline, max_slots),
-                )
-            else:
-                # Second predicate: total slots held by this host across ALL
-                # pipelines combined must also be under _WORKER_MAX_SLOTS.
-                # Still one atomic INSERT ... SELECT ... WHERE -- SQLite's
-                # writer serialization covers both counts the same way it
-                # covers the single count above.
-                cur = conn.execute(
-                    """
-                    INSERT OR IGNORE INTO job_concurrency_slots (pipeline, holder_key, claimed_at, host)
-                    SELECT ?, ?, ?, ?
-                    WHERE (SELECT COUNT(*) FROM job_concurrency_slots WHERE pipeline = ?) < ?
-                      AND (SELECT COUNT(*) FROM job_concurrency_slots WHERE host = ?) < ?
-                    """,
-                    (pipeline, holder_key, time.time(), _HOST,
-                     pipeline, max_slots, _HOST, _WORKER_MAX_SLOTS),
-                )
+            cur = conn.execute(
+                f"INSERT OR IGNORE INTO job_concurrency_slots ({', '.join(columns)}) "
+                f"SELECT {', '.join('?' for _ in columns)} WHERE {' AND '.join(predicates)}",
+                (*values, *predicate_values),
+            )
             conn.commit()
         return cur.rowcount > 0
 
@@ -581,6 +608,7 @@ CREATE TABLE IF NOT EXISTS job_concurrency_slots (
     holder_key  TEXT NOT NULL,
     claimed_at  DOUBLE PRECISION NOT NULL,
     host        TEXT NOT NULL DEFAULT '',
+    user_name   TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (pipeline, holder_key)
 );
 """
@@ -611,6 +639,7 @@ _PG_JOBS_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
 
 _PG_JOB_CONCURRENCY_SLOTS_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
     ("host", "TEXT NOT NULL DEFAULT ''"),
+    ("user_name", "TEXT NOT NULL DEFAULT ''"),
 ]
 
 
@@ -740,6 +769,37 @@ class PostgresJobStore(JobRepository, JobQueue, JobConcurrency):
         owner: str = "",
         instance_id: str = "",
         attempts: int = 0,
+        max_queued: int | None = None,
+    ) -> None:
+        self._upsert(
+            type_=type_, inst=inst, date=date, target=target, state=state,
+            returncode=returncode, elapsed=elapsed, started_at=started_at,
+            error_desc=error_desc, run_type=run_type, params=params,
+            run_id=run_id, run_name=run_name, user_name=user_name, owner=owner,
+            instance_id=instance_id, attempts=attempts,
+        )
+
+    def _upsert(
+        self,
+        *,
+        type_: str,
+        inst: str,
+        date: str,
+        target: str,
+        state: str,
+        returncode: int | None,
+        elapsed: int,
+        started_at: float,
+        error_desc: str = "",
+        run_type: str = "",
+        params: str = "",
+        run_id: str = "",
+        run_name: str = "",
+        user_name: str | None = None,
+        owner: str = "",
+        instance_id: str = "",
+        attempts: int = 0,
+        max_queued: int | None = None,
     ) -> None:
         if user_name is None:
             user_name = ""
@@ -747,6 +807,19 @@ class PostgresJobStore(JobRepository, JobQueue, JobConcurrency):
         if run_id:
             key = f"{key}/{run_id}"
         with self._pool.connection() as conn:
+            if max_queued:
+                # Per-user queued cap (issue #265). READ COMMITTED lets two
+                # concurrent enqueues both see the same COUNT, so serialize
+                # this user's enqueues on a transaction-scoped advisory lock
+                # (released at COMMIT/ROLLBACK). The two-argument form keeps
+                # its keyspace disjoint from claim_slot's pipeline lock.
+                conn.execute("SELECT pg_advisory_xact_lock(2, hashtext(%s))", (user_name,))
+                queued = conn.execute(
+                    "SELECT COUNT(*) FROM jobs WHERE state = 'pending' AND user_name = %s AND key != %s",
+                    (user_name, key),
+                ).fetchone()[0]
+                if queued >= max_queued:
+                    raise JobLimitExceeded(queued_limit_message(user_name, max_queued))
             conn.execute(
                 """
                 INSERT INTO jobs(key, type, instrument, obsdate, target, state, returncode,
@@ -829,8 +902,9 @@ class PostgresJobStore(JobRepository, JobQueue, JobConcurrency):
         run_id: str = "",
         run_name: str = "",
         user_name: str | None = None,
+        max_queued: int | None = None,
     ) -> None:
-        self.save(
+        self._upsert(
             type_=type_,
             inst=inst,
             date=date,
@@ -844,6 +918,7 @@ class PostgresJobStore(JobRepository, JobQueue, JobConcurrency):
             run_id=run_id,
             run_name=run_name,
             user_name=user_name,
+            max_queued=max_queued if user_name else None,
         )
         # See DatabaseJobStore.enqueue's identical guard: best-effort by
         # contract, never allowed to surface as a failed enqueue.
@@ -935,7 +1010,15 @@ class PostgresJobStore(JobRepository, JobQueue, JobConcurrency):
             self._close_listen_connection()
             return False
 
-    def claim_slot(self, pipeline: str, holder_key: str, max_slots: int) -> bool:
+    def claim_slot(
+        self,
+        pipeline: str,
+        holder_key: str,
+        max_slots: int,
+        *,
+        user_name: str | None = None,
+        max_user_slots: int | None = None,
+    ) -> bool:
         with self._pool.connection() as conn:
             # Unlike SQLite (whole-database writer serialization even in WAL
             # mode), Postgres's default READ COMMITTED isolation lets two
@@ -958,17 +1041,6 @@ class PostgresJobStore(JobRepository, JobQueue, JobConcurrency):
             # (no prior call to be compatible with) and gets its collision
             # safety from being in an already-disjoint keyspace instead.
             conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (pipeline,))
-            if _WORKER_MAX_SLOTS is None:
-                cur = conn.execute(
-                    """
-                    INSERT INTO job_concurrency_slots (pipeline, holder_key, claimed_at)
-                    SELECT %s, %s, %s
-                    WHERE (SELECT COUNT(*) FROM job_concurrency_slots WHERE pipeline = %s) < %s
-                    ON CONFLICT (pipeline, holder_key) DO NOTHING
-                    """,
-                    (pipeline, holder_key, time.time(), pipeline, max_slots),
-                )
-                return cur.rowcount > 0
             # The host cap spans ALL pipelines combined, so a claim for a
             # *different* pipeline on the same host would take a different
             # pipeline-keyed lock above and not be mutually exclusive with
@@ -977,17 +1049,36 @@ class PostgresJobStore(JobRepository, JobQueue, JobConcurrency):
             # that gap. Always acquired after the pipeline lock, at every call
             # site, so two claims can never wait on each other in reverse
             # order (no ABBA deadlock).
-            conn.execute("SELECT pg_advisory_xact_lock(1, hashtext(%s))", (_HOST,))
+            if _WORKER_MAX_SLOTS is not None:
+                conn.execute("SELECT pg_advisory_xact_lock(1, hashtext(%s))", (_HOST,))
+            capped_user = bool(user_name and max_user_slots and max_user_slots > 0)
+            if capped_user:
+                # Per-user running cap (issue #265). It spans every pipeline,
+                # so the per-pipeline lock above does not serialize two of
+                # this user's claims on different pipelines; a lock keyed on
+                # the user does. Always taken last (pipeline, then host, then
+                # user) at every call site, so no ABBA deadlock.
+                conn.execute("SELECT pg_advisory_xact_lock(3, hashtext(%s))", (user_name,))
+            columns = ["pipeline", "holder_key", "claimed_at"]
+            values: list = [pipeline, holder_key, time.time()]
+            predicates = ["(SELECT COUNT(*) FROM job_concurrency_slots WHERE pipeline = %s) < %s"]
+            predicate_values: list = [pipeline, max_slots]
+            if _WORKER_MAX_SLOTS is not None:
+                columns.append("host")
+                values.append(_HOST)
+                predicates.append("(SELECT COUNT(*) FROM job_concurrency_slots WHERE host = %s) < %s")
+                predicate_values += [_HOST, _WORKER_MAX_SLOTS]
+            if user_name:
+                columns.append("user_name")
+                values.append(user_name)
+            if capped_user:
+                predicates.append("(SELECT COUNT(*) FROM job_concurrency_slots WHERE user_name = %s) < %s")
+                predicate_values += [user_name, max_user_slots]
             cur = conn.execute(
-                """
-                INSERT INTO job_concurrency_slots (pipeline, holder_key, claimed_at, host)
-                SELECT %s, %s, %s, %s
-                WHERE (SELECT COUNT(*) FROM job_concurrency_slots WHERE pipeline = %s) < %s
-                  AND (SELECT COUNT(*) FROM job_concurrency_slots WHERE host = %s) < %s
-                ON CONFLICT (pipeline, holder_key) DO NOTHING
-                """,
-                (pipeline, holder_key, time.time(), _HOST,
-                 pipeline, max_slots, _HOST, _WORKER_MAX_SLOTS),
+                f"INSERT INTO job_concurrency_slots ({', '.join(columns)}) "
+                f"SELECT {', '.join('%s' for _ in columns)} WHERE {' AND '.join(predicates)} "
+                "ON CONFLICT (pipeline, holder_key) DO NOTHING",
+                (*values, *predicate_values),
             )
             return cur.rowcount > 0
 

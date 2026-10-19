@@ -50,7 +50,7 @@ def _launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, test_run: bool) -> 
 
 
 class _Store:
-    def claim_slot(self, *_args):
+    def claim_slot(self, *_args, **_kwargs):
         return True
 
     def save(self, **_kwargs):

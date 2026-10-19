@@ -157,6 +157,7 @@ class ActionResponse(ResponseModel):
     queued: bool = False
     already_running: bool = False
     already_finished: bool = False
+    limit_exceeded: bool = False
     requested: bool = False
     count: int | None = None
 

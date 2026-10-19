@@ -21,6 +21,7 @@ import yaml
 
 from muscat_db import jobs, database
 from muscat_db.job_store import current_instance_id, current_owner, get_job_store
+from muscat_db.job_limits import JobLimitExceeded, claim_caps, enqueue_caps, limit_refusal
 from muscat_db import __meta__, __muscatdb_version__, __version__
 from muscat_db.photometry import (
     _conda_env_python,
@@ -510,7 +511,7 @@ def start_ttv_fit(
 
         # Every ttv_fit job is "full" (no test-run concept here), so always
         # claim a cross-process concurrency slot before launching.
-        claimed_slot = get_job_store().claim_slot("ttv_fit", key, _MAX_FULL_JOBS)
+        claimed_slot = get_job_store().claim_slot("ttv_fit", key, _MAX_FULL_JOBS, **claim_caps(user_name))
         at_capacity = not claimed_slot
         if at_capacity:
             try:
@@ -522,7 +523,10 @@ def start_ttv_fit(
                     params=json.dumps({"options": options}, separators=(",", ":")),
                     run_name=run_name,
                     user_name=user_name,
+                    **enqueue_caps(user_name),
                 )
+            except JobLimitExceeded as exc:
+                return limit_refusal(exc)
             except Exception:
                 return {"ok": False, "error": "database not writable"}
             return {"ok": True, "key": key, "queued": True}
@@ -1468,7 +1472,7 @@ def sync_jobs() -> None:
                 # Atomic: at most one process/caller ever wins this claim for a
                 # given key, so two workers draining the same pending row can
                 # never both launch it.
-                if not store.claim_slot("ttv_fit", key, _MAX_FULL_JOBS):
+                if not store.claim_slot("ttv_fit", key, _MAX_FULL_JOBS, **claim_caps(entry.get("user_name"))):
                     continue
                 rdir.mkdir(parents=True, exist_ok=True)
                 csv_content = opts.get("csv_content", "")

@@ -53,6 +53,8 @@ uv run muscat-db access scope <user> [--off]
 # Scoped viewer + one target under any proposal (issue #228)
 uv run muscat-db access grant-target <user> <target>
 uv run muscat-db access revoke-target <user> <target>
+# Per-user job caps (issue #265): show, set (0 = unlimited) or clear a user's overrides
+uv run muscat-db access limit <user> [--running N] [--queued N] [--reset]
 ```
 
 A restricted proposal is hidden from `/targets`, `/target`, project pages and
@@ -68,6 +70,26 @@ allowlist are hidden, including proposals ingested later. They get no shared
 chat (only a private `@bot` exchange and messages addressed to them), and
 `/toi` and `/nexsci` do not flag or link targets outside their scope. Admins are
 never scoped. A scoped user with no grants sees nothing.
+
+### Per-user job limits
+
+Each user may run `MUSCAT_USER_MAX_RUNNING` (default 1) full jobs at once and
+have `MUSCAT_USER_MAX_QUEUED` (default 5) waiting, counted across photometry,
+transit fit and TTV fit together. `0` means unlimited. `access limit` stores a
+per-user override on the user row; with no override the site default applies,
+admins included.
+
+* A launch over the running cap is queued, not refused, and starts when one of
+  the user's jobs finishes. Other users' queued jobs are not held up behind it.
+* A launch over the queued cap is refused with HTTP 429 and a message naming
+  the limit.
+* Test runs take no durable slot and are not counted. A job with no user (an
+  instance without an authenticating proxy) is not capped.
+* Slots claimed before this feature carry no user, so a user's jobs already
+  running at deploy time are not counted until they finish.
+* The caps are enforced in the job store (`claim_slot`, `enqueue`), not in the
+  request handlers, so the web server and fleet workers share them. On
+  PostgreSQL each user's claims and enqueues take a transaction advisory lock.
 
 A scoped viewer can also be given single targets with `access grant-target
 <user> <target>` (spaces and case ignored, resolved to the raw `object`
