@@ -67,6 +67,7 @@ from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader
 
 from muscat_db import photometry as phot
+from muscat_db import photometry_api as phot_api
 from muscat_db import ref_time as ref_time_lib
 from muscat_db import postprocess as postproc
 from muscat_db import exposure as exp_calc
@@ -7101,17 +7102,17 @@ def _ref_time_frames(inst: str, date: str, target: str) -> dict[int, list[dict]]
     return frames
 
 
-@photometry_router.get("/ref-time/{inst}/{date}/{target}")
+@photometry_router.get("/ref-time/{inst}/{date}/{target}", response_model=phot_api.RefTimeRange)
 def photometry_ref_time_range(inst: str, date: str, target: str):
     """Time range, 10-minute slider steps and per-band cadence for the
     ``--ref_select time`` reference-time slider."""
     info = ref_time_lib.build_range(_ref_time_frames(inst, date, target), target)
     if info is None:
         raise HTTPException(404, f"no timed frames for {target!r}")
-    return JSONResponse(info)
+    return phot_api.response(phot_api.RefTimeRange, info)
 
 
-@photometry_router.get("/ref-time/{inst}/{date}/{target}/preview")
+@photometry_router.get("/ref-time/{inst}/{date}/{target}/preview", response_model=phot_api.RefTimePreview)
 def photometry_ref_time_preview(inst: str, date: str, target: str, jd: float):
     """Per band, the frame closest in time to full-JD *jd* and a preview image,
     so the slider can show what ``--ref_time`` would select."""
@@ -7122,7 +7123,7 @@ def photometry_ref_time_preview(inst: str, date: str, target: str, jd: float):
     if inst in ref_time_lib.CALIBRATED_INSTRUMENTS:
         # Same directory run_photometry reads/writes (--calib_dir default).
         calibrated_dir = pathlib.Path(str(phot.results_dir(inst, date)) + "_calibrated")
-    return JSONResponse(
+    return phot_api.response(phot_api.RefTimePreview,
         ref_time_lib.preview(
             frames, target, jd, phot.raw_data_dir(inst, date),
             calibrated_dir=calibrated_dir,
@@ -7130,7 +7131,8 @@ def photometry_ref_time_preview(inst: str, date: str, target: str, jd: float):
     )
 
 
-@photometry_router.get("/file/{inst}/{date}/{target}/run/{run_id}/{name}")
+@photometry_router.get("/file/{inst}/{date}/{target}/run/{run_id}/{name}", response_class=FileResponse,
+                       responses={200: {"content": {"application/octet-stream": {"schema": {"type": "string", "format": "binary"}}}}})
 def photometry_file_run(inst: str, date: str, target: str, run_id: str, name: str):
     path = phot.safe_run_artifact_path(inst, date, target, run_id, name)
     if path is None or _run_hidden("photometry", inst, date, target, run_id):
@@ -7150,7 +7152,8 @@ def _legacy_artifact_hidden(inst: str, date: str, name: str) -> bool:
     return any(stem.startswith(obj + "_") for obj in hidden)
 
 
-@photometry_router.get("/file/{inst}/{date}/{name}")
+@photometry_router.get("/file/{inst}/{date}/{name}", response_class=FileResponse,
+                       responses={200: {"content": {"application/octet-stream": {"schema": {"type": "string", "format": "binary"}}}}})
 def photometry_file(inst: str, date: str, name: str):
     path = phot.safe_artifact_path(inst, date, name)
     if path is None or _legacy_artifact_hidden(inst, date, name):
@@ -7234,18 +7237,54 @@ def _photometry_download_all(inst: str, date: str, target: str, run_id: str | No
     return _create_zip_response(files_to_zip, archive_name)
 
 
-@photometry_router.get("/download-all/{inst}/{date}/{target}/run/{run_id}")
+@photometry_router.get("/download-all/{inst}/{date}/{target}/run/{run_id}", response_class=FileResponse,
+                       responses={200: {"content": {"application/zip": {"schema": {"type": "string", "format": "binary"}}}}})
 def photometry_download_all_run(inst: str, date: str, target: str, run_id: str):
     return _photometry_download_all(inst, date, target, run_id)
 
 
-@photometry_router.get("/download-all/{inst}/{date}/{target}")
+@photometry_router.get("/download-all/{inst}/{date}/{target}", response_class=FileResponse,
+                       responses={200: {"content": {"application/zip": {"schema": {"type": "string", "format": "binary"}}}}})
 def photometry_download_all(inst: str, date: str, target: str):
     return _photometry_download_all(inst, date, target, None)
 
 
-@photometry_router.post("/run")
-def photometry_run(request: Request, payload: dict = Body(...)):
+@photometry_router.get("/runs", response_model=phot_api.RunsResponse)
+def photometry_runs(inst: str, date: str, target: str):
+    """List visible runs with products, newest first; an empty run_id is legacy."""
+    if inst not in INSTRUMENTS or not phot.valid_date(date):
+        raise HTTPException(400, "invalid instrument or date")
+    runs = []
+    if not _night_hidden(inst, date, target):
+        discovered, _ = phot.list_photometry_runs(inst, date, target)
+        products = _product_visibility()
+        runs = [r for r in discovered if not products.hidden("photometry", inst, date, target, r.run_id)]
+    return phot_api.response(phot_api.RunsResponse, {"runs": runs})
+
+
+@photometry_router.get("/outputs", response_model=phot_api.PhotometryOutputs)
+def photometry_outputs(inst: str, date: str, target: str, run: str = "",
+                       site: str = "", telescope: str = "", mode: str = ""):
+    """Discover files for one run; blank run selects legacy products.
+
+    Fetch named-run files with /file/{inst}/{date}/{target}/run/{run_id}/{name}
+    and legacy files with /file/{inst}/{date}/{name}. Calibration masters use
+    the legacy file route. The /download-all routes return ZIP archives.
+    """
+    if inst not in INSTRUMENTS or not phot.valid_date(date):
+        raise HTTPException(400, "invalid instrument or date")
+    run_id = run.strip()
+    outputs = phot.empty_outputs()
+    if not _night_hidden(inst, date, target) and not _run_hidden("photometry", inst, date, target, run_id):
+        outputs = phot.list_outputs(inst, date, target, run_id=run_id or None,
+                                    site=site or None, telescope=telescope or None, mode=mode or None)
+    return phot_api.response(phot_api.PhotometryOutputs, outputs)
+
+
+@photometry_router.post("/run", response_model=phot_api.ActionResponse,
+                        responses={400: {"model": phot_api.ActionResponse}})
+def photometry_run(request: Request, payload: phot_api.RunRequest):
+    payload = payload.model_dump(exclude_unset=True)
     inst = (payload.get("inst") or "").strip()
     date = (payload.get("date") or "").strip()
     target = (payload.get("target") or "").strip()
@@ -7257,19 +7296,20 @@ def photometry_run(request: Request, payload: dict = Body(...)):
     # or multiple physical telescopes.
     site_err = _site_required_error(_db_path(), inst, date, target, options)
     if site_err:
-        return JSONResponse({"ok": False, "error": site_err}, status_code=400)
+        return phot_api.response(phot_api.ActionResponse, {"ok": False, "error": site_err}, status_code=400)
     telescope_err = _telescope_required_error(_db_path(), inst, date, target, options)
     if telescope_err:
-        return JSONResponse({"ok": False, "error": telescope_err}, status_code=400)
+        return phot_api.response(phot_api.ActionResponse, {"ok": False, "error": telescope_err}, status_code=400)
     result = phot.start_run(inst, date, target, options=options, test_run=test_run, user_name=user_name)
     if not result.get("ok"):
-        return JSONResponse(result, status_code=400)
-    return JSONResponse(result)
+        return phot_api.response(phot_api.ActionResponse, result, status_code=400)
+    return phot_api.response(phot_api.ActionResponse, result)
 
 
-@photometry_router.post("/command")
-def photometry_command(payload: dict = Body(...)):
+@photometry_router.post("/command", response_model=phot_api.CommandResponse)
+def photometry_command(payload: phot_api.CommandRequest):
     """Preview the exact prose command for the chosen options (live form echo)."""
+    payload = payload.model_dump(exclude_unset=True)
     inst = (payload.get("inst") or "").strip()
     date = (payload.get("date") or "").strip()
     target = (payload.get("target") or "").strip()
@@ -7286,28 +7326,30 @@ def photometry_command(payload: dict = Body(...)):
     if not error and not hidden:
         error = _telescope_required_error(_db_path(), inst, date, target, options)
     command = phot.command_str(inst, date, target, options=options, test_run=test_run)
-    return JSONResponse({"command": command, "error": error})
+    return phot_api.response(phot_api.CommandResponse, {"command": command, "error": error})
 
 
-@photometry_router.post("/postprocess")
-def photometry_postprocess(payload: dict = Body(...)):
+@photometry_router.post("/postprocess", response_model=phot_api.PostprocessResponse,
+                        responses={400: {"model": phot_api.PostprocessResponse}})
+def photometry_postprocess(payload: phot_api.PostprocessRequest):
     """Synchronously sigma-clip a finished run's band lightcurves.
 
     ``apply=false`` returns a dry-run report plus a base64 outlier preview;
     ``apply=true`` overwrites the band CSVs in place and regenerates the run's
     summary ``*_lightcurves.png`` so transit fit sees exactly one version.
     """
+    payload = payload.model_dump(exclude_unset=True)
     inst = (payload.get("inst") or "").strip()
     date = (payload.get("date") or "").strip()
     target = (payload.get("target") or "").strip()
     run = (payload.get("run") or "").strip()
     if inst not in INSTRUMENTS or not phot.valid_date(date) or not target:
-        return JSONResponse(
+        return phot_api.response(phot_api.PostprocessResponse,
             {"ok": False, "error": "invalid instrument, date or target"},
             status_code=400,
         )
     if not run:
-        return JSONResponse({"ok": False, "error": "a run is required"}, status_code=400)
+        return phot_api.response(phot_api.PostprocessResponse, {"ok": False, "error": "a run is required"}, status_code=400)
     _require_visible_run("photometry", inst, date, target, run)
     result = postproc.postprocess(
         inst,
@@ -7322,43 +7364,47 @@ def photometry_postprocess(payload: dict = Body(...)):
         exclude_after_jd=payload.get("exclude_after_jd"),
     )
     if not result.get("ok"):
-        return JSONResponse(result, status_code=400)
-    return JSONResponse(result)
+        return phot_api.response(phot_api.PostprocessResponse, result, status_code=400)
+    return phot_api.response(phot_api.PostprocessResponse, result)
 
 
-@photometry_router.post("/postprocess/restore")
-def photometry_postprocess_restore(payload: dict = Body(...)):
+@photometry_router.post("/postprocess/restore", response_model=phot_api.RestoreResponse,
+                        responses={400: {"model": phot_api.RestoreResponse}})
+def photometry_postprocess_restore(payload: phot_api.RestoreRequest):
     """Undo the run's post-process clip: put back the band CSVs and summary
     figure saved before the first ``apply``."""
+    payload = payload.model_dump(exclude_unset=True)
     inst = (payload.get("inst") or "").strip()
     date = (payload.get("date") or "").strip()
     target = (payload.get("target") or "").strip()
     run = (payload.get("run") or "").strip()
     if inst not in INSTRUMENTS or not phot.valid_date(date) or not target:
-        return JSONResponse(
+        return phot_api.response(phot_api.RestoreResponse,
             {"ok": False, "error": "invalid instrument, date or target"},
             status_code=400,
         )
     if not run:
-        return JSONResponse({"ok": False, "error": "a run is required"}, status_code=400)
+        return phot_api.response(phot_api.RestoreResponse, {"ok": False, "error": "a run is required"}, status_code=400)
     _require_visible_run("photometry", inst, date, target, run)
     result = postproc.restore_clip(inst, date, target, run)
     if not result.get("ok"):
-        return JSONResponse(result, status_code=400)
-    return JSONResponse(result)
+        return phot_api.response(phot_api.RestoreResponse, result, status_code=400)
+    return phot_api.response(phot_api.RestoreResponse, result)
 
 
-@photometry_router.get("/status")
+@photometry_router.get("/status", response_model=phot_api.JobStatus)
 def photometry_status(inst: str, date: str, target: str, run: str = ""):
     # Drain the queue so a pending full job is promoted once the slot frees,
     # even when only the photometry page (not the Jobs page) is polling.
     phot.sync_jobs()
     if _run_hidden("photometry", inst, date, target, (run or "").strip()):
-        return JSONResponse(dict(_NO_JOB_STATUS))
-    return JSONResponse(phot.job_status(inst, date, target, run_id=(run or "").strip()))
+        return phot_api.response(phot_api.JobStatus, dict(_NO_JOB_STATUS))
+    return phot_api.response(phot_api.JobStatus, phot.job_status(inst, date, target, run_id=(run or "").strip()))
 
 
-@photometry_router.get("/log-stream")
+@photometry_router.get("/log-stream", response_class=StreamingResponse,
+                       responses={200: {"description": "Server-sent events; each data event contains JobStatus JSON.",
+                                        "content": {"text/event-stream": {"schema": {"type": "string"}}}}})
 async def photometry_log_stream(request: Request, inst: str, date: str, target: str, run: str = ""):
     """SSE counterpart to ``/status`` -- pushes the same payload on every
     change instead of waiting for the client's next poll (architecture issue
@@ -7372,8 +7418,9 @@ async def photometry_log_stream(request: Request, inst: str, date: str, target: 
     ))
 
 
-@photometry_router.post("/status-batch")
-def photometry_status_batch(payload: dict = Body(...)):
+@photometry_router.post("/status-batch", response_model=phot_api.BatchResponse,
+                        responses={400: {"model": phot_api.ErrorResponse}})
+def photometry_status_batch(payload: phot_api.BatchRequest):
     """Poll multiple jobs in a single request. Reduces polling overhead when monitoring many jobs.
 
     Request body:
@@ -7396,11 +7443,11 @@ def photometry_status_batch(payload: dict = Body(...)):
     }
     """
     phot.sync_jobs()
-    jobs = payload.get("jobs") or []
+    jobs = payload.jobs or []
     if not isinstance(jobs, list):
-        return JSONResponse({"error": "jobs must be a list"}, status_code=400)
+        return phot_api.response(phot_api.ErrorResponse, {"error": "jobs must be a list"}, status_code=400)
     if len(jobs) > _MAX_STATUS_BATCH:
-        return JSONResponse(
+        return phot_api.response(phot_api.ErrorResponse,
             {"error": f"jobs must contain at most {_MAX_STATUS_BATCH} entries"},
             status_code=400,
         )
@@ -7436,11 +7483,13 @@ def photometry_status_batch(payload: dict = Body(...)):
             **status
         })
 
-    return JSONResponse({"jobs": results})
+    return phot_api.response(phot_api.BatchResponse, {"jobs": results})
 
 
-@photometry_router.post("/cancel")
-def photometry_cancel(payload: dict = Body(...)):
+@photometry_router.post("/cancel", response_model=phot_api.ActionResponse,
+                        responses={400: {"model": phot_api.ActionResponse}})
+def photometry_cancel(payload: phot_api.CancelRequest):
+    payload = payload.model_dump(exclude_unset=True)
     inst = (payload.get("inst") or "").strip()
     date = (payload.get("date") or "").strip()
     target = (payload.get("target") or "").strip()
@@ -7448,25 +7497,27 @@ def photometry_cancel(payload: dict = Body(...)):
     _require_visible_run("photometry", inst, date, target, run_id)
     result = phot.cancel_run(inst, date, target, run_id=run_id)
     if not result.get("ok"):
-        return JSONResponse(result, status_code=400)
-    return JSONResponse(result)
+        return phot_api.response(phot_api.ActionResponse, result, status_code=400)
+    return phot_api.response(phot_api.ActionResponse, result)
 
 
-@photometry_router.post("/delete")
-def photometry_delete(payload: dict = Body(...)):
+@photometry_router.post("/delete", response_model=phot_api.ActionResponse,
+                        responses={400: {"model": phot_api.ActionResponse}})
+def photometry_delete(payload: phot_api.CancelRequest):
+    payload = payload.model_dump(exclude_unset=True)
     inst = (payload.get("inst") or "").strip()
     date = (payload.get("date") or "").strip()
     target = (payload.get("target") or "").strip()
     if inst not in INSTRUMENTS:
-        return JSONResponse({"ok": False, "error": "unknown instrument"}, status_code=400)
+        return phot_api.response(phot_api.ActionResponse, {"ok": False, "error": "unknown instrument"}, status_code=400)
     if not phot.valid_date(date):
-        return JSONResponse({"ok": False, "error": "invalid date"}, status_code=400)
+        return phot_api.response(phot_api.ActionResponse, {"ok": False, "error": "invalid date"}, status_code=400)
     if not (target or "").strip():
-        return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
+        return phot_api.response(phot_api.ActionResponse, {"ok": False, "error": "target is required"}, status_code=400)
     run_id = (payload.get("run_id") or payload.get("run") or "").strip()
     _require_visible_run("photometry", inst, date, target, run_id)
     result = phot.delete_reduction(inst, date, target, run_id=run_id)
-    return JSONResponse(result)
+    return phot_api.response(phot_api.ActionResponse, result)
 
 
 def _require_visible_object(db: str, obj: str, obsdate: str = "", instrument: str = "") -> None:
