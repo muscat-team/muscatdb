@@ -25,6 +25,7 @@ import yaml
 from muscat_db import jobs, database
 from muscat_db._optimize_helper import DONE_MARKER as _OPTIMIZE_DONE_MARKER
 from muscat_db.job_store import current_instance_id, current_owner, get_job_store
+from muscat_db.job_limits import JobLimitExceeded, claim_caps, enqueue_caps, limit_refusal
 from muscat_db import __meta__, __muscatdb_version__, __version__
 from muscat_db.instruments import INSTRUMENTS
 from muscat_db.photometry import (
@@ -33,6 +34,7 @@ from muscat_db.photometry import (
     MULTISITE_MODES, _TELESCOPE_PREFIX, timer_conda_env,
 )
 from muscat_db.cache import register_cache
+from muscat_db.engine_identity import version_probe
 
 _REPO_ROOT = pathlib.Path(__file__).parent.parent.parent.resolve()
 logger = logging.getLogger(__name__)
@@ -55,7 +57,7 @@ def _timer_version() -> str:
         else:
             try:
                 result = subprocess.run(
-                    [timer_py, "-c", "from importlib.metadata import version; print(version('timer'))"],
+                    [timer_py, "-c", version_probe(("timer",))],
                     capture_output=True, text=True, timeout=10,
                 )
                 _TIMER_VERSION = result.stdout.strip() if result.returncode == 0 and result.stdout.strip() else "unknown"
@@ -1593,7 +1595,10 @@ def start_fit(
     with _FIT_LOCK:
         existing = _FIT_JOBS.get(key)
 
-        if existing is not None and existing.proc.poll() is None:
+        # The pid file covers a fit launched by another server process, which
+        # _FIT_JOBS cannot see; launching over it would truncate its log and
+        # overwrite its pid file.
+        if jobs.run_is_live(existing.proc if existing else None, rdir / "timer-fit.pid"):
             return {"ok": True, "key": key, "already_running": True, "run_id": run_id}
 
         # Test runs take no durable slot, so cap them here instead (refuse, not
@@ -1616,7 +1621,7 @@ def start_fit(
         # capped above instead). Not yet claimed here just means queue below.
         claimed_slot = False
         if run_type == "full":
-            claimed_slot = get_job_store().claim_slot("transit_fit", key, _MAX_FULL_JOBS)
+            claimed_slot = get_job_store().claim_slot("transit_fit", key, _MAX_FULL_JOBS, **claim_caps(user_name))
         at_capacity = run_type == "full" and not claimed_slot
 
         # Queue full jobs when at capacity
@@ -1630,7 +1635,10 @@ def start_fit(
                     params=params_json,
                     run_name=run_name,
                     user_name=user_name,
+                    **enqueue_caps(user_name),
                 )
+            except JobLimitExceeded as exc:
+                return limit_refusal(exc)
             except Exception:
                 return {"ok": False, "error": "database not writable"}
             return {"ok": True, "key": key, "queued": True, "run_id": run_id}
@@ -1876,6 +1884,11 @@ def delete_fit(inst: str, date: str, target: str, run_id: str = "") -> dict:
             rdir = fit_output_dir(inst, date, target)
     except ValueError:
         return {"ok": False, "error": "invalid target"}
+
+    with _FIT_LOCK:
+        job = _FIT_JOBS.get(fit_job_key(inst, date, target, run_id))
+    if jobs.run_is_live(job.proc if job else None, rdir / "timer-fit.pid"):
+        return {"ok": False, "error": jobs.LIVE_RUN_DELETE_ERROR}
 
     removed = 0
     if run_id:
@@ -2593,7 +2606,7 @@ def sync_jobs() -> None:
                 # Atomic: at most one process/caller ever wins this claim for a
                 # given key, so two workers draining the same pending row can
                 # never both launch it.
-                if not store.claim_slot("transit_fit", key, _MAX_FULL_JOBS):
+                if not store.claim_slot("transit_fit", key, _MAX_FULL_JOBS, **claim_caps(entry.get("user_name"))):
                     continue
                 rdir.mkdir(parents=True, exist_ok=True)
                 csvs = get_csv_lightcurves(inst, date, target)

@@ -109,7 +109,7 @@ def test_sync_jobs_queue_drain_stages_inputs_like_start_ttv_fit(tmp_path, monkey
         def pending(self, pipeline):
             return [entry]
 
-        def claim_slot(self, pipeline, holder_key, max_slots):
+        def claim_slot(self, pipeline, holder_key, max_slots, **_kwargs):
             return True
 
         def save(self, **kwargs):
@@ -185,7 +185,7 @@ def test_sync_jobs_queue_drain_applies_core_pinning_when_configured(tmp_path, mo
         def pending(self, pipeline):
             return [entry]
 
-        def claim_slot(self, pipeline, holder_key, max_slots):
+        def claim_slot(self, pipeline, holder_key, max_slots, **_kwargs):
             return True
 
         def save(self, **kwargs):

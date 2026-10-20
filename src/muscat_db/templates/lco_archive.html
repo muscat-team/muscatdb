@@ -15,10 +15,11 @@
       <select id="dl-req-rlevel"><option value="">any</option><option value="91" selected>91 (reduced)</option><option value="0">0 (raw)</option></select></div>
   </div>
   <div class="lco-actions">
-    <button class="btn primary" type="button" id="btn-fetch-request">Fetch request</button>
+    <button class="btn primary" type="button" id="btn-download-request" title="Download and ingest every frame of this request in one background job">Download request</button>
+    <button class="btn" type="button" id="btn-fetch-request" title="List this request's frames below to download a subset">Fetch request</button>
     <span class="lco-msg" id="msg-request" style="margin: 0;"></span>
   </div>
-  <p class="lco-note">Enter the numeric request ID from an observation portal URL (e.g. <code>4236675</code> from <code>observe.lco.global/requests/4236675</code>) to pull every frame for that request. It ignores the search fields above; results appear below for selection and download.</p>
+  <p class="lco-note">Enter the numeric request ID from an observation portal URL (e.g. <code>4236675</code> from <code>observe.lco.global/requests/4236675</code>) and click <strong>Download request</strong> to download and ingest every frame of that request; progress shows here and on the Jobs page. <strong>Fetch request</strong> lists the frames below instead, to download a subset. Both ignore the search fields below.</p>
 </details>
 
 <details class="lco-section section-fold" id="fold-search" open>
@@ -113,7 +114,9 @@
   };
   var lastFrames = [];
   var downloadRoot = '';
-  var downloadPollTimer = null;
+  // One poll timer per message line: a request download and a selected-row
+  // download can run at the same time, each reporting to its own line.
+  var downloadPollTimers = {};
   var DOWNLOAD_INSTRUMENT_DIRS = {
     sinistro: 'Sinistro',
     muscat: 'MuSCAT',
@@ -192,44 +195,45 @@
     };
   }
 
-  function pollArchiveDownload(jobId, locText) {
-    if (downloadPollTimer) clearTimeout(downloadPollTimer);
+  function pollArchiveDownload(jobId, locText, msgId) {
+    msgId = msgId || 'msg-download';
+    if (downloadPollTimers[msgId]) clearTimeout(downloadPollTimers[msgId]);
     fetch('/api/lco/archive/download/' + encodeURIComponent(jobId))
       .then(function (r) { return r.json(); })
       .then(function (d) {
-        if (!d.ok) { msg('msg-download', d.error || 'download failed', 'err'); return; }
+        if (!d.ok) { msg(msgId, d.error || 'download failed', 'err'); return; }
         var results = d.results || [];
         if (results.length) applyDownloadResults(results);
         if (d.state === 'pending' || d.state === 'running') {
           if (d.phase === 'funpacking') {
-            msg('msg-download', 'Funpacking ' + (d.funpack_done || 0) + '/' + (d.funpack_total || 0) + ' frames…' + (locText || ''));
+            msg(msgId, 'Funpacking ' + (d.funpack_done || 0) + '/' + (d.funpack_total || 0) + ' frames…' + (locText || ''));
           } else if (d.phase === 'scanning') {
-            msg('msg-download', 'Scanning downloaded FITS into obslogs…' + (locText || ''));
+            msg(msgId, 'Scanning downloaded FITS into obslogs…' + (locText || ''));
           } else if (d.phase === 'ingesting') {
-            msg('msg-download', 'Ingesting obslogs into muscat-db…' + (locText || ''));
+            msg(msgId, 'Ingesting obslogs into muscat-db…' + (locText || ''));
           } else {
-            msg('msg-download', 'Downloading ' + (d.frames_done || 0) + '/' + (d.frames_total || 0) + ' frames…' + (locText || ''));
+            msg(msgId, 'Downloading ' + (d.frames_done || 0) + '/' + (d.frames_total || 0) + ' frames…' + (locText || ''));
           }
-          downloadPollTimer = setTimeout(function () { pollArchiveDownload(jobId, locText); }, 1500);
+          downloadPollTimers[msgId] = setTimeout(function () { pollArchiveDownload(jobId, locText, msgId); }, 1500);
           return;
         }
         var summary = downloadSummary(results);
         if (d.state === 'error') {
           msg(
-            'msg-download',
+            msgId,
             summary.ok + '/' + (d.frames_total || 0) + ' downloaded, ' + summary.exists + ' already present, ' + summary.errors + ' failed: ' + (d.error || 'unknown error') + summary.savedTo,
             'err'
           );
           return;
         }
         msg(
-          'msg-download',
+          msgId,
           'Done: ' + summary.ok + ' downloaded, ' + summary.exists + ' already present, ' + summary.errors + ' errors' + summary.savedTo,
           summary.errors ? 'err' : 'ok'
         );
       })
       .catch(function (e) {
-        msg('msg-download', String(e), 'err');
+        msg(msgId, String(e), 'err');
       });
   }
 
@@ -519,16 +523,23 @@
       : (downloadRoot ? '' : ' — save location unknown (download root not configured)');
     msg('msg-download', 'Downloading ' + picked.length + ' frames…' + locText);
 
-    // Set status to downloading... immediately
+    // Show "downloading…" at once, but keep each row's previous status so a
+    // refused request (e.g. 413) does not leave rows claiming a download.
+    var previousStatus = picked.map(function (f) { return f._downloadStatus; });
     picked.forEach(function (f) {
       f._downloadStatus = 'downloading…';
     });
     renderFrameGroups(selectedFrameKeys());
-    
+    function restoreRows(error) {
+      picked.forEach(function (f, i) { f._downloadStatus = previousStatus[i]; });
+      renderFrameGroups(selectedFrameKeys());
+      msg('msg-download', 'Download not started: ' + error, 'err');
+    }
+
     var body = { overwrite: chk('dl-overwrite'), frames: picked.map(minimalFramePayload), background: true };
     fetch('/api/lco/archive/download', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
       .then(function (r) { return r.json(); }).then(function (d) {
-        if (!d.ok) { msg('msg-download', d.error || 'failed', 'err'); return; }
+        if (!d.ok) { restoreRows(d.error || 'failed'); return; }
         if (d.job_id) {
           msg('msg-download', 'Download queued — 0/' + (d.frames_total || picked.length) + ' frames…' + locText);
           var link = el('link-to-jobs');
@@ -545,7 +556,34 @@
         );
         var linkFg = el('link-to-jobs');
         if (linkFg) linkFg.style.display = '';
-      }).catch(function (e) { msg('msg-download', String(e), 'err'); });
+      }).catch(function (e) { restoreRows(String(e)); });
+  });
+
+  // Issue #256: download a whole request from its ID alone. The server runs
+  // the archive search itself, so nothing has to be fetched or selected first.
+  el('btn-download-request').addEventListener('click', function () {
+    var reqId = val('dl-request-id');
+    if (!reqId) { msg('msg-request', 'Enter a request ID', 'err'); return; }
+    if (!/^[0-9]+$/.test(reqId)) { msg('msg-request', 'Request ID must be numeric', 'err'); return; }
+    msg('msg-request', 'Searching request ' + reqId + ' and queuing its download…');
+    // Disabled until the server answers, so a double click sends one request.
+    // The server also refuses a second active job for the same request.
+    var button = el('btn-download-request');
+    button.disabled = true;
+    var body = { request_id: reqId, reduction_level: val('dl-req-rlevel'), overwrite: chk('dl-overwrite') };
+    fetch('/api/lco/archive/request-download', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      .then(function (r) { return r.json(); }).then(function (d) {
+        button.disabled = false;
+        if (!d.ok) { msg('msg-request', (d.error || 'failed') + (d.detail ? ': ' + d.detail : ''), 'err'); return; }
+        var locText = (d.dest_dirs && d.dest_dirs.length) ? '; saving to ' + d.dest_dirs.join(', ') : '';
+        msg('msg-request', 'Download of request ' + reqId + ' queued: 0/' + (d.frames_total || 0) + ' frames…' + locText);
+        var link = el('link-to-jobs');
+        if (link) link.style.display = '';
+        pollArchiveDownload(d.job_id, locText, 'msg-request');
+      }).catch(function (e) {
+        button.disabled = false;
+        msg('msg-request', String(e), 'err');
+      });
   });
 
   // Persist the open/collapsed state of each section-fold card across page

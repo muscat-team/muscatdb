@@ -61,6 +61,7 @@ ENV_VARS: tuple[EnvVar, ...] = (
     EnvVar("MUSCAT_PROSE_PROJECT", "<repo>/../ext_tools/prose2", "prose2 repository path"),
     EnvVar("MUSCAT_PROSE_PYTHON", None, "Explicit prose interpreter (highest priority)"),
     EnvVar("MUSCAT_PROSE_CONDA_ENV", "prose", "Conda env supplying prose dependencies"),
+    EnvVar("MUSCAT_PROSE_FROZEN_CONFIG", "0", "Use the versioned production telescope snapshot"),
     EnvVar(
         "MUSCAT_TIMER_DIR",
         str(Path.home() / "ql" / "timer"),
@@ -186,8 +187,8 @@ ENV_VARS: tuple[EnvVar, ...] = (
     EnvVar("MUSCAT_LCO_ARCHIVE_DOWNLOAD_WORKERS", "1", "Concurrent LCO background download jobs"),
     EnvVar("MUSCAT_LCO_ARCHIVE_DOWNLOAD_FRAME_WORKERS", "8", "Frame workers within one LCO download"),
     EnvVar("MUSCAT_LCO_ARCHIVE_FUNPACK_WORKERS", "2", "Concurrent LCO funpack subprocesses"),
-    EnvVar("MUSCAT_LCO_ARCHIVE_MAX_FRAMES", "500", "Frames allowed per LCO archive request"),
-    EnvVar("MUSCAT_LCO_ARCHIVE_MAX_PAYLOAD_BYTES", "2097152", "Serialized bytes allowed per LCO archive request"),
+    EnvVar("MUSCAT_LCO_ARCHIVE_MAX_FRAMES", "0", "Frames allowed per LCO archive download (0 means no limit)"),
+    EnvVar("MUSCAT_LCO_ARCHIVE_MAX_PAYLOAD_BYTES", "16777216", "Serialized bytes allowed per LCO archive request"),
     EnvVar("MUSCAT_LCO_ARCHIVE_FOREGROUND_MAX_FRAMES", "10", "Frames allowed in a foreground LCO download"),
     EnvVar("MUSCAT_LCO_ARCHIVE_MAX_ACTIVE_PER_USER", "2", "Active LCO archive jobs allowed per user"),
     EnvVar("MUSCAT_LCO_ARCHIVE_DOWNLOAD_MAX_JOBS", "200", "Tracked LCO archive queue/history entries"),
@@ -292,6 +293,8 @@ ENV_VARS: tuple[EnvVar, ...] = (
     ),
     EnvVar("MUSCAT_MAX_FULL_JOBS", "1", "Concurrent full runs allowed per pipeline across all processes sharing the database; 0 disables full runs (use on a staging instance so it cannot compete with production)"),
     EnvVar("MUSCAT_MAX_TEST_JOBS", "4", "Concurrent test runs allowed per pipeline (full runs use durable slots)"),
+    EnvVar("MUSCAT_USER_MAX_RUNNING", "1", "Full jobs one user may run at once, across photometry, transit fit and TTV fit; a launch over it is queued. 0 means unlimited. Per-user override: `muscat-db access limit`"),
+    EnvVar("MUSCAT_USER_MAX_QUEUED", "5", "Queued jobs one user may have; a launch over it is refused (HTTP 429). 0 means unlimited. Per-user override: `muscat-db access limit`"),
     EnvVar(
         "MUSCAT_WORKER_MAX_SLOTS",
         None,

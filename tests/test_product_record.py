@@ -185,6 +185,16 @@ def test_photometry_run_records_author_inputs_settings_versions(db, tmp_path):
     assert rec["inputs"][0]["proposal_ids"] == ["KEY2026B-001", "OTHER-9"]
 
 
+def test_frozen_photometry_records_configuration_digest(db, tmp_path, monkeypatch):
+    from muscat_db._prose_launcher import SNAPSHOT_SHA256
+    monkeypatch.setenv("MUSCAT_PROSE_FROZEN_CONFIG", "1")
+    phot._write_run_product(
+        tmp_path, inst=INST, date=DATE, target=TARGET, opts={}, test_run=False,
+        user_name="alice", site="", telescope="", mode="", run_name="frozen",
+    )
+    assert pr.read_record(tmp_path)["tool_versions"]["prose_config_sha256"] == SNAPSHOT_SHA256
+
+
 def test_transit_fit_records_each_selected_lightcurve(db, tmp_path):
     runs = phot.output_base() / INST / DATE / "_runs" / "TOI-1234"
     csv = runs / "coj-full" / "TOI-1234_sinistro_g.csv"
@@ -327,6 +337,149 @@ def test_backfill_skips_deleted_run_dirs(db):
     assert backfill_products(db).missing_dir == 1
 
 
+# -- backfill: run directories with no job row -------------------------------
+
+
+def _write_fit_yaml(rdir, files):
+    import yaml
+
+    rdir.mkdir(parents=True, exist_ok=True)
+    data = {band: {"band": band, "file": name, "format": "afphot"} for band, name in files.items()}
+    (rdir / "fit.yaml").write_text(yaml.safe_dump({"data": data, "planets": "b"}))
+
+
+def _make_lightcurve(night, run_id, name):
+    d = night / "_runs" / TARGET / run_id if run_id else night
+    d.mkdir(parents=True, exist_ok=True)
+    (d / name).write_text("BJD_TDB,flux\n")
+
+
+def test_backfill_disk_photometry_run_without_job_row(db):
+    rdir = phot.run_output_dir(INST, DATE, TARGET, "old-run")
+    rdir.mkdir(parents=True)
+    stats = backfill_products(db)
+    rec = pr.read_record(rdir)
+    assert stats.from_disk == 1 and stats.written == 1
+    assert rec["backfilled"] is True and not rec["author"]
+    assert rec["inputs"][0]["proposal_ids"] == ["KEY2026B-001", "OTHER-9"]
+
+
+def test_backfill_disk_photometry_with_no_matching_frames_is_undetermined(db):
+    phot.run_output_dir(INST, DATE, "GHOST", "r").mkdir(parents=True)
+    backfill_products(db)
+    assert pr.read_record(phot.run_output_dir(INST, DATE, "GHOST", "r"))["inputs"] is None
+
+
+def test_backfill_disk_pass_does_not_recount_runs_with_job_rows(db):
+    _insert_job(db, type="photometry", instrument=INST, obsdate=DATE, target=TARGET, run_id="r1",
+                user_name="alice")
+    phot.run_output_dir(INST, DATE, TARGET, "r1").mkdir(parents=True)
+    stats = backfill_products(db)
+    assert (stats.written, stats.from_disk) == (1, 0)
+    assert pr.read_record(phot.run_output_dir(INST, DATE, TARGET, "r1"))["author"] == "alice"
+
+
+def test_backfill_disk_transit_fit_recovers_inputs_from_fit_yaml(db):
+    night = phot.output_base() / INST / DATE
+    _make_lightcurve(night, "coj-full", "lc_g.csv")
+    rdir = fit.fit_output_dir(INST, DATE, TARGET, "default")
+    _write_fit_yaml(rdir, {"g": "lc_g.csv"})
+    stats = backfill_products(db)
+    rec = pr.read_record(rdir)
+    assert stats.from_disk == 2  # the fit, and the photometry run holding its light curve
+    assert rec["level"] == "transit_fit" and not rec["author"]
+    assert rec["inputs"] == [pr.lightcurve_input(
+        INST, DATE, TARGET, night / "_runs" / TARGET / "coj-full" / "lc_g.csv",
+        night / "_runs" / TARGET,
+    )]
+
+
+def test_backfill_disk_transit_fit_legacy_layout_and_night_level_csv(db):
+    night = phot.output_base() / INST / DATE
+    _make_lightcurve(night, "", "lc_g.csv")
+    rdir = fit.fit_output_dir(INST, DATE, TARGET)
+    _write_fit_yaml(rdir, {"g": "lc_g.csv"})
+    backfill_products(db)
+    assert pr.read_record(rdir)["inputs"][0]["run_id"] == ""
+
+
+def test_backfill_disk_transit_fit_ambiguous_csv_lists_every_candidate(db):
+    night = phot.output_base() / INST / DATE
+    _make_lightcurve(night, "run-a", "lc_g.csv")
+    _make_lightcurve(night, "run-b", "lc_g.csv")
+    rdir = fit.fit_output_dir(INST, DATE, TARGET, "default")
+    _write_fit_yaml(rdir, {"g": "lc_g.csv"})
+    backfill_products(db)
+    rec = pr.read_record(rdir)
+    assert sorted(i["run_id"] for i in rec["inputs"]) == ["run-a", "run-b"]
+    assert rec["note"]
+
+
+@pytest.mark.parametrize("files", [{"g": "missing.csv"}, {"g": "lc_g.csv", "r": "missing.csv"}])
+def test_backfill_disk_transit_fit_unlocatable_csv_is_undetermined(db, files):
+    night = phot.output_base() / INST / DATE
+    _make_lightcurve(night, "run-a", "lc_g.csv")
+    rdir = fit.fit_output_dir(INST, DATE, TARGET, "default")
+    _write_fit_yaml(rdir, files)
+    backfill_products(db)
+    rec = pr.read_record(rdir)
+    assert rec["inputs"] is None and "missing.csv" in rec["note"]
+
+
+def test_backfill_disk_transit_fit_unreadable_fit_yaml_is_undetermined(db):
+    rdir = fit.fit_output_dir(INST, DATE, TARGET, "default")
+    rdir.mkdir(parents=True)
+    (rdir / "fit.yaml").write_text("data: [unclosed")
+    backfill_products(db)
+    assert pr.read_record(rdir)["inputs"] is None
+
+
+def test_backfill_disk_ignores_out_subdirectory_and_dirs_without_fit_yaml(db):
+    rdir = fit.fit_output_dir(INST, DATE, TARGET, "default")
+    _write_fit_yaml(rdir, {"g": "lc_g.csv"})
+    _write_fit_yaml(rdir / "out", {"g": "lc_g.csv"})
+    (fit.fit_output_dir(INST, DATE, TARGET, "empty")).mkdir(parents=True)
+    stats = backfill_products(db)
+    assert stats.from_disk == 1
+    assert pr.read_record(rdir / "out") is None
+    assert pr.read_record(fit.fit_output_dir(INST, DATE, TARGET, "empty")) is None
+
+
+def test_backfill_disk_legacy_fit_out_directory_is_not_a_run(db):
+    # legacy layout: the target directory is the run and timer's ``out`` sits directly below it
+    night = phot.output_base() / INST / DATE
+    _make_lightcurve(night, "", "lc_g.csv")
+    rdir = fit.fit_output_dir(INST, DATE, TARGET)
+    _write_fit_yaml(rdir, {"g": "lc_g.csv"})
+    _write_fit_yaml(rdir / "out", {"g": "lc_g.csv"})
+    backfill_products(db)
+    assert pr.read_record(rdir) is not None
+    assert pr.read_record(rdir / "out") is None
+
+
+@pytest.mark.parametrize("name", ["../lc_g.csv", "sub/lc_g.csv"])
+def test_backfill_disk_transit_fit_rejects_light_curve_path_not_a_bare_name(db, name):
+    night = phot.output_base() / INST / DATE
+    _make_lightcurve(night, "", "lc_g.csv")
+    (night / "sub").mkdir()
+    (night / "sub" / "lc_g.csv").write_text("BJD_TDB,flux\n")
+    (night.parent / "lc_g.csv").write_text("BJD_TDB,flux\n")  # what ``../lc_g.csv`` resolves to
+    rdir = fit.fit_output_dir(INST, DATE, TARGET, "default")
+    _write_fit_yaml(rdir, {"g": name})
+    backfill_products(db)
+    assert pr.read_record(rdir)["inputs"] is None
+
+
+def test_backfill_disk_dry_run_writes_nothing_and_second_run_is_a_noop(db):
+    rdir = phot.run_output_dir(INST, DATE, TARGET, "old-run")
+    rdir.mkdir(parents=True)
+    dry = backfill_products(db, dry_run=True)
+    assert dry.from_disk == 1 and dry.written == 0 and pr.read_record(rdir) is None
+    backfill_products(db)
+    again = backfill_products(db)
+    assert again.from_disk == 0 and again.written == 0 and again.already == 1
+
+
 # -- wiring through the real start functions ----------------------------------
 
 
@@ -450,3 +603,51 @@ def test_prose_version_retries_after_a_failed_lookup(monkeypatch):
     assert phot.prose_version() == "2.0.1"         # after the window: retried and cached
     assert phot.prose_version() == "2.0.1"
     assert len(calls) == 2
+
+
+# -- target spelling (#221, #245) ---------------------------------------------
+
+VARIANT_INST = "muscat3"
+VARIANT_DATE = "260202"
+
+
+@pytest.fixture
+def variant_frames(db):
+    """Frames filed as 'TOI 55.01'; runs name the same target 'TOI-55'."""
+    conn = sqlite3.connect(db)
+    conn.executemany(
+        "INSERT INTO frames (instrument, obsdate, ccd, filename, object, proposal_id) "
+        "VALUES (?, ?, 1, ?, ?, ?)",
+        [(VARIANT_INST, VARIANT_DATE, f"v{i}.fits", "TOI 55.01", "P-55") for i in range(2)],
+    )
+    conn.commit()
+    conn.close()
+    return db
+
+
+def test_live_photometry_resolves_a_spelling_variant_of_the_target(variant_frames, tmp_path):
+    rdir = tmp_path / "run"
+    rdir.mkdir()
+    phot._write_run_product(
+        rdir, inst=VARIANT_INST, date=VARIANT_DATE, target="TOI-55", opts={}, test_run=True,
+        user_name="alice", site="", telescope="", mode="", run_name="",
+    )
+    rec = pr.read_record(rdir)
+    assert rec["inputs"] is not None
+    assert rec["inputs"][0]["proposal_ids"] == ["P-55"]
+    assert rec["inputs"][0]["n_frames"] == 2
+
+
+def test_backfill_photometry_resolves_a_spelling_variant_of_the_target(variant_frames):
+    _insert_job(variant_frames, type="photometry", instrument=VARIANT_INST, obsdate=VARIANT_DATE,
+                target="TOI-55", run_id="r1", user_name="alice")
+    rdir = phot.run_output_dir(VARIANT_INST, VARIANT_DATE, "TOI-55", "r1")
+    rdir.mkdir(parents=True)
+    stats = backfill_products(variant_frames)
+    assert (stats.determined, stats.undetermined) == (1, 0)
+    assert pr.read_record(rdir)["inputs"][0]["proposal_ids"] == ["P-55"]
+
+
+def test_target_normalizer_matches_the_catalog_name_rules(variant_frames):
+    norm = pr.target_normalizer(variant_frames)
+    assert norm("TOI-55") == norm("TOI 55.01")

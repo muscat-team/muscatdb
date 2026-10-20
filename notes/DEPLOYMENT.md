@@ -26,6 +26,8 @@ muscat-db runs behind nginx (HTTP Basic Auth) reverse-proxying to uvicorn, insid
 
 **Cron status (2026-09-10):** both entries are installed and verified. Both went in on 2026-09-06, but staging's next real target hit a real outage the old `send-keys` relaunch could not recover from (fixed in #146 — see `notes/deploy-staging-plan.md` Gate F for the full incident and fix timeline); both entries were pulled by hand before production's poll could hit the same failure. With the fix merged to `test` (`257173d`), staging's entry alone was reinstalled and reverified against a real unattended tick on 2026-09-07. Once #146 released to `main` via #148 (`70de9ec`), production's entry was reinstalled on 2026-09-10 and its first unattended tick deployed `5923c3d -> 70de9ec` cleanly via `respawn-pane -k`, confirmed by `:8001/healthz` returning 200 right after. The Slack failure-alert webhook (`/etc/muscat-db/slack-webhook-url`) was installed on 2026-09-08, so a failed deploy now pages Slack in addition to logging `FAILED`. Gate F (#26, #131) is closed.
 
+Keep nginx's `client_max_body_size` (20m in every `deploy/nginx*.conf`) above `MUSCAT_LCO_ARCHIVE_MAX_PAYLOAD_BYTES` (16 MiB by default). Selecting every row of a large LCO archive search posts several MB of frame metadata, and nginx would otherwise refuse it with an HTML 413 before the app can answer in JSON. A whole-request download posts only the request ID.
+
 The README "Multi-User Deployment" section has the full walkthrough; the essentials:
 
 ```bash
@@ -48,6 +50,11 @@ uv run muscat-db access explain <user> [--target <name>]   # read-only: what <us
 uv run muscat-db access list [--user <user>]
 # Scoped viewer (issue #202): sees only the proposals granted to them
 uv run muscat-db access scope <user> [--off]
+# Scoped viewer + one target under any proposal (issue #228)
+uv run muscat-db access grant-target <user> <target>
+uv run muscat-db access revoke-target <user> <target>
+# Per-user job caps (issue #265): show, set (0 = unlimited) or clear a user's overrides
+uv run muscat-db access limit <user> [--running N] [--queued N] [--reset]
 ```
 
 A restricted proposal is hidden from `/targets`, `/target`, project pages and
@@ -63,6 +70,34 @@ allowlist are hidden, including proposals ingested later. They get no shared
 chat (only a private `@bot` exchange and messages addressed to them), and
 `/toi` and `/nexsci` do not flag or link targets outside their scope. Admins are
 never scoped. A scoped user with no grants sees nothing.
+
+### Per-user job limits
+
+Each user may run `MUSCAT_USER_MAX_RUNNING` (default 1) full jobs at once and
+have `MUSCAT_USER_MAX_QUEUED` (default 5) waiting, counted across photometry,
+transit fit and TTV fit together. `0` means unlimited. `access limit` stores a
+per-user override on the user row; with no override the site default applies,
+admins included.
+
+* A launch over the running cap is queued, not refused, and starts when one of
+  the user's jobs finishes. Other users' queued jobs are not held up behind it.
+* A launch over the queued cap is refused with HTTP 429 and a message naming
+  the limit.
+* Test runs take no durable slot and are not counted. A job with no user (an
+  instance without an authenticating proxy) is not capped.
+* Slots claimed before this feature carry no user, so a user's jobs already
+  running at deploy time are not counted until they finish.
+* The caps are enforced in the job store (`claim_slot`, `enqueue`), not in the
+  request handlers, so the web server and fleet workers share them. On
+  PostgreSQL each user's claims and enqueues take a transaction advisory lock.
+
+A scoped viewer can also be given single targets with `access grant-target
+<user> <target>` (spaces and case ignored, resolved to the raw `object`
+spellings): they then see every observation of that target under any proposal,
+and nothing else of the proposals it is in. Target grants apply to scoped
+viewers only; the command refuses anyone else. `access explain <user>` lists
+them. A target first observed under a new spelling after the viewer's grants
+were resolved is picked up on the next request.
 
 Connect to production via SSH tunnel: `ssh -L 8000:localhost:8000 <user>@muscat-ut2` → http://localhost:8000. Staging's public port is `:8002` (`ssh -L 8002:localhost:8002`).
 
@@ -114,6 +149,58 @@ because it lets a dev-tree branch switch restart the live server. Deploys are
 driven by `deploy/pull-deploy.sh` from cron, which restarts the matching session
 after a `git reset --hard` in the dedicated checkout; since `--reload` is gone,
 HTML/JavaScript changes require that deploy restart before they are live.
+
+### Release order (test → main)
+
+Merging to `main` deploys nothing by itself; the cron entry for `main` takes the
+commit within 5 minutes. Do the steps in this order.
+
+1. **Back up `muscat.db` before the merge**, with SQLite's backup API (not `cp`,
+   the file is live and about 2.6 GB). A backup taken after the merge already
+   holds the new schema and cannot show the old one.
+   ```bash
+   python3 -c "import sqlite3; s=sqlite3.connect('file:$MUSCAT_DB_PATH?mode=ro',uri=True); d=sqlite3.connect('$HOME/temp/muscat.db.pre-<release>.<date>'); s.backup(d); d.close(); s.close()"
+   ```
+2. **Merge the release PR (`test` → `main`) with a merge commit**, never a squash,
+   once CI is green on the final `test` head. A later push to `test` dismisses the
+   approval.
+3. **Wait for the cron deploy** and read `$HOME/deploy/main/app/logs/pull-deploy.log`.
+   A migration on the live database can push startup past the health-check limit;
+   the first attempt then fails (Slack alert) and the next poll retries. The
+   `main` cron line sets `PULL_DEPLOY_HEALTH_TIMEOUT_S=120` for that reason (the
+   default is 30).
+4. **Verify**: the log says `deployed main at <sha>`, that SHA equals
+   `git ls-remote origin refs/heads/main`, `curl 127.0.0.1:8001/healthz` returns
+   `{"ok":true}`, and any new tables or columns are in the live database.
+5. **Run host-side data steps from `deploy/main/app`**, only after step 4, each as
+   `--dry-run` first. They need the deployed code, which is why they follow the
+   deploy.
+
+When a PR reads data that an earlier PR only writes or that a command backfills,
+ship them in separate releases and run the data step between them. Do not merge the
+reader until the data step has run on production:
+
+| Writer (released first) | Data step on the host | Reader (released after) |
+|---|---|---|
+| Product records written per run (#208, #245) | `muscat-db backfill-products` | Visibility read from `_product.json` |
+| Group/grant tables (#228 step 1, #247) | `muscat-db access groups-seed`, then `access groups-check` must exit 0 | Call sites switched from the blocklist to groups (#228 step 2) |
+
+`backfill-products` first walks the `jobs` table, then the run directories on disk
+(`prose/<inst>/<date>/_runs/<target>/<run>` and `timer/<inst>/<date>/<target>[/<run>]`),
+because runs older than the `jobs` table have no row. A run with no record is
+admin-only for everyone else, so the step is complete only when no run directory is
+left without one. Check with a second `--dry-run`: it must report `would write 0
+record(s)`. Transit fits found on disk take their light curves from `fit.yaml`; an
+unreadable `fit.yaml` or a missing light curve leaves the fit undetermined.
+
+`groups-check` compares what the group model and the blocklist let every viewer
+see; run it again after any `access restrict`, `grant` or `scope` change while both
+models exist.
+
+The files under `/etc/nginx/sites-available/` are root-owned copies, not links to
+`deploy/`. A change to `deploy/nginx*.conf` does not reach nginx on a deploy: diff
+the live file against the repo, copy it over, then `sudo nginx -t && sudo systemctl
+reload nginx`.
 
 ---
 
@@ -230,6 +317,22 @@ printf 'export MUSCAT_POSTGRES_DSN=postgresql://muscatdb:%s@localhost:5432/musca
      && uv run muscat-db restart --port=8888 --reload
    ```
 4. `uv run` and `--reload` only restart on Python changes; templates and JavaScript need a manual restart (see CLAUDE.md).
+
+### Dev server (`:8888`): who runs its full runs
+
+The worker fleet serves one profile at a time (`deploy/workers.py status` prints `installed profile prod but selected dev` when they differ). While the fleet is installed for `prod`, its workers read `muscatdb_prod`, so a job queued on the dev server (`muscatdb_dev`) has no worker to claim it.
+
+A dev server that was started with `MUSCAT_WORKER_MAX_SLOTS=0` (queue-only) therefore leaves every full run `pending`. Seen on 2026-10-16: a full photometry run queued on 2026-10-15 sat `pending` for a day, and a TTV run from the ephemeris page would have done the same.
+
+Do not switch the fleet to `dev` to fix this: `:8001` is queue-only and depends on the same workers. Let the dev server run its own full jobs instead. In the pane that hosts it (trace the process as in the previous section), with nothing queued or running:
+
+```bash
+source ~/.config/muscatdb/pg.env && export MUSCAT_CONTROL_PLANE=postgres \
+  MUSCAT_WORKER_MAX_SLOTS=2 MUSCAT_MAX_FULL_JOBS=2 \
+  && uv run muscat-db restart --port=8888 --reload
+```
+
+`MUSCAT_WORKER_MAX_SLOTS=2` lets this process run two full jobs per pipeline itself; `MUSCAT_MAX_FULL_JOBS=2` matches `max_full_jobs` under `[profiles.dev]` in `deploy/workers.toml` (a server launched before that line existed still carries the default 6). Restarting makes the process claim any row still `pending`, so cancel stale queued jobs first or they start at once.
 
 ### Warning: the Postgres test suite truncates its tables
 
@@ -529,6 +632,138 @@ an engine checkout on `sys.path` via `cwd` to find the code (photometry now reso
 the `photometry` console script from the conda env directly, matching how transit-fit
 and TTV already resolved `timer-fit`/`harmonic`), so the env's installed package is
 authoritative for all three pipelines once the `-prod` envs exist.
+
+#### Pinned production engines
+
+`deploy/engines.toml` records owner repositories, full commits, and revision-specific
+production environment names. `deploy/engines.py` audits the development baseline,
+clones its working dependencies into a **new** environment, replaces the editable
+engine with the pinned non-editable Git install, and verifies repository, commit,
+interpreter, import location, and `pip check`. It refuses to overwrite an existing
+environment. A failed provision leaves an unapproved environment for diagnosis;
+do not select it for production. An existing environment must pass `verify` before use.
+
+The initial candidates, audited on 2026-10-18, are:
+
+| Engine | Owner repository | Commit | Candidate environment |
+|---|---|---|---|
+| prose2 | `jpdeleon/prose2` | `6029ea8777121bd4ba4de9248735744a101ab425` | `prose-prod-6029ea87` |
+| timer | `john-livingston/timer` | `b8428258c9b62266532173af4abd7fbafee6dcef` | `timer-prod-b8428258` |
+
+These retain the working baseline's Python (prose 3.10.15, timer 3.13.13) and
+science dependencies. Prose's one explicit dependency override is
+`matplotlib==3.8.4`: the working environment's 3.9.3 violates the current
+owner package's `matplotlib<3.9` constraint (the old editable metadata did not
+report this). The override is recorded in `engines.toml` and verified against the
+installed version. On success,
+`<environment>/muscat-engine.json` records the installation identity, exact conda
+package URLs, and full pip freeze. Preserve this record with each deployment.
+Cloning is a migration from an audited working baseline, not a portable lockfile
+installer: a later clone of a changed development environment may have different
+dependencies even at the same engine commit. Compare dependency records before
+accepting any rebuilt environment.
+
+Prepared on ut2 on 2026-10-18; **not activated** in the web app or fleet.
+Both installations pass metadata/import-location checks and `pip check` on ut2
+and ut3–ut7. The dependency records are also checked in under
+`deploy/conda/production/{prose,timer}.json`. The baseline/pinned comparisons in
+`tests/test_pinned_engines_slow.py` passed for photometry preview and full reduction
+and for timer optimize-only and seeded sampling. The real Sinistro/260624
+TIC88297141 light curve is identical (311 rows), and timer's real KIC multi-band
+smoke fit has identical posterior means. The sampling check uses only 20 tuning
+and 20 draws; it tests migration compatibility, not scientific convergence.
+
+**Production photometry uses a frozen effective telescope configuration.**
+`MUSCAT_PROSE_FROZEN_CONFIG=1` routes both reductions and postprocessing through
+the standalone `_prose_launcher.py` adapter in the selected conda interpreter,
+passing `--config <path-to-_prose_telescopes.yaml>` explicitly. This is one
+authoritative, version-controlled configuration, not independently maintained
+configuration directories for each environment. An explicit path must contain
+the approved snapshot: missing or changed files fail without falling back to
+`~/.prose`.
+Before importing prose, it checks the packaged `_prose_telescopes.yaml` checksum
+and matching installed engine commit, then supplies a read-only `ConfigManager`
+initialized from the snapshot. The original initializer never runs, so it cannot
+read development telescope symlinks, create shared config files or download the
+unused Ballet model. HOME, `~/.prose` and the engine checkout are unchanged.
+All configuration write methods are rejected, including `set()` before it can
+mutate settings, builtin updates, legacy file migrations and model downloads.
+The read-only contract concerns configuration APIs and filesystem side effects;
+the engine's in-memory working dictionaries remain ordinary dictionaries.
+
+The snapshot preserves all 94 effective aliases, including builtin/custom
+definitions, resolved duplicate-name precedence, and YAML tuple types. It records
+the source telescope-file hashes. No camera values or header precedence are
+changed by freezing them. The digest is printed in each run log and stored as
+`tool_versions.prose_config_sha256` in `_product.json`; `engines.py verify` also
+imports the real engine with the adapter and verifies the digest against its pin.
+The YAML is included in the installed muscat-db wheel.
+
+Forked workers inherit this configuration. The adapter requires the pinned
+Python 3.10/Linux `fork` start method and refuses spawn/forkserver, which could
+re-import prose without the adapter. The engine has no supported explicit,
+read-only configuration loading API yet;
+[jpdeleon/prose2#15](https://github.com/jpdeleon/prose2/issues/15) tracks that API
+so this adapter can eventually be removed. Independent directories are not a
+requirement: installations may load the same approved configuration file.
+
+To prepare a future configuration update, `deploy/engines.py capture-config
+--snapshot <new-file>` captures the effective configuration using clean engine
+code at the approved commit. It refuses to overwrite an existing snapshot. Review
+the candidate's scientific settings, then update the packaged YAML and both
+recorded SHA-256 values (launcher and `engines.toml`) together. Never regenerate
+the production snapshot automatically at launch or by following live symlinks.
+
+Harmonic is not yet covered by #101: the live editable install is the
+`jpdeleon/harmonic` fork at `f616614568f7655858da29fbc46fb9edfdb022ee`.
+The owner's upstream `john-livingston/harmonic` at
+`a32fb8e32ca776e0e6e7dc92ad4232cef1f12194` lacks the custom-prior flags
+`--mu-min-me`, `--mu-max-me`, and `--z-max` sent by muscat-db (#77).
+Do not pin the fork or silently discard requested priors. Resolve compatibility
+before adding harmonic to the production pins; keep #101 open until then.
+
+Prepare without changing any live process:
+
+```bash
+uv run python deploy/engines.py audit
+uv run python deploy/engines.py install
+uv run python deploy/engines.py verify
+```
+
+Use `--conda /absolute/path/to/miniconda3/bin/conda` for another installation.
+Temporary build files go under `~/temp` (`--scratch` overrides this).
+Verify on **each** worker host as well as ut2, and exercise the installed
+`photometry` and `timer-fit` entrypoints against isolated output directories.
+Check telescope resources and both test/full execution paths. Run the fast suite
+with `uv run pytest`; heavyweight integration checks must use separate databases,
+output trees and obslog paths, never a default production run directory.
+
+Roll out only after the PR is merged, released and taken by the deploy host:
+
+1. Take a verified SQLite backup; record the current web and worker engine settings.
+2. Confirm `deploy/engines.py verify` succeeds everywhere and that no jobs are active.
+3. `deploy/workers.toml [profiles.prod].engine_envs` selects pinned prose and timer
+   for **both** `render_env` and `web-env`; `prose_frozen_config = true` enables
+   the adapter in both processes. Development keeps its existing environments
+   and exports `MUSCAT_PROSE_FROZEN_CONFIG=0`.
+   Apply with `uv run python deploy/workers.py --profile prod up`. Busy workers are
+   deliberately left unchanged; re-run after they drain and check all units.
+4. Merge the `web-env` engine exports into production's existing `.web-env`, preserving
+   its Postgres and control-plane settings. Do not replace that file with only the
+   generated fragment. Ensure `MUSCAT_PROSE_PYTHON` is unset in both `.env` and the
+   launch environment, since it takes precedence over `MUSCAT_PROSE_CONDA_ENV`.
+5. Restart the production web process in `muscatdbgui`, verify `/healthz`, then run
+   one queued job per migrated pipeline and check its log and `_product.json`.
+   Pinned engines now record `version+git.<full SHA>` in the existing version fields.
+
+Rollback: stop admitting new work and let active jobs finish, restore the recorded
+web exports and worker `engine_envs` (an operator-local config can select the old
+envs), reapply the fleet configuration, and restart the web process in `muscatdbgui`.
+When reverting to editable prose, also set `prose_frozen_config = false` for the
+workers and `MUSCAT_PROSE_FROZEN_CONFIG=0` for the web process; the frozen launcher
+deliberately refuses editable engines.
+No old engine environment is removed by this workflow. Future upgrades provision
+new environment names and repeat this process; never upgrade an in-use env in place.
 
 ### Cross-mounted raids
 Three NFS servers auto-mount each other's storage:

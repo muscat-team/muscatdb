@@ -43,6 +43,7 @@ from pathlib import Path
 
 from muscat_db import jobs, database
 from muscat_db.job_store import current_instance_id, current_owner, get_job_store
+from muscat_db.job_limits import JobLimitExceeded, claim_caps, enqueue_caps, limit_refusal
 from muscat_db.ref_time import is_valid_ref_time
 from muscat_db.instruments import INSTRUMENTS
 from muscat_db.cache import register_cache
@@ -349,12 +350,8 @@ def prose_version() -> str:
         found = None
         prose_py = _conda_env_python(prose_conda_env())
         if prose_py is not None:
-            code = (
-                "from importlib.metadata import version, PackageNotFoundError\n"
-                f"for n in {_PROSE_DISTRIBUTIONS!r}:\n"
-                "    try:\n        print(version(n)); break\n"
-                "    except PackageNotFoundError:\n        pass\n"
-            )
+            from muscat_db.engine_identity import version_probe
+            code = version_probe(_PROSE_DISTRIBUTIONS)
             try:
                 result = subprocess.run(
                     [prose_py, "-c", code], capture_output=True, text=True,
@@ -389,7 +386,15 @@ def _write_run_product(
     from muscat_db import __version__
     from muscat_db import product_record
 
-    inputs, note = product_record.frames_inputs(database.db_path(), inst, date, target)
+    db = database.db_path()
+    inputs, note = product_record.frames_inputs(
+        db, inst, date, target, product_record.target_normalizer(db)
+    )
+    tool_versions = {"muscat_db": __version__, "prose": prose_version()}
+    if os.environ.get("MUSCAT_PROSE_FROZEN_CONFIG") == "1":
+        from muscat_db._prose_launcher import snapshot_bytes, SNAPSHOT_SHA256
+        snapshot_bytes()
+        tool_versions["prose_config_sha256"] = SNAPSHOT_SHA256
     record = product_record.build_record(
         "photometry",
         author=user_name,
@@ -399,7 +404,7 @@ def _write_run_product(
             "options": opts, "test_run": bool(test_run),
             "site": site, "telescope": telescope, "mode": mode, "run_name": run_name,
         },
-        tool_versions={"muscat_db": __version__, "prose": prose_version()},
+        tool_versions=tool_versions,
     )
     product_record.write_record(rdir, record)
 
@@ -421,6 +426,12 @@ def _prose_prefix(module: str = _MODULE, console_script: str | None = "photometr
     invocation.
     """
     explicit = prose_python()
+    if os.environ.get("MUSCAT_PROSE_FROZEN_CONFIG") == "1":
+        python = explicit or _conda_env_python(prose_conda_env())
+        if python is None:
+            raise RuntimeError("frozen prose configuration requires its pinned environment")
+        return [python, "-I", str(_HERE / "_prose_launcher.py"),
+                "--config", str(_HERE / "_prose_telescopes.yaml"), module]
     if explicit:
         return [explicit, "-m", module]
     env = prose_conda_env()
@@ -1271,6 +1282,26 @@ _TRIPLE_RE = re.compile(r"^-?\d+(\.\d+)?,-?\d+(\.\d+)?,-?\d+(\.\d+)?$")
 _PAIR_RE = re.compile(r"^-?\d+(\.\d+)?,-?\d+(\.\d+)?$")
 _INTPAIR_RE = re.compile(r"^\d+,\d+$")
 _BAND_RE = re.compile(r"^[A-Za-z0-9_]+$")
+# Comma-separated options become one argv element per item in build_command, so
+# an item that is not a plain number could be read by prose2's argparse as a flag
+# of its own (--data_dir, --results_dir, ...) and override the ones set here.
+# Ids and Julian dates are digits only; anything else is refused by
+# validate_run_options and dropped by build_command.
+_INT_ITEM_RE = re.compile(r"[0-9]+")
+_JD_ITEM_RE = re.compile(r"[0-9]+(\.[0-9]+)?")
+
+
+def _list_items(value) -> list[str]:
+    return [item.strip() for item in str(value or "").split(",") if item.strip()]
+
+
+def _numeric_items(value, item_re: re.Pattern) -> list[str]:
+    """The items of a comma-separated option that are plain numbers."""
+    return [item for item in _list_items(value) if item_re.fullmatch(item)]
+
+
+def _all_numeric(value, item_re: re.Pattern) -> bool:
+    return len(_numeric_items(value, item_re)) == len(_list_items(value))
 
 
 def normalize_run_options(raw: dict | None) -> dict:
@@ -1435,6 +1466,17 @@ def validate_run_options(o: dict, inst: str | None = None) -> str | None:
     mode = (o.get("mode") or "").strip()
     if mode and mode not in SINISTRO_MODES:
         return f"mode must be one of {', '.join(SINISTRO_MODES)}"
+    for key, label in (("comparison_ids", "comparison IDs"), ("avoid_comparison_ids", "avoid comparison IDs")):
+        if not _all_numeric(o.get(key), _INT_ITEM_RE):
+            return f"{label} must be comma-separated integers"
+    for key, label in (("exclude_after_jd", "exclude after JD"), ("exclude_before_jd", "exclude before JD")):
+        if not _all_numeric(o.get(key), _JD_ITEM_RE):
+            return f"{label} must be comma-separated Julian dates (digits and one decimal point)"
+    target_id = str(o.get("target_id") or "").strip()
+    if target_id and not _INT_ITEM_RE.fullmatch(target_id):
+        return "target ID must be an integer"
+    if str(o.get("calib_dir") or "").strip():
+        return "the calibration directory cannot be set; it is always the night's own"
     return None
 
 
@@ -1511,24 +1553,22 @@ def build_command(
                 # a negative declination (e.g. -45:00:42) as a CLI flag.
                 dec = f" {dec}"
             args += ["--target_coord", ra, dec]
-    if o.get("target_id") not in (None, ""):
-        args += ["--tID", o["target_id"]]
-    if o.get("comparison_ids") not in (None, ""):
-        cids = [c.strip() for c in o["comparison_ids"].split(",") if c.strip()]
-        if cids:
-            args += ["--cID", *cids]
-    if o.get("avoid_comparison_ids") not in (None, ""):
-        aids = [a.strip() for a in o["avoid_comparison_ids"].split(",") if a.strip()]
-        if aids:
-            args += ["--avoid_cids", *aids]
-    if o.get("exclude_after_jd") not in (None, ""):
-        vals = [v.strip() for v in o["exclude_after_jd"].split(",") if v.strip()]
-        if vals:
-            args += ["--exclude_after_jd", *vals]
-    if o.get("exclude_before_jd") not in (None, ""):
-        vals = [v.strip() for v in o["exclude_before_jd"].split(",") if v.strip()]
-        if vals:
-            args += ["--exclude_before_jd", *vals]
+    # Only plain numbers are forwarded, even though validate_run_options already
+    # refuses anything else: queued and stored options reach this function
+    # without it (the fleet worker, sync_jobs), and a stray flag here would
+    # override --data_dir or --results_dir.
+    target_id = str(o.get("target_id") or "").strip()
+    if _INT_ITEM_RE.fullmatch(target_id):
+        args += ["--tID", target_id]
+    for flag, key, item_re in (
+        ("--cID", "comparison_ids", _INT_ITEM_RE),
+        ("--avoid_cids", "avoid_comparison_ids", _INT_ITEM_RE),
+        ("--exclude_after_jd", "exclude_after_jd", _JD_ITEM_RE),
+        ("--exclude_before_jd", "exclude_before_jd", _JD_ITEM_RE),
+    ):
+        items = _numeric_items(o.get(key), item_re)
+        if items:
+            args += [flag, *items]
     if o.get("avoid_nearby_star_mode") != "off":
         nearby = o.get("avoid_nearby_star")
         if o.get("avoid_nearby_star_mode") == "auto" or nearby in (None, ""):
@@ -1585,7 +1625,8 @@ def build_command(
         if mode:
             args += ["--mode", mode]
     if inst in ("muscat", "muscat2"):
-        args += ["--calib_dir", o.get("calib_dir") or str(results_dir(inst, date)) + "_calibrated"]
+        # Never taken from the options: prose2 writes calibration masters here.
+        args += ["--calib_dir", str(results_dir(inst, date)) + "_calibrated"]
     if o.get("make_gif", False):
         args.append("--gif")
     if o.get("plot_gaia_sources", True):
@@ -1797,25 +1838,21 @@ def start_run(
         overwrite = opts.get("overwrite", True)
         logger.info(f"start_run: {inst}/{date}/{target} run_id={run_id} overwrite={overwrite} existing={existing is not None}")
 
+        # A live run is never restarted by a repeat launch, overwrite or not:
+        # a double click or a second server process would otherwise kill a
+        # 20+ minute reduction (or, from another process whose _JOBS cannot
+        # see it, wipe the run directory under it). Restart means Cancel first.
+        # The pid file covers jobs launched by a different server process.
         if existing is not None and existing.proc.poll() is None:
-            if overwrite:
-                logger.info(f"start_run: cancelling existing job for {key} (overwrite=True)")
-                try:
-                    existing.cancelled = True
-                    jobs.terminate_pg(existing.proc)
-                    if existing.logf:
-                        try:
-                            existing.logf.close()
-                        except OSError:
-                            pass
-                except OSError:
-                    pass
-                if existing.run_type == "full":
-                    get_job_store().release_slot("photometry", key)
-                _JOBS.pop(key, None)
-            else:
-                logger.info(f"start_run: reusing existing job for {key} (overwrite=False)")
-                return {"ok": True, "key": key, "already_running": True, "run_id": run_id}
+            live = True
+        else:
+            try:
+                live = _detect_process_running(run_output_dir(inst, date, target, run_id))
+            except ValueError:
+                live = False
+        if live:
+            logger.info(f"start_run: {key} is already running; ignoring relaunch (overwrite={overwrite})")
+            return {"ok": True, "key": key, "already_running": True, "run_id": run_id}
 
         if _reduction_products_exist(inst, date, target, run_id) and not overwrite:
             logger.info(f"start_run: refusing to overwrite existing reduction for {key} (overwrite=False)")
@@ -1849,7 +1886,7 @@ def start_run(
         # capped above instead). Not yet claimed here just means queue below.
         claimed_slot = False
         if run_type == "full":
-            claimed_slot = get_job_store().claim_slot("photometry", key, _MAX_FULL_JOBS)
+            claimed_slot = get_job_store().claim_slot("photometry", key, _MAX_FULL_JOBS, **claim_caps(user_name))
         at_capacity = run_type == "full" and not claimed_slot
 
         # Queue full jobs when at capacity
@@ -1864,7 +1901,10 @@ def start_run(
                     run_id=run_id,
                     run_name=run_name,
                     user_name=user_name,
+                    **enqueue_caps(user_name),
                 )
+            except JobLimitExceeded as exc:
+                return limit_refusal(exc)
             except sqlite3.OperationalError as exc:
                 return {"ok": False, "error": f"database not writable: {exc}"}
             return {"ok": True, "key": key, "queued": True, "run_id": run_id}
@@ -2209,6 +2249,14 @@ def delete_reduction(inst: str, date: str, target: str, run_id: str = "") -> dic
     the web-run log. Also clears the persisted job record so the Jobs page
     no longer shows a stale entry. Never touches other targets.
     """
+    try:
+        rdir = run_output_dir(inst, date, target, run_id or None)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    with _LOCK:
+        job = _JOBS.get(job_key(inst, date, target, run_id))
+    if jobs.run_is_live(job.proc if job else None, rdir / _PID_FILE_NAME):
+        return {"ok": False, "error": jobs.LIVE_RUN_DELETE_ERROR}
     ok, removed, error = _delete_reduction_files(inst, date, target, run_id)
     if not ok:
         return {"ok": False, "error": error or "failed to delete reduction"}
@@ -2560,7 +2608,7 @@ def sync_jobs() -> None:
                 # Atomic: at most one process/caller ever wins this claim for a
                 # given key, so two workers draining the same pending row can
                 # never both launch it.
-                if not store.claim_slot("photometry", candidate_key, _MAX_FULL_JOBS):
+                if not store.claim_slot("photometry", candidate_key, _MAX_FULL_JOBS, **claim_caps(entry.get("user_name"))):
                     continue
                 try:
                     p = json.loads(entry.get("params") or "{}")

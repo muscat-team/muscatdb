@@ -21,6 +21,7 @@ import yaml
 
 from muscat_db import jobs, database
 from muscat_db.job_store import current_instance_id, current_owner, get_job_store
+from muscat_db.job_limits import JobLimitExceeded, claim_caps, enqueue_caps, limit_refusal
 from muscat_db import __meta__, __muscatdb_version__, __version__
 from muscat_db.photometry import (
     _conda_env_python,
@@ -30,6 +31,7 @@ from muscat_db.photometry import (
     harmonic_conda_env,
 )
 from muscat_db.cache import register_cache
+from muscat_db.engine_identity import version_probe
 
 _REPO_ROOT = pathlib.Path(__file__).parent.parent.parent.resolve()
 logger = logging.getLogger(__name__)
@@ -51,7 +53,7 @@ def _harmonic_version() -> str:
         else:
             try:
                 result = subprocess.run(
-                    [harmonic_py, "-c", "from importlib.metadata import version; print(version('harmonic'))"],
+                    [harmonic_py, "-c", version_probe(("harmonic",))],
                     capture_output=True, text=True, timeout=10,
                 )
                 _HARMONIC_VERSION = result.stdout.strip() if result.returncode == 0 and result.stdout.strip() else "unknown"
@@ -492,7 +494,10 @@ def start_ttv_fit(
 
     with _TTV_LOCK:
         existing = _TTV_JOBS.get(key)
-        if existing is not None and existing.proc.poll() is None:
+        # The pid file covers a fit launched by another server process (see
+        # transit_fit.start_fit).
+        live_pid_file = ttv_output_dir(target, run_name) / "harmonic.pid"
+        if jobs.run_is_live(existing.proc if existing else None, live_pid_file):
             return {"ok": True, "key": key, "already_running": True}
 
         # Every ttv_fit job is "full" (no test-run concept here), so a zero cap
@@ -506,7 +511,7 @@ def start_ttv_fit(
 
         # Every ttv_fit job is "full" (no test-run concept here), so always
         # claim a cross-process concurrency slot before launching.
-        claimed_slot = get_job_store().claim_slot("ttv_fit", key, _MAX_FULL_JOBS)
+        claimed_slot = get_job_store().claim_slot("ttv_fit", key, _MAX_FULL_JOBS, **claim_caps(user_name))
         at_capacity = not claimed_slot
         if at_capacity:
             try:
@@ -518,7 +523,10 @@ def start_ttv_fit(
                     params=json.dumps({"options": options}, separators=(",", ":")),
                     run_name=run_name,
                     user_name=user_name,
+                    **enqueue_caps(user_name),
                 )
+            except JobLimitExceeded as exc:
+                return limit_refusal(exc)
             except Exception:
                 return {"ok": False, "error": "database not writable"}
             return {"ok": True, "key": key, "queued": True}
@@ -828,6 +836,10 @@ def delete_ttv_fit(target: str, run_name: str = "") -> dict:
         rdir = ttv_output_dir(target, run_name)
     except ValueError:
         return {"ok": False, "error": "invalid target"}
+    with _TTV_LOCK:
+        job = _TTV_JOBS.get(ttv_job_key(target, run_name))
+    if jobs.run_is_live(job.proc if job else None, rdir / "harmonic.pid"):
+        return {"ok": False, "error": jobs.LIVE_RUN_DELETE_ERROR}
     removed = 0
     if rdir.is_dir():
         try:
@@ -1460,7 +1472,7 @@ def sync_jobs() -> None:
                 # Atomic: at most one process/caller ever wins this claim for a
                 # given key, so two workers draining the same pending row can
                 # never both launch it.
-                if not store.claim_slot("ttv_fit", key, _MAX_FULL_JOBS):
+                if not store.claim_slot("ttv_fit", key, _MAX_FULL_JOBS, **claim_caps(entry.get("user_name"))):
                     continue
                 rdir.mkdir(parents=True, exist_ok=True)
                 csv_content = opts.get("csv_content", "")

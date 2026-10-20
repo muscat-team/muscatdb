@@ -105,6 +105,8 @@ class Config:
     stagger_s: float
     max_full_jobs: int | None = None
     profile: str | None = None
+    engine_envs: dict[str, str] = field(default_factory=dict)
+    prose_frozen_config: bool = False
     hosts: dict[str, HostSpec] = field(default_factory=dict)
 
 
@@ -118,7 +120,8 @@ def _int(value, where: str, minimum: int = 0) -> int:
 # which otherwise lives under [web]).
 _PROFILE_KEYS = frozenset({
     "repo", "env_file", "pg_host", "database", "control_plane", "max_slots",
-    "job_threads", "notify", "stagger_s", "max_full_jobs", "queue_only",
+    "job_threads", "notify", "stagger_s", "max_full_jobs", "queue_only", "engine_envs",
+    "prose_frozen_config",
 })
 
 
@@ -152,6 +155,17 @@ def _apply_profile(data: dict, profile: str | None) -> tuple[dict, dict, str | N
 
 def parse_config(data: dict, profile: str | None = None) -> Config:
     d, web, profile = _apply_profile(data, profile)
+    frozen = d.get("prose_frozen_config", False)
+    if not isinstance(frozen, bool):
+        raise ConfigError("prose_frozen_config must be a boolean")
+    engine_envs = d.get("engine_envs", {})
+    if not isinstance(engine_envs, dict):
+        raise ConfigError("engine_envs must map engine names to conda environment names")
+    for engine, env_name in engine_envs.items():
+        if (engine not in {"prose", "timer", "harmonic"}
+                or not isinstance(env_name, str)
+                or not re.fullmatch(r"[A-Za-z0-9_-]+", env_name)):
+            raise ConfigError(f"engine_envs contains an invalid engine or environment: {engine!r}")
     for need in ("pg_host", "database"):
         if not d.get(need):
             raise ConfigError(f"[defaults] {need} is required")
@@ -190,6 +204,8 @@ def parse_config(data: dict, profile: str | None = None) -> Config:
             _int(d["max_full_jobs"], "max_full_jobs", 1) if "max_full_jobs" in d else None
         ),
         profile=profile,
+        engine_envs=dict(engine_envs),
+        prose_frozen_config=frozen,
         hosts=hosts,
     )
 
@@ -250,11 +266,16 @@ def render_env(cfg: Config, host: HostSpec, hostname: str) -> str:
     if cfg.profile:
         # Also makes a profile switch change the env text, so `up` restarts the units.
         lines["MUSCAT_WORKER_PROFILE"] = cfg.profile
+    for engine, name in sorted(cfg.engine_envs.items()):
+        lines[f"MUSCAT_{engine.upper()}_CONDA_ENV"] = name
+    lines["MUSCAT_PROSE_FROZEN_CONFIG"] = "1" if cfg.prose_frozen_config else "0"
     return "".join(f"{k}={v}\n" for k, v in lines.items())
 
 
 def web_env(cfg: Config) -> str:
-    out = []
+    out = [f"export MUSCAT_PROSE_FROZEN_CONFIG={int(cfg.prose_frozen_config)}\n"]
+    for engine, name in sorted(cfg.engine_envs.items()):
+        out.append(f"export MUSCAT_{engine.upper()}_CONDA_ENV={name}\n")
     if cfg.profile:
         out.append(f"# profile {cfg.profile}: database {cfg.database}, repo {cfg.repo}\n")
     if cfg.queue_only_web:

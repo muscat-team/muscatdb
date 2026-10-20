@@ -424,3 +424,111 @@ class JobStoreContractTests:
 
     def test_heartbeat_missing_key_is_noop(self, store):
         store.heartbeat("photometry:muscat4/260101/GONE", "host:1:abc")  # must not raise
+
+    # --- per-user caps (issue #265) -----------------------------------
+
+    def test_claim_slot_user_cap_counts_across_pipelines(self, store):
+        assert store.claim_slot("photometry", "a", 5, user_name="ann", max_user_slots=1) is True
+        # Pipeline has room, but ann is at her cap.
+        assert store.claim_slot("transit_fit", "b", 5, user_name="ann", max_user_slots=1) is False
+        assert store.claim_slot("photometry", "c", 5, user_name="ann", max_user_slots=1) is False
+        # Another user is unaffected.
+        assert store.claim_slot("photometry", "d", 5, user_name="bob", max_user_slots=1) is True
+
+    def test_claim_slot_user_cap_frees_on_release(self, store):
+        store.claim_slot("photometry", "a", 5, user_name="ann", max_user_slots=1)
+        store.release_slot("photometry", "a")
+        assert store.claim_slot("ttv_fit", "b", 5, user_name="ann", max_user_slots=1) is True
+
+    def test_claim_slot_without_user_cap_ignores_user(self, store):
+        for key in ("a", "b", "c"):
+            assert store.claim_slot("photometry", key, 5, user_name="ann", max_user_slots=None) is True
+        assert store.claim_slot("photometry", "d", 5, user_name="ann", max_user_slots=0) is True
+
+    def test_claim_slot_user_cap_still_obeys_pipeline_cap(self, store):
+        assert store.claim_slot("photometry", "a", 1, user_name="ann", max_user_slots=3) is True
+        assert store.claim_slot("photometry", "b", 1, user_name="bob", max_user_slots=3) is False
+
+    def test_claim_slot_user_cap_is_atomic_under_races(self, store):
+        import threading
+
+        pipelines = ["photometry", "transit_fit", "ttv_fit"]
+        results: list[bool] = []
+        barrier = threading.Barrier(6)
+
+        def claim(i: int) -> None:
+            barrier.wait()
+            results.append(
+                store.claim_slot(pipelines[i % 3], f"k{i}", 10, user_name="ann", max_user_slots=2)
+            )
+
+        threads = [threading.Thread(target=claim, args=(i,)) for i in range(6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert results.count(True) == 2
+
+    def _enqueue(self, store, target, user, max_queued, type_="photometry"):
+        store.enqueue(
+            type_=type_, inst="muscat4", date="260101", target=target,
+            started_at=time.time(), user_name=user, max_queued=max_queued,
+        )
+
+    def test_enqueue_refuses_over_queued_cap(self, store):
+        import pytest
+
+        from muscat_db.job_limits import JobLimitExceeded
+
+        self._enqueue(store, "A", "ann", 2)
+        self._enqueue(store, "B", "ann", 2, type_="transit_fit")  # cap spans pipelines
+        with pytest.raises(JobLimitExceeded, match="ann"):
+            self._enqueue(store, "C", "ann", 2, type_="ttv_fit")
+        assert len(store.pending("ttv_fit")) == 0
+        self._enqueue(store, "D", "bob", 2)  # another user is unaffected
+        assert len(store.pending("photometry")) == 2
+
+    def test_enqueue_cap_ignores_non_pending_rows(self, store):
+        save(store, target="RUN", state="running", started_at=1.0, user_name="ann")
+        save(store, target="DONE", state="done", started_at=1.0, user_name="ann")
+        self._enqueue(store, "A", "ann", 1)
+
+    def test_reenqueue_of_a_pending_key_is_not_counted(self, store):
+        self._enqueue(store, "A", "ann", 1)
+        self._enqueue(store, "A", "ann", 1)  # same key: no new row, so no refusal
+        assert len(store.pending("photometry")) == 1
+
+    def test_enqueue_without_cap_is_unlimited(self, store):
+        for i in range(8):
+            self._enqueue(store, f"T{i}", "ann", None)
+        self._enqueue(store, "Z", "ann", 0)
+        assert len(store.pending("photometry")) == 9
+
+    def test_enqueue_without_user_is_never_capped(self, store):
+        for i in range(3):
+            self._enqueue(store, f"T{i}", None, 1)
+        assert len(store.pending("photometry")) == 3
+
+    def test_enqueue_cap_is_atomic_under_races(self, store):
+        import threading
+
+        from muscat_db.job_limits import JobLimitExceeded
+
+        outcomes: list[bool] = []
+        barrier = threading.Barrier(8)
+
+        def enqueue(i: int) -> None:
+            barrier.wait()
+            try:
+                self._enqueue(store, f"T{i}", "ann", 3)
+                outcomes.append(True)
+            except JobLimitExceeded:
+                outcomes.append(False)
+
+        threads = [threading.Thread(target=enqueue, args=(i,)) for i in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert outcomes.count(True) == 3
+        assert len(store.pending("photometry")) == 3

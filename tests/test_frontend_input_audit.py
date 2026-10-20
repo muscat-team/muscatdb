@@ -261,7 +261,8 @@ def test_lco_prediction_inputs_invalidate_generated_windows():
 
     invalidate = _function_body(html, "invalidateGeneratedWindows")
     assert "clearWindows()" in invalidate
-    assert "lastDryRunHash = null" in invalidate
+    # Drafts and dry-run hashes (per request) are dropped with the windows.
+    assert "reqState = {}" in invalidate
     assert "el('vis-figure').style.display = 'none'" in invalidate
     assert "Generate windows" in invalidate
     assert "node.addEventListener('input', invalidateGeneratedWindows)" in html
@@ -321,8 +322,10 @@ def test_lco_site_availability_annotates_without_removing_elp():
     assert ".disabled" not in annotate
     assert "removeChild" not in annotate
 
-    # applyKind re-annotates for the newly selected kind, and init loads once.
-    assert "annotateSiteOptions();" in _function_body(html, "applyKind")
+    # applyKind re-annotates for the newly selected kind (via the shared
+    # instrument-block refresh, which split legs also trigger), and init loads once.
+    assert "refreshInstrumentBlocks();" in _function_body(html, "applyKind")
+    assert "annotateSiteOptions();" in _function_body(html, "refreshInstrumentBlocks")
     assert "loadSiteAvailability();" in html
 
     # applyAutoConfig leaves the site unset + explains instead of pinning a site
@@ -880,7 +883,7 @@ def test_ephemeris_dataset_run_name_uses_transit_coverage_suffix():
 
     render_table = _function_body(html, "renderDatasetsTable")
     assert "['full', 'ing', 'egr'].includes(d.transit_coverage)" in render_table
-    assert "${d.run_name}${coverageSuffix}" in render_table
+    assert "${escapeAttr(d.run_name)}${coverageSuffix}" in render_table
     assert "runTypeBadge" not in render_table
 
 

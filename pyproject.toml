@@ -23,6 +23,7 @@ dependencies = [
     "markdown>=3.10.3",
     "nh3>=0.3.7",
     "pyjwt[crypto]>=2.8",
+    "pydantic>=2",
 ]
 
 [project.optional-dependencies]
@@ -38,6 +39,9 @@ muscat-db = "muscat_db.cli:app"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+muscat_db = ["_prose_telescopes.yaml"]
 
 [build-system]
 requires = ["setuptools>=75"]

@@ -769,8 +769,10 @@ def backfill_products_cmd(
     """Write product records for runs made before they existed (issue #208).
 
     Rebuilds each photometry, transit-fit and TTV run's record from its job
-    row. Runs whose inputs cannot be established exactly get a record with
-    undetermined inputs and stay admin-only. Idempotent; never overwrites.
+    row, then from the run directories on disk for runs with no job row
+    (transit-fit inputs come from the run's fit.yaml). Runs whose inputs
+    cannot be established exactly get a record with undetermined inputs and
+    stay admin-only. Idempotent; never overwrites.
     """
     _log_startup_banner(f"backfill-products --db {db}")
     _require_existing_db(ctx, db, "backfill-products")
@@ -781,7 +783,8 @@ def backfill_products_cmd(
     n = (stats.determined + stats.undetermined) if dry_run else stats.written
     console.print(
         f"{verb} {n} record(s): {stats.determined} with inputs, "
-        f"{stats.undetermined} undetermined; {stats.already} already had one, "
+        f"{stats.undetermined} undetermined ({stats.from_disk} found by walking "
+        f"run directories); {stats.already} already had one, "
         f"{stats.missing_dir} run dir(s) missing, {stats.errors} error(s)"
     )
     for reason, count in sorted(stats.by_reason.items(), key=lambda kv: -kv[1]):
@@ -1463,6 +1466,83 @@ def access_scope(
         )
 
 
+@access_app.command("limit")
+def access_limit(
+    username: str = typer.Argument(..., help="nginx username"),
+    running: int = typer.Option(None, "--running", min=0, help="Jobs the user may run at once (0 = unlimited)"),
+    queued: int = typer.Option(None, "--queued", min=0, help="Jobs the user may have waiting (0 = unlimited)"),
+    reset: bool = typer.Option(False, "--reset", help="Clear the user's overrides (back to the site defaults)"),
+):
+    """Set a user's caps on running and queued jobs (#265).
+
+    Photometry, transit fit and TTV fit count together. With no options, show
+    the user's current caps. A user with no override gets the site defaults
+    (MUSCAT_USER_MAX_RUNNING / MUSCAT_USER_MAX_QUEUED); admins are not exempt.
+    """
+    from muscat_db import job_limits
+    from muscat_db.database import db_path
+
+    if reset or running is not None or queued is not None:
+        limits = job_limits.set_limits(db_path(), username, running=running, queued=queued, reset=reset)
+    else:
+        limits = job_limits.limits_for(username)
+    console.print(
+        f"[green]{username}: running {job_limits.describe(limits.running)}, "
+        f"queued {job_limits.describe(limits.queued)}[/]"
+    )
+
+
+@access_app.command("grant-target")
+def access_grant_target(
+    username: str = typer.Argument(..., help="nginx username (must be a scoped viewer)"),
+    target: str = typer.Argument(..., help="Target name; spaces and case are ignored"),
+    granted_by: str = typer.Option(
+        None, "--by", help="Recorded as the granting admin (default: your OS user)"
+    ),
+):
+    """Let a scoped viewer see one target under any proposal (#228).
+
+    Everything else in the target's proposals stays hidden. Only scoped viewers
+    (`access scope`) take target grants; for anyone else the grant would have no
+    effect, so it is refused.
+    """
+    from muscat_db import access
+    from muscat_db.database import db_path
+
+    db = db_path()
+    target = target.strip()
+    if not access.is_scoped(db, username):
+        console.print(
+            f"[red]Error: '{username}' is not a scoped viewer, so a target grant would have "
+            f"no effect. Run `muscat-db access scope {username}` first.[/]"
+        )
+        raise typer.Exit(1)
+    if not access.target_matches_observations(db, target):
+        console.print(
+            f"[yellow]{target} matches no observed object, so it shows {username} nothing "
+            "until one is ingested.[/]"
+        )
+    if access.grant_target(db, username, target, granted_by or getpass.getuser()):
+        console.print(f"[green]{username} granted target {target}[/]")
+    else:
+        console.print(f"[yellow]{username} already has target {target}[/]")
+
+
+@access_app.command("revoke-target")
+def access_revoke_target(
+    username: str = typer.Argument(..., help="nginx username"),
+    target: str = typer.Argument(..., help="Target name"),
+):
+    """Remove a scoped viewer's target grant."""
+    from muscat_db import access
+    from muscat_db.database import db_path
+
+    if not access.revoke_target(db_path(), username, target.strip()):
+        console.print(f"[yellow]{username} had no target grant for {target}[/]")
+        raise typer.Exit(1)
+    console.print(f"[green]{username} revoked from target {target}[/]")
+
+
 @access_app.command("list")
 def access_list(
     username: str | None = typer.Option(None, "--user", "-u", help="Show one user's grants"),
@@ -1611,6 +1691,8 @@ def access_explain(
     hidden = sum(p["target_nights"] for p in info["proposals"] if not p["visible"])
     total = sum(p["target_nights"] for p in info["proposals"])
     console.print(f"{total - hidden} of {total} target-nights visible, {hidden} hidden")
+    for g in info["target_grants"]:
+        console.print(f"Target grant: {g['target']} (by {g['granted_by'] or '-'}, {g['granted_at']})")
     for pid in info["unmatched_grants"]:
         console.print(
             f"[yellow]Grant {pid} matches no observation, so it shows {username} nothing.[/]"

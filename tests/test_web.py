@@ -176,6 +176,9 @@ def test_ttv_output_file_opens_inline_not_download(tmp_path, monkeypatch):
     import gzip
 
     monkeypatch.setenv("MUSCAT_TTV_DIR", str(tmp_path / "ttv"))
+    # An empty database: nothing restricted, so no product record is needed. The
+    # default path is the repo's real muscat.db, which restricts a proposal.
+    monkeypatch.setenv("MUSCAT_DB_PATH", str(tmp_path / "empty.db"))
     run_dir = tmp_path / "ttv" / "TOI123" / "_runs" / "default"
     run_dir.mkdir(parents=True)
     (run_dir / "data.csv").write_text("bjd,flux\n1.0,0.99\n")
@@ -1448,7 +1451,8 @@ def test_lco_pages_render_and_nav_links_it(mock_db):
     assert "Search LCO Archive" in archive.text and "Download selected" in archive.text
     assert "Submitted Request Monitoring" in page.text
     assert "/api/lco/monitored-requests" in page.text
-    assert page.text.count('class="lco-section section-fold"') == 5
+    # Target, windows, imaging settings, requests (science/test), monitoring.
+    assert page.text.count('class="lco-section section-fold"') == 4
     assert archive.text.count('class="lco-section section-fold"') == 3
     assert "<summary><h3>Target &amp; Transit Windows</h3></summary>" in page.text
     assert "<summary><h3>Results</h3></summary>" in archive.text
@@ -2498,6 +2502,10 @@ def test_lco_windows_attaches_observability(monkeypatch):
     assert wins and all("observability" in w for w in wins)
     for w in wins:
         assert w["observability"]["rating"] in ("full", "partial", "none")
+        # Every transit carries its booking plans (possibly none).
+        assert isinstance(w["observability"]["plans"], list)
+        for plan in w["observability"]["plans"]:
+            assert plan["type"] in ("single", "either", "relay")
 
 
 def test_lco_windows_omits_observability_without_radec(monkeypatch):
@@ -3692,7 +3700,7 @@ def test_list_ttv_runs_empty_for_unknown_or_unsafe_target(tmp_path, monkeypatch)
     assert ttv.list_ttv_runs("../etc") == []
 
 
-def test_ttv_fit_runs_endpoint(tmp_path, monkeypatch):
+def test_ttv_fit_runs_endpoint(tmp_path, monkeypatch, mock_db):
     monkeypatch.setenv("MUSCAT_TTV_DIR", str(tmp_path))
     _make_ttv_run(tmp_path, "HIP67522", "default")
 
@@ -3705,7 +3713,7 @@ def test_ttv_fit_runs_endpoint(tmp_path, monkeypatch):
     assert client.get("/api/ttv-fit/runs", params={"target": ""}).status_code == 400
 
 
-def test_ttv_fit_model_endpoint_uses_selected_run_and_end_date(monkeypatch):
+def test_ttv_fit_model_endpoint_uses_selected_run_and_end_date(monkeypatch, mock_db):
     captured = {}
 
     def fake_model(target, run_name, end_date):
@@ -3834,7 +3842,7 @@ def test_ttv_model_rejects_invalid_date_before_starting_harmonic(tmp_path, monke
     assert result == {"ok": False, "error": "end_date must be YYYY-MM-DD"}
 
 
-def test_ttv_download_all_uses_disk_backed_archive(tmp_path, monkeypatch):
+def test_ttv_download_all_uses_disk_backed_archive(tmp_path, monkeypatch, mock_db):
     monkeypatch.setenv("MUSCAT_TTV_DIR", str(tmp_path))
     run_dir = _make_ttv_run(tmp_path, "HIP67522", "default")
     (run_dir / "samples.csv.gz").write_bytes(b"samples")
@@ -4109,3 +4117,74 @@ def test_target_page_has_exofop_obslog_section(mock_db, monkeypatch):
     assert "/api/lco/archive/exofop?OBJECT=" in html
     assert "/api/lco/archive/exofop-download" in html
     assert 'id="exofop-obslog-tbody"' in html
+
+
+def _vis_error_ipp(v, d):
+    return {"errors": {"requests": [{"non_field_errors": [
+        f"According to the constraints of the request, the target will only be visible for a maximum of {v} "
+        f"hours within the time window. This is less than the duration of your request {d} hours."
+    ]}]}}
+
+
+def test_lco_ipp_fits_repeat_duration_to_lco_visibility(monkeypatch):
+    """LCO's visibility error is answered by cutting repeat_duration to fit and
+    checking once more; the fitted payload and its hash come back."""
+    import muscat_db.lco as _lco
+    calls = []
+
+    def fake_ipp(payload, token=None):
+        calls.append(payload["requests"][0]["configurations"][0]["repeat_duration"])
+        return _vis_error_ipp("3.56", "4.03") if len(calls) == 1 else {"max_allowable_ipp_value": 1.0}
+
+    monkeypatch.setattr("muscat_db.lco.max_allowable_ipp", fake_ipp)
+    params = {**_ipp_params(), "type": "REPEAT_EXPOSE"}
+    rg = _lco.build_requestgroup(params["kind"], params)
+    r = TestClient(app).post("/api/lco/ipp", json={"requestgroup": rg})
+    body = r.json()
+    assert r.status_code == 200 and body["ok"]
+    assert len(calls) == 2 and calls[1] < calls[0]
+    fitted = body["payload"]["requests"][0]["configurations"][0]["repeat_duration"]
+    assert fitted == calls[1]
+    assert body["payload_hash"] == _lco.payload_hash(body["payload"])
+    assert body["ipp"] == {"max_allowable_ipp_value": 1.0}
+    assert body["adjusted"][0]["old"] == calls[0] and body["adjusted"][0]["new"] == fitted
+
+
+def test_lco_ipp_leaves_other_errors_alone(monkeypatch):
+    calls = []
+
+    def fake_ipp(payload, token=None):
+        calls.append(1)
+        return {"errors": {"requests": [{"non_field_errors": ["Some other problem"]}]}}
+
+    monkeypatch.setattr("muscat_db.lco.max_allowable_ipp", fake_ipp)
+    body = TestClient(app).post("/api/lco/ipp", json=_ipp_params()).json()
+    assert len(calls) == 1 and "adjusted" not in body
+
+
+def test_lco_split_ipp_fits_a_leg_and_submit_rebuilds_it(mock_db, monkeypatch):
+    """A split leg is rebuilt from params at submit, so the fitted value is
+    returned as an explicit repeat_duration the client sends back; the rebuilt
+    leg then matches the checked hash."""
+    import muscat_db.lco as _lco
+    seen = []
+
+    def fake_ipp(payload, token=None):
+        seen.append(payload["requests"][0]["location"].get("site"))
+        if payload["requests"][0]["location"].get("site") == "elp" and seen.count("elp") == 1:
+            return _vis_error_ipp("1.20", "1.40")
+        return {"max_allowable_ipp_value": 1.0}
+
+    monkeypatch.setattr("muscat_db.lco.max_allowable_ipp", fake_ipp)
+    leg = {**_ipp_params(), "type": "REPEAT_EXPOSE",
+           "windows": [{"start": "2026-01-01T00:00:00Z", "end": "2026-01-01T01:30:00Z"}]}
+    leg_a = {**leg, "site": "elp"}
+    leg_b = {**leg, "site": "lsc"}
+    monkeypatch.setattr("muscat_db.lco._clip_windows_to_observability", lambda *a, **k: None)
+    body = TestClient(app).post("/api/lco/split-ipp", json={"leg_a": leg_a, "leg_b": leg_b}).json()
+    assert body["ok"]
+    override = body["leg_a"]["repeat_duration_override"]
+    assert override == 5400 - 180 - 720 - _lco._LCO_DURATION_FIT_SLACK_S  # 0.20 h = 720 s
+    assert body["leg_b"].get("repeat_duration_override") is None
+    rebuilt = _lco.build_requestgroup("sinistro", {**leg_a, "repeat_duration": override})
+    assert _lco.payload_hash(rebuilt) == body["leg_a"]["payload_hash"]
