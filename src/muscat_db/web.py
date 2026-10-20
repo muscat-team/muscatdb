@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import datetime
 import contextvars
 import json
@@ -4803,8 +4804,19 @@ def _attach_observability(result: dict, payload: dict, duration_h: float) -> Non
             pad_before_min=float(payload.get("pad_before_min") or 0.0),
             pad_after_min=float(payload.get("pad_after_min") or 0.0),
         )
-        for w, o in zip(windows, obs):
-            w["observability"] = o
+        # Booking plans per transit (each useful site alone, either site, a
+        # relay), over the padded window: what the schedule page offers in each
+        # row's plan dropdown.
+        plans = transit_obs.transit_plans(
+            float(ra), float(dec), windows, duration_h,
+            max_airmass=float(payload.get("obs_airmass") or 2.0),
+            twilight=payload.get("twilight") or transit_obs.DEFAULT_TWILIGHT,
+            moon_sep_min=float(payload.get("moon_sep_min") or 0.0),
+            max_lunar_phase=float(payload.get("max_lunar_phase") or 1.0),
+            sites=payload.get("sites") or None,
+        )
+        for w, o, p in zip(windows, obs, plans):
+            w["observability"] = {**o, "plans": p}
     except transit_obs.TransitObsError as e:
         result["obs_error"] = str(e)
     except Exception as e:  # never let astropy break window listing
@@ -5037,11 +5049,19 @@ def api_lco_ipp(request: Request, payload: dict = Body(...)):
     """Run the max-allowable-IPP dry-run on the edited draft (or a params-built
     requestgroup when no edited ``requestgroup`` is supplied)."""
     try:
+        user = _request_user(request)
         rg = _requestgroup_from_payload(payload)
-        ipp = lco.max_allowable_ipp(rg, _request_user(request))
-        return JSONResponse(
-            {"ok": True, "payload": rg, "payload_hash": lco.payload_hash(rg), "ipp": ipp}
-        )
+        ipp = lco.max_allowable_ipp(rg, user)
+        body = {"ok": True}
+        # LCO saw less visible time than the request lasts: cut repeat_duration
+        # by the overrun it reported and check once more. The fitted payload
+        # (and its hash) replaces the draft, so Submit books what passed.
+        fit = lco.fit_repeat_duration_to_visibility(rg, ipp)
+        if fit is not None:
+            rg, body["adjusted"] = fit
+            ipp = lco.max_allowable_ipp(rg, user)
+        body.update({"payload": rg, "payload_hash": lco.payload_hash(rg), "ipp": ipp})
+        return JSONResponse(body)
     except lco.LcoError as e:
         return _lco_error_response(e)
 
@@ -5205,21 +5225,40 @@ def api_lco_split_ipp(request: Request, payload: dict = Body(...)):
     Both legs must pass validation before either can be submitted; this never
     reports a partial pass, naming which leg failed when one does."""
     user = _request_user(request)
-    try:
-        rg_a = lco.build_requestgroup((payload.get("leg_a") or {}).get("kind"), payload.get("leg_a") or {})
-        ipp_a = lco.max_allowable_ipp(rg_a, user)
-    except lco.LcoError as e:
-        return _lco_split_error_response(e, "leg_a")
-    try:
-        rg_b = lco.build_requestgroup((payload.get("leg_b") or {}).get("kind"), payload.get("leg_b") or {})
-        ipp_b = lco.max_allowable_ipp(rg_b, user)
-    except lco.LcoError as e:
-        return _lco_split_error_response(e, "leg_b")
-    return JSONResponse({
-        "ok": True,
-        "leg_a": {"payload": rg_a, "payload_hash": lco.payload_hash(rg_a), "ipp": ipp_a},
-        "leg_b": {"payload": rg_b, "payload_hash": lco.payload_hash(rg_b), "ipp": ipp_b},
+    legs = {}
+    for key in ("leg_a", "leg_b"):
+        try:
+            legs[key] = _dry_run_split_leg(payload.get(key) or {}, user)
+        except lco.LcoError as e:
+            return _lco_split_error_response(e, key)
+    return JSONResponse({"ok": True, **legs})
+
+
+def _dry_run_split_leg(leg: dict, user: str | None) -> dict:
+    """Build and dry-run one split leg, fitting repeat_duration to LCO's
+    visibility when its dry-run reports the request outlasts it.
+
+    A leg is rebuilt from its params at submit, so a fitted value is returned
+    as ``repeat_duration_override`` for the client to send back as the leg's
+    explicit ``repeat_duration`` (which ``build_requestgroup`` honours). Each
+    build gets a fresh copy: building writes the clipped windows into params.
+    """
+    kind = leg.get("kind")
+    rg = lco.build_requestgroup(kind, copy.deepcopy(leg))
+    ipp = lco.max_allowable_ipp(rg, user)
+    override = leg.get("repeat_duration") or None
+    out = {}
+    fit = lco.fit_repeat_duration_to_visibility(rg, ipp)
+    if fit is not None:
+        override = fit[1][0]["new"]
+        rg = lco.build_requestgroup(kind, {**copy.deepcopy(leg), "repeat_duration": override})
+        ipp = lco.max_allowable_ipp(rg, user)
+        out["adjusted"] = fit[1]
+    out.update({
+        "payload": rg, "payload_hash": lco.payload_hash(rg), "ipp": ipp,
+        "repeat_duration_override": override,
     })
+    return out
 
 
 @lco_router.post("/split-submit", response_class=JSONResponse)

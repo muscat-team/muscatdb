@@ -1882,6 +1882,12 @@ _REPEAT_EXPOSE_SETUP_OVERHEAD_S = 180
 # value varies per site/target; 900 s per bounded edge is a safe default.
 _LCO_VISIBILITY_EDGE_MARGIN_S = 900
 
+# How far outside each window edge to look for the target's rise/set. A window
+# already trimmed to the visibility plot ends exactly on the rise/set sample, so
+# sampling only inside it would miss that the edge is observability-bounded and
+# skip the margin above. 300 s is the visibility plot's sampling step.
+_EDGE_PROBE_S = 300
+
 
 def _repeat_duration(params: dict) -> int | None:
     """Seconds a REPEAT_EXPOSE config should repeat within its observing window.
@@ -1940,28 +1946,76 @@ def _value_or_default(value, default):
     return default if value in (None, "") else value
 
 
+def _parse_utc(value) -> datetime.datetime:
+    return datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+
+
+def _iso_utc(dt: datetime.datetime) -> str:
+    return dt.isoformat().replace("+00:00", "Z")
+
+
+def _clip_window(window: dict, site: str, observable_interval) -> tuple[dict, int | None] | None:
+    """One window clipped to its observable run at ``site``, plus its usable cap.
+
+    ``observable_interval(window, site)`` is sampled over the window widened by
+    ``_EDGE_PROBE_S`` on each side, so an edge sitting on (or just past) the
+    target's rise/set still counts as observability-bounded. Each bounded edge
+    is held back by ``_LCO_VISIBILITY_EDGE_MARGIN_S`` from the rise/set itself;
+    the cap is ``None`` when neither edge is bounded. An unclipped edge keeps
+    its exact original timestamp. Returns ``None`` when nothing is observable.
+    """
+    start, end = _parse_utc(window["start"]), _parse_utc(window["end"])
+    probe = datetime.timedelta(seconds=_EDGE_PROBE_S)
+    interval = observable_interval({"start": _iso_utc(start - probe), "end": _iso_utc(end + probe)}, site)
+    if interval is None:
+        return None
+    run_start, run_end = _parse_utc(interval["start"]), _parse_utc(interval["end"])
+    clip_start, clip_end = max(start, run_start), min(end, run_end)
+    if clip_end <= clip_start:
+        return None
+    clipped = {
+        **window,
+        "start": window["start"] if clip_start == start else interval["start"],
+        "end": window["end"] if clip_end == end else interval["end"],
+    }
+    if not (interval["hit_start_limit"] or interval["hit_end_limit"]):
+        return clipped, None
+    margin = datetime.timedelta(seconds=_LCO_VISIBILITY_EDGE_MARGIN_S)
+    usable_start = max(clip_start, run_start + margin) if interval["hit_start_limit"] else clip_start
+    usable_end = min(clip_end, run_end - margin) if interval["hit_end_limit"] else clip_end
+    return clipped, max(int((usable_end - usable_start).total_seconds()), 60)
+
+
 def _clip_windows_to_observability(kind: str, params: dict, max_airmass, min_lunar_distance, max_lunar_phase=1.0) -> None:
-    """Clip each REPEAT_EXPOSE window to the portion observable at the pinned site.
+    """Clip each REPEAT_EXPOSE window to the portion observable at its site.
 
     ``generate_windows`` pads windows around mid-transit with no site awareness,
     so a window can run past the target's rise/set at the site (e.g. post-egress
-    padding below the airmass limit). When a specific ``site`` is pinned, each
-    window's ``start``/``end`` is clipped to the longest contiguous observable run
-    at that site under the request's own constraints (the airmass/moon/twilight
-    actually submitted); unclipped edges keep their exact timestamps.
+    padding below the airmass limit). Each window is clipped at the pinned
+    ``site``, or, with no site pinned, at the window's own ``site`` hint (the
+    site the schedule page planned that window for), to the longest contiguous
+    observable run under the request's own constraints (the airmass/moon/
+    twilight actually submitted); unclipped edges keep their exact timestamps.
     ``repeat_duration`` (via :func:`_repeat_duration`) is then derived from the
     clipped span, held back by ``_LCO_VISIBILITY_EDGE_MARGIN_S`` for each edge
     bounded by the target's own rise/set.
 
-    No pinned site leaves the windows untouched — the scheduler may pick any site
-    on the telescope class, so one site's interval would not apply. A window with
-    no observable time at the site raises.
+    The ``site`` hint is always removed: LCO's window schema has no such field.
+    A window with neither a pinned site nor a hint is left untouched, since the
+    scheduler may pick any site on the telescope class. A window with no
+    observable time at its site raises.
     """
+    hints = [str(w.get("site") or "").strip().lower() for w in params.get("windows") or []]
+    # "Either site" windows list every site LCO may run them at.
+    multi = [[str(x).strip().lower() for x in (w.get("sites") or []) if str(x).strip()]
+             for w in params.get("windows") or []]
+    windows = [{k: v for k, v in w.items() if k not in ("site", "sites")} for w in params.get("windows") or []]
+    if "windows" in params:
+        params["windows"] = windows
     if (params.get("type") or "REPEAT_EXPOSE") != "REPEAT_EXPOSE":
         return
-    site = (params.get("site") or "").strip().lower()
-    windows = params.get("windows") or []
-    if not site or not windows or params.get("ra") in (None, "") or params.get("dec") in (None, ""):
+    pinned = (params.get("site") or "").strip().lower()
+    if not (pinned or any(hints) or any(multi)) or not windows or params.get("ra") in (None, "") or params.get("dec") in (None, ""):
         return
 
     try:
@@ -1974,32 +2028,51 @@ def _clip_windows_to_observability(kind: str, params: dict, max_airmass, min_lun
         phase = float(max_lunar_phase)
         airmass = float(max_airmass)
 
-        clipped = []
-        caps: dict[int, int] = {}
-        for idx, window in enumerate(windows):
-            interval = transit_obs.observable_interval(
+        def interval_at(window, site):
+            return transit_obs.observable_interval(
                 ra, dec, window, site,
                 max_airmass=airmass, twilight=twilight,
                 moon_sep_min=moon_sep, max_lunar_phase=phase,
             )
-            if interval is None:
+
+        clipped = []
+        caps: dict[int, int] = {}
+        for idx, window in enumerate(windows):
+            site = pinned or hints[idx]
+            if not site and multi[idx]:
+                # Unpinned: keep the window, but size repeat_duration to the
+                # listed site that can observe the least of it.
+                usable = []
+                for s in multi[idx]:
+                    result = _clip_window(window, s, interval_at)
+                    if result is None:
+                        continue
+                    w_s, cap = result
+                    usable.append(cap if cap is not None else int(
+                        (_parse_utc(w_s["end"]) - _parse_utc(w_s["start"])).total_seconds()))
+                if not usable:
+                    raise LcoError(
+                        f"Window {idx + 1} is not observable at any of "
+                        f"{', '.join(x.upper() for x in multi[idx])}",
+                        status=400,
+                    )
+                clipped.append(window)
+                caps[idx] = max(min(usable), 60)
+                continue
+            if not site:
+                clipped.append(window)
+                continue
+            result = _clip_window(window, site, interval_at)
+            if result is None:
                 raise LcoError(
                     f"Window {idx + 1} is not observable at {site.upper()} — "
                     "choose a different window, site, or loosen airmass/moon constraints",
                     status=400,
                 )
-            clipped.append({**window, "start": interval["start"], "end": interval["end"]})
-            # One edge margin per edge the target's own rise/set bounds (not the
-            # scheduling boundary): the LCO-visible span is that much shorter.
-            edges = int(interval["hit_start_limit"]) + int(interval["hit_end_limit"])
-            if edges:
-                try:
-                    start = datetime.datetime.fromisoformat(str(interval["start"]).replace("Z", "+00:00"))
-                    end = datetime.datetime.fromisoformat(str(interval["end"]).replace("Z", "+00:00"))
-                    span_s = (end - start).total_seconds()
-                    caps[idx] = max(int(span_s) - edges * _LCO_VISIBILITY_EDGE_MARGIN_S, 60)
-                except ValueError:
-                    pass
+            clipped_window, cap = result
+            clipped.append(clipped_window)
+            if cap is not None:
+                caps[idx] = cap
         params["windows"] = clipped
         if caps:
             params["_observable_repeat_duration"] = caps
@@ -2014,7 +2087,8 @@ def _clip_windows_to_observability(kind: str, params: dict, max_airmass, min_lun
         logger.warning(
             "observability clipping unavailable for %s at %s (%s: %s); "
             "submitting unclipped windows",
-            params.get("target_name") or "?", site.upper(), type(exc).__name__, exc,
+            params.get("target_name") or "?", (pinned or ",".join(sorted(set(filter(None, hints))))).upper(),
+            type(exc).__name__, exc,
         )
         return
 
@@ -2256,6 +2330,21 @@ def build_requestgroup(kind: str, params: dict, configurations: list[dict] | Non
             status=400,
         )
 
+    # A pinned site must host the instrument's telescope (e.g. no 1 m Sinistro
+    # at ogg). LCO would reject it at the dry-run with a less direct message;
+    # a split relay leg is the usual way to get here.
+    site = str(params.get("site") or "").strip().lower()
+    if site:
+        from muscat_db import transit_obs
+
+        hosts = transit_obs.SITES_FOR_KIND.get((kind or "").strip().lower())
+        if hosts is not None and site not in hosts:
+            raise LcoError(
+                f"{kind} has no unit at {site.upper()} (it is at {', '.join(s.upper() for s in hosts)}) — "
+                "choose another site or instrument",
+                status=400,
+            )
+
     supplied_configurations = configurations
     target = {
         "name": params["target_name"],
@@ -2469,6 +2558,56 @@ def build_requestgroup(kind: str, params: dict, configurations: list[dict] | Non
             "configurations": configurations,
         }]
     }
+
+# LCO's dry-run rejects a request whose total duration (repeat_duration plus its
+# own setup/acquisition overheads) exceeds the longest stretch it considers the
+# target visible in the window, using its own rules (telescope limits, twilight)
+# that our astropy model only approximates. The error states both numbers, so the
+# overrun is cut from repeat_duration directly. The slack absorbs the two values'
+# 0.01 h (36 s) rounding with margin.
+_LCO_VISIBILITY_ERROR = re.compile(
+    r"visible for a maximum of ([0-9.]+) hours.*?duration of your request ([0-9.]+) hours",
+    re.DOTALL,
+)
+_LCO_DURATION_FIT_SLACK_S = 120
+
+
+def fit_repeat_duration_to_visibility(request_group: dict, ipp: dict) -> tuple[dict, list[dict]] | None:
+    """Copy of ``request_group`` with repeat_duration cut to LCO's visibility.
+
+    For each request whose dry-run error reports "visible for a maximum of V
+    hours ... duration of your request D hours", its last REPEAT_EXPOSE
+    configuration's ``repeat_duration`` is reduced by ``D - V`` plus
+    ``_LCO_DURATION_FIT_SLACK_S``. Returns ``(fitted_group, changes)`` with one
+    ``{"request", "visible_h", "duration_h", "old", "new"}`` entry per changed
+    request, or ``None`` when no request has that error or none can be fitted
+    (the cut would leave under a minute of repeats).
+    """
+    errors = ((ipp or {}).get("errors") or {}).get("requests") or []
+    fitted = json.loads(json.dumps(request_group))
+    changes = []
+    for idx, req_errors in enumerate(errors):
+        if not isinstance(req_errors, dict) or idx >= len(fitted.get("requests") or []):
+            continue
+        text = " ".join(str(m) for m in req_errors.get("non_field_errors") or [])
+        match = _LCO_VISIBILITY_ERROR.search(text)
+        if not match:
+            continue
+        visible_h, duration_h = float(match.group(1)), float(match.group(2))
+        configs = [c for c in fitted["requests"][idx].get("configurations") or []
+                   if c.get("type") == "REPEAT_EXPOSE" and c.get("repeat_duration")]
+        if not configs:
+            continue
+        old = int(configs[-1]["repeat_duration"])
+        # Both values are whole 0.01 h (36 s) steps: round away float noise.
+        cut = round(max(duration_h - visible_h, 0.0) * 3600) + _LCO_DURATION_FIT_SLACK_S
+        new = old - cut
+        if new < 60:
+            continue
+        configs[-1]["repeat_duration"] = new
+        changes.append({"request": idx, "visible_h": visible_h, "duration_h": duration_h, "old": old, "new": new})
+    return (fitted, changes) if changes else None
+
 
 def max_allowable_ipp(
     request_group: dict,

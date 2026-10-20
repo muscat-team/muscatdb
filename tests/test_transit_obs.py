@@ -407,6 +407,32 @@ def test_visibility_series_structure():
     assert 0.0 <= s["moon_sep_mid"] <= 180.0
 
 
+def test_visibility_series_observable_runs_match_mask():
+    """observable_runs are the contiguous observable stretches of the plot grid,
+    so the schedule page can offer the run around the transit as the window."""
+    s = T.visibility_series(207.52600, -40.83590, "2026-07-27T01:30:00", 3.0, "lsc",
+                            max_airmass=2.0, twilight="nautical", moon_sep_min=30)
+    runs = s["observable_runs"]
+    assert runs, "HIP67522 is observable from LSC that night"
+    n_obs = 0
+    for run in runs:
+        assert run["start"] in s["times"] and run["end"] in s["times"]
+        assert run["start"] <= run["end"]
+        i0, i1 = s["times"].index(run["start"]), s["times"].index(run["end"])
+        n_obs += i1 - i0 + 1
+    # Together the runs cover exactly the observable samples.
+    assert n_obs / len(s["times"]) == pytest.approx(s["observable_fraction"], abs=1e-3)
+    # The run spanning mid-transit ends at the target's set (~03:14 at airmass 2).
+    mid_run = next(r for r in runs if r["start"] <= "2026-07-27T01:30" <= r["end"])
+    assert mid_run["end"].startswith("2026-07-27T03:1")
+
+
+def test_true_runs_lists_every_run():
+    assert T._true_runs([False, True, False, True, True, False]) == [(1, 1), (3, 4)]
+    assert T._true_runs([True, True]) == [(0, 1)]
+    assert T._true_runs([False, False]) == []
+
+
 def test_visibility_series_rejects_unknown_site():
     with pytest.raises(T.TransitObsError):
         T.visibility_series(97.64, 29.67, "2026-03-15T10:00:00", 2.5, "jwst")
@@ -468,3 +494,75 @@ def test_observable_interval_rejects_unknown_site():
     window = {"start": "2026-07-26T23:47:44Z", "end": "2026-07-27T06:08:44Z"}
     with pytest.raises(T.TransitObsError):
         T.observable_interval(207.526, -40.836, window, "jwst")
+
+
+# --------------------------------------------------------------------------- #
+# transit_plans: per-transit booking options (single site / either / relay)
+# --------------------------------------------------------------------------- #
+
+def _jd(iso):
+    from astropy.time import Time
+    return Time(iso.replace("Z", "")).jd
+
+
+def test_relay_legs_hand_off_mid_overlap_with_a_margin():
+    """Full early site + egress-only late site: the early leg is cut to just
+    past the handoff instead of running the whole window, the late leg keeps
+    its span, and the legs overlap by the relay margin."""
+    d = 1 / 24.0
+    early = (10.0 * d, 15.0 * d)   # sees everything
+    late = (12.0 * d, 16.0 * d)    # starts mid-way
+    a, b = T._relay_legs(early, late, overlap_min=30.0)
+    # Handoff region is [12h, 15h]; midpoint 13.5h; +-15 min.
+    assert a == pytest.approx((10.0 * d, 13.75 * d))
+    assert b == pytest.approx((13.25 * d, 16.0 * d))
+
+
+def test_relay_legs_keep_spans_when_a_gap_remains():
+    d = 1 / 24.0
+    a, b = T._relay_legs((10 * d, 12 * d), (12.5 * d, 15 * d), overlap_min=30.0)
+    assert a == pytest.approx((10 * d, 12 * d)) and b == pytest.approx((12.5 * d, 15 * d))
+
+
+def test_transit_plans_offer_each_site_either_and_a_relay():
+    """TIC434398831 b, 2026-10-26 (rated 'Full @ tfn, cpt'): one plan per site
+    that sees a contact, 'either' over both, and a relay whose early leg
+    sees ingress and late leg sees egress."""
+    window = {"mid": "2026-10-26T03:20:24Z", "start": "2026-10-26T01:12:32Z", "end": "2026-10-26T05:28:16Z"}
+    plans = T.transit_plans(93.95926, 16.02385, [window], 2.76, max_airmass=2.0,
+                            twilight="nautical", moon_sep_min=30.0)[0]
+    by_id = {p["id"]: p for p in plans}
+    assert by_id["site:tfn"]["coverage"] == "full"
+    assert by_id["site:cpt"]["coverage"] == "partial"
+    # Full sites are listed first.
+    assert plans[0]["id"] == "site:tfn"
+    either = by_id["either"]
+    assert set(either["sites"]) == {"tfn", "cpt"}
+    assert either["start"] <= by_id["site:tfn"]["start"] and either["end"] >= by_id["site:tfn"]["end"]
+    relay = next(p for p in plans if p["type"] == "relay")
+    early, late = relay["legs"]
+    assert {early["site"], late["site"]} == {"tfn", "cpt"}
+    ingress = _jd(window["mid"]) - 2.76 / 48
+    egress = _jd(window["mid"]) + 2.76 / 48
+    assert _jd(early["start"]) <= ingress and _jd(late["end"]) >= egress
+    # Legs overlap at the handoff rather than both spanning the window.
+    assert _jd(early["end"]) > _jd(late["start"])
+    assert (_jd(early["end"]) - _jd(late["start"])) * 1440 <= 31
+
+
+def test_transit_plans_skip_a_site_seeing_no_contact():
+    """A window no site can observe yields no plans."""
+    window = {"mid": "2026-10-29T19:47:00Z", "start": "2026-10-29T17:39:00Z", "end": "2026-10-29T21:54:00Z"}
+    assert T.transit_plans(93.95926, 16.02385, [window], 2.76, max_airmass=2.0,
+                           twilight="nautical", moon_sep_min=30.0) == [[]]
+
+
+def test_transit_plans_relay_prefers_full_coverage_over_a_cheap_gapped_pair():
+    """2026-11-13: ELP (ingress only) + COJ (egress only) leave ~111 min of the
+    transit uncovered; the relay must instead hand OGG (full) over to COJ."""
+    window = {"mid": "2026-11-13T13:33:54Z", "start": "2026-11-13T11:26:06Z", "end": "2026-11-13T15:41:42Z"}
+    plans = T.transit_plans(93.95926, 16.02385, [window], 2.76, max_airmass=2.0,
+                            twilight="nautical", moon_sep_min=30.0)[0]
+    relay = next(p for p in plans if p["type"] == "relay")
+    assert relay["gap_min"] == 0.0
+    assert "ogg" in relay["sites"]

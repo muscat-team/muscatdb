@@ -362,6 +362,119 @@ class LcoTest(unittest.TestCase):
         self.assertEqual(req["windows"][0]["end"], "2026-07-04T10:00:00Z")
         self.assertEqual(req["configurations"][0]["repeat_duration"], 10800 - 180)
 
+    def test_site_without_the_instrument_is_rejected(self):
+        """A pinned site that does not host the instrument (a split leg sending
+        Sinistro to OGG) fails at build time with a clear 400, not at LCO."""
+        params = {
+            "name": "n", "proposal": "p", "target_name": "t",
+            "ra": 10.0, "dec": -5.0, "kind": "sinistro", "site": "ogg",
+            "filter": "rp", "exposure_time": 60, "readout_mode": "central_2k_2x2",
+            "windows": [{"start": "2026-07-04T07:00:00Z", "end": "2026-07-04T10:00:00Z"}],
+        }
+        with self.assertRaises(lco.LcoError) as cm:
+            lco.build_requestgroup("sinistro", params)
+        self.assertEqual(cm.exception.status, 400)
+        self.assertIn("OGG", cm.exception.message)
+        self.assertIn("sinistro", cm.exception.message)
+
+    def test_muscat_leg_at_ogg_builds_a_2m_request(self):
+        """The 2 m leg of a mixed relay: kind muscat pinned to ogg."""
+        params = {
+            "name": "n", "proposal": "p", "target_name": "t",
+            "ra": 10.0, "dec": -5.0, "kind": "muscat", "site": "ogg", "type": "EXPOSE",
+            "exposure_times": {"g": 30, "r": 30, "i": 30, "z": 30},
+            "windows": [{"start": "2026-07-04T07:00:00Z", "end": "2026-07-04T10:00:00Z"}],
+        }
+        req = lco.build_requestgroup("muscat", params)["requests"][0]
+        self.assertEqual(req["location"], {"telescope_class": "2m0", "site": "ogg"})
+        self.assertEqual(req["instrument_type"], "2M0-SCICAM-MUSCAT")
+
+    @patch("muscat_db.transit_obs.observable_interval")
+    def test_repeat_expose_window_site_hint_clips_without_pinned_site(self, mock_interval):
+        """A window carrying the site it was planned for (the schedule page's
+        proposed window) is clipped at that site even with no site pinned, and
+        the hint never reaches the LCO payload."""
+        mock_interval.return_value = {
+            "start": "2026-07-04T07:30:00Z", "end": "2026-07-04T10:05:00Z",
+            "fraction": 0.8, "hit_start_limit": True, "hit_end_limit": False,
+        }
+        params = {
+            "name": "n", "proposal": "p", "target_name": "t",
+            "ra": 10.0, "dec": -5.0, "kind": "sinistro",
+            "filter": "rp", "exposure_time": 60, "readout_mode": "central_2k_2x2",
+            "type": "REPEAT_EXPOSE",
+            "windows": [{"start": "2026-07-04T07:00:00Z", "end": "2026-07-04T10:00:00Z", "site": "lsc"}],
+        }
+        rg = lco.build_requestgroup("sinistro", params)
+        req = rg["requests"][0]
+        self.assertEqual(mock_interval.call_args[0][3], "lsc")
+        self.assertEqual(req["windows"], [{"start": "2026-07-04T07:30:00Z", "end": "2026-07-04T10:00:00Z"}])
+        # No site pinned on the request itself: the scheduler still picks.
+        self.assertNotIn("site", req["location"])
+        # 2.5 h clipped span (9000 s) - one edge margin (start) - setup.
+        self.assertEqual(req["configurations"][0]["repeat_duration"], 9000 - 900 - 180)
+
+    @patch("muscat_db.transit_obs.observable_interval")
+    def test_repeat_expose_edge_on_limit_takes_margin(self, mock_interval):
+        """A window whose start already sits on the target's rise (as a window
+        trimmed to the visibility plot does) still gets the LCO edge margin:
+        the rise is found by probing just outside the window."""
+        def interval(ra, dec, window, site, **kw):
+            # The probe window opens before 07:00; the target rises at 07:00.
+            self.assertLess(window["start"], "2026-07-04T07:00:00Z")
+            return {"start": "2026-07-04T07:00:00Z", "end": window["end"],
+                    "fraction": 0.97, "hit_start_limit": True, "hit_end_limit": False}
+        mock_interval.side_effect = interval
+        params = {
+            "name": "n", "proposal": "p", "target_name": "t",
+            "ra": 10.0, "dec": -5.0, "kind": "sinistro", "site": "lsc",
+            "filter": "rp", "exposure_time": 60, "readout_mode": "central_2k_2x2",
+            "type": "REPEAT_EXPOSE",
+            "windows": [{"start": "2026-07-04T07:00:00Z", "end": "2026-07-04T10:00:00Z"}],
+        }
+        req = lco.build_requestgroup("sinistro", params)["requests"][0]
+        self.assertEqual(req["windows"][0], {"start": "2026-07-04T07:00:00Z", "end": "2026-07-04T10:00:00Z"})
+        self.assertEqual(req["configurations"][0]["repeat_duration"], 10800 - 900 - 180)
+
+    @patch("muscat_db.transit_obs.observable_interval")
+    def test_either_site_window_sizes_repeat_to_the_shorter_site(self, mock_interval):
+        """An 'either site' window (``sites`` hint, no pinned site) keeps its
+        span -- LCO may run it at any listed site -- while repeat_duration must
+        fit the site that sees the least of it."""
+        spans = {
+            "lsc": ("2026-07-04T07:00:00Z", "2026-07-04T10:00:00Z", False, False),  # all 3 h
+            "cpt": ("2026-07-04T07:00:00Z", "2026-07-04T09:00:00Z", False, True),   # sets at 09:00
+        }
+
+        def interval(ra, dec, window, site, **kw):
+            s, e, hs, he = spans[site]
+            return {"start": s, "end": e, "fraction": 1.0, "hit_start_limit": hs, "hit_end_limit": he}
+
+        mock_interval.side_effect = interval
+        params = {
+            "name": "n", "proposal": "p", "target_name": "t",
+            "ra": 10.0, "dec": -5.0, "kind": "sinistro",
+            "filter": "rp", "exposure_time": 60, "readout_mode": "central_2k_2x2",
+            "type": "REPEAT_EXPOSE",
+            "windows": [{"start": "2026-07-04T07:00:00Z", "end": "2026-07-04T10:00:00Z", "sites": ["lsc", "cpt"]}],
+        }
+        req = lco.build_requestgroup("sinistro", params)["requests"][0]
+        self.assertEqual(req["windows"], [{"start": "2026-07-04T07:00:00Z", "end": "2026-07-04T10:00:00Z"}])
+        self.assertNotIn("site", req["location"])
+        # CPT: 2 h observable, its set edge held back by the margin, less setup.
+        self.assertEqual(req["configurations"][0]["repeat_duration"], 7200 - 900 - 180)
+
+    def test_window_site_hint_stripped_when_not_clipping(self):
+        """EXPOSE configs never clip, but the planning hint must still be dropped."""
+        params = {
+            "name": "n", "proposal": "p", "target_name": "t",
+            "ra": 10.0, "dec": -5.0, "kind": "sinistro", "type": "EXPOSE",
+            "filter": "rp", "exposure_time": 60, "readout_mode": "central_2k_2x2",
+            "windows": [{"start": "2026-07-04T07:00:00Z", "end": "2026-07-04T10:00:00Z", "site": "lsc"}],
+        }
+        req = lco.build_requestgroup("sinistro", params)["requests"][0]
+        self.assertEqual(req["windows"], [{"start": "2026-07-04T07:00:00Z", "end": "2026-07-04T10:00:00Z"}])
+
     def test_repeat_expose_clips_hip67522_real_observability(self):
         """Regression (real astropy): the HIP67522 draft window (23:47->06:08) is
         clipped to the real observable end at LSC (~03:14 under airmass 2.0), not
@@ -2421,3 +2534,52 @@ def test_archive_search_all_reports_truncation_of_estimated_listing(monkeypatch)
     _archive_pages(monkeypatch, {0: full, 2: full, 4: full})
     result = lco.archive_search_all({"limit": "2"}, max_frames=4)
     assert result["truncated"] is True and len(result["results"]) == 4
+
+
+# --------------------------------------------------------------------------- #
+# Fitting repeat_duration to LCO's own visibility (dry-run feedback)
+# --------------------------------------------------------------------------- #
+
+_VIS_ERR = (
+    "According to the constraints of the request, the target will only be visible "
+    "for a maximum of {v} hours within the time window. This is less than the "
+    "duration of your request {d} hours. Consider expanding the time window or "
+    "loosening the airmass or lunar separation constraints."
+)
+
+
+def _rg_with_repeat(seconds):
+    return {"requests": [{"configurations": [{"type": "REPEAT_EXPOSE", "repeat_duration": seconds}]}]}
+
+
+def _ipp_vis_error(v, d):
+    return {"errors": {"requests": [{"non_field_errors": [_VIS_ERR.format(v=v, d=d)]}]}}
+
+
+def test_fit_repeat_duration_cuts_by_the_reported_overrun_plus_slack():
+    """TIC434398831 b, OGG 2m, 2026-11-13: LCO saw 3.56 h but the request lasted
+    4.03 h; repeat_duration drops by that 0.47 h plus the rounding slack."""
+    rg = _rg_with_repeat(14316)
+    fitted = lco.fit_repeat_duration_to_visibility(rg, _ipp_vis_error("3.56", "4.03"))
+    assert fitted is not None
+    new_rg, changes = fitted
+    new = new_rg["requests"][0]["configurations"][0]["repeat_duration"]
+    assert new == 14316 - 1692 - lco._LCO_DURATION_FIT_SLACK_S  # 0.47 h = 1692 s
+    assert changes == [{"request": 0, "visible_h": 3.56, "duration_h": 4.03, "old": 14316, "new": new}]
+    # The input payload is left untouched.
+    assert rg["requests"][0]["configurations"][0]["repeat_duration"] == 14316
+
+
+def test_fit_repeat_duration_handles_equal_rounded_hours():
+    """2026-11-02: visible 4.26 h vs request 4.26 h (equal after rounding) still
+    needs a cut, which the slack provides."""
+    new_rg, _ = lco.fit_repeat_duration_to_visibility(_rg_with_repeat(15156), _ipp_vis_error("4.26", "4.26"))
+    assert new_rg["requests"][0]["configurations"][0]["repeat_duration"] == 15156 - lco._LCO_DURATION_FIT_SLACK_S
+
+
+def test_fit_repeat_duration_ignores_other_errors_and_impossible_fits():
+    other = {"errors": {"requests": [{"non_field_errors": ["Some other problem"]}]}}
+    assert lco.fit_repeat_duration_to_visibility(_rg_with_repeat(14316), other) is None
+    assert lco.fit_repeat_duration_to_visibility(_rg_with_repeat(14316), {"max_allowable_ipp_value": 1.0}) is None
+    # Visible time shorter than LCO's own overhead: nothing sensible to fit.
+    assert lco.fit_repeat_duration_to_visibility(_rg_with_repeat(300), _ipp_vis_error("0.02", "0.13")) is None
