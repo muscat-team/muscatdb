@@ -82,6 +82,7 @@ from muscat_db.access import (
     sql_not_denied as _sql_not_denied,
 )
 from muscat_db.product_visibility import ProductVisibility
+from muscat_db import run_ownership
 from muscat_db.auth import (
     PROXY_SECRET_HEADER,
     authentication_required as _authentication_required,
@@ -752,6 +753,21 @@ def _ttv_run_hidden(target: str, run_name: str = "", products: ProductVisibility
 def _require_visible_ttv_run(target: str, run_name: str = "") -> None:
     if _ttv_run_hidden(target, run_name):
         raise HTTPException(404, f"target {target!r} not found")
+
+
+def _viewer_may_modify_run(level: str, inst: str, date: str, target: str, run_id: str = "") -> bool:
+    """Whether the viewer may delete or cancel this run (issue #272); see
+    :mod:`muscat_db.run_ownership`. Seeing the run is checked separately."""
+    user = _CURRENT_USER.get()
+    owner = run_ownership.run_owner(level, inst, date, target, run_id)
+    return run_ownership.may_modify_run(_db_path(), user, _jobs_user_is_admin(user), owner)
+
+
+def _require_may_modify_run(level: str, inst: str, date: str, target: str, run_id: str = "") -> None:
+    """403 a delete or cancel of a run the viewer neither owns nor shares a
+    group with the owner of. Call after the run is known to be visible."""
+    if not _viewer_may_modify_run(level, inst, date, target, run_id):
+        raise HTTPException(403, "only the run's owner, an admin, or someone in the owner's group may change it")
 
 
 # What a job-status poll returns for a run that does not exist; a hidden run
@@ -2453,6 +2469,7 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
         sel_mode=(outputs.get("mode") if outputs else "") or "",
         runs=runs,
         sel_run=sel_run or "",
+        can_modify_run=_viewer_may_modify_run("photometry", inst, date, route_target, sel_run or ""),
         dates=dates, targets=targets,
         outputs=outputs, previews=previews,
         nearby_preview=nearby_preview,
@@ -2684,6 +2701,7 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
         sel_site=sel_site, sel_telescope=sel_telescope, sel_mode=sel_mode,
         csv_sites=csv_sites, csv_telescopes=csv_telescopes, csv_modes=csv_modes,
         runs=runs, sel_run=sel_run,
+        can_modify_run=_viewer_may_modify_run("transit_fit", inst, date, target, sel_run or ""),
         runs_json=runs_json,
         dates=dates, targets=targets,
         csvs=csvs, outputs=outputs,
@@ -3414,6 +3432,7 @@ def transit_fit_cancel(payload: dict = Body(...)):
     target = (payload.get("target") or "").strip()
     run_id = (payload.get("run_id") or payload.get("run") or "").strip()
     _require_visible_run("transit_fit", inst, date, target, run_id)
+    _require_may_modify_run("transit_fit", inst, date, target, run_id)
     result = fit.cancel_fit(inst, date, target, run_id=run_id)
     if not result.get("ok"):
         return JSONResponse(result, status_code=400)
@@ -3433,8 +3452,9 @@ def transit_fit_delete(payload: dict = Body(...)):
     if not (target or "").strip():
         return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
     _require_visible_run("transit_fit", inst, date, target, run_id)
+    _require_may_modify_run("transit_fit", inst, date, target, run_id)
     result = fit.delete_fit(inst, date, target, run_id=run_id)
-    return JSONResponse(result)
+    return JSONResponse(result, status_code=500 if result.get("delete_failed") else 200)
 
 
 def _serve_transit_file(inst: str, date: str, target: str, name: str, run_id: str | None):
@@ -6877,6 +6897,7 @@ def jobs_page():
         j["elapsed"] = _live_elapsed(j)
         j["stored"] = j["key"] in stored_keys
         j["can_delete"] = j["stored"] and _may_delete_job(j, user, is_admin)
+        j["can_cancel"] = _may_cancel_job_row(j)
 
     counts = {"running": 0, "done": 0, "error": 0, "cancelled": 0, "pending": 0}
     for j in all_jobs:
@@ -7019,6 +7040,28 @@ _JOB_TERMINAL_STATES = frozenset({"done", "error", "cancelled"})
 
 def _jobs_user_is_admin(user: str | None) -> bool:
     return bool(user) and is_admin_user(_db_path(), user)
+
+
+_RUN_JOB_TYPES = frozenset({"photometry", "transit_fit", "ttv_fit"})
+
+
+def _may_cancel_job_row(job: dict) -> bool:
+    """Whether the viewer may cancel this live Jobs-page row (issue #272).
+
+    Only photometry, transit-fit and TTV rows are runs owned by someone; other
+    rows (LCO downloads) keep their existing behaviour, and a row that is not
+    live has nothing to cancel.
+    """
+    if job.get("type") not in _RUN_JOB_TYPES or job.get("state") not in ("running", "pending"):
+        return True
+    is_ttv = job["type"] == "ttv_fit"
+    return _viewer_may_modify_run(
+        job["type"],
+        "" if is_ttv else str(job.get("inst") or ""),
+        "" if is_ttv else str(job.get("date") or ""),
+        str(job.get("target") or ""),
+        str(job.get("run_id") or ""),
+    )
 
 
 def _may_delete_job(job: dict, user: str | None, is_admin: bool) -> bool:
@@ -7541,6 +7584,7 @@ def photometry_cancel(payload: phot_api.CancelRequest):
     target = (payload.get("target") or "").strip()
     run_id = (payload.get("run_id") or payload.get("run") or "").strip()
     _require_visible_run("photometry", inst, date, target, run_id)
+    _require_may_modify_run("photometry", inst, date, target, run_id)
     result = phot.cancel_run(inst, date, target, run_id=run_id)
     if not result.get("ok"):
         return phot_api.response(phot_api.ActionResponse, result, status_code=400)
@@ -7562,6 +7606,7 @@ def photometry_delete(payload: phot_api.CancelRequest):
         return phot_api.response(phot_api.ActionResponse, {"ok": False, "error": "target is required"}, status_code=400)
     run_id = (payload.get("run_id") or payload.get("run") or "").strip()
     _require_visible_run("photometry", inst, date, target, run_id)
+    _require_may_modify_run("photometry", inst, date, target, run_id)
     result = phot.delete_reduction(inst, date, target, run_id=run_id)
     return phot_api.response(phot_api.ActionResponse, result)
 
@@ -7794,7 +7839,8 @@ def ttv_fit_runs(target: str = ""):
         return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
     products = _product_visibility()
     runs = [
-        r for r in ttv.list_ttv_runs(target.strip())
+        {**r, "can_modify": _viewer_may_modify_run("ttv_fit", "", "", target.strip(), r["run_name"])}
+        for r in ttv.list_ttv_runs(target.strip())
         if not _ttv_run_hidden(target, r["run_name"], products)
     ]
     return JSONResponse({"ok": True, "runs": runs})
@@ -7911,6 +7957,7 @@ def api_cancel_ttv_fit(payload: dict = Body(...)):
     if not target:
         return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
     _require_visible_ttv_run(target, run_name)
+    _require_may_modify_run("ttv_fit", "", "", target, run_name)
     res = ttv.cancel_ttv_fit(target, run_name)
     return JSONResponse(res)
 
@@ -7922,8 +7969,9 @@ def api_delete_ttv_fit(payload: dict = Body(...)):
     if not target:
         return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
     _require_visible_ttv_run(target, run_name)
+    _require_may_modify_run("ttv_fit", "", "", target, run_name)
     res = ttv.delete_ttv_fit(target, run_name)
-    return JSONResponse(res)
+    return JSONResponse(res, status_code=500 if res.get("delete_failed") else 200)
 
 
 @ttv_fit_router.get("/status", response_class=JSONResponse)

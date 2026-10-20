@@ -3881,7 +3881,7 @@
           if (res.ok) {
             window.location.reload();
           } else {
-            showMessageModal('Delete Failed', 'Delete failed: ' + (res.error || 'unknown error'));
+            showMessageModal('Delete Failed', 'Delete failed: ' + (res.error || res.detail || 'unknown error'));
             if (deleteBtn) {
               deleteBtn.disabled = false;
               deleteBtn.textContent = '🗑 Delete Results';
@@ -4141,6 +4141,8 @@
 
   // Run whose results are currently displayed. Also the run that Delete acts on.
   var selectedTTVRun = null;
+  // run_name -> whether the viewer may delete it (from /api/ttv-fit/runs)
+  var ttvRunCanModify = {};
   var ttvModelData = null;
   var ttvModelRun = null;
   var ttvModelAvailable = false;
@@ -4164,6 +4166,8 @@
       .then(r => r.json())
       .then(res => {
         const runs = (res.ok && res.runs) ? res.runs.map(r => r.run_name) : [];
+        ttvRunCanModify = {};
+        ((res.ok && res.runs) ? res.runs : []).forEach(r => { ttvRunCanModify[r.run_name] = r.can_modify !== false; });
         if (runs.length === 0) {
           const deleteBtn = document.getElementById('delete-btn');
           if (deleteBtn) deleteBtn.style.display = 'none';
@@ -4232,7 +4236,12 @@
           selectedTTVRun = runName;
           showTTVRunLog(target, runName);
           updateTTVRunUrl(runName, historyMode);
-          if (deleteBtn) deleteBtn.style.display = 'inline-block';
+          if (deleteBtn) {
+            deleteBtn.style.display = 'inline-block';
+            const mayModify = ttvRunCanModify[runName] !== false;
+            deleteBtn.disabled = !mayModify;
+            deleteBtn.title = mayModify ? '' : "Only the run's owner, an admin, or someone in the owner's group can delete it";
+          }
           renderTTVOutputs(target, runName, res.outputs, runs);
           applyTTVRunSnapshot(res.outputs.input_snapshot);
         } else {

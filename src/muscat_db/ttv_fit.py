@@ -845,8 +845,10 @@ def delete_ttv_fit(target: str, run_name: str = "") -> dict:
         try:
             shutil.rmtree(rdir)
             removed += 1
-        except OSError:
-            pass
+        except OSError as exc:
+            logger.warning("could not delete TTV run %s", rdir, exc_info=True)
+            return {"ok": False, "delete_failed": True,
+                    "error": f"could not delete the run: {exc.strerror or exc}"}
     job_key = ttv_job_key(target, run_name)
     db_key = f"ttv_fit:{job_key}"
     get_job_store().delete(db_key)

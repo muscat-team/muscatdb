@@ -1897,8 +1897,10 @@ def delete_fit(inst: str, date: str, target: str, run_id: str = "") -> dict:
             try:
                 shutil.rmtree(rdir)
                 removed += 1
-            except OSError:
-                pass
+            except OSError as exc:
+                logger.warning("could not delete fit run %s", rdir, exc_info=True)
+                return {"ok": False, "delete_failed": True,
+                        "error": f"could not delete the run: {exc.strerror or exc}"}
     else:
         # Legacy single-dir run — remove output files from the base target
         # directory without removing the directory itself or named-run
@@ -1911,6 +1913,7 @@ def delete_fit(inst: str, date: str, target: str, run_id: str = "") -> dict:
                 rdir / "sys.yaml",
                 rdir / "meta.yaml",
             ]
+            failed = []
             for p in legacy_targets:
                 try:
                     if p.is_dir():
@@ -1920,7 +1923,11 @@ def delete_fit(inst: str, date: str, target: str, run_id: str = "") -> dict:
                         p.unlink()
                         removed += 1
                 except OSError:
-                    pass
+                    logger.warning("could not delete %s", p, exc_info=True)
+                    failed.append(p.name)
+            if failed:
+                return {"ok": False, "delete_failed": True,
+                        "error": f"could not delete: {', '.join(failed)}"}
 
     db_key = f"transit_fit:{inst}/{date}/{_target_dir_name(target)}"
     if run_id:
