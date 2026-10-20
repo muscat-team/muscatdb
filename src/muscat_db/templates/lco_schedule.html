@@ -164,7 +164,7 @@
     </label>
     <label class="lco-field" style="flex-direction: row; align-items: center; gap: 0.4rem;">
       <span style="font-size: 0.72rem; color: var(--text-dim); text-transform: uppercase;">Default plan
-        <span class="help-tooltip" title="How each transit's plan (the dropdown in its Transit obs cell) starts out; changing a row's plan by hand keeps it. Sites LCO currently lists as unschedulable are avoided when another plan exists.&#10;• Best site, relay if none is full: one site covering the whole transit, else a two-site relay, else the best partial site.&#10;• Best single site: always one site (full, else the most coverage).&#10;• Either site when possible: one unpinned request LCO may run at any useful site; repeat_duration fits the site seeing the least.">?</span></span>
+        <span class="help-tooltip" title="How each transit's plan (the dropdown in its Transit obs cell) starts out; changing a row's plan by hand keeps it. Sites LCO currently lists as unschedulable are avoided when another plan exists.&#10;• Best site, relay if none is full: one site covering the whole transit, else a two-site relay, else the best partial site.&#10;• Best single site: always one site (full, else the most coverage).&#10;• Either site when possible: one unpinned request; repeat_duration fits the listed site seeing the least. Coverage is not guaranteed: LCO may run the block at any site with this instrument that can see the target (not only the listed ones) and anywhere inside the window, so it may miss ingress, egress, or both.">?</span></span>
       <select id="sch-plan-policy" class="lco-control">
         <option value="relay">Best site, relay if none is full</option>
         <option value="single">Best single site</option>
@@ -2211,7 +2211,7 @@
         extra = [hand >= 0 ? 'overlap ' + hand + ' min' : 'gap ' + (-hand) + ' min'].concat(extra);
         if (hand < 0) ok = false;
       }
-      if (v.type === 'either') extra = ['LCO picks the site; repeat_duration fits the one seeing the least'].concat(extra);
+      if (v.type === 'either') extra = ['LCO picks the site and the block\'s place in the window; repeat_duration fits the listed site seeing the least; may miss ingress or egress'].concat(extra);
       summary += ' · ' + extra.join(' · ');
     }
     var text = el('vis-proposal-text');
