@@ -445,6 +445,31 @@ def test_backfill_disk_ignores_out_subdirectory_and_dirs_without_fit_yaml(db):
     assert pr.read_record(fit.fit_output_dir(INST, DATE, TARGET, "empty")) is None
 
 
+def test_backfill_disk_legacy_fit_out_directory_is_not_a_run(db):
+    # legacy layout: the target directory is the run and timer's ``out`` sits directly below it
+    night = phot.output_base() / INST / DATE
+    _make_lightcurve(night, "", "lc_g.csv")
+    rdir = fit.fit_output_dir(INST, DATE, TARGET)
+    _write_fit_yaml(rdir, {"g": "lc_g.csv"})
+    _write_fit_yaml(rdir / "out", {"g": "lc_g.csv"})
+    backfill_products(db)
+    assert pr.read_record(rdir) is not None
+    assert pr.read_record(rdir / "out") is None
+
+
+@pytest.mark.parametrize("name", ["../lc_g.csv", "sub/lc_g.csv"])
+def test_backfill_disk_transit_fit_rejects_light_curve_path_not_a_bare_name(db, name):
+    night = phot.output_base() / INST / DATE
+    _make_lightcurve(night, "", "lc_g.csv")
+    (night / "sub").mkdir()
+    (night / "sub" / "lc_g.csv").write_text("BJD_TDB,flux\n")
+    (night.parent / "lc_g.csv").write_text("BJD_TDB,flux\n")  # what ``../lc_g.csv`` resolves to
+    rdir = fit.fit_output_dir(INST, DATE, TARGET, "default")
+    _write_fit_yaml(rdir, {"g": name})
+    backfill_products(db)
+    assert pr.read_record(rdir)["inputs"] is None
+
+
 def test_backfill_disk_dry_run_writes_nothing_and_second_run_is_a_noop(db):
     rdir = phot.run_output_dir(INST, DATE, TARGET, "old-run")
     rdir.mkdir(parents=True)
