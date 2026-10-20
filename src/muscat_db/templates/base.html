@@ -378,6 +378,8 @@
   (function () {
     function initTable(table) {
       if (table.dataset.resizableInit === '1') return;
+      // Opt-out for tables that should keep their natural column widths.
+      if (table.hasAttribute('data-no-resize')) return;
       if (table.offsetParent === null) return; // Skip if table is currently hidden
       table.dataset.resizableInit = '1';
       const headRow = table.tHead && table.tHead.rows[0];

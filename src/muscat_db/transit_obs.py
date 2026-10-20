@@ -289,16 +289,12 @@ def _observes_contact(mask_row, start_jd: float, end_jd: float, mid_jd, half: fl
     return ingress_obs or egress_obs
 
 
-def _longest_true_run(mask) -> tuple[int, int]:
-    """``(start_idx, end_idx)`` of the longest contiguous ``True`` run in a
-    boolean array. A target rises/sets once within a few-hour window, so its
-    observable samples form a single run; a moon-separation dip can split that
-    run in two, in which case the longer (usable) leg is chosen. Assumes at
-    least one ``True`` sample."""
+def _true_runs(mask) -> list[tuple[int, int]]:
+    """``(start_idx, end_idx)`` of every contiguous ``True`` run, in order."""
     import numpy as np
 
     arr = np.asarray(mask, dtype=bool)
-    best_start, best_end, best_len = 0, -1, 0
+    runs = []
     i, n = 0, len(arr)
     while i < n:
         if not arr[i]:
@@ -307,9 +303,21 @@ def _longest_true_run(mask) -> tuple[int, int]:
         j = i
         while j + 1 < n and arr[j + 1]:
             j += 1
+        runs.append((i, j))
+        i = j + 1
+    return runs
+
+
+def _longest_true_run(mask) -> tuple[int, int]:
+    """``(start_idx, end_idx)`` of the longest contiguous ``True`` run in a
+    boolean array. A target rises/sets once within a few-hour window, so its
+    observable samples form a single run; a moon-separation dip can split that
+    run in two, in which case the longer (usable) leg is chosen. Assumes at
+    least one ``True`` sample."""
+    best_start, best_end, best_len = 0, -1, 0
+    for i, j in _true_runs(mask):
         if j - i + 1 > best_len:
             best_len, best_start, best_end = j - i + 1, i, j
-        i = j + 1
     return best_start, best_end
 
 
@@ -615,6 +623,158 @@ def classify_transits(
     return results
 
 
+# Overlap kept between a relay's two legs around the handoff (minutes): enough
+# shared baseline to tie the two light curves together, without charging the
+# whole common span twice.
+_RELAY_OVERLAP_MIN = 30.0
+
+
+def _relay_legs(early: tuple[float, float], late: tuple[float, float],
+                overlap_min: float = _RELAY_OVERLAP_MIN) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Trim two chronological coverage spans (JD) into relay legs.
+
+    Where the spans overlap, the handoff is the middle of the shared stretch
+    and each leg runs ``overlap_min/2`` past it (clamped to its own span), so
+    neither leg duplicates the other's coverage beyond that margin. With a
+    gap, both spans are kept as they are.
+    """
+    (a_s, a_e), (b_s, b_e) = early, late
+    shared_end = min(a_e, b_e)
+    if b_s > shared_end:
+        return (a_s, a_e), (b_s, b_e)
+    handoff = (b_s + shared_end) / 2.0
+    half = overlap_min / 2.0 / 1440.0
+    return (a_s, min(a_e, handoff + half)), (max(b_s, handoff - half), b_e)
+
+
+def transit_plans(
+    ra_deg: float,
+    dec_deg: float,
+    windows: list[dict],
+    duration_hours: float,
+    *,
+    max_airmass: float = 2.0,
+    twilight: str = DEFAULT_TWILIGHT,
+    moon_sep_min: float = 30.0,
+    max_lunar_phase: float = 1.0,
+    sites: list[str] | None = None,
+    kind: str | None = None,
+) -> list[list[dict]]:
+    """Booking plans for each window's transit, best first.
+
+    Each site's observable run within the padded window (``start``..``end``)
+    that overlaps the transit is a candidate. A site whose run sees neither
+    contact (only mid-transit) is not useful and is left out. Plans:
+
+    - ``{"type": "single", "id": "site:<s>", "site", "coverage": "full" |
+      "partial", "ingress", "egress", "start", "end"}`` per useful site, full
+      sites first, then by transit minutes covered;
+    - ``{"type": "either", "id": "either", "sites", "start", "end"}`` when two
+      or more sites are useful: one request LCO may run at any of them, over
+      their combined span;
+    - ``{"type": "relay", "id": "relay:<early>><late>", "sites", "legs"}`` for
+      the best ordered pair whose early site sees ingress and late site sees
+      egress, legs trimmed around the handoff (:func:`_relay_legs`).
+
+    Sites resolve as in :func:`classify_transits`. Returns one list per window.
+    """
+    import numpy as np
+    import astropy.units as u
+    from astropy.time import Time
+    from astropy.coordinates import SkyCoord
+
+    if not windows:
+        return []
+    half = float(duration_hours) / 48.0  # days
+    alt_min = alt_limit_from_airmass(max_airmass)
+    sun_alt_max = twilight_limit(twilight)
+    site_list = resolve_site_list(sites, kind)
+    target = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg)
+
+    starts = np.array([Time(_parse_iso_utc(w["start"])).jd for w in windows])
+    ends = np.array([Time(_parse_iso_utc(w["end"])).jd for w in windows])
+    mids = np.array([Time(_parse_iso_utc(w["mid"])).jd for w in windows])
+    n_samp = max(5, int(round(float(np.max(ends - starts)) * 1440.0 / _CLASSIFY_STEP_MIN)) + 1)
+    offsets = np.linspace(0.0, 1.0, n_samp)
+    jd = starts[:, None] + (ends - starts)[:, None] * offsets[None, :]
+    grid = Time(jd.ravel(), format="jd", scale="utc")
+
+    masks = {}
+    for site in site_list:
+        mask, *_ = _observable_mask(
+            target, _earth_location(site), grid, alt_min, sun_alt_max,
+            moon_sep_min, max_lunar_phase,
+        )
+        masks[site] = np.asarray(mask).reshape(len(windows), n_samp)
+
+    tol = (_CLASSIFY_STEP_MIN / 2.0) / 1440.0
+    out = []
+    for i in range(len(windows)):
+        ingress, egress = mids[i] - half, mids[i] + half
+        singles = []
+        for site in site_list:
+            runs = _true_runs(masks[site][i])
+            spans = [(jd[i][a], jd[i][b]) for a, b in runs]
+            spans = [s for s in spans if min(s[1], egress) > max(s[0], ingress)]
+            if not spans:
+                continue
+            s0, s1 = max(spans, key=lambda s: min(s[1], egress) - max(s[0], ingress))
+            sees_in = s0 <= ingress + tol and s1 >= ingress
+            sees_eg = s0 <= egress and s1 >= egress - tol
+            if not (sees_in or sees_eg):
+                continue
+            singles.append({
+                "type": "single", "id": f"site:{site}", "site": site,
+                "coverage": "full" if sees_in and sees_eg else "partial",
+                "ingress": bool(sees_in), "egress": bool(sees_eg),
+                "start": _jd_to_iso_z(s0), "end": _jd_to_iso_z(s1),
+                "_span": (s0, s1), "_covered": min(s1, egress) - max(s0, ingress),
+            })
+        singles.sort(key=lambda p: (p["coverage"] != "full", -p["_covered"]))
+
+        plans = list(singles)
+        if len(singles) >= 2:
+            plans.append({
+                "type": "either", "id": "either", "sites": [p["site"] for p in singles],
+                "start": _jd_to_iso_z(min(p["_span"][0] for p in singles)),
+                "end": _jd_to_iso_z(max(p["_span"][1] for p in singles)),
+            })
+            best = None
+            for p, q in itertools.combinations(singles, 2):
+                early, late = sorted((p, q), key=lambda x: (x["_span"][0], x["_span"][1]))
+                if not (early["ingress"] and late["egress"]):
+                    continue
+                legs = _relay_legs(early["_span"], late["_span"])
+                # Transit time the two legs actually cover (a gap between them
+                # counts as uncovered), then the cheaper of equal coverages.
+                a_in = (max(legs[0][0], ingress), min(legs[0][1], egress))
+                b_in = (max(legs[1][0], ingress), min(legs[1][1], egress))
+                union = max(0.0, a_in[1] - a_in[0]) + max(0.0, b_in[1] - b_in[0]) - max(
+                    0.0, min(a_in[1], b_in[1]) - max(a_in[0], b_in[0]))
+                cost = (legs[0][1] - legs[0][0]) + (legs[1][1] - legs[1][0])
+                key = (-round(union * 1440.0), cost)
+                if best is None or key < best[0]:
+                    best = (key, early, late, legs)
+            if best is not None:
+                _, early, late, legs = best
+                gap = max(0.0, legs[1][0] - legs[0][1]) * 1440.0
+                overlap = max(0.0, legs[0][1] - legs[1][0]) * 1440.0
+                plans.append({
+                    "type": "relay", "id": f"relay:{early['site']}>{late['site']}",
+                    "sites": [early["site"], late["site"]],
+                    "legs": [
+                        {"site": early["site"], "start": _jd_to_iso_z(legs[0][0]), "end": _jd_to_iso_z(legs[0][1])},
+                        {"site": late["site"], "start": _jd_to_iso_z(legs[1][0]), "end": _jd_to_iso_z(legs[1][1])},
+                    ],
+                    "overlap_min": round(overlap, 1), "gap_min": round(gap, 1),
+                })
+        for p in plans:
+            p.pop("_span", None)
+            p.pop("_covered", None)
+        out.append(plans)
+    return out
+
+
 def visibility_series(
     ra_deg: float,
     dec_deg: float,
@@ -687,4 +847,9 @@ def visibility_series(
         "max_lunar_phase": float(max_lunar_phase),
         "moon_dark_floor": _MOON_DARK_FRACTION,
         "observable_fraction": round(float(np.asarray(mask).mean()), 3),
+        # Contiguous observable stretches on the plot grid (sample precision);
+        # the schedule page offers the one around the transit as the window.
+        "observable_runs": [
+            {"start": times[i].isot, "end": times[j].isot} for i, j in _true_runs(mask)
+        ],
     }

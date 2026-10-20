@@ -6,6 +6,41 @@
 {% include "_lco_shared.html" %}
 
 <style>
+  /* Proposed observing window on the visibility plot: two edge handles
+     (resize) and a labelled bar (move) laid over the Plotly plot area. */
+  #vis-plot-wrap { position: relative; }
+  #vis-prop-overlay { position: absolute; inset: 0; pointer-events: none; }
+  #vis-prop-overlay > div { position: absolute; pointer-events: auto; touch-action: none; user-select: none; }
+  .vis-prop-edge { width: 12px; cursor: ew-resize; }
+  .vis-prop-edge::after { content: ''; position: absolute; left: 5px; top: 0; bottom: 0; width: 2px; background: var(--prop-color, #d63384); }
+  .vis-prop-edge:hover::after, .vis-prop-edge.dragging::after { left: 4px; width: 4px; }
+  .vis-prop-bar { height: 20px; cursor: grab; background: var(--prop-color, #d63384); opacity: 0.85; color: #fff; font-size: 0.7rem; line-height: 20px; text-align: center; white-space: nowrap; overflow: hidden; border-radius: 3px; }
+  .vis-prop-bar:hover { opacity: 1; }
+  .vis-prop-bar.dragging { cursor: grabbing; opacity: 1; filter: brightness(0.85); }
+  /* Split relay: one row per leg (site, instrument, request name), with the
+     same columns so the two legs line up; stacks on narrow screens. */
+  .split-leg-row { grid-template-columns: minmax(150px, 1fr) minmax(170px, 1fr) minmax(240px, 2fr); }
+  .split-leg-row + .split-leg-row { margin-top: 0.5rem; }
+  @media (max-width: 640px) { .split-leg-row { grid-template-columns: 1fr; } }
+  #windows-table.hide-rank .col-rank, #windows-table.hide-gain .col-gain { display: none; }
+  /* Header help icons: the cell's ellipsis would hide the "?" and both the
+     cell and the scrolling table wrapper clip the CSS bubble, so these show
+     a viewport-positioned bubble (#th-tip, same look) instead. */
+  /* Full page width with content-sized columns (the table opts out of the
+     shared fixed-width resizer): spare width is shared out, no value is
+     truncated, and the wrapper scrolls when the page is too narrow. */
+  #windows-table th, #windows-table td { max-width: none; overflow: visible; text-overflow: clip; }
+  #windows-table th .help-tooltip::after { display: none; }
+  #th-tip {
+    position: fixed; z-index: 1000; max-width: 280px; pointer-events: none;
+    font-size: 0.75rem; font-weight: 400; line-height: 1.45; text-align: left; white-space: pre-line;
+    text-transform: none; letter-spacing: normal; color: var(--text); background: var(--surface2);
+    border: 1px solid var(--border); border-radius: 6px; padding: 0.5rem 0.65rem;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  }
+  .lco-block-title { font-weight: 600; color: var(--text); border-bottom: 1px solid var(--border); padding-bottom: 0.2rem; }
+  .vis-prop-leg { display: inline-flex; align-items: center; gap: 0.3rem; margin-right: 0.6rem; }
+  .vis-prop-label { font-size: 0.72rem; color: var(--text-dim); text-transform: uppercase; }
   /* Provenance badge shown next to each target-scoped ephemeris field so the
      user can tell where a value came from (and that it belongs to the current
      target) rather than trusting a possibly-stale leftover from another one. */
@@ -128,10 +163,19 @@
       <span style="font-size: 0.72rem; color: var(--text-dim); text-transform: uppercase;">Rank by info gain</span>
     </label>
     <label class="lco-field" style="flex-direction: row; align-items: center; gap: 0.4rem;">
+      <span style="font-size: 0.72rem; color: var(--text-dim); text-transform: uppercase;">Default plan
+        <span class="help-tooltip" title="How each transit's plan (the dropdown in its Transit obs cell) starts out; changing a row's plan by hand keeps it. Sites LCO currently lists as unschedulable are avoided when another plan exists.&#10;• Best site, relay if none is full: one site covering the whole transit, else a two-site relay, else the best partial site.&#10;• Best single site: always one site (full, else the most coverage).&#10;• Either site when possible: one unpinned request LCO may run at any useful site; repeat_duration fits the site seeing the least.">?</span></span>
+      <select id="sch-plan-policy" class="lco-control">
+        <option value="relay">Best site, relay if none is full</option>
+        <option value="single">Best single site</option>
+        <option value="either">Either site when possible</option>
+      </select>
+    </label>
+    <label class="lco-field" style="flex-direction: row; align-items: center; gap: 0.4rem;">
       <span style="font-size: 0.72rem; color: var(--text-dim); text-transform: uppercase;">Show</span>
-      <select id="win-filter" style="padding: 0.35rem 0.5rem;">
+      <select id="win-filter" class="lco-control">
         <option value="all">all</option>
-        <option value="obs">partial + full</option>
+        <option value="obs" selected>partial + full</option>
         <option value="full">full only</option>
         <option value="split">split only</option>
       </select>
@@ -139,8 +183,8 @@
     <span class="lco-msg" id="msg-windows" style="margin: 0;"></span>
   </div>
   <div class="lco-table-wrap" style="margin-top: 0.75rem;">
-    <table class="lco-table" id="windows-table" style="display: none;">
-      <thead><tr><th><input type="checkbox" id="win-all" checked></th><th>Epoch</th><th>Start (UTC)</th><th>Mid (UTC)</th><th>Mid unc</th><th>End (UTC)</th><th>Transit obs</th><th>Rank</th><th>Gain</th><th>Visibility</th></tr></thead>
+    <table class="lco-table" id="windows-table" data-no-resize style="display: none; width: 100%;">
+      <thead><tr><th><input type="checkbox" id="win-all" checked></th><th>Epoch</th><th>Visibility</th><th>Start (UTC)</th><th>Mid (UTC)</th><th>Mid unc</th><th>End (UTC)</th><th>Transit obs</th><th class="col-rank">Rank <span class="help-tooltip" title="Suggested observing order from 'Rank by info gain' (TTV model source): 1 = observe first. Ranked greedily, so each transit's rank accounts for the information the higher-ranked transits already add.">?</span></th><th class="col-gain">Gain <span class="help-tooltip" title="Information gain (bits) on the TTV parameters from measuring this one transit's mid-time, excluding what only refines the linear ephemeris. Higher is more useful; computed per transit, independent of the others.">?</span></th></tr></thead>
       <tbody id="windows-body"></tbody>
     </table>
   </div>
@@ -149,7 +193,20 @@
       <strong id="vis-caption" style="font-size: 0.85rem;"></strong>
       <button class="btn" type="button" id="vis-close" style="margin-left: auto;">✕ Hide</button>
     </div>
-    <div id="vis-plot" style="width: 100%; height: 420px; border: 1px solid var(--border); border-radius: 8px;"></div>
+    <div id="vis-plot-wrap">
+      <div id="vis-plot" style="width: 100%; height: 420px; border: 1px solid var(--border); border-radius: 8px;"></div>
+      <div id="vis-prop-overlay" style="display: none;"></div>
+    </div>
+    <div id="vis-proposal" style="display: none; margin-top: 0.4rem;">
+     <!-- Window times and Reset share one row; the readout sits below. The
+          plan itself is chosen in the transit's table row. -->
+     <div class="lco-actions" style="margin-top: 0;">
+      <span id="vis-prop-legs" data-for=""></span>
+      <button class="btn" type="button" id="vis-prop-reset" title="Trim the padded window to the observable time again, discarding manual changes">Reset</button>
+      <span class="help-tooltip" title="Each box is a request window for this transit's plan (chosen in its Transit obs cell in the table): pink for a single-site or either-site request, one box per site in that site's color for a relay. A box starts as the padded window trimmed to when its site can observe the target. Drag a bar to shift a box or an edge to resize it, or type the times; each box stays inside its site's observable time, and repeat_duration is derived from it.">?</span>
+     </div>
+     <div class="lco-msg" id="vis-proposal-text" style="margin: 0.35rem 0 0;"></div>
+    </div>
     <p class="lco-note" style="margin-top: 0.4rem;">
       Computed with astropy. The shaded band is the full transit; cross-check against the
       <a id="lco-vis-link" href="#" target="_blank" rel="noopener">LCO visibility figure</a>.
@@ -161,6 +218,7 @@
 
 <details class="lco-section section-fold" open>
   <summary><h3>Imaging Request</h3></summary>
+  <p class="lco-note" id="split-kind-note" style="display: none;"></p>
   <div class="lco-grid" style="grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));">
     <div class="lco-field"><label for="sch-proposal">Proposal ID <span class="help-tooltip" title="LCO proposal ID. Required for submission. Loaded from your LCO account settings.">?</span></label>
       <select id="sch-proposal">
@@ -174,11 +232,8 @@
         <option value="muscat">2M0-SCICAM-MUSCAT</option>
       </select>
     </div>
-    <div class="lco-field"><label for="sch-name">Request name <span class="help-tooltip" title="Human-readable name for this LCO request. Shown in the observing queue.">?</span></label><input id="sch-name" type="text" placeholder="WASP-12b transit"></div>
-    <div class="lco-field muscat-only"><label for="sch-count">Exp count <span class="help-tooltip" title="Number of exposures per visit. Each exposure covers all 4 bands simultaneously.">?</span></label>
-      <input id="sch-count" type="number" min="1" value="1"></div>
-    <div class="lco-field sinistro-only"><label for="sch-sin-count">Exp count <span class="help-tooltip" title="Number of exposures per visit.">?</span></label><input id="sch-sin-count" type="number" min="1" value="1"></div>
-    <div class="lco-field"><label>Site <span class="help-tooltip" title="Observing site. Auto-filled from the checked window(s): the shared best site when they agree, or left blank when they differ so LCO's scheduler picks an observable node. For MuSCAT3 choose ogg (Maui) or coj (Siding Spring); for Sinistro choose any LCO 1m node (no unit at ogg); for QHY600 choose any LCO 0.4m node (all 6 sites, including ogg); or leave blank to let LCO pick.">?</span></label>
+    <div class="lco-field" id="sch-name-field" style="display: none;"><label for="sch-name">Request name <span class="help-tooltip" title="Human-readable name for this LCO request. Shown in the observing queue.">?</span></label><input id="sch-name" type="text" placeholder="WASP-12b transit"></div>
+    <div class="lco-field" id="sch-site-field" style="display: none;"><label>Site <span class="help-tooltip" title="Observing site. Auto-filled from the checked window(s): the shared best site when they agree, or left blank when they differ so LCO's scheduler picks an observable node. For MuSCAT3 choose ogg (Maui) or coj (Siding Spring); for Sinistro choose any LCO 1m node (no unit at ogg); for QHY600 choose any LCO 0.4m node (all 6 sites, including ogg); or leave blank to let LCO pick.">?</span></label>
       <div class="muscat-only" style="display: none;">
         <select id="sch-muscat-site">
           <option value="">— select —</option>
@@ -198,31 +253,39 @@
       </div>
       <div class="lco-msg" id="sch-site-note" style="display: none; margin-top: 0.3rem;"></div>
     </div>
-    <div class="lco-field sinistro-only" style="display: none;">
-      <label for="sch-effective-filter">Filter <span class="help-tooltip" title="LCO Sinistro filters: Pan-STARRS (rp/gp/ip/up/zs/w) and Bessell (U/B/V/R/I). central_2k_2x2 readout only calibrates up/gp/rp/ip/zs/w. QHY600 offers a wider set incl. narrowband (OIII, S[II], H-Alpha).">?</span></label>
-      <select id="sch-effective-filter">
-        <option value="rp">rp</option>
-        <option value="up">up</option>
-        <option value="gp">gp</option>
-        <option value="ip">ip</option>
-        <option value="zs">zs</option>
-      </select>
-    </div>
-    <div class="lco-field sinistro-only" style="display: none;">
-      <label for="sch-effective-exptime">Exp time (s) <span class="help-tooltip" title="Exposure time in seconds for Sinistro/QHY600 observations.">?</span></label>
-      <input id="sch-effective-exptime" type="text" inputmode="decimal" placeholder="60">
-    </div>
-    <div class="lco-field sinistro-only" style="display: none;">
-      <label for="sch-effective-mode">Readout <span class="help-tooltip" title="Readout mode. Sinistro: 2k 2x2 uses central CCD region, full uses entire frame. QHY600: central30x30 crops to a 30'x30' subframe (default, no binning), full uses entire frame.">?</span></label>
-      <select id="sch-effective-mode">
-        <option value="central_2k_2x2">2k 2x2</option>
-        <option value="full_frame">full</option>
-      </select>
-    </div>
   </div>
   <div class="lco-msg" id="msg-proposals" style="margin-top: 0.4rem;"></div>
 
+  <div class="sinistro-only" style="margin-top: 0.6rem;">
+    <div class="lco-subhead lco-block-title" id="single-block-title">Sinistro / QHY600</div>
+    <div class="lco-grid" style="grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 0.5rem 1rem;">
+      <div class="lco-field"><label for="sch-sin-count">Exp count <span class="help-tooltip" title="Number of exposures per visit.">?</span></label><input id="sch-sin-count" type="number" min="1" value="1"></div>
+      <div class="lco-field">
+        <label for="sch-effective-filter">Filter <span class="help-tooltip" title="LCO Sinistro filters: Pan-STARRS (rp/gp/ip/up/zs/w) and Bessell (U/B/V/R/I). central_2k_2x2 readout only calibrates up/gp/rp/ip/zs/w. QHY600 offers a wider set incl. narrowband (OIII, S[II], H-Alpha).">?</span></label>
+        <select id="sch-effective-filter">
+          <option value="rp">rp</option>
+          <option value="up">up</option>
+          <option value="gp">gp</option>
+          <option value="ip">ip</option>
+          <option value="zs">zs</option>
+        </select>
+      </div>
+      <div class="lco-field">
+        <label for="sch-effective-exptime">Exp time (s) <span class="help-tooltip" title="Exposure time in seconds for Sinistro/QHY600 observations.">?</span></label>
+        <input id="sch-effective-exptime" type="text" inputmode="decimal" placeholder="60">
+      </div>
+      <div class="lco-field">
+        <label for="sch-effective-mode">Readout <span class="help-tooltip" title="Readout mode. Sinistro: 2k 2x2 uses central CCD region, full uses entire frame. QHY600: central30x30 crops to a 30'x30' subframe (default, no binning), full uses entire frame.">?</span></label>
+        <select id="sch-effective-mode">
+          <option value="central_2k_2x2">2k 2x2</option>
+          <option value="full_frame">full</option>
+        </select>
+      </div>
+    </div>
+  </div>
+
   <div class="muscat-only" style="margin-top: 0.6rem;">
+    <div class="lco-subhead lco-block-title" id="muscat-block-title">MuSCAT</div>
     <div class="lco-subhead">Exposure times per band</div>
     <div class="lco-grid" style="grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 0.5rem 1rem;">
       <div class="lco-field"><label for="sch-exp-g">g (s) <span class="help-tooltip" title="Exposure time in seconds for the g band.">?</span></label><input id="sch-exp-g" type="number" step="any" placeholder="30"></div>
@@ -232,6 +295,8 @@
     </div>
     <div class="lco-subhead">Settings</div>
     <div class="lco-grid" style="grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 0.5rem 1rem;">
+      <div class="lco-field"><label for="sch-count">Exp count <span class="help-tooltip" title="Number of exposures per visit. Each exposure covers all 4 bands simultaneously.">?</span></label>
+        <input id="sch-count" type="number" min="1" value="1"></div>
       <div class="lco-field"><label for="sch-exp-mode">Exp mode <span class="help-tooltip" title="Async returns immediately after exposure; Sync blocks until data is available.">?</span></label>
         <select id="sch-exp-mode"><option value="ASYNCHRONOUS" selected>Async</option><option value="SYNCHRONOUS">Sync</option></select></div>
       <div class="lco-field"><label for="sch-readout">Readout mode <span class="help-tooltip" title="MUSCAT_FAST is faster but noisier; MUSCAT_SLOW is slower but lower read noise.">?</span></label><select id="sch-readout"><option value="MUSCAT_FAST">MUSCAT_FAST</option><option value="MUSCAT_SLOW">MUSCAT_SLOW</option></select></div>
@@ -282,93 +347,35 @@
   <p class="lco-note">These scheduling inputs are separate from the archive page.</p>
 </details>
 
-<details class="lco-section section-fold" id="split-section" style="display: none;" open>
-  <summary><h3>Split Request (two-site relay)</h3></summary>
-  <p class="lco-note" id="split-note"></p>
-  <div class="lco-grid" style="grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));">
-    <div class="lco-field"><label for="sch-site-a">Leg A site (ingress) <span class="help-tooltip" title="LCO site for the ingress leg of a split relay request. Choose a site where ingress is observable.">?</span></label>
-      <select id="sch-site-a">
-        <option value="">— select —</option>
-        <option value="ogg">ogg (Haleakala)</option>
-        <option value="coj">coj (Siding Spring)</option>
-        <option value="lsc">lsc (Cerro Tololo)</option>
-        <option value="cpt">cpt (Sutherland)</option>
-        <option value="tfn">tfn (Tenerife)</option>
-        <option value="elp">elp (McDonald)</option>
-      </select>
-    </div>
-    <div class="lco-field"><label for="sch-site-b">Leg B site (egress) <span class="help-tooltip" title="LCO site for the egress leg of a split relay request. Choose a site where egress is observable.">?</span></label>
-      <select id="sch-site-b">
-        <option value="">— select —</option>
-        <option value="ogg">ogg (Haleakala)</option>
-        <option value="coj">coj (Siding Spring)</option>
-        <option value="lsc">lsc (Cerro Tololo)</option>
-        <option value="cpt">cpt (Sutherland)</option>
-        <option value="tfn">tfn (Tenerife)</option>
-        <option value="elp">elp (McDonald)</option>
-      </select>
-    </div>
-  </div>
-  <div class="lco-actions">
-    <button class="btn primary" type="button" id="btn-split-dry-run">Check settings (both legs)</button>
-    <span class="lco-msg" id="msg-split-ipp" style="margin: 0;"></span>
-  </div>
-  <div id="split-ipp-result" style="margin-top: 0.75rem; display: none;">
-    <div class="lco-grid" style="grid-template-columns: 1fr 1fr;">
-      <div>
-        <div style="font-weight: 600; font-size: 0.8rem; color: var(--text-dim); margin-bottom: 0.25rem;">Leg A</div>
-        <div class="lco-note" id="split-a-summary"></div>
-      </div>
-      <div>
-        <div style="font-weight: 600; font-size: 0.8rem; color: var(--text-dim); margin-bottom: 0.25rem;">Leg B</div>
-        <div class="lco-note" id="split-b-summary"></div>
-      </div>
-    </div>
-  </div>
-  <div class="lco-actions" style="margin-top: 0.6rem;">
-    <button class="btn" type="button" id="btn-submit-leg-a" disabled
-      title="Enabled once leg A passes its own dry-run. Requires MUSCAT_LCO_ALLOW_SUBMIT=1 on the server.">
-      Submit Leg A only
-    </button>
-    <button class="btn" type="button" id="btn-submit-leg-b" disabled
-      title="Enabled once leg B passes its own dry-run. Requires MUSCAT_LCO_ALLOW_SUBMIT=1 on the server.">
-      Submit Leg B only
-    </button>
-    <button class="btn primary" type="button" id="btn-split-submit" disabled
-      title="Enabled after both legs pass dry-run. Requires MUSCAT_LCO_ALLOW_SUBMIT=1 on the server.">
-      Submit both
-    </button>
-  </div>
-  <div id="split-partial-warning" style="display: none; margin-top: 0.75rem; padding: 0.6rem 0.8rem; border-radius: 8px; background: color-mix(in srgb, #e0a23b 18%, transparent); border: 1px solid #e0a23b;">
-    <strong>⚠ Partial booking:</strong> <span id="split-partial-text"></span>
-  </div>
-  <p class="lco-note">Each leg is an independent LCO booking. "Submit both" is not atomic — if leg B fails
-    after leg A is booked, leg A stays booked (see the warning above); use "Submit Leg B only" to retry it.
-    There is no automatic cancellation.</p>
-</details>
-
 <details class="lco-section section-fold" id="single-submit-section" open>
-  <summary><h3>Single site request</h3></summary>
+  <summary><h3>Requests</h3></summary>
   <div class="lco-tabs" role="tablist">
     <button type="button" class="lco-tab active" data-tab="science">Science obs</button>
     <button type="button" class="lco-tab" data-tab="test">Test obs</button>
   </div>
 
   <div class="lco-tab-panel" data-panel="science">
+    <p class="lco-note" style="margin-top: 0;">One LCO request per ticked transit, following the plan chosen in its row
+      (a relay is two requests). Each request is drafted, checked with LCO and submitted on its own; set
+      each one's instrument and name here, and the shared settings under Imaging Request.</p>
     <div class="lco-actions">
-      <button class="btn primary" type="button" id="btn-create-draft" title="Build the LCO request payload from the form so you can review and edit it before checking settings">Create draft</button>
-      <button class="btn primary" type="button" id="btn-dry-run" style="display: none;">Check settings</button>
-      <button class="btn" type="button" id="btn-submit" disabled style="display: none;"
-        title="Enabled after a successful dry-run of the current draft. Requires MUSCAT_LCO_ALLOW_SUBMIT=1 on the server.">
-        Submit
+      <button class="btn primary" type="button" id="btn-create-draft" title="Build each request's LCO payload from the form so you can review and edit it before checking settings">Create drafts</button>
+      <button class="btn primary" type="button" id="btn-dry-run" disabled title="Run LCO's dry-run on every draft">Check settings</button>
+      <button class="btn danger" type="button" id="btn-submit" disabled
+        title="Submit every request that passed its check. Requires MUSCAT_LCO_ALLOW_SUBMIT=1 on the server.">
+        Submit all
       </button>
       <span class="lco-msg" id="msg-ipp" style="margin: 0;"></span>
     </div>
-    <div id="ipp-result" style="margin-top: 0.75rem; display: none;">
-      <p class="lco-note" style="margin: 0 0 0.35rem;">Editable LCO request payload — tweak fields (e.g. <code>exposure_time</code>, window start/end) before checking settings. Editing after a check disables Submit until you re-check.</p>
-      <textarea class="lco-pre" id="payload-pre" spellcheck="false" aria-label="LCO request payload"></textarea>
-      <div class="lco-note" id="ipp-summary" style="margin-top: 0.4rem;"></div>
+    <p class="lco-note" id="requests-empty">Tick transits in the windows table to list their requests here.</p>
+    <div class="lco-table-wrap">
+      <table class="lco-table" id="requests-table" data-no-resize style="display: none; width: auto;">
+        <thead><tr><th>Transit</th><th>Plan</th><th>Site</th><th>Instrument</th><th>Request name</th><th>Window (UTC)</th><th>Status</th><th></th></tr></thead>
+        <tbody id="requests-body"></tbody>
+      </table>
     </div>
+    <p class="lco-note">Requests are independent bookings: if one fails after others are booked, the booked ones stay
+      booked (a relay can end up with one leg). There is no automatic cancellation.</p>
   </div>
 
   <div class="lco-tab-panel" data-panel="test" style="display: none;">
@@ -527,7 +534,7 @@
     'sch-twilight','sch-sites','win-filter',
     'sch-kind','sch-name','sch-count','sch-exp-g','sch-exp-r','sch-exp-i','sch-exp-z',
     'sch-exp-mode','sch-readout','sch-muscat-site','sch-nb-g','sch-nb-r','sch-nb-i','sch-nb-z',
-    'sch-sin-count','sch-site','sch-site-a','sch-site-b',
+    'sch-sin-count','sch-site','sch-plan-policy',
     'sch-type','sch-observation-type','sch-guiding-config','sch-defocus',
     'sch-effective-filter','sch-effective-exptime','sch-effective-mode',
     'sch-obs-airmass','sch-moon-sep','sch-max-lunar-phase','sch-ipp','sch-test-budget'
@@ -608,9 +615,8 @@
   document.addEventListener('change', function (e) {
     if (e.target && (TEXT_IDS.indexOf(e.target.id) !== -1 || CHECK_IDS.indexOf(e.target.id) !== -1)) {
       saveOptions();
-      el('btn-submit').disabled = true;
-      lastDryRunHash = null;
-      resetSplitSubmitState();
+      // Every draft was built from the old settings.
+      invalidateAllRequests();
     }
   });
 
@@ -635,17 +641,16 @@
   // exptime starts empty: no default exposure time is assumed -- the user must
   // enter one before a dry-run/submit. mode/filter keep sensible defaults.
   var lastSinistroFields = { exptime: '', mode: 'central_2k_2x2', filter: 'rp' };
+  // True while the single-filter fields hold real (editable) values rather
+  // than MuSCAT's read-only summary. Starts true so the first instrument
+  // refresh keeps the values restored from the saved form.
+  var singleBlockEditable = true;
   var lastScheduleKind = '';
   var lastTargetInfo = null;
   var lastInfoTarget = '';
   var pendingSource = null;
   var targetRefreshTimer = null;
   var lastWindows = [];
-  var lastDryRunHash = null;
-  var lastSplitDryRunHashes = null;   // { a: hash|null, b: hash|null } -- each leg only gets a
-                                       // hash once ITS OWN dry-run passes, independent of the other
-  var lastSplitLegAResult = null;     // leg A's submit result, once booked
-  var lastSplitLegBResult = null;     // leg B's submit result, once booked
 
   function setDot(id, ok) { var e = el(id); if (e) e.className = 'dot ' + (ok ? 'ok' : 'no'); }
   MuscatFetch.fetchJson('/api/lco/config').then(function (d) {
@@ -706,6 +711,12 @@
     sinistro: [['central_2k_2x2', 'central_2k_2x2'], ['full_frame', 'full_frame']],
     qhy600: [['central30x30', 'central30x30'], ['full_frame', 'full_frame']],
   };
+  // Default readout/filter per single-filter camera: the first (standard)
+  // option of each list above.
+  var SINGLE_FILTER_DEFAULTS = {
+    sinistro: { mode: 'central_2k_2x2', filter: 'rp' },
+    qhy600: { mode: 'central30x30', filter: 'rp' },
+  };
   // Secondary-mirror defocus limit (mm), from LCO's live instrument
   // capabilities schema (mirrors muscat_db.lco._DEFOCUS_LIMIT_MM).
   var DEFOCUS_LIMIT_MM = { muscat: 8, muscat3: 8, muscat4: 8, sinistro: 5, qhy600: 0.5 };
@@ -747,7 +758,7 @@
   // come back silently rather than needing a code change.
   function annotateSiteOptions() {
     var kind = val('sch-kind');
-    ['sch-muscat-site', 'sch-site', 'sch-site-a', 'sch-site-b'].forEach(function (id) {
+    ['sch-muscat-site', 'sch-site'].forEach(function (id) {
       var sel = el(id);
       if (!sel) return;
       Array.prototype.forEach.call(sel.options, function (o) {
@@ -777,6 +788,22 @@
       '. Left the site unset — pick another site or instrument.';
     node.style.display = '';
   }
+  // The checked window's site has no unit of this instrument (e.g. Sinistro at
+  // ogg): say so instead of silently leaving the site blank.
+  function showUnhostedNote(site, kind) {
+    var node = el('sch-site-note');
+    if (!node) return;
+    var hosts = kindsAtSite(site).map(function (k) {
+      return k === 'muscat' ? (MUSCAT_NAME_AT[site] || 'MuSCAT') : (INSTRUMENT_TYPE_LABEL[KIND_INSTRUMENT_TYPE[k]] || k);
+    });
+    var kindLabel = INSTRUMENT_TYPE_LABEL[KIND_INSTRUMENT_TYPE[kind]] || kind;
+    node.className = 'lco-msg err';
+    node.textContent = kindLabel + ' has no unit at ' + site.toUpperCase() + ', where this transit is observable' +
+      (hosts.length ? ' (' + site.toUpperCase() + ' has ' + hosts.join(', ') + ')' : '') +
+      '. Site left blank — switch instrument or pick another site.';
+    node.style.display = '';
+  }
+
   function clearSiteNote() {
     var node = el('sch-site-note');
     if (!node) return;
@@ -881,7 +908,9 @@
   function updateScheduleFields() {
     var kind = val('sch-kind');
     var isMuscat = kind === 'muscat' || kind === 'muscat3' || kind === 'muscat4';
-    if (isMuscat) {
+    // With MuSCAT selected the single-filter fields double as a read-only
+    // summary of the band settings -- unless a split leg needs them for real.
+    if (isMuscat && !singleBlockEditable) {
       var bands = [];
       var maxExp = null;
       ['g', 'r', 'i', 'z'].forEach(function (band) {
@@ -899,8 +928,10 @@
   }
 
   function updateDefocusLimits() {
-    var kind = val('sch-kind');
-    var limit = DEFOCUS_LIMIT_MM[kind] !== undefined ? DEFOCUS_LIMIT_MM[kind] : 8;
+    // Defocus is shared by both legs of a mixed split, so the tightest limit applies.
+    var limit = Math.min.apply(null, activeKinds().map(function (k) {
+      return DEFOCUS_LIMIT_MM[k] !== undefined ? DEFOCUS_LIMIT_MM[k] : 8;
+    }));
     var defocusEl = el('sch-defocus');
     var hint = el('hint-defocus');
     if (defocusEl) {
@@ -915,27 +946,38 @@
     if (hint) hint.title = 'Secondary-mirror offset from focus, in mm, to prevent CCD saturation on bright targets. 0 = focused. Limit for this instrument: ±' + limit + 'mm.';
   }
 
-  function applyKind() {
+  function isMuscatKind(k) { return k === 'muscat' || k === 'muscat3' || k === 'muscat4'; }
+
+  // The single-filter camera the requests can pair with MuSCAT: the selected
+  // Instrument when it is single-filter, else Sinistro (every non-2m site has
+  // one). All requests share the one single-filter settings block, so they
+  // never mix Sinistro with QHY600.
+  function splitSingleKind() {
     var k = val('sch-kind');
-    var muscat = k === 'muscat' || k === 'muscat3' || k === 'muscat4';
-    var prevMuscat = lastScheduleKind === 'muscat' || lastScheduleKind === 'muscat3' || lastScheduleKind === 'muscat4';
-    if (!prevMuscat) rememberSinistroFields();
+    return isSingleFilterKind(k) ? k : 'sinistro';
+  }
+
+  // Show the settings block of every instrument in play and make the
+  // single-filter fields editable whenever a single-filter instrument is.
+  function refreshInstrumentBlocks() {
+    var kinds = activeKinds();
+    var showMuscat = kinds.some(isMuscatKind);
+    var showSingle = kinds.some(isSingleFilterKind);
+    if (singleBlockEditable) rememberSinistroFields();
     // .lco-field keeps its flex column layout (label above input); plain
     // wrappers fall back to block. Forcing 'block' on a .lco-field would
     // flatten it to label-beside-input, misaligning it with the other fields.
     function kindDisplay(e) { return e.classList.contains('lco-field') ? 'flex' : 'block'; }
-    document.querySelectorAll('.muscat-only').forEach(function (e) { e.style.display = muscat ? kindDisplay(e) : 'none'; });
-    document.querySelectorAll('.sinistro-only').forEach(function (e) { e.style.display = muscat ? 'none' : kindDisplay(e); });
-    updateDefocusLimits();
+    document.querySelectorAll('.muscat-only').forEach(function (e) { e.style.display = showMuscat ? kindDisplay(e) : 'none'; });
+    document.querySelectorAll('.sinistro-only').forEach(function (e) { e.style.display = showSingle ? kindDisplay(e) : 'none'; });
     var effExp = el('sch-effective-exptime');
     var effMode = el('sch-effective-mode');
     var effFilter = el('sch-effective-filter');
-    if (effExp) effExp.readOnly = muscat;
-    if (effMode) effMode.disabled = muscat;
-    if (effFilter) effFilter.disabled = muscat;
-    setSelectValue('sch-guiding-config', 'OFF');
-    if (!muscat) {
-      var singleKind = isSingleFilterKind(k) ? k : 'sinistro';
+    if (effExp) effExp.readOnly = !showSingle;
+    if (effMode) effMode.disabled = !showSingle;
+    if (effFilter) effFilter.disabled = !showSingle;
+    if (showSingle) {
+      var singleKind = splitSingleKind();
       function optHtml(pairs) {
         return pairs.map(function (p) { return '<option value="' + p[0] + '">' + p[1] + '</option>'; }).join('');
       }
@@ -948,27 +990,39 @@
         var stillValid = Array.prototype.some.call(siteSelEl.options, function (o) { return o.value === prevSite; });
         siteSelEl.value = stillValid ? prevSite : '';
       }
-      // Split-relay legs (sch-site-a/-b) submit real per-site requests, so
-      // their static option lists must narrow with the kind too -- otherwise
-      // a hand-picked site absent from this kind's network (e.g. ogg for
-      // sinistro) sits there as a selectable value LCO then refuses.
-      ['sch-site-a', 'sch-site-b'].forEach(function (legId) {
-        var legEl = el(legId);
-        if (!legEl) return;
-        var prevLeg = legEl.value;
-        legEl.innerHTML = '<option value="">— select —</option>' + optHtml(SINGLE_FILTER_SITES[singleKind]);
-        var legStillValid = Array.prototype.some.call(legEl.options, function (o) { return o.value === prevLeg; });
-        legEl.value = legStillValid ? prevLeg : '';
-      });
       setVal('sch-effective-exptime', lastSinistroFields.exptime);
       setVal('sch-effective-mode', lastSinistroFields.mode);
       setVal('sch-effective-filter', lastSinistroFields.filter);
+      // A remembered value the new camera lacks (Sinistro's central_2k_2x2
+      // on QHY600) leaves the dropdown blank: fall back to its default.
+      if (!val('sch-effective-mode')) setVal('sch-effective-mode', SINGLE_FILTER_DEFAULTS[singleKind].mode);
+      if (!val('sch-effective-filter')) setVal('sch-effective-filter', SINGLE_FILTER_DEFAULTS[singleKind].filter);
     }
+    singleBlockEditable = showSingle;
+    updateBlockTitles();
+    updateKindNote();
+    updateDefocusLimits();
     updateScheduleFields();
     annotateSiteOptions();
+  }
+
+  function applyKind() {
+    var k = val('sch-kind');
+    setSelectValue('sch-guiding-config', 'OFF');
+    refreshInstrumentBlocks();
+    // Each request's instrument choices start from the selected Instrument.
+    renderRequests();
     lastScheduleKind = k;
   }
-  el('sch-kind').addEventListener('change', applyKind);
+  // A manual instrument change keeps the checked window's site: re-run the
+  // auto-config so the new instrument's site dropdown is filled too (applyAutoConfig
+  // never reverts a manually chosen instrument).
+  el('sch-kind').addEventListener('change', function () {
+    applyKind();
+    applyAutoConfig();
+    // Either-site plans depend on the Instrument: refresh each row's options.
+    if (lastWindows.length) renderWindows(selectedWindowIndices());
+  });
   ['sch-exp-g', 'sch-exp-r', 'sch-exp-i', 'sch-exp-z', 'sch-readout'].forEach(function (id) {
     var node = el(id);
     if (!node) return;
@@ -981,6 +1035,8 @@
     node.addEventListener('input', rememberSinistroFields);
     node.addEventListener('change', rememberSinistroFields);
   });
+  // Single-filter request names carry the filter.
+  el('sch-effective-filter').addEventListener('change', function () { renderRequests(); });
 
   function populateProposals(results) {
     var sel = el('sch-proposal');
@@ -1001,6 +1057,9 @@
       sel.appendChild(opt);
     });
     if (current) sel.value = current;
+    // With exactly one proposal there is nothing to choose. With several,
+    // leave it unset rather than guess: a wrong proposal books the wrong time.
+    if (!sel.value && results.length === 1) sel.value = results[0].id || results[0];
   }
 
   function fetchProposals(silent) {
@@ -1388,7 +1447,13 @@
     document.querySelectorAll('#windows-body input[type=checkbox]').forEach(function (c) {
       if (c.checked) {
         var w = lastWindows[+c.dataset.i];
-        if (w) out.push({ start: w.start, end: w.end });
+        if (!w) return;
+        // The first request window of the transit's plan, carrying its site
+        // so the server sizes repeat_duration to what that site can observe.
+        var leg = planLegs(w, currentPlan(w))[0];
+        var win = { start: leg.start, end: leg.end };
+        if (leg.site) win.site = leg.site;
+        out.push(win);
       }
     });
     return out;
@@ -1404,6 +1469,17 @@
         (mode === 'split' && isSplitRating(rating));
       tr.style.display = show ? '' : 'none';
     });
+  }
+
+  // 1-sigma mid-time uncertainty (minutes) propagated from the linear
+  // ephemeris: sqrt(t0_unc^2 + (n * P_unc)^2), where n counts periods since t0
+  // (epoch_abs). The displayed epoch restarts at 0 in every date range, so it
+  // cannot be used here. null when neither input has an uncertainty.
+  function midUncMinutes(w, t0Unc, periodUnc) {
+    if (t0Unc === null && periodUnc === null) return null;
+    var n = typeof w.epoch_abs === 'number' ? w.epoch_abs : w.epoch;
+    var t = t0Unc || 0, pu = periodUnc || 0;
+    return Math.sqrt(t * t + n * n * pu * pu) * 1440.0;
   }
 
   function formatUnc(uncMin) {
@@ -1424,17 +1500,51 @@
     return m ? m[1] + ' ' + m[2] : String(iso);
   }
 
+  // Start/End cell: the request window(s) of the transit's plan, with the
+  // padded window's edge in the tooltip.
+  function windowEdgeCell(w, edge) {
+    var span = planSpan(w);
+    if (!span) return escapeHtml(fmtWindowTime(w[edge]));
+    var tip = span.label + '; padded window ' + edge + ': ' + fmtWindowTime(w[edge]);
+    return '<span title="' + escapeHtml(tip) + '" style="color: ' + PROPOSAL_COLOR + ';">' + escapeHtml(fmtWindowTime(span[edge])) + '</span>';
+  }
+
+  // "<target><planet>_<yymmdd>" for a window's date, or '' without a target.
+  function requestNameBase(dateStr) {
+    var target = val('sch-target');
+    if (!target) return '';
+    var yymmdd = (dateStr || '').substring(2, 10).replace(/-/g, '');
+    return target + (val('sch-planet') || '') + '_' + yymmdd;
+  }
+
+  // Building or checking a request needs a window: until a row is ticked the
+  // draft/check buttons are disabled (with the reason on hover).
+  var NEEDS_WINDOW_BUTTONS = ['btn-create-draft', 'btn-dry-run', 'btn-test-observation'];
+  function updateWindowGatedButtons() {
+    var nSel = selectedWindowIndices().length;
+    var none = !nSel;
+    // Keep the select-all box in step with hand-ticked rows.
+    el('win-all').checked = nSel > 0 && nSel === lastWindows.length;
+    NEEDS_WINDOW_BUTTONS.forEach(function (id) {
+      var b = el(id);
+      if (!b) return;
+      if (!b.hasAttribute('data-title')) b.setAttribute('data-title', b.title || '');
+      b.disabled = none;
+      b.title = none ? 'Generate windows and tick a row in the windows table first' : b.getAttribute('data-title');
+    });
+  }
+
   function updateRequestName() {
+    updateWindowGatedButtons();
+    refreshRequests();
     var target = val('sch-target');
     if (!target) return;
     var selected = selectedWindows();
     if (!selected.length) return;
     var firstWin = selected[0];
     var dateStr = firstWin.mid || firstWin.start;
-    var yymmdd = (dateStr || '').substring(2, 10).replace(/-/g, '');
-    var planet = val('sch-planet');
     var kind = val('sch-kind');
-    var name = target + (planet || '') + '_' + yymmdd;
+    var name = requestNameBase(dateStr);
     if (kind === 'muscat3') {
       name += '_M3';
     } else if (kind === 'muscat4') {
@@ -1458,115 +1568,316 @@
     // Get the current inputs' uncertainty:
     var t0Tuple = tupleField('sch-t0');
     var periodTuple = tupleField('sch-period');
-    var showUnc = t0Tuple.ok && periodTuple.ok && (t0Tuple.unc !== null || periodTuple.unc !== null);
+    // A TTV-model source numbers epochs from the model's own reference and its
+    // mid-times do not follow t0/P, so the linear propagation does not apply.
+    var showUnc = t0Tuple.ok && periodTuple.ok && (t0Tuple.unc !== null || periodTuple.unc !== null) &&
+      val('sch-source').indexOf('ttv:') !== 0;
 
     lastWindows.forEach(function (w, i) {
       var o = w.observability;
-      var checked = hasExplicitSelection ? !!selectedSet[i] : !!(o && o.rating === 'full');
+      // Freshly generated rows start unticked (each tick is a request to
+      // book), except a lone transit, which is the obvious choice.
+      var checked = hasExplicitSelection ? !!selectedSet[i] : lastWindows.length === 1;
       var tr = document.createElement('tr');
       tr.setAttribute('data-rating', (o && o.rating) || 'none');
+      tr.setAttribute('data-i', i);
 
       var uncText = '-';
-      if (showUnc) {
-        var t0_unc = t0Tuple.unc || 0;
-        var period_unc = periodTuple.unc || 0;
-        var uncDays = Math.sqrt(t0_unc * t0_unc + w.epoch * w.epoch * period_unc * period_unc);
-        var uncMin = uncDays * 1440.0;
-        uncText = formatUnc(uncMin);
-      }
+      // Saved at generation (see btn-gen-windows), so a restored table shows it
+      // even before the ephemeris fields are refilled; else computed live.
+      var uncMin = typeof w.mid_unc_min === 'number' ? w.mid_unc_min
+        : (showUnc ? midUncMinutes(w, t0Tuple.unc, periodTuple.unc) : null);
+      if (uncMin !== null) uncText = formatUnc(uncMin);
 
       tr.innerHTML = '<td><input type="checkbox" data-i="' + i + '"' + (checked ? ' checked' : '') + '></td>' +
-        '<td>' + w.epoch + '</td><td>' + fmtWindowTime(w.start) + '</td><td>' + fmtWindowTime(w.mid) + '</td><td>' + uncText + '</td><td>' + fmtWindowTime(w.end) + '</td>' +
-        '<td>' + obsCellHtml(o) + '</td>' +
-        '<td>' + (w.rank ? '<strong>' + w.rank + '</strong>' : '-') + '</td>' +
-        '<td>' + (typeof w.gain_ttv === 'number' ? w.gain_ttv.toFixed(2) : '-') + '</td>' +
-        '<td><a href="#" class="vis-link" data-i="' + i + '" title="Show the astropy visibility plot for this transit below the table">show plot</a></td>';
+        '<td>' + w.epoch + '</td>' +
+        '<td><a href="#" class="vis-link" data-i="' + i + '" title="Show the astropy visibility plot for this transit below the table">show plot</a></td>' +
+        '<td class="win-start">' + windowEdgeCell(w, 'start') + '</td><td>' + fmtWindowTime(w.mid) + '</td><td>' + uncText + '</td><td class="win-end">' + windowEdgeCell(w, 'end') + '</td>' +
+        '<td>' + planCellHtml(w, i) + '</td>' +
+        '<td class="col-rank">' + (w.rank ? '<strong>' + w.rank + '</strong>' : '-') + '</td>' +
+        '<td class="col-gain">' + (typeof w.gain_ttv === 'number' ? w.gain_ttv.toFixed(2) : '-') + '</td>';
       tb.appendChild(tr);
     });
     el('windows-table').style.display = lastWindows.length ? '' : 'none';
+    // Rank/Gain only exist after "Rank by info gain"; hide the columns otherwise.
+    el('windows-table').classList.toggle('hide-rank', !lastWindows.some(function (w) { return w.rank; }));
+    el('windows-table').classList.toggle('hide-gain', !lastWindows.some(function (w) { return typeof w.gain_ttv === 'number'; }));
     el('win-all').checked = selectedWindowIndices().length === lastWindows.length;
+    matchWidths('#windows-body .plan-select');
     applyWinFilter();
     updateRequestName();
-    updateSplitPanel();
     applyAutoConfig();
   }
 
-  // Returns the observability of the single checked window when it's rated
-  // split_gap or split_overlap (the only cases the split-request panel
-  // applies to), else null.
-  function currentSplitObservability() {
-    var idxs = selectedWindowIndices();
-    if (idxs.length !== 1) return null;
-    var w = lastWindows[idxs[0]];
-    return (w && w.observability && isSplitRating(w.observability.rating)) ? w.observability : null;
+  // Give every control matching ``selector`` the width of the widest one, so a
+  // column of dropdowns lines up whatever each one's selected label is.
+  function matchWidths(selector) {
+    var nodes = Array.prototype.slice.call(document.querySelectorAll(selector));
+    nodes.forEach(function (n) { n.style.width = ''; });
+    var widest = Math.max.apply(null, [0].concat(nodes.map(function (n) { return n.offsetWidth; })));
+    if (widest) nodes.forEach(function (n) { n.style.width = widest + 'px'; });
   }
 
-  // Shows/hides the "Split Request" panel based on the current window
-  // selection, and resets its dry-run/submit state whenever the selection (or
-  // its split_sites) changes so a stale dry-run hash can never be submitted
-  // against a different pair of legs. Mutually exclusive with the generic
-  // "Dry-run & Submit" section: a single-site submit doesn't apply to a
-  // window with no full single-site coverage, and showing both at once left
-  // two unrelated pairs of "check settings"/"submit" buttons on screen.
-  function updateSplitPanel() {
-    var o = currentSplitObservability();
-    var panel = el('split-section');
-    var singlePanel = el('single-submit-section');
-    if (!panel) return;
-    if (!o) {
-      panel.style.display = 'none';
-      if (singlePanel) singlePanel.style.display = '';
-      return;
-    }
-    if (singlePanel) singlePanel.style.display = 'none';
-    el('btn-submit').disabled = true;
-    lastDryRunHash = null;
-    panel.style.display = '';
-    setSelectValue('sch-site-a', o.split_sites[0]);
-    setSelectValue('sch-site-b', o.split_sites[1]);
-    el('btn-submit-leg-a').textContent = 'Submit ' + o.split_sites[0].toUpperCase() + ' only';
-    el('btn-submit-leg-b').textContent = 'Submit ' + o.split_sites[1].toUpperCase() + ' only';
-    var note = (o.rating === 'split_gap' ? 'Gap relay: ' : 'Overlap relay: ') + o.split_sites.join(' → ').toUpperCase();
-    if (o.split_overlap_min) note += ' (' + o.split_overlap_min + ' min overlap)';
-    if (o.split_gap_min) note += ' (' + o.split_gap_min + ' min gap — neither site observes this stretch)';
-    note += bracketWarning(o);
-    el('split-note').textContent = note;
-    resetSplitSubmitState();
+  // Transit obs cell: the transit's plan dropdown (its rating summary in the
+  // tooltip; a single-plan transit gets one too, so the column lines up), '—'
+  // when none.
+  function planCellHtml(w, i) {
+    var plans = windowPlans(w);
+    var o = w.observability;
+    if (!plans.length) return obsCellHtml(o);
+    var tip = obsCellHtml(o).replace(/<[^>]+>/g, '');
+    return '<select class="plan-select lco-control" data-i="' + i + '" title="' + escapeHtml(tip) + '" aria-label="Plan for this transit">' +
+      planOptionsHtml(w) + '</select>';
   }
 
-  function resetSplitSubmitState() {
-    lastSplitDryRunHashes = null;
-    lastSplitLegAResult = null;
-    lastSplitLegBResult = null;
-    el('btn-submit-leg-a').disabled = true;
-    el('btn-submit-leg-b').disabled = true;
-    el('btn-split-submit').disabled = true;
-    el('split-ipp-result').style.display = 'none';
-    el('split-partial-warning').style.display = 'none';
-    msg('msg-split-ipp', '');
-  }
+  var KIND_LABEL = { muscat: 'MuSCAT (2m)', sinistro: 'Sinistro (1m)', qhy600: 'QHY600 (0.4m)' };
+  var MUSCAT_NAME_AT = { ogg: 'MuSCAT3', coj: 'MuSCAT4' };
 
-  // Builds the two leg payloads for a split submission by cloning the shared
-  // single-request params (buildParams()) and overriding the per-leg site,
-  // window span, and exposure count -- everything else (target, proposal,
-  // filters, IPP, guiding, etc.) is shared between both legs.
-  function buildSplitParams() {
-    var o = currentSplitObservability();
-    if (!o) return null;
-    var kind = val('sch-kind');
-    var base = buildParams();
-    var siteIds = ['sch-site-a', 'sch-site-b'];
-    var legs = o.split_windows.map(function (sw, idx) {
-      var leg = JSON.parse(JSON.stringify(base));
-      leg.site = val(siteIds[idx]) || sw.site;
-      leg.windows = [{ start: sw.start, end: sw.end }];
-      var windowSec = windowDurationSec(sw.start, sw.end);
-      var times = [num('sch-exp-g'), num('sch-exp-r'), num('sch-exp-i'), num('sch-exp-z')];
-      var count = computeExposureCount(kind, windowSec, val('sch-type'), times, num('sch-effective-exptime'));
-      if (count !== null) leg.exposure_count = count;
-      return leg;
+  // Instruments a site hosts (static networks; live outages are annotated).
+  function kindsAtSite(site) {
+    var out = [];
+    if (_2M_SITES[site]) out.push('muscat');
+    ['sinistro', 'qhy600'].forEach(function (k) {
+      if (SINGLE_FILTER_SITES[k].some(function (p) { return p[0] === site; })) out.push(k);
     });
-    return { leg_a: legs[0], leg_b: legs[1] };
+    return out;
+  }
+
+  // A request at ``site`` can use the selected Instrument, MuSCAT, or the
+  // single-filter camera in play -- whichever of those the site hosts.
+  function kindOptionsAt(site) {
+    var main = isMuscatKind(val('sch-kind')) ? 'muscat' : val('sch-kind');
+    var hosted = kindsAtSite(site);
+    var out = [];
+    [main, 'muscat', splitSingleKind()].forEach(function (k) {
+      if (hosted.indexOf(k) !== -1 && out.indexOf(k) === -1) out.push(k);
+    });
+    return out;
+  }
+
+  function kindLabelAt(k, site) {
+    var label = (k === 'muscat' && MUSCAT_NAME_AT[site]) ? MUSCAT_NAME_AT[site] + ' (2m)' : (KIND_LABEL[k] || k);
+    if (site && !kindAvailableAt(k, site)) label += SITE_OFFLINE_SUFFIX;
+    return label;
+  }
+
+  // ---- Booking plans per transit -----------------------------------------
+  // /api/lco/windows lists each transit's plans (observability.plans, best
+  // first): one useful site alone ("single"), any of several sites with no
+  // site pinned ("either"), or a two-site relay. The plan picked for a
+  // transit (w.plan; w.plan_manual once chosen by hand) decides the request(s)
+  // the Requests card builds for it. A transit without plans (no coordinates)
+  // falls back to its padded window with no site pinned.
+  var WINDOW_PLAN = { id: 'window', type: 'window' };
+
+  function windowPlans(w) {
+    var plans = (w && w.observability && w.observability.plans) || [];
+    return plans.map(function (p) { return p.type === 'either' ? eitherForInstrument(p, plans) : p; })
+      .filter(Boolean);
+  }
+
+  // An either-site request is one LCO request with one instrument, so it can
+  // only use sites hosting the selected Instrument: keep those (at least two),
+  // spanning just their own windows, else drop the plan. Mixing instruments
+  // (e.g. Sinistro at ELP with MuSCAT3 at OGG) is a relay: one request each.
+  function eitherForInstrument(p, plans) {
+    var kind = isMuscatKind(val('sch-kind')) ? 'muscat' : val('sch-kind');
+    var sites = p.sites.filter(function (s) { return kindsAtSite(s).indexOf(kind) !== -1; });
+    if (sites.length < 2) return null;
+    if (sites.length === p.sites.length) return p;
+    var own = plans.filter(function (q) { return q.type === 'single' && sites.indexOf(q.site) !== -1; });
+    return Object.assign({}, p, {
+      id: 'either:' + sites.join(','), sites: sites,
+      start: own.map(function (q) { return q.start; }).sort()[0],
+      end: own.map(function (q) { return q.end; }).sort().slice(-1)[0]
+    });
+  }
+
+  // A site can take a request now when LCO lists any instrument we schedule
+  // there (an empty list means the site is offline, e.g. maintenance).
+  function siteSchedulable(site) {
+    return kindsAtSite(site).some(function (k) { return kindAvailableAt(k, site); });
+  }
+
+  function planSites(p) {
+    if (!p || p.type === 'window') return [];
+    return p.type === 'single' ? [p.site] : (p.sites || []);
+  }
+
+  // Either-site requests only need one schedulable site; the rest need all.
+  function planSchedulable(p) {
+    var sites = planSites(p);
+    if (!sites.length) return true;
+    return p.type === 'either' ? sites.some(siteSchedulable) : sites.every(siteSchedulable);
+  }
+
+  function planLabel(p) {
+    if (!p || p.type === 'window') return 'Padded window (no site)';
+    var label;
+    if (p.type === 'single') {
+      label = (p.coverage === 'full' ? 'Full' : 'Partial') + ' @ ' + p.site.toUpperCase();
+      if (p.coverage !== 'full') label += ' (' + (p.ingress ? 'ingress' : 'egress') + ')';
+    } else if (p.type === 'either') {
+      var kind = isMuscatKind(val('sch-kind')) ? 'muscat' : val('sch-kind');
+      label = 'Either ' + p.sites.map(function (s) { return s.toUpperCase(); }).join(' / ') +
+        ' (' + (KIND_LABEL[kind] || kind).split(' ')[0] + ')';
+    } else {
+      label = 'Relay ' + p.sites.map(function (s) { return s.toUpperCase(); }).join(' → ') +
+        (p.gap_min ? ' (' + p.gap_min + ' min gap)' : ' (' + p.overlap_min + ' min overlap)');
+    }
+    if (!planSchedulable(p)) label += ' · offline';
+    return label;
+  }
+
+  // The page-level "Default plan" rule, preferring plans LCO can schedule now.
+  function defaultPlanId(w) {
+    var plans = windowPlans(w);
+    if (!plans.length) return WINDOW_PLAN.id;
+    var ok = plans.filter(planSchedulable);
+    var pool = ok.length ? ok : plans;
+    var first = function (type, cond) {
+      return pool.filter(function (p) { return p.type === type && (!cond || cond(p)); })[0] || null;
+    };
+    var bestSingle = first('single');
+    var full = first('single', function (p) { return p.coverage === 'full'; });
+    var either = first('either');
+    var relay = first('relay');
+    var policy = val('sch-plan-policy') || 'relay';
+    if (policy === 'either' && either) return either.id;
+    if (policy === 'single') return (bestSingle || pool[0]).id;
+    if (full) return full.id;
+    if (relay) return relay.id;
+    return (bestSingle || pool[0]).id;
+  }
+
+  function currentPlan(w) {
+    var plans = windowPlans(w);
+    if (!plans.length) { w.plan = WINDOW_PLAN.id; return WINDOW_PLAN; }
+    var p = plans.filter(function (x) { return x.id === w.plan; })[0];
+    if (!p) {
+      w.plan = defaultPlanId(w);
+      w.plan_manual = false;
+      p = plans.filter(function (x) { return x.id === w.plan; })[0];
+    }
+    return p;
+  }
+
+  // Each request window of a plan: the boxes adjusted on the plot
+  // (w.boxes[planId]) or else the plan's own spans.
+  function planLegs(w, p) {
+    var stored = w.boxes && w.boxes[p.id];
+    if (stored && stored.length) return stored;
+    if (p.type === 'single') return [{ site: p.site, start: p.start, end: p.end }];
+    if (p.type === 'either') return [{ site: '', sites: p.sites.slice(), start: p.start, end: p.end }];
+    if (p.type === 'relay') return p.legs.map(function (l) { return { site: l.site, start: l.start, end: l.end }; });
+    return [{ site: '', start: w.start, end: w.end }];
+  }
+
+  function planOptionsHtml(w) {
+    var current = currentPlan(w);
+    return windowPlans(w).map(function (p) {
+      return '<option value="' + escapeHtml(p.id) + '"' + (p.id === current.id ? ' selected' : '') + '>' +
+        escapeHtml(planLabel(p)) + '</option>';
+    }).join('');
+  }
+
+  // ---- Requests derived from the ticked transits ---------------------------
+  // One LCO request per ticked transit (two for a relay), each with its own
+  // site, instrument, name and window. reqState keeps what the user set and
+  // what LCO said per request key, and persists with the schedule state.
+  var reqState = {};
+
+  function requestKey(idx, planId, leg) { return idx + '|' + planId + '|' + leg; }
+
+  function deriveRequests() {
+    var out = [];
+    selectedWindowIndices().forEach(function (idx) {
+      var w = lastWindows[idx];
+      if (!w) return;
+      var p = currentPlan(w);
+      planLegs(w, p).forEach(function (leg, legIdx) {
+        var req = {
+          key: requestKey(idx, p.id, legIdx), idx: idx, plan: p, leg: legIdx,
+          legs: p.type === 'relay' ? 2 : 1, site: leg.site || '', sites: leg.sites || null,
+          start: leg.start, end: leg.end
+        };
+        req.kind = requestKindFor(req);
+        out.push(req);
+      });
+    });
+    return out;
+  }
+
+  // Instruments a request may use: those its site hosts, or the selected
+  // Instrument for an either-site (or site-less) request.
+  function requestKindOptions(req) {
+    if (req.site) return kindOptionsAt(req.site);
+    // An either-site request is offered only when all its sites host the
+    // selected Instrument (eitherForInstrument), and uses exactly that one.
+    var main = isMuscatKind(val('sch-kind')) ? 'muscat' : val('sch-kind');
+    return [main];
+  }
+
+  function requestKindFor(req) {
+    var opts = requestKindOptions(req);
+    var chosen = reqState[req.key] && reqState[req.key].kind;
+    if (chosen && opts.indexOf(chosen) !== -1) return chosen;
+    var main = isMuscatKind(val('sch-kind')) ? 'muscat' : val('sch-kind');
+    return opts.indexOf(main) !== -1 ? main : (opts[0] || main);
+  }
+
+  // "<target><planet>_<yymmdd>" plus _M3/_M4 for MuSCAT at ogg/coj, or
+  // _<site>_<filter> for a single-filter camera ("any" for either-site).
+  function autoRequestName(req) {
+    var w = lastWindows[req.idx];
+    var base = w ? requestNameBase(w.mid || w.start) : '';
+    if (!base) return '';
+    if (isMuscatKind(req.kind)) return base + (MUSCAT_NAME_AT[req.site] ? '_M' + MUSCAT_NAME_AT[req.site].slice(-1) : '');
+    var band = val('sch-effective-filter');
+    return base + '_' + (req.site || 'any') + (band ? '_' + band : '');
+  }
+
+  function requestName(req) {
+    var st = reqState[req.key];
+    return st && st.nameEdited && st.name ? st.name : autoRequestName(req);
+  }
+
+  // Instruments the current requests use (else the Instrument dropdown).
+  function activeKinds() {
+    var kinds = [];
+    deriveRequests().forEach(function (r) { if (kinds.indexOf(r.kind) === -1) kinds.push(r.kind); });
+    return kinds.length ? kinds : [val('sch-kind')];
+  }
+
+  // Title each instrument's settings block; when requests use both blocks,
+  // name the sites each one feeds.
+  function updateBlockTitles() {
+    var single = splitSingleKind();
+    var titles = { muscat: 'MuSCAT', single: (KIND_LABEL[single] || single).split(' ')[0] };
+    var reqs = deriveRequests();
+    var kinds = activeKinds();
+    if (kinds.some(isMuscatKind) && kinds.some(isSingleFilterKind)) {
+      ['muscat', 'single'].forEach(function (which) {
+        var sites = [];
+        reqs.forEach(function (r) {
+          if ((which === 'muscat') !== isMuscatKind(r.kind)) return;
+          var s = r.site ? (which === 'muscat' ? (MUSCAT_NAME_AT[r.site] || 'MuSCAT') + ' @ ' : '') + r.site.toUpperCase() : 'either site';
+          if (sites.indexOf(s) === -1) sites.push(s);
+        });
+        titles[which] += ' — ' + sites.join(', ');
+      });
+    }
+    el('muscat-block-title').textContent = titles.muscat;
+    el('single-block-title').textContent = titles.single;
+  }
+
+  function updateKindNote() {
+    var note = el('split-kind-note');
+    var kinds = activeKinds();
+    if (!(kinds.some(isMuscatKind) && kinds.some(isSingleFilterKind))) { note.style.display = 'none'; return; }
+    note.textContent = 'The requests use two instruments: each uses its own settings block below (titled with its sites). ' +
+      'Everything else here (proposal, IPP, type, guiding, defocus) applies to every request.';
+    note.style.display = '';
   }
 
   // Drop any rendered windows so a failed/empty Generate can't leave stale rows
@@ -1582,10 +1893,7 @@
     // initially filling out the form. Once a result exists, remove every
     // stale path to it (table, selected windows, plot, and submit hashes).
     if (!lastWindows.length && el('windows-table').style.display === 'none') return;
-    lastDryRunHash = null;
-    el('btn-submit').disabled = true;
-    resetDraftState();
-    resetSplitSubmitState();
+    reqState = {};
     clearWindows();
     el('vis-figure').style.display = 'none';
     if (window.Plotly) Plotly.purge('vis-plot');
@@ -1602,10 +1910,7 @@
     var state = {
       windows: lastWindows,
       selected: selectedWindowIndices(),
-      dry_run_hash: lastDryRunHash,
-      ipp_summary: el('ipp-summary').textContent,
-      payload_pre: el('payload-pre').value,
-      ipp_visible: el('ipp-result').style.display !== 'none'
+      requests: reqState
     };
     if (extra) {
       Object.keys(extra).forEach(function (key) { state[key] = extra[key]; });
@@ -1618,16 +1923,8 @@
     try { saved = JSON.parse(localStorage.getItem(STATE_KEY) || 'null'); } catch (e) { saved = null; }
     if (!saved) return;
     lastWindows = Array.isArray(saved.windows) ? saved.windows : [];
-    lastDryRunHash = saved.dry_run_hash || null;
+    reqState = saved.requests && typeof saved.requests === 'object' ? saved.requests : {};
     if (lastWindows.length) renderWindows(saved.selected || []);
-    if (saved.ipp_visible && saved.payload_pre) {
-      el('ipp-result').style.display = '';
-      el('ipp-summary').textContent = saved.ipp_summary || '';
-      el('payload-pre').value = saved.payload_pre || '';
-      el('btn-dry-run').style.display = '';
-      el('btn-submit').style.display = '';
-      el('btn-submit').disabled = !lastDryRunHash;
-    }
   }
 
   function siteForWindow(w) {
@@ -1700,10 +1997,11 @@
     var selId = isSingleFilterKind(val('sch-kind')) ? 'sch-site' : 'sch-muscat-site';
     var sel = el(selId);
     if (!sel) return;
+    var unhosted = '';
     if (site) {
       // The site must be a valid option for the current instrument dropdown.
       var ok = Array.prototype.some.call(sel.options, function (o) { return o.value === site; });
-      if (!ok) site = '';
+      if (!ok) { unhosted = site; site = ''; }
     }
     // Respect a manual override: only touch the dropdown when it is blank or
     // still holds the last value we auto-wrote.
@@ -1717,6 +2015,8 @@
     if (site && !kindAvailableAt(kind, site)) {
       showSiteNote(site, kind);
       site = '';
+    } else if (unhosted) {
+      showUnhostedNote(unhosted, kind);
     } else {
       clearSiteNote();
     }
@@ -1741,13 +2041,370 @@
     return SITE_COLORS[site] || SITE_COLOR_CYCLE[idx % SITE_COLOR_CYCLE.length];
   }
 
+  // ---- Request windows on the visibility plot -----------------------------
+  // The plotted transit's plan draws one box per request window (one, or two
+  // for a relay), each clamped to the observable time of its site(s). Moving
+  // a box stores it in w.boxes[planId], which the Requests card then uses.
+  var PROPOSAL_SNAP_MS = 60000;
+  var PROPOSAL_MIN_MS = 10 * 60000;
+  var PROPOSAL_COLOR = '#d63384';
+  // { idx, planId, type, series, wStart, wEnd, ingress, egress,
+  //   legs: [{ site, sites, run, color, shapeIdx }] }
+  var proposalView = null;
+
+  function utcMs(value) {
+    if (typeof value === 'number') return value;
+    var s = String(value).trim().replace(' ', 'T');
+    if (!/(Z|[+-]\d\d:?\d\d)$/i.test(s)) s += 'Z';
+    return Date.parse(s);
+  }
+  function isoZ(ms) { return new Date(ms).toISOString().replace('.000Z', 'Z'); }
+  // Naive UTC string: the plot's x values are UTC without a zone suffix.
+  function plotTime(ms) { return new Date(ms).toISOString().slice(0, 19).replace('T', ' '); }
+  function hhmm(ms) { return new Date(ms).toISOString().slice(11, 16); }
+  function fmtSpan(ms) {
+    var m = Math.round(ms / 60000);
+    return Math.floor(m / 60) + 'h ' + String(m % 60).padStart(2, '0') + 'm';
+  }
+
+  // The observable run overlapping [startMs, endMs] the most, or null.
+  function runAround(data, startMs, endMs) {
+    var best = null, bestOverlap = 0;
+    (data.observable_runs || []).forEach(function (r) {
+      var rs = utcMs(r.start), re = utcMs(r.end);
+      var overlap = Math.min(re, endMs) - Math.max(rs, startMs);
+      if (overlap > bestOverlap) { bestOverlap = overlap; best = { start: rs, end: re }; }
+    });
+    return best;
+  }
+
+  // Snap to whole minutes and keep [start, end] inside the run (whose edges
+  // are snapped inward). ``moved`` keeps the span length (a drag) instead of
+  // clamping each edge on its own (a resize).
+  function clampProposal(run, startMs, endMs, moved) {
+    function snap(ms) { return Math.round(ms / PROPOSAL_SNAP_MS) * PROPOSAL_SNAP_MS; }
+    var lo = Math.ceil(run.start / PROPOSAL_SNAP_MS) * PROPOSAL_SNAP_MS;
+    var hi = Math.floor(run.end / PROPOSAL_SNAP_MS) * PROPOSAL_SNAP_MS;
+    if (hi <= lo) return { start: run.start, end: run.end };
+    var minSpan = Math.min(PROPOSAL_MIN_MS, hi - lo);
+    var s, e;
+    if (moved) {
+      var span = Math.min(Math.max(snap(endMs - startMs), minSpan), hi - lo);
+      s = Math.min(Math.max(snap(startMs), lo), hi - span);
+      e = s + span;
+    } else {
+      s = Math.min(Math.max(snap(startMs), lo), hi - minSpan);
+      e = Math.min(Math.max(snap(endMs), s + minSpan), hi);
+    }
+    return { start: s, end: e };
+  }
+
+  // Start/end of a transit's request window(s) under its plan, for the table;
+  // null for the padded-window fallback.
+  function planSpan(w) {
+    var p = currentPlan(w);
+    if (p.type === 'window') return null;
+    var legs = planLegs(w, p);
+    return {
+      start: legs.map(function (l) { return l.start; }).sort()[0],
+      end: legs.map(function (l) { return l.end; }).sort().slice(-1)[0],
+      label: planLabel(p)
+    };
+  }
+
+  // Builds the plotted transit's view from its plan: each request window's
+  // box, clamped to the observable run of its site (the union of its sites'
+  // runs for an either-site request; the padded window when no site applies).
+  function initProposal(series, w, idx) {
+    var p = currentPlan(w);
+    var any = series[0].data;
+    var view = {
+      idx: idx, planId: p.id, type: p.type, series: series,
+      wStart: utcMs(w.start), wEnd: utcMs(w.end),
+      ingress: utcMs(any.ingress), egress: utcMs(any.egress), legs: []
+    };
+    var before = JSON.stringify(planLegs(w, p));
+    var boxes = planLegs(w, p).map(function (L) {
+      var ws = utcMs(L.start), we = utcMs(L.end);
+      var sites = L.site ? [L.site] : (L.sites || []);
+      var seriesIdx = series.findIndex(function (x) { return x.site === L.site; });
+      var leg = {
+        site: L.site, sites: L.sites, run: null,
+        color: p.type === 'relay' ? siteColor(L.site, seriesIdx >= 0 ? seriesIdx : view.legs.length) : PROPOSAL_COLOR
+      };
+      var runs = sites.map(function (s) {
+        var x = series.filter(function (y) { return y.site === s; })[0];
+        return x ? runAround(x.data, ws, we) : null;
+      }).filter(Boolean);
+      if (runs.length) {
+        leg.run = {
+          start: Math.min.apply(null, runs.map(function (r) { return r.start; })),
+          end: Math.max.apply(null, runs.map(function (r) { return r.end; }))
+        };
+      } else if (!sites.length) {
+        leg.run = { start: view.wStart, end: view.wEnd };
+      }
+      view.legs.push(leg);
+      if (!leg.run) return L;
+      var c = clampProposal(leg.run, ws, we, false);
+      var box = { site: L.site, start: isoZ(c.start), end: isoZ(c.end) };
+      if (L.sites) box.sites = L.sites.slice();
+      return box;
+    });
+    w.boxes = w.boxes || {};
+    w.boxes[p.id] = boxes;
+    if (JSON.stringify(boxes) !== before) invalidateTransitRequests(idx);
+    updateWindowRow(idx);
+    saveScheduleState();
+    return view;
+  }
+
+  // Pre-ingress/post-egress coverage of [s, e] against the requested padding.
+  function coverageParts(v, s, e) {
+    var pre = Math.round((v.ingress - s) / 60000), post = Math.round((e - v.egress) / 60000);
+    return {
+      ok: pre >= 0 && post >= 0,
+      text: [
+        pre >= 0 ? 'pre-ingress ' + pre + ' of ' + Math.round((v.ingress - v.wStart) / 60000) + ' min'
+                 : 'starts ' + (-pre) + ' min after ingress',
+        post >= 0 ? 'post-egress ' + post + ' of ' + Math.round((v.wEnd - v.egress) / 60000) + ' min'
+                  : 'ends ' + (-post) + ' min before egress'
+      ]
+    };
+  }
+
+  function currentBoxes() {
+    var v = proposalView;
+    var w = v && lastWindows[v.idx];
+    return w && w.boxes && w.boxes[v.planId] ? w.boxes[v.planId] : [];
+  }
+
+  function legName(v, leg) {
+    if (leg.site) return leg.site.toUpperCase();
+    return leg.sites ? leg.sites.map(function (s) { return s.toUpperCase(); }).join(' / ') : 'padded window';
+  }
+
+  function updateProposalReadout() {
+    var v = proposalView;
+    var w = v && lastWindows[v.idx];
+    if (!v || !w) { el('vis-proposal').style.display = 'none'; return; }
+    el('vis-proposal').style.display = '';
+    var boxes = currentBoxes();
+    var parts = [], ok = true;
+    v.legs.forEach(function (leg, i) {
+      var b = boxes[i];
+      if (!leg.run || !b) { parts.push(legName(v, leg) + ' not observable here'); ok = false; return; }
+      var s = utcMs(b.start), e = utcMs(b.end);
+      parts.push(legName(v, leg) + ' ' + hhmm(s) + '–' + hhmm(e) + ' (' + fmtSpan(e - s) +
+        (leg.site || leg.sites ? ', observable ' + hhmm(leg.run.start) + '–' + hhmm(leg.run.end) : '') + ')');
+    });
+    var live = boxes.map(function (b) { return { s: utcMs(b.start), e: utcMs(b.end) }; });
+    var summary = planLabel(currentPlan(w)) + ' — ' + parts.join(v.type === 'relay' ? ' → ' : '') + ' UTC';
+    if (live.length) {
+      var cov = coverageParts(v, Math.min.apply(null, live.map(function (x) { return x.s; })),
+                              Math.max.apply(null, live.map(function (x) { return x.e; })));
+      ok = ok && cov.ok;
+      var extra = cov.text;
+      if (v.type === 'relay' && live.length === 2) {
+        live.sort(function (a, b) { return a.s - b.s; });
+        var hand = Math.round((live[0].e - live[1].s) / 60000);
+        extra = [hand >= 0 ? 'overlap ' + hand + ' min' : 'gap ' + (-hand) + ' min'].concat(extra);
+        if (hand < 0) ok = false;
+      }
+      if (v.type === 'either') extra = ['LCO picks the site; repeat_duration fits the one seeing the least'].concat(extra);
+      summary += ' · ' + extra.join(' · ');
+    }
+    var text = el('vis-proposal-text');
+    text.textContent = summary;
+    text.className = 'lco-msg ' + (ok ? 'ok' : 'err');
+    renderProposalInputs(v, boxes);
+  }
+
+  // One start/end input pair per request window (typed edits; drags update them too).
+  function renderProposalInputs(v, boxes) {
+    var box = el('vis-prop-legs');
+    var sig = v.idx + '|' + v.planId;
+    if (box.getAttribute('data-for') !== sig) {
+      box.setAttribute('data-for', sig);
+      box.innerHTML = v.legs.map(function (leg, i) {
+        var input = function (edge) {
+          return '<input class="vis-prop-input lco-control" data-leg="' + i + '" data-edge="' + edge + '" type="text" size="16"' +
+            ' placeholder="YYYY-MM-DD HH:MM" aria-label="' + escapeHtml(legName(v, leg) + ' ' + edge) + ' (UTC)">';
+        };
+        return '<span class="vis-prop-leg">' +
+          (v.legs.length > 1 ? '<strong style="color: ' + leg.color + ';">' + escapeHtml(legName(v, leg)) + '</strong>' : '') +
+          '<span class="vis-prop-label">Start (UTC)</span>' + input('start') +
+          '<span class="vis-prop-label">End (UTC)</span>' + input('end') + '</span>';
+      }).join('');
+    }
+    v.legs.forEach(function (leg, i) {
+      var b = boxes[i];
+      box.querySelectorAll('input[data-leg="' + i + '"]').forEach(function (inp) {
+        inp.disabled = !leg.run || !b;
+        if (b && document.activeElement !== inp) inp.value = plotTime(utcMs(b[inp.getAttribute('data-edge')])).slice(0, 16);
+      });
+    });
+  }
+
+  function updateWindowRow(idx) {
+    var w = lastWindows[idx];
+    var tr = document.querySelector('#windows-body tr[data-i="' + idx + '"]');
+    if (!w || !tr) return;
+    tr.querySelector('.win-start').innerHTML = windowEdgeCell(w, 'start');
+    tr.querySelector('.win-end').innerHTML = windowEdgeCell(w, 'end');
+    var sel = tr.querySelector('.plan-select');
+    if (sel && sel.value !== w.plan) sel.value = w.plan;
+  }
+
+  // Plot-area geometry relative to #vis-plot-wrap plus the visible x-range,
+  // for mapping times to overlay pixels. null before the plot is drawn.
+  function plotGeometry() {
+    var gd = el('vis-plot');
+    var area = gd.querySelector('.nsewdrag');
+    var range = gd.layout && gd.layout.xaxis && gd.layout.xaxis.range;
+    if (!area || !range) return null;
+    var a = area.getBoundingClientRect(), wrap = el('vis-plot-wrap').getBoundingClientRect();
+    var r0 = utcMs(range[0]), r1 = utcMs(range[1]);
+    return {
+      left: a.left - wrap.left, top: a.top - wrap.top, width: a.width, height: a.height,
+      r0: r0, msPerPx: (r1 - r0) / a.width
+    };
+  }
+
+  // Overlay handles per box: start edge, move bar, end edge.
+  function buildProposalOverlay(v) {
+    el('vis-prop-overlay').innerHTML = (v ? v.legs : []).map(function (leg, i) {
+      var name = legName(v, leg);
+      var style = ' style="--prop-color: ' + leg.color + ';"';
+      return '<div class="vis-prop-edge" data-leg="' + i + '" data-mode="start"' + style + ' title="Drag to change the ' + escapeHtml(name) + ' window start"></div>' +
+        '<div class="vis-prop-bar" data-leg="' + i + '" data-mode="move"' + style + ' title="Drag to shift the ' + escapeHtml(name) + ' window"></div>' +
+        '<div class="vis-prop-edge" data-leg="' + i + '" data-mode="end"' + style + ' title="Drag to change the ' + escapeHtml(name) + ' window end"></div>';
+    }).join('');
+  }
+
+  // Lay each box's edge handles and move bar over it; bars stack upward from
+  // the bottom of the plot so overlapping relay boxes stay grabbable.
+  function positionProposalOverlay() {
+    var overlay = el('vis-prop-overlay');
+    var v = proposalView;
+    var boxes = currentBoxes();
+    var g = plotGeometry();
+    if (!g || !boxes.length) { overlay.style.display = 'none'; return; }
+    overlay.style.display = '';
+    var lo = g.left, hi = g.left + g.width;
+    v.legs.forEach(function (leg, i) {
+      var b = boxes[i];
+      var nodes = overlay.querySelectorAll('[data-leg="' + i + '"]');
+      if (!b || !leg.run) { nodes.forEach(function (n) { n.style.display = 'none'; }); return; }
+      var s = utcMs(b.start), e = utcMs(b.end);
+      var x0 = g.left + (s - g.r0) / g.msPerPx, x1 = g.left + (e - g.r0) / g.msPerPx;
+      [[nodes[0], x0], [nodes[2], x1]].forEach(function (pair) {
+        pair[0].style.display = pair[1] >= lo && pair[1] <= hi ? '' : 'none';
+        pair[0].style.left = (pair[1] - 6) + 'px';
+        pair[0].style.top = g.top + 'px';
+        pair[0].style.height = g.height + 'px';
+      });
+      var bx0 = Math.max(x0, lo), bx1 = Math.min(x1, hi);
+      var bar = nodes[1];
+      bar.style.display = bx1 > bx0 ? '' : 'none';
+      bar.style.left = bx0 + 'px';
+      bar.style.width = (bx1 - bx0) + 'px';
+      bar.style.top = (g.top + g.height - 24 * (i + 1)) + 'px';
+      bar.textContent = (v.legs.length > 1 ? legName(v, leg) + ' ' : '') + '⟷ ' + fmtSpan(e - s);
+    });
+  }
+
+  // Store a new window for one box of the plotted transit and redraw it.
+  function setProposal(legIdx, startMs, endMs, moved) {
+    var v = proposalView;
+    var w = v && lastWindows[v.idx];
+    var leg = v && v.legs[legIdx];
+    if (!w || !leg || !leg.run) return;
+    var p = clampProposal(leg.run, startMs, endMs, moved);
+    var boxes = currentBoxes().slice();
+    var old = boxes[legIdx];
+    if (old && utcMs(old.start) === p.start && utcMs(old.end) === p.end) { updateProposalReadout(); return; }
+    boxes[legIdx] = Object.assign({}, old, { start: isoZ(p.start), end: isoZ(p.end) });
+    w.boxes[v.planId] = boxes;
+    var upd = {};
+    upd['shapes[' + leg.shapeIdx + '].x0'] = plotTime(p.start);
+    upd['shapes[' + leg.shapeIdx + '].x1'] = plotTime(p.end);
+    Plotly.relayout('vis-plot', upd);
+    positionProposalOverlay();
+    updateProposalReadout();
+    updateWindowRow(v.idx);
+    invalidateTransitRequests(v.idx);
+    saveScheduleState();
+  }
+
+  // Switch a transit's plan (from its table row or the plot), redrawing the
+  // plot when it shows that transit.
+  function setPlan(idx, planId) {
+    var w = lastWindows[idx];
+    if (!w || w.plan === planId) return;
+    w.plan = planId;
+    w.plan_manual = true;
+    updateWindowRow(idx);
+    invalidateTransitRequests(idx);
+    refreshRequests();
+    saveScheduleState();
+    if (proposalView && proposalView.idx === idx) renderVisibility(proposalView.series, w, idx);
+  }
+
+  // Pointer drag on the overlay: an edge resizes, the bar shifts the window.
+  // Each move is clamped to that box's observable run by setProposal.
+  (function () {
+    var drag = null;
+    var pending = null;
+    el('vis-prop-overlay').addEventListener('pointerdown', function (e) {
+      var handle = e.target.closest('[data-mode]');
+      var g = plotGeometry();
+      if (!handle || !g) return;
+      var legIdx = +handle.getAttribute('data-leg');
+      var b = currentBoxes()[legIdx];
+      if (!b) return;
+      e.preventDefault();
+      handle.setPointerCapture(e.pointerId);
+      handle.classList.add('dragging');
+      drag = {
+        handle: handle, leg: legIdx, mode: handle.getAttribute('data-mode'), x: e.clientX,
+        msPerPx: g.msPerPx, start: utcMs(b.start), end: utcMs(b.end)
+      };
+    });
+    el('vis-prop-overlay').addEventListener('pointermove', function (e) {
+      if (!drag) return;
+      var d = (e.clientX - drag.x) * drag.msPerPx;
+      if (pending === null) {
+        window.requestAnimationFrame(function () {
+          var p = pending; pending = null;
+          if (p) setProposal(p.leg, p.s, p.e, p.moved);
+        });
+      }
+      pending = {
+        leg: drag.leg, moved: drag.mode === 'move',
+        s: drag.start + (drag.mode === 'end' ? 0 : d),
+        e: drag.end + (drag.mode === 'start' ? 0 : d)
+      };
+    });
+    function endDrag() {
+      if (!drag) return;
+      drag.handle.classList.remove('dragging');
+      drag = null;
+    }
+    el('vis-prop-overlay').addEventListener('pointerup', endDrag);
+    el('vis-prop-overlay').addEventListener('pointercancel', endDrag);
+  })();
+
   // ``series`` is an array of { site, data } (data = /api/lco/visibility payload).
   // Target altitude is drawn once per site (faint full track + bold during that
   // site's night); Moon/Sun context is drawn for the primary (first) site only.
-  function renderVisibility(series, w) {
+  function renderVisibility(series, w, idx) {
     var isDark = document.documentElement.getAttribute('data-theme') === 'dark';
     var fg = isDark ? '#e1e4ed' : '#1a1c22';
     var grid = isDark ? '#2a2e3a' : '#e6e8ee';
+    // Neutral slate for the transit band: distinct from every site's track
+    // color (coj's teal used to blend into it) and from the pink proposal box.
+    var transitColor = isDark ? '#9aa6bd' : '#55607a';
     var primary = series[0].data;
 
     var traces = [];
@@ -1818,38 +2475,38 @@
     var x0 = primary.times[0];
     var x1 = primary.times[primary.times.length - 1];
     var shapes = [
-      { type: 'rect', xref: 'x', yref: 'paper', x0: primary.ingress, x1: primary.egress, y0: 0, y1: 1, fillcolor: '#45d6b5', opacity: 0.18, line: { width: 0 }, layer: 'below' },
-      { type: 'rect', xref: 'x', yref: 'paper', x0: w.start, x1: primary.ingress, y0: 0, y1: 1, fillcolor: '#45d6b5', opacity: 0.07, line: { width: 0 }, layer: 'below' },
-      { type: 'rect', xref: 'x', yref: 'paper', x0: primary.egress, x1: w.end, y0: 0, y1: 1, fillcolor: '#45d6b5', opacity: 0.07, line: { width: 0 }, layer: 'below' },
+      { type: 'rect', xref: 'x', yref: 'paper', x0: primary.ingress, x1: primary.egress, y0: 0, y1: 1, fillcolor: transitColor, opacity: 0.32, line: { width: 0 }, layer: 'below' },
+      // Requested pre-ingress/post-egress padding: lighter than the transit
+      // but strong enough to read through the proposed-window box, with its
+      // outer edges dashed so the padded window's extent stays visible.
+      { type: 'rect', xref: 'x', yref: 'paper', x0: w.start, x1: primary.ingress, y0: 0, y1: 1, fillcolor: transitColor, opacity: 0.18, line: { width: 0 }, layer: 'below' },
+      { type: 'rect', xref: 'x', yref: 'paper', x0: primary.egress, x1: w.end, y0: 0, y1: 1, fillcolor: transitColor, opacity: 0.18, line: { width: 0 }, layer: 'below' },
+      { type: 'line', xref: 'x', yref: 'paper', x0: w.start, x1: w.start, y0: 0, y1: 1, line: { color: transitColor, width: 1, dash: 'dash' } },
+      { type: 'line', xref: 'x', yref: 'paper', x0: w.end, x1: w.end, y0: 0, y1: 1, line: { color: transitColor, width: 1, dash: 'dash' } },
       { type: 'line', xref: 'x', yref: 'y', x0: x0, x1: x1, y0: primary.alt_limit, y1: primary.alt_limit, line: { color: '#45d6b5', width: 1, dash: 'dot' } },
       { type: 'line', xref: 'x', yref: 'y', x0: x0, x1: x1, y0: primary.sun_alt_limit, y1: primary.sun_alt_limit, line: { color: '#e07b53', width: 1, dash: 'dot' } },
       { type: 'line', xref: 'x', yref: 'y', x0: x0, x1: x1, y0: 0, y1: 0, line: { color: grid, width: 1 } }
     ];
     var annotations = [
-      { x: primary.ingress, y: 90, xref: 'x', yref: 'y', text: 'transit', showarrow: false, font: { color: '#45d6b5', size: 10 }, xanchor: 'left', yanchor: 'top' },
+      { x: primary.ingress, y: 90, xref: 'x', yref: 'y', text: 'transit', showarrow: false, font: { color: transitColor, size: 10 }, xanchor: 'left', yanchor: 'top' },
       { x: 0.01, y: 0.02, xref: 'paper', yref: 'paper', xanchor: 'left', yanchor: 'bottom', showarrow: false, font: { color: fg, size: 10 }, text: 'alt≥' + primary.alt_limit + '° · sun<' + primary.sun_alt_limit + '°' }
     ];
-    // For a split_gap/split_overlap transit, draw each relay site's own
-    // observable arc as a thin colored bar stacked near the top of the plot
-    // -- the overlap or gap between the two bars is exactly the handoff.
-    if (w.observability && isSplitRating(w.observability.rating) && w.observability.split_windows) {
-      w.observability.split_windows.forEach(function (sw, idx) {
-        var seriesIdx = series.findIndex(function (s) { return s.site === sw.site; });
-        var color = siteColor(sw.site, seriesIdx >= 0 ? seriesIdx : idx);
-        var bandTop = 0.99 - idx * 0.07;
-        var bandBottom = bandTop - 0.045;
-        shapes.push({
-          type: 'rect', xref: 'x', yref: 'paper',
-          x0: sw.start, x1: sw.end, y0: bandBottom, y1: bandTop,
-          fillcolor: color, opacity: 0.85, line: { width: 0 }, layer: 'above'
-        });
-        annotations.push({
-          x: sw.start, y: (bandTop + bandBottom) / 2, xref: 'x', yref: 'paper',
-          xanchor: 'right', yanchor: 'middle', showarrow: false,
-          font: { color: color, size: 9 }, text: sw.site.toUpperCase() + ' '
-        });
+    // The plan's request window(s); the overlay's handles drag/resize them.
+    // A relay draws one box per site, in that site's color.
+    proposalView = initProposal(series, w, idx);
+    var boxes = currentBoxes();
+    proposalView.legs.forEach(function (leg, i) {
+      var b = boxes[i];
+      if (!b || !leg.run) return;
+      leg.shapeIdx = shapes.length;
+      shapes.push({
+        type: 'rect', xref: 'x', yref: 'paper', y0: 0, y1: 1,
+        x0: plotTime(utcMs(b.start)), x1: plotTime(utcMs(b.end)),
+        fillcolor: leg.color, opacity: 0.14, line: { color: leg.color, width: 1 },
+        layer: 'below'
       });
-    }
+    });
+    buildProposalOverlay(proposalView);
     var layout = {
       margin: { l: 45, r: 65, t: 30, b: 36 },
       paper_bgcolor: 'rgba(0,0,0,0)',
@@ -1862,8 +2519,38 @@
       shapes: shapes,
       annotations: annotations
     };
-    Plotly.newPlot('vis-plot', traces, layout, { responsive: true, displayModeBar: false });
+    Plotly.newPlot('vis-plot', traces, layout, { responsive: true, displayModeBar: false }).then(function (gd) {
+      // Re-place the overlay whenever the plot redraws (zoom, autoscale,
+      // responsive resize).
+      if (gd.removeAllListeners) gd.removeAllListeners('plotly_afterplot');
+      gd.on('plotly_afterplot', positionProposalOverlay);
+      positionProposalOverlay();
+    });
+    updateProposalReadout();
   }
+
+  function proposalInputMs(input) {
+    var v = input ? input.value.trim() : '';
+    return /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}$/.test(v) ? utcMs(v + ':00') : NaN;
+  }
+  el('vis-prop-legs').addEventListener('change', function (e) {
+    var input = e.target.closest('.vis-prop-input');
+    if (!input) return;
+    var leg = input.getAttribute('data-leg');
+    var s = proposalInputMs(el('vis-prop-legs').querySelector('input[data-leg="' + leg + '"][data-edge="start"]'));
+    var en = proposalInputMs(el('vis-prop-legs').querySelector('input[data-leg="' + leg + '"][data-edge="end"]'));
+    if (isNaN(s) || isNaN(en)) { updateProposalReadout(); return; }
+    setProposal(+leg, Math.min(s, en), Math.max(s, en), false);
+  });
+  // Back to the plan's own windows: drop the adjusted boxes and redraw.
+  el('vis-prop-reset').addEventListener('click', function () {
+    var v = proposalView;
+    var w = v && lastWindows[v.idx];
+    if (!w) return;
+    if (w.boxes) delete w.boxes[v.planId];
+    invalidateTransitRequests(v.idx);
+    renderVisibility(v.series, w, v.idx);
+  });
 
   el('btn-fetch-ephem').addEventListener('click', function () {
     var target = val('sch-target');
@@ -1928,9 +2615,35 @@
     document.querySelectorAll('#windows-body input[type=checkbox]').forEach(function (c) { c.checked = el('win-all').checked; });
     saveScheduleState();
     updateRequestName();
-    updateSplitPanel();
     applyAutoConfig();
   });
+  // Viewport-positioned bubble for the windows table's header help icons
+  // (see the #th-tip CSS): above the icon, or below when there is no room,
+  // kept inside the viewport horizontally.
+  (function () {
+    var tip = document.createElement('div');
+    tip.id = 'th-tip';
+    tip.setAttribute('role', 'tooltip');
+    tip.style.display = 'none';
+    document.body.appendChild(tip);
+    var table = el('windows-table');
+    table.addEventListener('mouseover', function (e) {
+      var icon = e.target.closest('th .help-tooltip');
+      if (!icon) return;
+      tip.textContent = icon.getAttribute('data-tip') || icon.getAttribute('title') || '';
+      tip.style.display = '';
+      var r = icon.getBoundingClientRect(), t = tip.getBoundingClientRect();
+      var top = r.top - t.height - 8;
+      if (top < 8) top = r.bottom + 8;
+      var left = Math.min(Math.max(8, r.left + r.width / 2 - t.width / 2), window.innerWidth - t.width - 8);
+      tip.style.top = top + 'px';
+      tip.style.left = left + 'px';
+    });
+    table.addEventListener('mouseout', function (e) {
+      if (e.target.closest('th .help-tooltip')) tip.style.display = 'none';
+    });
+  })();
+
   el('win-filter').addEventListener('change', function () {
     applyWinFilter();
     saveScheduleState();
@@ -1940,11 +2653,21 @@
       saveScheduleState();
       updateRequestName();
       updateExposureCount();
-      updateSplitPanel();
       applyAutoConfig();
-      el('btn-submit').disabled = true;
-      lastDryRunHash = null;
+    } else if (e.target && e.target.matches('.plan-select')) {
+      setPlan(+e.target.getAttribute('data-i'), e.target.value);
     }
+  });
+
+  // A new default rule re-plans every transit whose plan was not picked by hand.
+  el('sch-plan-policy').addEventListener('change', function () {
+    lastWindows.forEach(function (w, i) {
+      if (w.plan_manual) return;
+      var id = defaultPlanId(w);
+      if (id !== w.plan) { w.plan = id; invalidateTransitRequests(i); }
+    });
+    renderWindows(selectedWindowIndices());
+    saveScheduleState();
   });
 
   el('sch-target').addEventListener('change', updateRequestName);
@@ -2028,6 +2751,14 @@
     MuscatFetch.fetchJson('/api/lco/windows', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(function (d) {
         if (!d.ok) { clearWindows(); msg('msg-windows', d.error || 'failed', 'err'); return; }
         lastWindows = d.windows || [];
+        reqState = {};  // request keys index the old windows
+        // Store each window's propagated mid-time uncertainty with it: the
+        // inputs that produced it are known now, and a restore may redraw the
+        // table before they are refilled. Not for a TTV-model source (its
+        // mid-times do not follow t0/P).
+        if (!isTtv && (t0Tuple.unc !== null || periodTuple.unc !== null)) {
+          lastWindows.forEach(function (w) { w.mid_unc_min = midUncMinutes(w, t0Tuple.unc, periodTuple.unc); });
+        }
         if (d.duration && !val('sch-duration')) setVal('sch-duration', tupleString(d.duration, null));
         renderWindows();
         saveScheduleState();
@@ -2053,11 +2784,18 @@
     if (!dur) { msg('msg-windows', 'Set the transit duration first', 'err'); return; }
     var w = lastWindows[+link.getAttribute('data-i')];
     if (!w) return;
-    // Plot every site that can see this transit (best first, or exactly the
-    // relay pair for a 'split' transit); fall back to the kind's default site
-    // when there's no observability info.
+    proposalView = null;
+    el('vis-proposal').style.display = 'none';
+    el('vis-prop-overlay').style.display = 'none';
+    // Plot every site any of the transit's plans uses, so switching plans
+    // needs no refetch; fall back to the kind's default site when there's no
+    // observability info.
     var sites = (w.observability ? sitesForPlot(w.observability) : []);
+    windowPlans(w).forEach(function (p) {
+      planSites(p).forEach(function (s) { if (SITE_LABELS[s] && sites.indexOf(s) === -1) sites.push(s); });
+    });
     if (!sites.length) sites = [siteForWindow(w)];
+    var winIdx = +link.getAttribute('data-i');
     var lcoParams = new URLSearchParams({
       season: 'false', ra: ra, dec: dec,
       airmass: val('sch-obs-airmass') || '2', date: w.mid.slice(0, 10), aperture: 'all'
@@ -2102,16 +2840,19 @@
         (rating ? ' (' + rating + handoffNote + ')' : '') +
         ' — visible: ' + visParts.join(', ');
       el('vis-caption').textContent = caption;
-      renderVisibility(ok, w);
+      renderVisibility(ok, w, winIdx);
     }).catch(function (e) { msg('msg-windows', errText(e), 'err'); });
   });
   el('vis-close').addEventListener('click', function () {
     el('vis-figure').style.display = 'none';
+    proposalView = null;
     if (window.Plotly) Plotly.purge('vis-plot');
   });
 
-  function buildParams() {
-    var kind = val('sch-kind');
+  // ``kindOverride`` builds one split leg's params for that leg's instrument
+  // (its settings block), sharing everything else.
+  function buildParams(kindOverride) {
+    var kind = kindOverride || val('sch-kind');
     var coords = parseCoords();
     var p = {
       kind: kind, name: val('sch-name'), proposal: val('sch-proposal'),
@@ -2200,88 +2941,6 @@
     return messages.length ? messages : null;
   }
 
-  // Science flow: Create draft (build the payload locally, editable) → Check
-  // settings (dry-run the *edited* JSON) → Submit (book exactly what was checked,
-  // hash-locked). "Create draft" only builds — build_requestgroup returns a clear
-  // error for any field it genuinely needs; all payload checking (the LCO
-  // dry-run) is left to "Check settings". Editing the draft after a check
-  // disables Submit until re-check.
-  function parseDraft() {
-    try {
-      var rg = JSON.parse(el('payload-pre').value);
-      if (!rg || typeof rg !== 'object' || Array.isArray(rg)) throw new Error('payload must be a JSON object');
-      return rg;
-    } catch (e) {
-      msg('msg-ipp', 'Draft JSON is invalid: ' + e.message, 'err');
-      return null;
-    }
-  }
-
-  // Collapse the editor + Check/Submit back to just "Create draft".
-  function resetDraftState() {
-    lastDryRunHash = null;
-    el('ipp-result').style.display = 'none';
-    el('payload-pre').value = '';
-    el('ipp-summary').textContent = '';
-    el('btn-dry-run').style.display = 'none';
-    el('btn-submit').style.display = 'none';
-    el('btn-submit').disabled = true;
-  }
-
-  el('btn-create-draft').addEventListener('click', function () {
-    msg('msg-ipp', 'Building draft…');
-    lastDryRunHash = null;
-    el('btn-submit').disabled = true;
-    MuscatFetch.fetchJson('/api/lco/build', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(buildParams()) }).then(function (d) {
-        if (!d.ok) { errMsg('msg-ipp', d.error, d.detail); return; }
-        el('payload-pre').value = JSON.stringify(d.payload, null, 2);
-        el('ipp-summary').textContent = '';
-        el('ipp-result').style.display = '';
-        el('btn-dry-run').style.display = '';
-        el('btn-submit').style.display = '';
-        el('btn-submit').disabled = true;
-        msg('msg-ipp', 'Draft created. Edit if needed, then Check settings.', 'ok');
-        saveScheduleState();
-      }).catch(function (e) { msg('msg-ipp', errText(e), 'err'); });
-  });
-
-  // Any edit to the draft invalidates the last dry-run.
-  el('payload-pre').addEventListener('input', function () {
-    if (lastDryRunHash) msg('msg-ipp', 'Draft edited — Check settings again before submitting.');
-    lastDryRunHash = null;
-    el('btn-submit').disabled = true;
-    el('ipp-summary').textContent = '';
-  });
-
-  el('btn-dry-run').addEventListener('click', function () {
-    var rg = parseDraft();
-    if (!rg) return;
-    msg('msg-ipp', 'Running dry-run…');
-    lastDryRunHash = null;
-    el('btn-submit').disabled = true;
-    MuscatFetch.fetchJson('/api/lco/ipp', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requestgroup: rg }) }).then(function (d) {
-        if (!d.ok) { errMsg('msg-ipp', d.error, d.detail); return; }
-        lastDryRunHash = d.payload_hash;
-        var ipp = d.ipp || {};
-        var lcoErrors = formatLcoErrors(ipp);
-        if (lcoErrors && lcoErrors.length > 0) {
-          el('btn-submit').disabled = true;
-          lastDryRunHash = null;
-          var errorHtml = '<div style="color: var(--red); font-weight: 600; margin-bottom: 0.5rem;">Validation Errors — Fix these issues:</div><div style="font-size: 0.9rem; line-height: 1.6;">' +
-            lcoErrors.map(function (e) { return e; }).join('<br>') +
-            '</div>';
-          el('ipp-summary').innerHTML = errorHtml;
-          msg('msg-ipp', 'Validation errors found. Fix the draft and re-run Check settings.', 'err');
-        } else {
-          el('btn-submit').disabled = false;
-          var allowed = ipp.max_allowable_ipp_value !== undefined ? ipp.max_allowable_ipp_value : (ipp.errors ? 'Error in response' : 'OK');
-          el('ipp-summary').textContent = 'Max allowable IPP: ' + allowed + ' · payload hash ' + (d.payload_hash || '').slice(0, 12);
-          msg('msg-ipp', 'Dry-run OK. Submit button enabled.', 'ok');
-        }
-        saveScheduleState();
-      }).catch(function (e) { msg('msg-ipp', errText(e), 'err'); });
-  });
-
   // Shared by the single-site and split submit flows: LCO's submit response
   // carries the booked request id(s) either as result.id or result.requests[].id.
   function extractRequestIds(result) {
@@ -2355,8 +3014,7 @@
     // setVal fires no events, so invalidate explicitly. Without this a prior
     // passed dry-run would leave Submit enabled for the old draft.
     invalidateGeneratedWindows();
-    resetDraftState();
-    resetSplitSubmitState();
+    reqState = {};
     // p.kind (from requestgroup_to_params/_INSTRUMENT_TYPE_TO_KIND) is one of
     // "muscat", "sinistro", "qhy600" -- never muscat3/muscat4, which aren't
     // real #sch-kind options (they're view-only instrument identities).
@@ -2429,202 +3087,278 @@
     if (btn) cloneRequest(btn.getAttribute('data-clone-id'));
   });
 
-  function submitLcoRequest() {
-    var rg = parseDraft();
-    if (!rg) return;
-    var body = buildParams();     // metadata for local monitoring
-    body.requestgroup = rg;       // the edited draft is what gets booked
-    body.confirm = true;
-    body.dry_run_hash = lastDryRunHash;
-    msg('msg-ipp', 'Submitting…');
-    MuscatFetch.fetchJson('/api/lco/submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, { submit: true }).then(function (d) {
-        if (!d.ok) { errMsg('msg-ipp', d.error, d.detail); return; }
+  // ---- Requests card ------------------------------------------------------
+  // Create drafts (build each request's payload locally, editable) → Check
+  // settings (LCO dry-run of each draft; a request LCO finds longer than the
+  // target's visible time comes back with repeat_duration fitted) → Submit
+  // (book exactly what was checked, hash-locked per request). Requests are
+  // processed one after another so LCO never sees a burst.
+
+  // "repeat_duration fitted …" note for a dry-run whose request LCO found
+  // longer than the target's visible time (the server cut it and re-checked).
+  function fitNote(changes) {
+    return (changes || []).map(function (c) {
+      return 'repeat_duration fitted to LCO visibility (' + c.visible_h.toFixed(2) + ' h visible, request was ' +
+        c.duration_h.toFixed(2) + ' h): ' + c.old + ' → ' + c.new + ' s, re-checked.';
+    }).join(' ');
+  }
+
+  function reqStateFor(key) {
+    if (!reqState[key]) reqState[key] = {};
+    return reqState[key];
+  }
+
+  // Drop drafts/checks the change made stale; a booked request keeps its record.
+  function invalidateRequests(match) {
+    Object.keys(reqState).forEach(function (key) {
+      var st = reqState[key];
+      if (st.status === 'submitted' || !match(key)) return;
+      st.payload = null; st.hash = null; st.status = ''; st.message = ''; st.adjusted = null;
+    });
+    renderRequests();
+  }
+  function invalidateAllRequests() { invalidateRequests(function () { return true; }); }
+  function invalidateTransitRequests(idx) {
+    invalidateRequests(function (key) { return key.indexOf(idx + '|') === 0; });
+  }
+
+  // The /api/lco/build params for one request: the shared form settings for
+  // its instrument, plus its own name, site and window. A window carries its
+  // site (or an either-site request's sites) so the server sizes
+  // repeat_duration to what that site can observe.
+  function paramsFor(req) {
+    var p = buildParams(req.kind);
+    p.kind = req.kind;
+    p.name = requestName(req);
+    delete p.site;
+    if (req.site) p.site = req.site;
+    var win = { start: req.start, end: req.end };
+    if (req.site) win.site = req.site;
+    else if (req.sites) win.sites = req.sites.slice();
+    p.windows = [win];
+    var times = [num('sch-exp-g'), num('sch-exp-r'), num('sch-exp-i'), num('sch-exp-z')];
+    var count = computeExposureCount(req.kind, windowDurationSec(req.start, req.end), val('sch-type'), times, num('sch-effective-exptime'));
+    if (count !== null) p.exposure_count = count;
+    return p;
+  }
+
+  var STATUS_TEXT = { '': 'not drafted', draft: 'draft', edited: 'edited — check again', ok: 'checked', error: 'error', submitted: 'submitted' };
+  var openJson = {};
+
+  function statusCellHtml(st) {
+    var color = st.status === 'ok' || st.status === 'submitted' ? 'var(--green)' : (st.status === 'error' ? 'var(--red)' : 'var(--text-dim)');
+    var html = '<span style="color: ' + color + '; font-weight: 600;">' + escapeHtml(STATUS_TEXT[st.status || ''] || st.status) + '</span>';
+    if (st.status === 'submitted' && st.ids && st.ids.length) html += ' ' + requestLinksHtml(st.ids);
+    if (st.message) html += '<div class="lco-note" style="margin: 0.15rem 0 0; white-space: normal; min-width: 220px; max-width: 300px;">' + escapeHtml(st.message) + '</div>';
+    return html;
+  }
+
+  function renderRequests() {
+    var body = el('requests-body');
+    if (!body) return;
+    var reqs = deriveRequests();
+    el('requests-table').style.display = reqs.length ? '' : 'none';
+    el('requests-empty').style.display = reqs.length ? 'none' : '';
+    var focused = document.activeElement && body.contains(document.activeElement) ? document.activeElement : null;
+    var focusKey = focused ? focused.getAttribute('data-key') + '|' + focused.className : null;
+    body.innerHTML = reqs.map(function (req) {
+      var st = reqStateFor(req.key);
+      var w = lastWindows[req.idx];
+      var k = escapeHtml(req.key);
+      var siteText = req.site ? req.site.toUpperCase() : (req.sites ? 'any: ' + req.sites.map(function (s) { return s.toUpperCase(); }).join(' / ') : '—');
+      var kindOpts = requestKindOptions(req).map(function (kind) {
+        return '<option value="' + kind + '"' + (kind === req.kind ? ' selected' : '') + '>' + escapeHtml(kindLabelAt(kind, req.site)) + '</option>';
+      }).join('');
+      var locked = st.status === 'submitted';
+      var planText = planLabel(req.plan) + (req.legs > 1 ? ' · leg ' + 'AB'[req.leg] : '');
+      var row = '<tr data-key="' + k + '">' +
+        '<td>' + w.epoch + ' · ' + escapeHtml(fmtWindowTime(w.mid).slice(0, 10)) + '</td>' +
+        '<td>' + escapeHtml(planText) + '</td>' +
+        '<td>' + escapeHtml(siteText) + '</td>' +
+        '<td><select class="req-kind lco-control" data-key="' + k + '"' + (locked ? ' disabled' : '') + '>' + kindOpts + '</select></td>' +
+        '<td><input class="req-name lco-control" data-key="' + k + '" type="text" size="28" value="' + escapeHtml(requestName(req)) + '"' + (locked ? ' disabled' : '') + '></td>' +
+        '<td>' + escapeHtml(hhmm(utcMs(req.start)) + '–' + hhmm(utcMs(req.end))) + ' <span class="lco-note" style="margin: 0;">(' + fmtSpan(utcMs(req.end) - utcMs(req.start)) + ')</span></td>' +
+        '<td>' + statusCellHtml(st) + '</td>' +
+        '<td style="white-space: nowrap;">' +
+          '<button class="btn req-json" type="button" data-key="' + k + '"' + (st.payload ? '' : ' disabled') + '>JSON</button> ' +
+          '<button class="btn danger req-submit" type="button" data-key="' + k + '"' + (st.status === 'ok' ? '' : ' disabled') + '>Submit</button>' +
+        '</td></tr>';
+      if (openJson[req.key] && st.payload) {
+        row += '<tr class="req-json-row"><td colspan="8"><textarea class="lco-pre req-payload" data-key="' + k + '" spellcheck="false"' +
+          (locked ? ' readonly' : '') + ' aria-label="LCO request payload">' + escapeHtml(JSON.stringify(st.payload, null, 2)) + '</textarea></td></tr>';
+      }
+      return row;
+    }).join('');
+    matchWidths('#requests-body .req-kind');
+    if (focusKey) {
+      var again = Array.prototype.filter.call(body.querySelectorAll('[data-key]'), function (n) {
+        return n.getAttribute('data-key') + '|' + n.className === focusKey;
+      })[0];
+      if (again) again.focus();
+    }
+    updateRequestButtons(reqs);
+  }
+
+  function updateRequestButtons(reqs) {
+    reqs = reqs || deriveRequests();
+    var anyPayload = reqs.some(function (r) { var st = reqState[r.key]; return st && st.payload && st.status !== 'submitted'; });
+    var anyOk = reqs.some(function (r) { var st = reqState[r.key]; return st && st.status === 'ok'; });
+    var checkBtn = el('btn-dry-run');
+    if (checkBtn && reqs.length) checkBtn.disabled = !anyPayload;
+    el('btn-submit').disabled = !anyOk;
+  }
+
+  // Instruments, filters and readout follow the requests; refresh both.
+  function refreshRequests() {
+    refreshInstrumentBlocks();
+    renderRequests();
+  }
+
+  function runSequential(items, fn) {
+    return items.reduce(function (chain, item) { return chain.then(function () { return fn(item); }); }, Promise.resolve());
+  }
+
+  el('btn-create-draft').addEventListener('click', function () {
+    var reqs = deriveRequests().filter(function (r) { return reqStateFor(r.key).status !== 'submitted'; });
+    if (!reqs.length) { msg('msg-ipp', 'Tick at least one transit with a plan to draft.', 'err'); return; }
+    var failed = 0;
+    msg('msg-ipp', 'Building ' + reqs.length + ' draft(s)…');
+    runSequential(reqs, function (req) {
+      var st = reqStateFor(req.key);
+      return MuscatFetch.fetchJson('/api/lco/build', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(paramsFor(req)) })
+        .then(function (d) {
+          st.hash = null; st.adjusted = null;
+          if (!d.ok) { st.payload = null; st.status = 'error'; st.message = d.error || 'build failed'; failed++; return; }
+          st.payload = d.payload; st.badJson = false; st.status = 'draft'; st.message = '';
+        })
+        .catch(function (e) { st.payload = null; st.status = 'error'; st.message = errText(e); failed++; })
+        .then(function () { renderRequests(); });
+    }).then(function () {
+      saveScheduleState();
+      msg('msg-ipp', failed ? failed + ' of ' + reqs.length + ' draft(s) failed — see Status.' : reqs.length + ' draft(s) created. Review (JSON), then Check settings.', failed ? 'err' : 'ok');
+    });
+  });
+
+  el('btn-dry-run').addEventListener('click', function () {
+    var reqs = deriveRequests().filter(function (r) {
+      var st = reqStateFor(r.key);
+      return st.payload && st.status !== 'submitted';
+    });
+    if (!reqs.length) { msg('msg-ipp', 'Create drafts first.', 'err'); return; }
+    var passed = 0;
+    msg('msg-ipp', 'Checking ' + reqs.length + ' request(s) with LCO…');
+    runSequential(reqs, function (req) {
+      var st = reqStateFor(req.key);
+      // Never check the last good JSON in place of an unparseable edit.
+      if (st.badJson) { renderRequests(); return Promise.resolve(); }
+      return MuscatFetch.fetchJson('/api/lco/ipp', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requestgroup: st.payload }) })
+        .then(function (d) {
+          st.hash = null;
+          if (!d.ok) { st.status = 'error'; st.message = (d.error || 'check failed') + (d.detail ? ' — ' + d.detail : ''); return; }
+          // A fitted repeat_duration replaces the draft: the hash covers it.
+          if (d.adjusted) { st.payload = d.payload; st.adjusted = d.adjusted; }
+          var errors = formatLcoErrors(d.ipp || {});
+          if (errors) { st.status = 'error'; st.message = errors.join(' '); return; }
+          var ipp = d.ipp || {};
+          st.hash = d.payload_hash;
+          st.status = 'ok';
+          st.message = (ipp.max_allowable_ipp_value !== undefined ? 'Max allowable IPP ' + ipp.max_allowable_ipp_value + '. ' : '') + fitNote(d.adjusted);
+          passed++;
+        })
+        .catch(function (e) { st.status = 'error'; st.message = errText(e); })
+        .then(function () { renderRequests(); });
+    }).then(function () {
+      saveScheduleState();
+      msg('msg-ipp', passed + ' of ' + reqs.length + ' request(s) passed.' + (passed ? ' Submit is enabled for those.' : ''), passed === reqs.length ? 'ok' : 'err');
+    });
+  });
+
+  // Book requests one by one; each is independent at LCO (a relay's two legs
+  // too), so a failure leaves the others booked and is reported per request.
+  function submitRequests(keys) {
+    var reqs = deriveRequests().filter(function (r) {
+      return keys.indexOf(r.key) !== -1 && reqStateFor(r.key).status === 'ok';
+    });
+    if (!reqs.length) return;
+    var names = reqs.map(function (r) { return '• ' + requestName(r); }).join('\n');
+    showConfirmModal(
+      'Submit ' + reqs.length + ' request' + (reqs.length > 1 ? 's' : '') + ' to LCO?',
+      'Each books telescope time separately and cannot be undone here:\n' + names,
+      { confirmLabel: 'Submit', confirmClass: 'btn danger' }
+    ).then(function (confirmed) {
+      if (!confirmed) return;
+      var booked = 0, failed = 0;
+      msg('msg-ipp', 'Submitting…');
+      runSequential(reqs, function (req) {
+        var st = reqStateFor(req.key);
+        var body = paramsFor(req);          // metadata for local monitoring
+        body.requestgroup = st.payload;     // the checked draft is what gets booked
+        body.confirm = true;
+        body.dry_run_hash = st.hash;
+        return MuscatFetch.fetchJson('/api/lco/submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, { submit: true })
+          .then(function (d) {
+            if (!d.ok) { st.status = 'error'; st.message = (d.error || 'submit failed') + (d.detail ? ' — ' + d.detail : ''); failed++; return; }
+            st.status = 'submitted';
+            st.ids = extractRequestIds(d.result);
+            st.message = monitoringWarning(d.monitoring) ? 'Booked, but local monitoring registration failed.' : '';
+            booked++;
+          })
+          .catch(function (e) { st.status = 'error'; st.message = errText(e); failed++; })
+          .then(function () { renderRequests(); });
+      }).then(function () {
+        saveScheduleState();
         refreshMonitoredRequests();
-        var ids = extractRequestIds(d.result);
-        if (ids.length) {
-          msgHtml('msg-ipp', 'Submitted: ' + requestLinksHtml(ids) + monitoringWarning(d.monitoring), d.monitoring && d.monitoring.ok === false ? 'err' : 'ok');
-        } else {
-          msgHtml('msg-ipp', 'Submitted: ' + escapeHtml(JSON.stringify(d.result || {})) + monitoringWarning(d.monitoring), d.monitoring && d.monitoring.ok === false ? 'err' : 'ok');
-        }
-      }).catch(function (e) { msg('msg-ipp', errText(e), 'err'); });
+        msg('msg-ipp', booked + ' booked' + (failed ? ', ' + failed + ' failed — the booked ones stay booked; fix and resubmit the rest.' : '.'), failed ? 'err' : 'ok');
+      });
+    });
   }
 
   el('btn-submit').addEventListener('click', function () {
-    if (!lastDryRunHash) { msg('msg-ipp', 'Run a dry-run first', 'err'); return; }
-    showConfirmModal(
-      'Submit LCO request?',
-      'This consumes real telescope time.',
-      { confirmLabel: 'Submit', confirmClass: 'btn danger' }
-    ).then(function (confirmed) {
-      if (confirmed) submitLcoRequest();
-    });
+    submitRequests(deriveRequests().map(function (r) { return r.key; }));
   });
 
-  function summarizeSplitLeg(leg) {
-    var ipp = (leg && leg.ipp) || {};
-    var errors = formatLcoErrors(ipp);
-    if (errors) {
-      return '<div style="color: var(--red); font-weight: 600;">Validation errors:</div>' +
-        '<div style="font-size: 0.85rem; line-height: 1.5;">' + errors.map(escapeHtml).join('<br>') + '</div>';
-    }
-    var allowed = ipp.max_allowable_ipp_value !== undefined ? ipp.max_allowable_ipp_value : 'OK';
-    return 'Max allowable IPP: ' + allowed + ' · hash ' + ((leg && leg.payload_hash) || '').slice(0, 12);
-  }
+  el('requests-body').addEventListener('click', function (e) {
+    var btn = e.target.closest('button[data-key]');
+    if (!btn) return;
+    var key = btn.getAttribute('data-key');
+    if (btn.classList.contains('req-json')) { openJson[key] = !openJson[key]; renderRequests(); }
+    else if (btn.classList.contains('req-submit')) submitRequests([key]);
+  });
 
-  el('btn-split-dry-run').addEventListener('click', function () {
-    var params = buildSplitParams();
-    if (!params) { msg('msg-split-ipp', 'Select exactly one window rated "split" first', 'err'); return; }
-    if (!val('sch-target')) { msg('msg-split-ipp', 'Enter a target', 'err'); return; }
-    var reqCoords = parseCoords();
-    if (reqCoords.ra === null || reqCoords.dec === null) {
-      msg('msg-split-ipp', 'Enter valid "RA, Dec (deg)" — resolve the target or type coordinates', 'err');
+  el('requests-body').addEventListener('change', function (e) {
+    var sel = e.target.closest('.req-kind');
+    if (!sel) return;
+    var st = reqStateFor(sel.getAttribute('data-key'));
+    st.kind = sel.value;
+    invalidateRequests(function (key) { return key === sel.getAttribute('data-key'); });
+    refreshRequests();
+    saveScheduleState();
+  });
+
+  el('requests-body').addEventListener('input', function (e) {
+    var key = e.target.getAttribute('data-key');
+    if (!key) return;
+    var st = reqStateFor(key);
+    if (e.target.classList.contains('req-name')) {
+      st.name = e.target.value;
+      st.nameEdited = true;
+      // The name is part of a built draft: update it there and require a re-check.
+      if (st.payload) { st.payload.name = st.name; st.hash = null; st.status = 'edited'; st.message = ''; }
+    } else if (e.target.classList.contains('req-payload')) {
+      try {
+        var parsed = JSON.parse(e.target.value);
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('payload must be a JSON object');
+        st.payload = parsed; st.badJson = false; st.hash = null; st.status = 'edited'; st.message = '';
+      } catch (err) {
+        st.badJson = true; st.hash = null; st.status = 'error'; st.message = 'Draft JSON is invalid: ' + err.message;
+      }
+    } else {
       return;
     }
-    if (!val('sch-proposal')) { msg('msg-split-ipp', 'Select a proposal', 'err'); return; }
-    if (!val('sch-site-a') || !val('sch-site-b')) { msg('msg-split-ipp', 'Select both Leg A and Leg B sites', 'err'); return; }
-    if (val('sch-site-a') === val('sch-site-b')) { msg('msg-split-ipp', 'Leg A and Leg B must be different sites', 'err'); return; }
-    var kind = val('sch-kind');
-    if (kind === 'muscat' || kind === 'muscat3' || kind === 'muscat4') {
-      var hasExp = false;
-      ['g', 'r', 'i', 'z'].forEach(function (b) { if (num('sch-exp-' + b) !== null) hasExp = true; });
-      if (!hasExp) { msg('msg-split-ipp', 'Enter at least one exposure time (g, r, i, or z)', 'err'); return; }
-    } else if (isSingleFilterKind(kind)) {
-      if (num('sch-effective-exptime') === null) { msg('msg-split-ipp', 'Enter an exposure time (s)', 'err'); return; }
-    }
-    resetSplitSubmitState();
-    msg('msg-split-ipp', 'Running dry-run for both legs…');
-    MuscatFetch.fetchJson('/api/lco/split-ipp', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(params) }).then(function (d) {
-        if (!d.ok) {
-          errMsg('msg-split-ipp', 'Leg ' + (d.leg === 'leg_b' ? 'B' : 'A') + ' failed: ' + (d.error || 'failed'), d.detail);
-          return;
-        }
-        el('split-ipp-result').style.display = '';
-        el('split-a-summary').innerHTML = summarizeSplitLeg(d.leg_a);
-        el('split-b-summary').innerHTML = summarizeSplitLeg(d.leg_b);
-        // Each leg's own submit button only depends on ITS OWN dry-run passing
-        // -- a failing leg B doesn't block submitting a passing leg A alone.
-        var legAOk = !formatLcoErrors(d.leg_a.ipp);
-        var legBOk = !formatLcoErrors(d.leg_b.ipp);
-        lastSplitDryRunHashes = { a: legAOk ? d.leg_a.payload_hash : null, b: legBOk ? d.leg_b.payload_hash : null };
-        el('btn-submit-leg-a').disabled = !legAOk;
-        el('btn-submit-leg-b').disabled = !legBOk;
-        el('btn-split-submit').disabled = !(legAOk && legBOk);
-        if (legAOk && legBOk) {
-          msg('msg-split-ipp', 'Both legs OK.', 'ok');
-        } else if (legAOk || legBOk) {
-          msg('msg-split-ipp', (legAOk ? 'Leg A' : 'Leg B') + ' OK — the other leg has validation errors (see above). You can still submit the valid leg alone.', 'err');
-        } else {
-          msg('msg-split-ipp', 'Both legs have validation errors — see details above.', 'err');
-        }
-        saveScheduleState();
-      }).catch(function (e) { msg('msg-split-ipp', errText(e), 'err'); });
-  });
-
-  // Submits exactly one leg via the plain single-site /api/lco/submit
-  // endpoint (a leg is just a normal single-site request whose window is
-  // that site's own trimmed coverage span) -- used for "Submit Leg A/B only"
-  // and to retry a leg after "Submit both" partially fails.
-  function submitSingleSplitLeg(which) {
-    var params = buildSplitParams();
-    var hash = lastSplitDryRunHashes && lastSplitDryRunHashes[which];
-    if (!params || !hash) { msg('msg-split-ipp', 'Run the dry-run first (leg ' + which.toUpperCase() + ' must pass)', 'err'); return; }
-    var body = which === 'a' ? params.leg_a : params.leg_b;
-    body.confirm = true;
-    body.dry_run_hash = hash;
-    msg('msg-split-ipp', 'Submitting leg ' + which.toUpperCase() + '…');
-    MuscatFetch.fetchJson('/api/lco/submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, { submit: true }).then(function (d) {
-        if (!d.ok) { errMsg('msg-split-ipp', 'Leg ' + which.toUpperCase() + ' failed: ' + (d.error || 'failed'), d.detail); return; }
-        refreshMonitoredRequests();
-        var ids = extractRequestIds(d.result);
-        // This leg is now a real booking -- disable its own button and
-        // "Submit both" (which would otherwise try to book it again).
-        el(which === 'a' ? 'btn-submit-leg-a' : 'btn-submit-leg-b').disabled = true;
-        el('btn-split-submit').disabled = true;
-        lastSplitDryRunHashes[which] = null;
-        if (which === 'a') { lastSplitLegAResult = d.result; } else { lastSplitLegBResult = d.result; }
-        el('split-partial-warning').style.display = 'none';
-        msgHtml('msg-split-ipp', 'Leg ' + which.toUpperCase() + ' booked: ' + requestLinksHtml(ids) + monitoringWarning(d.monitoring), d.monitoring && d.monitoring.ok === false ? 'err' : 'ok');
-      }).catch(function (e) { msg('msg-split-ipp', errText(e), 'err'); });
-  }
-
-  el('btn-submit-leg-a').addEventListener('click', function () {
-    if (el('btn-submit-leg-a').disabled) return;
-    showConfirmModal(
-      'Submit Leg A only?',
-      'This books real telescope time at ' + escapeHtml((val('sch-site-a') || '').toUpperCase()) + '.',
-      { confirmLabel: 'Submit', confirmClass: 'btn danger' }
-    ).then(function (confirmed) { if (confirmed) submitSingleSplitLeg('a'); });
-  });
-
-  el('btn-submit-leg-b').addEventListener('click', function () {
-    if (el('btn-submit-leg-b').disabled) return;
-    showConfirmModal(
-      'Submit Leg B only?',
-      'This books real telescope time at ' + escapeHtml((val('sch-site-b') || '').toUpperCase()) + '.',
-      { confirmLabel: 'Submit', confirmClass: 'btn danger' }
-    ).then(function (confirmed) { if (confirmed) submitSingleSplitLeg('b'); });
-  });
-
-  function submitSplitLcoRequest() {
-    var params = buildSplitParams();
-    if (!params || !lastSplitDryRunHashes || !lastSplitDryRunHashes.a || !lastSplitDryRunHashes.b) {
-      msg('msg-split-ipp', 'Run a dry-run first (both legs must pass)', 'err'); return;
-    }
-    var body = {
-      leg_a: params.leg_a, leg_b: params.leg_b, confirm: true,
-      dry_run_hash_a: lastSplitDryRunHashes.a, dry_run_hash_b: lastSplitDryRunHashes.b
-    };
-    msg('msg-split-ipp', 'Submitting leg A, then leg B…');
-    MuscatFetch.fetchJson('/api/lco/split-submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, { submit: true }).then(function (d) {
-        if (d.ok) {
-          refreshMonitoredRequests();
-          // Both legs are now real bookings -- disable every submit button so
-          // a stray click can't book either leg a second time.
-          el('btn-submit-leg-a').disabled = true;
-          el('btn-submit-leg-b').disabled = true;
-          el('btn-split-submit').disabled = true;
-          lastSplitDryRunHashes = null;
-          var idsA = extractRequestIds(d.leg_a.result);
-          var idsB = extractRequestIds(d.leg_b.result);
-          var warningA = monitoringWarning(d.leg_a && d.leg_a.monitoring);
-          var warningB = monitoringWarning(d.leg_b && d.leg_b.monitoring);
-          msgHtml('msg-split-ipp', 'Submitted — leg A: ' + requestLinksHtml(idsA) + ' · leg B: ' + requestLinksHtml(idsB) + warningA + warningB, warningA || warningB ? 'err' : 'ok');
-          el('split-partial-warning').style.display = 'none';
-          return;
-        }
-        if (d.partial) {
-          refreshMonitoredRequests();
-          // Leg A is already a real booking -- disable both its own button
-          // and "Submit both" so neither can re-submit (and re-book) leg A;
-          // "Submit Leg B only" (if leg B's dry-run passed) is safe from here.
-          el('btn-submit-leg-a').disabled = true;
-          el('btn-split-submit').disabled = true;
-          lastSplitDryRunHashes.a = null;
-          lastSplitLegAResult = d.leg_a && d.leg_a.result;
-          var bookedIds = extractRequestIds(lastSplitLegAResult);
-          el('split-partial-text').innerHTML = 'Leg A (' + escapeHtml((val('sch-site-a') || '').toUpperCase()) +
-            ') is booked: ' + requestLinksHtml(bookedIds) + '. Leg B failed: ' +
-            escapeHtml((d.leg_b && d.leg_b.error) || 'failed') + '. Use "Submit Leg B only" to retry it.' +
-            monitoringWarning(d.leg_a && d.leg_a.monitoring);
-          el('split-partial-warning').style.display = '';
-          msg('msg-split-ipp', 'Leg A booked, leg B failed — see the warning above.', 'err');
-          return;
-        }
-        msg('msg-split-ipp', 'Leg ' + (d.leg === 'leg_b' ? 'B' : 'A') + ' failed: ' + (d.error || 'failed'), 'err');
-      }).catch(function (e) { msg('msg-split-ipp', errText(e), 'err'); });
-  }
-
-  el('btn-split-submit').addEventListener('click', function () {
-    if (!lastSplitDryRunHashes || !lastSplitDryRunHashes.a || !lastSplitDryRunHashes.b) {
-      msg('msg-split-ipp', 'Run a dry-run first (both legs must pass)', 'err'); return;
-    }
-    showConfirmModal(
-      'Submit split LCO request?',
-      'This books two separate telescope-time requests (leg A, then leg B). This is not one atomic action — see the note below the buttons.',
-      { confirmLabel: 'Submit both', confirmClass: 'btn danger' }
-    ).then(function (confirmed) {
-      if (confirmed) submitSplitLcoRequest();
-    });
+    var row = document.querySelector('#requests-body tr[data-key="' + CSS.escape(key) + '"]');
+    if (row) row.children[6].innerHTML = statusCellHtml(st);
+    updateRequestButtons();
+    saveScheduleState();
   });
 
   el('btn-fov').addEventListener('click', function () {
@@ -2724,6 +3458,10 @@
       document.querySelectorAll('.lco-tab-panel').forEach(function (p) {
         p.style.display = (p.getAttribute('data-panel') === tab) ? '' : 'none';
       });
+      // Science requests take their names and sites from the Requests table;
+      // a test observation still uses the single Request name and Site.
+      el('sch-name-field').style.display = tab === 'test' ? '' : 'none';
+      el('sch-site-field').style.display = tab === 'test' ? '' : 'none';
     });
   });
 
@@ -2858,6 +3596,7 @@
   applyKind();
   updateScheduleFields();
   restoreScheduleState();
+  updateWindowGatedButtons();
   // Fetch live per-site availability after the restored state is in place, so
   // a saved pin is never clobbered before it has been applied.
   loadSiteAvailability();
