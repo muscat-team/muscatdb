@@ -25,6 +25,7 @@ import yaml
 from muscat_db import jobs, database
 from muscat_db._optimize_helper import DONE_MARKER as _OPTIMIZE_DONE_MARKER
 from muscat_db.job_store import current_instance_id, current_owner, get_job_store
+from muscat_db.job_limits import JobLimitExceeded, claim_caps, enqueue_caps, limit_refusal
 from muscat_db import __meta__, __muscatdb_version__, __version__
 from muscat_db.instruments import INSTRUMENTS
 from muscat_db.photometry import (
@@ -1620,7 +1621,7 @@ def start_fit(
         # capped above instead). Not yet claimed here just means queue below.
         claimed_slot = False
         if run_type == "full":
-            claimed_slot = get_job_store().claim_slot("transit_fit", key, _MAX_FULL_JOBS)
+            claimed_slot = get_job_store().claim_slot("transit_fit", key, _MAX_FULL_JOBS, **claim_caps(user_name))
         at_capacity = run_type == "full" and not claimed_slot
 
         # Queue full jobs when at capacity
@@ -1634,7 +1635,10 @@ def start_fit(
                     params=params_json,
                     run_name=run_name,
                     user_name=user_name,
+                    **enqueue_caps(user_name),
                 )
+            except JobLimitExceeded as exc:
+                return limit_refusal(exc)
             except Exception:
                 return {"ok": False, "error": "database not writable"}
             return {"ok": True, "key": key, "queued": True, "run_id": run_id}
@@ -2602,7 +2606,7 @@ def sync_jobs() -> None:
                 # Atomic: at most one process/caller ever wins this claim for a
                 # given key, so two workers draining the same pending row can
                 # never both launch it.
-                if not store.claim_slot("transit_fit", key, _MAX_FULL_JOBS):
+                if not store.claim_slot("transit_fit", key, _MAX_FULL_JOBS, **claim_caps(entry.get("user_name"))):
                     continue
                 rdir.mkdir(parents=True, exist_ok=True)
                 csvs = get_csv_lightcurves(inst, date, target)

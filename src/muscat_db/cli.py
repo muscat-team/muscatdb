@@ -1463,6 +1463,32 @@ def access_scope(
         )
 
 
+@access_app.command("limit")
+def access_limit(
+    username: str = typer.Argument(..., help="nginx username"),
+    running: int = typer.Option(None, "--running", min=0, help="Jobs the user may run at once (0 = unlimited)"),
+    queued: int = typer.Option(None, "--queued", min=0, help="Jobs the user may have waiting (0 = unlimited)"),
+    reset: bool = typer.Option(False, "--reset", help="Clear the user's overrides (back to the site defaults)"),
+):
+    """Set a user's caps on running and queued jobs (#265).
+
+    Photometry, transit fit and TTV fit count together. With no options, show
+    the user's current caps. A user with no override gets the site defaults
+    (MUSCAT_USER_MAX_RUNNING / MUSCAT_USER_MAX_QUEUED); admins are not exempt.
+    """
+    from muscat_db import job_limits
+    from muscat_db.database import db_path
+
+    if reset or running is not None or queued is not None:
+        limits = job_limits.set_limits(db_path(), username, running=running, queued=queued, reset=reset)
+    else:
+        limits = job_limits.limits_for(username)
+    console.print(
+        f"[green]{username}: running {job_limits.describe(limits.running)}, "
+        f"queued {job_limits.describe(limits.queued)}[/]"
+    )
+
+
 @access_app.command("grant-target")
 def access_grant_target(
     username: str = typer.Argument(..., help="nginx username (must be a scoped viewer)"),

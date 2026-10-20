@@ -293,6 +293,8 @@ ENV_VARS: tuple[EnvVar, ...] = (
     ),
     EnvVar("MUSCAT_MAX_FULL_JOBS", "1", "Concurrent full runs allowed per pipeline across all processes sharing the database; 0 disables full runs (use on a staging instance so it cannot compete with production)"),
     EnvVar("MUSCAT_MAX_TEST_JOBS", "4", "Concurrent test runs allowed per pipeline (full runs use durable slots)"),
+    EnvVar("MUSCAT_USER_MAX_RUNNING", "1", "Full jobs one user may run at once, across photometry, transit fit and TTV fit; a launch over it is queued. 0 means unlimited. Per-user override: `muscat-db access limit`"),
+    EnvVar("MUSCAT_USER_MAX_QUEUED", "5", "Queued jobs one user may have; a launch over it is refused (HTTP 429). 0 means unlimited. Per-user override: `muscat-db access limit`"),
     EnvVar(
         "MUSCAT_WORKER_MAX_SLOTS",
         None,

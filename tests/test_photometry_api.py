@@ -127,6 +127,21 @@ def test_run_converts_numbers_and_ignores_unknown_fields(client, monkeypatch):
     assert response.json() == {"ok": True, "key": "job", "run_id": "default", "queued": True}
 
 
+def test_refused_enqueue_answers_429_through_the_typed_route(client, monkeypatch):
+    refused = {"ok": False, "error": "queue is full", "limit_exceeded": True}
+    monkeypatch.setattr(phot, "start_run", lambda *a, **k: refused)
+    response = client.post("/api/photometry/run", json=DATASET)
+    assert response.status_code == 429, response.text
+    assert response.json() == refused
+
+
+def test_other_refusals_still_answer_400(client, monkeypatch):
+    monkeypatch.setattr(phot, "start_run", lambda *a, **k: {"ok": False, "error": "busy"})
+    response = client.post("/api/photometry/run", json=DATASET)
+    assert response.status_code == 400
+    assert response.json() == {"ok": False, "error": "busy"}
+
+
 @pytest.mark.parametrize("options, error", [
     ({"bands": []}, "select at least one band"),
     ({"comparison_ids": "1,--data_dir"}, "comma-separated integers"),

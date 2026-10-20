@@ -43,6 +43,7 @@ from pathlib import Path
 
 from muscat_db import jobs, database
 from muscat_db.job_store import current_instance_id, current_owner, get_job_store
+from muscat_db.job_limits import JobLimitExceeded, claim_caps, enqueue_caps, limit_refusal
 from muscat_db.ref_time import is_valid_ref_time
 from muscat_db.instruments import INSTRUMENTS
 from muscat_db.cache import register_cache
@@ -1885,7 +1886,7 @@ def start_run(
         # capped above instead). Not yet claimed here just means queue below.
         claimed_slot = False
         if run_type == "full":
-            claimed_slot = get_job_store().claim_slot("photometry", key, _MAX_FULL_JOBS)
+            claimed_slot = get_job_store().claim_slot("photometry", key, _MAX_FULL_JOBS, **claim_caps(user_name))
         at_capacity = run_type == "full" and not claimed_slot
 
         # Queue full jobs when at capacity
@@ -1900,7 +1901,10 @@ def start_run(
                     run_id=run_id,
                     run_name=run_name,
                     user_name=user_name,
+                    **enqueue_caps(user_name),
                 )
+            except JobLimitExceeded as exc:
+                return limit_refusal(exc)
             except sqlite3.OperationalError as exc:
                 return {"ok": False, "error": f"database not writable: {exc}"}
             return {"ok": True, "key": key, "queued": True, "run_id": run_id}
@@ -2604,7 +2608,7 @@ def sync_jobs() -> None:
                 # Atomic: at most one process/caller ever wins this claim for a
                 # given key, so two workers draining the same pending row can
                 # never both launch it.
-                if not store.claim_slot("photometry", candidate_key, _MAX_FULL_JOBS):
+                if not store.claim_slot("photometry", candidate_key, _MAX_FULL_JOBS, **claim_caps(entry.get("user_name"))):
                     continue
                 try:
                     p = json.loads(entry.get("params") or "{}")

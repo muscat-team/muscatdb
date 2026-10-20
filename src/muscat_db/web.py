@@ -717,6 +717,14 @@ def _photometry_run_of_csv(csv: pathlib.Path) -> str:
     return csv.parent.name if phot._RUNS_DIR_NAME in csv.parts else ""
 
 
+def _launch_response(result: dict) -> JSONResponse:
+    """A launch result as JSON: 429 when a per-user job cap refused it (issue
+    #265), 400 for any other refusal."""
+    if result.get("ok"):
+        return JSONResponse(result)
+    return JSONResponse(result, status_code=429 if result.get("limit_exceeded") else 400)
+
+
 def _restrict_csv_selection(inst: str, date: str, target: str, selected: list | None) -> list | None:
     """The light curves a transit fit may read: *selected* (all when None)
     minus those from photometry runs the viewer may not see. Without this a
@@ -3381,9 +3389,7 @@ def transit_fit_run(request: Request, payload: dict = Body(...)):
     _require_visible_night(inst, date, target)
     selected_csvs = _restrict_csv_selection(inst, date, target, selected_csvs)
     result = fit.start_fit(inst, date, target, options, test_run=test_run, selected_csvs=selected_csvs, user_name=user_name)
-    if not result.get("ok"):
-        return JSONResponse(result, status_code=400)
-    return JSONResponse(result)
+    return _launch_response(result)
 
 
 @transit_fit_router.post("/logp")
@@ -7124,9 +7130,7 @@ def jobs_rerun(request: Request, payload: dict = Body(...)):
         result = start_ttv_fit(target, options, user_name)
     else:
         raise HTTPException(400, "unknown job type")
-    if not result.get("ok"):
-        return JSONResponse(result, status_code=400)
-    return JSONResponse(result)
+    return _launch_response(result)
 
 
 def _ref_time_frames(inst: str, date: str, target: str) -> dict[int, list[dict]]:
@@ -7321,7 +7325,8 @@ def photometry_outputs(inst: str, date: str, target: str, run: str = "",
 
 
 @photometry_router.post("/run", response_model=phot_api.ActionResponse,
-                        responses={400: {"model": phot_api.ActionResponse}})
+                        responses={400: {"model": phot_api.ActionResponse},
+                                   429: {"model": phot_api.ActionResponse}})
 def photometry_run(request: Request, payload: phot_api.RunRequest):
     payload = payload.model_dump(exclude_unset=True)
     inst = (payload.get("inst") or "").strip()
@@ -7340,9 +7345,11 @@ def photometry_run(request: Request, payload: phot_api.RunRequest):
     if telescope_err:
         return phot_api.response(phot_api.ActionResponse, {"ok": False, "error": telescope_err}, status_code=400)
     result = phot.start_run(inst, date, target, options=options, test_run=test_run, user_name=user_name)
-    if not result.get("ok"):
-        return phot_api.response(phot_api.ActionResponse, result, status_code=400)
-    return phot_api.response(phot_api.ActionResponse, result)
+    if result.get("ok"):
+        return phot_api.response(phot_api.ActionResponse, result)
+    # 429 when a per-user job cap refused the launch (issue #265), 400 otherwise.
+    status = 429 if result.get("limit_exceeded") else 400
+    return phot_api.response(phot_api.ActionResponse, result, status_code=status)
 
 
 @photometry_router.post("/command", response_model=phot_api.CommandResponse)
@@ -7892,6 +7899,8 @@ def api_start_ttv_fit(request: Request, payload: dict = Body(...)):
     if err:
         return JSONResponse({"ok": False, "error": err}, status_code=400)
     result = ttv.start_ttv_fit(target, options, request.state.user)
+    if result.get("limit_exceeded"):
+        return _launch_response(result)
     return JSONResponse(result)
 
 

@@ -18,6 +18,7 @@ from contextlib import contextmanager
 from cryptography.fernet import Fernet, InvalidToken
 
 from muscat_db import db_backup
+from muscat_db.job_limits import JobLimitExceeded, queued_limit_message
 from muscat_db.instruments import INSTRUMENTS, OBSLOG_BASE
 from muscat_db.cache import clear_all_caches
 from muscat_db.coord import (
@@ -301,6 +302,7 @@ CREATE TABLE IF NOT EXISTS job_concurrency_slots (
     holder_key  TEXT NOT NULL,
     claimed_at  REAL NOT NULL,
     host        TEXT NOT NULL DEFAULT '',
+    user_name   TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (pipeline, holder_key)
 );
 
@@ -442,6 +444,10 @@ _MIGRATIONS = [
     "ALTER TABLE users ADD COLUMN email TEXT",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(lower(email)) "
     "WHERE email IS NOT NULL",
+    # issue #265: per-user job caps. NULL means the site default
+    # (job_limits.site_defaults); 0 means unlimited.
+    "ALTER TABLE users ADD COLUMN max_running_jobs INTEGER",
+    "ALTER TABLE users ADD COLUMN max_queued_jobs INTEGER",
 ]
 
 
@@ -2590,6 +2596,8 @@ def _ensure_jobs_schema(conn: sqlite3.Connection) -> None:
 # sync with SCHEMA and with job_store._PG_SCHEMA / _PG_JOB_CONCURRENCY_SLOTS_COLUMN_MIGRATIONS.
 _JOB_CONCURRENCY_SLOTS_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
     ("host", "TEXT NOT NULL DEFAULT ''"),
+    # issue #265: who holds the slot, so a per-user running cap can count them.
+    ("user_name", "TEXT NOT NULL DEFAULT ''"),
 ]
 
 
@@ -2676,7 +2684,12 @@ def save_job(
     owner: str = "",
     instance_id: str = "",
     attempts: int = 0,
+    max_pending: int | None = None,
 ) -> None:
+    # *max_pending* (issue #265) caps how many other ``pending`` rows this
+    # job's user may own: the count and the insert share one write transaction
+    # (BEGIN IMMEDIATE takes SQLite's writer lock first), so two racing
+    # enqueues can never both pass the check. Raises JobLimitExceeded.
     # The "user" is the nginx-authenticated account (X-Forwarded-User), set at
     # job creation from request.state.user. State-transition callers (sync_jobs,
     # watchdog, cancel, queue-drain) legitimately omit it, so default to "" and
@@ -2700,6 +2713,15 @@ def save_job(
     # follow-up heartbeat() call to establish its first fresh timestamp.
     with get_conn(path) as conn:
         _ensure_jobs_migrated(conn, path)
+        if max_pending is not None:
+            conn.execute("BEGIN IMMEDIATE")
+            queued = conn.execute(
+                "SELECT COUNT(*) FROM jobs WHERE state = 'pending' AND user_name = ? AND key != ?",
+                (user_name, key),
+            ).fetchone()[0]
+            if queued >= max_pending:
+                conn.rollback()
+                raise JobLimitExceeded(queued_limit_message(user_name, max_pending))
         conn.execute(
             """INSERT INTO jobs(key, type, instrument, obsdate, target, state, returncode, elapsed, started_at, error_desc, run_type, params, run_id, run_name, user_name, owner, instance_id, heartbeat_at, attempts)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
