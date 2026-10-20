@@ -185,6 +185,14 @@ reader until the data step has run on production:
 | Product records written per run (#208, #245) | `muscat-db backfill-products` | Visibility read from `_product.json` |
 | Group/grant tables (#228 step 1, #247) | `muscat-db access groups-seed`, then `access groups-check` must exit 0 | Call sites switched from the blocklist to groups (#228 step 2) |
 
+`backfill-products` first walks the `jobs` table, then the run directories on disk
+(`prose/<inst>/<date>/_runs/<target>/<run>` and `timer/<inst>/<date>/<target>[/<run>]`),
+because runs older than the `jobs` table have no row. A run with no record is
+admin-only for everyone else, so the step is complete only when no run directory is
+left without one. Check with a second `--dry-run`: it must report `would write 0
+record(s)`. Transit fits found on disk take their light curves from `fit.yaml`; an
+unreadable `fit.yaml` or a missing light curve leaves the fit undetermined.
+
 `groups-check` compares what the group model and the blocklist let every viewer
 see; run it again after any `access restrict`, `grant` or `scope` change while both
 models exist.

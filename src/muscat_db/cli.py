@@ -769,8 +769,10 @@ def backfill_products_cmd(
     """Write product records for runs made before they existed (issue #208).
 
     Rebuilds each photometry, transit-fit and TTV run's record from its job
-    row. Runs whose inputs cannot be established exactly get a record with
-    undetermined inputs and stay admin-only. Idempotent; never overwrites.
+    row, then from the run directories on disk for runs with no job row
+    (transit-fit inputs come from the run's fit.yaml). Runs whose inputs
+    cannot be established exactly get a record with undetermined inputs and
+    stay admin-only. Idempotent; never overwrites.
     """
     _log_startup_banner(f"backfill-products --db {db}")
     _require_existing_db(ctx, db, "backfill-products")
@@ -781,7 +783,8 @@ def backfill_products_cmd(
     n = (stats.determined + stats.undetermined) if dry_run else stats.written
     console.print(
         f"{verb} {n} record(s): {stats.determined} with inputs, "
-        f"{stats.undetermined} undetermined; {stats.already} already had one, "
+        f"{stats.undetermined} undetermined ({stats.from_disk} found by walking "
+        f"run directories); {stats.already} already had one, "
         f"{stats.missing_dir} run dir(s) missing, {stats.errors} error(s)"
     )
     for reason, count in sorted(stats.by_reason.items(), key=lambda kv: -kv[1]):
