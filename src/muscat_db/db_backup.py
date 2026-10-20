@@ -44,6 +44,12 @@ INTEGRITY_REPORT_LIMIT = 100
 SLOW_SNAPSHOT_S = 1800.0
 _LEAK_LINE = re.compile(r"^(\*\*\* in database \w+ \*\*\*|Page \d+: never used)$")
 _RUNBOOK = "notes/DEPLOYMENT.md, Database integrity failure"
+# A leaked-pages snapshot is accepted, but "never used" can also be a subtree
+# that lost its parent pointer, with its rows gone. The marker file beside the
+# snapshot says it was not verified ``ok``, so prune keeps a clean one around.
+_LEAK_MARKER = ".leaked-pages"
+# Fixed token in the warning that deploy/nightly.sh greps for to raise an alert.
+LEAK_ALERT_TOKEN = "INTEGRITY-LEAK"
 
 
 class IntegrityError(RuntimeError):
@@ -108,6 +114,51 @@ def leaked_pages_only(problems: list[str]) -> bool:
     )
 
 
+def app_table_counts(db_path: str | os.PathLike, tables) -> dict[str, int]:
+    """Row count of each of *tables* present in *db_path* (absent ones skipped).
+    Raises ``sqlite3.DatabaseError`` if a table cannot be read."""
+    conn = sqlite3.connect(f"file:{os.fspath(db_path)}?mode=ro", uri=True, timeout=30)
+    try:
+        present = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        return {
+            t: conn.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0]
+            for t in tables if t in present
+        }
+    finally:
+        conn.close()
+
+
+def _marker(snap: Path) -> Path:
+    return snap.with_name(snap.name + _LEAK_MARKER)
+
+
+def _nightly_snapshots(dest_dir: Path, prefix: str) -> list[Path]:
+    return sorted(
+        p for p in dest_dir.glob(f"{prefix}*.sqlite")
+        if p.is_file() and p.name.startswith(prefix)
+    )
+
+
+def newest_clean_snapshot(db_path: str | os.PathLike, dest_dir: Path | None = None) -> Path | None:
+    """The newest nightly snapshot whose integrity check returned exactly ``ok``
+    (one without a leaked-pages marker), or None."""
+    dest_dir = dest_dir if dest_dir is not None else backup_dir()
+    prefix = Path(db_path).name + _NIGHTLY_TAG
+    clean = [p for p in _nightly_snapshots(dest_dir, prefix) if not _marker(p).exists()]
+    return clean[-1] if clean else None
+
+
+def _row_drops(new: Path, baseline: Path, tables) -> list[str]:
+    """``table before->after`` for each app table with fewer rows in *new* than
+    in *baseline*; an unreadable table counts as a drop."""
+    before = app_table_counts(baseline, tables)
+    try:
+        after = app_table_counts(new, tables)
+    except sqlite3.DatabaseError as exc:
+        return [f"app tables unreadable ({exc})"]
+    return [f"{t} {n}->{after[t]}" for t, n in before.items() if after.get(t, 0) < n]
+
+
 def remove_with_sidecars(path: str | os.PathLike) -> None:
     """Remove a SQLite file and its ``-wal``/``-shm``/``-journal`` sidecars,
     ignoring any that are absent."""
@@ -135,7 +186,7 @@ def _backup_to(src: Path, part: Path) -> None:
                 target.execute("PRAGMA journal_mode=DELETE")
             except sqlite3.DatabaseError:
                 # A malformed copy can refuse the switch. Leave the verdict to
-                # integrity_check, so it still becomes a .CORRUPT forensics
+                # integrity_check, so it still becomes an .INTEGRITY-FAILED forensics
                 # copy; snapshot()'s cleanup removes the sidecars that check
                 # then leaves behind.
                 pass
@@ -150,14 +201,20 @@ def _snapshot_name(db_path: Path, now: datetime.datetime) -> str:
 
 
 def snapshot(db_path: str | os.PathLike, dest_dir: Path | None = None,
-             now: datetime.datetime | None = None) -> Path:
+             now: datetime.datetime | None = None, app_tables=()) -> Path:
     """Copy *db_path* into *dest_dir* with the SQLite backup API and verify it.
 
     Returns the snapshot path. Raises :class:`IntegrityError` if the copy (and
     therefore the source) fails ``integrity_check`` with anything but leaked
     pages; the bad copy is kept, renamed with a ``.INTEGRITY-FAILED`` suffix,
-    for forensics, and is never counted toward retention. Leaked pages are
-    logged and the snapshot kept as normal (issue #237).
+    for forensics, and is never counted toward retention.
+
+    A report of only unreferenced pages is accepted (issue #237) but is not
+    proof that no rows are lost, so the snapshot gets a marker file, the
+    warning carries :data:`LEAK_ALERT_TOKEN` for the nightly alert, and
+    :func:`prune` keeps the newest clean snapshot. When *app_tables* is given,
+    a leaked copy with fewer rows in any of them than the newest clean
+    snapshot is refused like real damage.
     """
     src = Path(db_path)
     dest_dir = dest_dir if dest_dir is not None else backup_dir()
@@ -171,17 +228,27 @@ def snapshot(db_path: str | os.PathLike, dest_dir: Path | None = None,
         copied = time.monotonic()
         problems = integrity_problems(part)
         checked = time.monotonic()
-        if problems and leaked_pages_only(problems):
+        leaked = bool(problems) and leaked_pages_only(problems)
+        drops: list[str] = []
+        if leaked and app_tables:
+            baseline = newest_clean_snapshot(src, dest_dir)
+            if baseline is not None:
+                drops = _row_drops(part, baseline, app_tables)
+        if leaked and not drops:
+            _marker(dest).write_text("\n".join(problems[:5]) + "\n")
             logger.warning(
-                "%s has %d unreferenced page(s) (%s); no row, index or table is "
-                "affected and the rebuild replaces every page",
-                src, len(problems) - 1 if problems[0].startswith("***") else len(problems),
-                problems[-1],
+                "%s: %s -- %d unreferenced page(s) (%s). They are not proof that no row "
+                "is lost; a clean snapshot is kept until a newer clean one exists (%s)",
+                LEAK_ALERT_TOKEN, src,
+                len(problems) - 1 if problems[0].startswith("***") else len(problems),
+                problems[-1], _RUNBOOK,
             )
         elif problems:
             bad = dest.with_name(dest.name + _FAILED_SUFFIX)
             os.replace(part, bad)
             shown = "; ".join(problems[:3]) + (" ..." if len(problems) > 3 else "")
+            if drops:
+                shown = f"unreferenced pages and fewer rows than the last clean snapshot: {', '.join(drops)}"
             raise IntegrityError(
                 f"{src} failed PRAGMA integrity_check ({shown}); snapshot kept at {bad}; "
                 "refusing to rebuild over it -- restore from an earlier backup first "
@@ -190,7 +257,7 @@ def snapshot(db_path: str | os.PathLike, dest_dir: Path | None = None,
         os.replace(part, dest)
     except BaseException:
         # Any failure from the copy through the final rename must not strand
-        # ``.part``. On the corrupt path it was already renamed to .CORRUPT, so
+        # ``.part``. On the corrupt path it was already renamed to .INTEGRITY-FAILED, so
         # this only clears whatever sidecars are still named after it.
         remove_with_sidecars(part)
         raise
@@ -210,25 +277,29 @@ def prune(db_path: str | os.PathLike, dest_dir: Path | None = None,
     """Delete all but the newest *keep* nightly snapshots of *db_path*.
 
     Only files matching ``<name>.nightly-*.sqlite`` are candidates, so manual
-    backups and ``.CORRUPT`` forensics copies are never touched. The stamp is
+    backups and ``.INTEGRITY-FAILED`` forensics copies are never touched. The
+    newest clean snapshot (no leaked-pages marker) is never pruned, however
+    many leaked ones are newer. The stamp is
     fixed-width, so name order is chronological order. Orphaned sidecars of
     nightly snapshots are swept as well.
     """
     dest_dir = dest_dir if dest_dir is not None else backup_dir()
     keep = keep if keep is not None else backup_keep()
     prefix = Path(db_path).name + _NIGHTLY_TAG
-    snaps = sorted(
-        p for p in dest_dir.glob(f"{prefix}*.sqlite")
-        if p.is_file() and p.name.startswith(prefix)
-    )
+    snaps = _nightly_snapshots(dest_dir, prefix)
+    clean = [p for p in snaps if not _marker(p).exists()]
+    protected = clean[-1] if clean else None
     removed: list[Path] = []
     for p in snaps[:-keep] if len(snaps) > keep else []:
+        if p == protected:
+            continue
         try:
             p.unlink()
         except OSError as exc:
             logger.warning("could not prune stale snapshot %s: %s", p, exc)
         else:
             removed.append(p)
+            _marker(p).unlink(missing_ok=True)
     _sweep_orphan_sidecars(dest_dir, prefix)
     return removed
 

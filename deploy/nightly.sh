@@ -47,7 +47,14 @@ case "$MODE" in
   run)
     step download-catalogs logs/download_catalogs.log bash scripts/download_catalogs.sh
     step scan-yesterday logs/scan.log "$UV" run muscat-db scan-yesterday
+    # A leaked-pages snapshot is accepted so the build runs, but the pages may
+    # hide lost rows: say so out loud instead of leaving it in the log.
+    before=$(wc -c < logs/build-db.log 2>/dev/null || echo 0)
     step build-db logs/build-db.log "$UV" run muscat-db build-db
+    leak="$(tail -c +"$((before + 1))" logs/build-db.log 2>/dev/null | grep -m1 "INTEGRITY-LEAK")"
+    if [ -n "$leak" ]; then
+      alert ":warning: muscat-db nightly on $(hostname): the database has unreferenced pages (integrity_check), so rows may be lost. The build went ahead; the last clean snapshot is kept. See notes/DEPLOYMENT.md, Database integrity failure. ${leak}"
+    fi
     ;;
   check)
     out="$("$UV" run muscat-db build-status --max-age-hours "$MAX_AGE" 2>&1)"

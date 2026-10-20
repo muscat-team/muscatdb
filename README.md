@@ -245,8 +245,11 @@ API, safe while the server is running) to `$MUSCAT_DB_BACKUP_DIR` (default
 the newest `$MUSCAT_DB_BACKUP_KEEP` (default 2). It aborts, leaving the live
 file untouched, if either that snapshot or the freshly built database fails
 `PRAGMA integrity_check`; a failed snapshot is kept with an `.INTEGRITY-FAILED`
-suffix. `integrity_check` output that is only `Page N: never used` is leaked page
-accounting, not damage: the build logs a warning and goes on. The integrity checks
+suffix. `integrity_check` output that is only `Page N: never used` unreferenced
+pages: the build goes on, but a Slack alert is raised because the pages can also
+hide lost rows. Such a snapshot is marked, the newest clean snapshot is never
+pruned, and a leaked copy with fewer rows in an app-owned table than that clean
+one is refused as damage. The integrity checks
 add roughly 3-4 minutes to the nightly run on an idle disk; see
 [Database integrity failure](notes/DEPLOYMENT.md#database-integrity-failure) when
 it refuses or runs for hours.

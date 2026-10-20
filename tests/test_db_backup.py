@@ -399,3 +399,97 @@ def test_build_db_on_fresh_path_needs_no_snapshot(tmp_path, backups, no_real_obs
 
     assert db.exists()
     assert not backups.exists() or _snapshots(backups) == []
+
+
+# --- a leaked-pages report is not proof that no row is lost (review of #277) ---
+
+def _nightly(d: Path, stamp: str, leaked: bool = False) -> Path:
+    snap = d / f"muscat.db.nightly-{stamp}.sqlite"
+    snap.write_bytes(b"x")
+    if leaked:
+        (d / (snap.name + db_backup._LEAK_MARKER)).write_text("Page 9: never used\n")
+    return snap
+
+
+def test_leaked_snapshot_is_marked_and_warns_with_the_alert_token(tmp_path, backups, caplog):
+    db = tmp_path / "muscat.db"
+    _make_db(db, notes=500)
+    _leak_pages(db)
+
+    with caplog.at_level("WARNING", logger=db_backup.logger.name):
+        snap = db_backup.snapshot(db)
+
+    assert (backups / (snap.name + db_backup._LEAK_MARKER)).exists()
+    assert any(db_backup.LEAK_ALERT_TOKEN in r.message for r in caplog.records)
+
+
+def test_clean_snapshot_has_no_marker(tmp_path, backups):
+    db = tmp_path / "muscat.db"
+    _make_db(db)
+
+    snap = db_backup.snapshot(db)
+
+    assert not (backups / (snap.name + db_backup._LEAK_MARKER)).exists()
+    assert db_backup.newest_clean_snapshot(db) == snap
+
+
+def test_prune_keeps_the_newest_clean_snapshot_when_newer_ones_leaked(tmp_path, backups):
+    backups.mkdir()
+    clean = _nightly(backups, "20261017-173000")
+    _nightly(backups, "20261018-173000", leaked=True)
+    _nightly(backups, "20261019-173000", leaked=True)
+    newest = _nightly(backups, "20261020-173000", leaked=True)
+
+    removed = db_backup.prune(tmp_path / "muscat.db", keep=2)
+
+    assert clean.exists() and newest.exists()
+    assert [p.name for p in removed] == [
+        "muscat.db.nightly-20261018-173000.sqlite",
+    ]
+    assert not list(backups.glob("*20261018*"))  # its marker goes with it
+
+
+def test_prune_is_unchanged_when_every_snapshot_is_clean(tmp_path, backups):
+    backups.mkdir()
+    for day in ("17", "18", "19", "20"):
+        _nightly(backups, f"202610{day}-173000")
+
+    db_backup.prune(tmp_path / "muscat.db", keep=2)
+
+    assert [p.name.split("nightly-")[1][:15] for p in _snapshots(backups)] == ["20261019-173000", "20261020-173000"]
+
+
+def test_leaked_snapshot_with_fewer_app_rows_than_the_clean_one_is_refused(tmp_path, backups):
+    db = tmp_path / "muscat.db"
+    _make_db(db, notes=500)
+    clean = db_backup.snapshot(db, now=datetime.datetime(2026, 10, 19, 17, 30))
+    with sqlite3.connect(str(db)) as c:
+        c.execute("DELETE FROM target_notes WHERE rowid % 2 = 0")
+    _leak_pages(db)
+
+    with pytest.raises(db_backup.IntegrityError, match=r"target_notes 500->250"):
+        db_backup.snapshot(db, now=datetime.datetime(2026, 10, 20, 17, 30), app_tables=("target_notes",))
+
+    assert _snapshots(backups) == [clean]
+    assert len(list(backups.glob("*.INTEGRITY-FAILED"))) == 1
+
+
+def test_leaked_snapshot_with_no_fewer_rows_is_accepted(tmp_path, backups):
+    db = tmp_path / "muscat.db"
+    _make_db(db, notes=500)
+    db_backup.snapshot(db, now=datetime.datetime(2026, 10, 19, 17, 30))
+    _leak_pages(db)
+
+    snap = db_backup.snapshot(db, now=datetime.datetime(2026, 10, 20, 17, 30), app_tables=("target_notes",))
+
+    assert snap in _snapshots(backups)
+
+
+def test_row_count_check_needs_a_clean_baseline(tmp_path, backups):
+    db = tmp_path / "muscat.db"
+    _make_db(db, notes=5)
+    _leak_pages(db)
+
+    snap = db_backup.snapshot(db, app_tables=("target_notes",))
+
+    assert snap in _snapshots(backups)

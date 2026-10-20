@@ -1051,7 +1051,7 @@ def build_db(db_path: str, progress=None) -> int:
     # (issue #182, finding 1). The snapshot is the disaster-recovery point for
     # a rebuild that goes wrong after this point.
     if os.path.exists(db_path):
-        db_backup.snapshot(db_path)
+        db_backup.snapshot(db_path, app_tables=_APP_OWNED_TABLES)
         db_backup.prune(db_path)
 
     # Phase 1: discover all CSVs (cheap walk so we can size the progress bar).

@@ -498,9 +498,16 @@ the step name and the end of `logs/build-db.log`.
 
 `logs/build-db.log` names the first problems and the kept copy:
 
-- **Only `Page N: never used` lines** are leaked pages. No row, index or table is
-  affected, and the rebuild replaces the file page for page. The build logs a
-  warning and carries on; there is nothing to do.
+- **Only `Page N: never used` lines** are unreferenced pages. Usually they are
+  leaked accounting, but a subtree that lost its parent pointer is reported the
+  same way and its rows are gone. The rebuild regenerates `frames`, `summaries`
+  and `targets` only; the app-owned tables (users, access, groups, jobs, LCO
+  requests) are copied forward as they are. So the build carries on, Slack gets
+  an alert, the snapshot is marked (`<snapshot>.leaked-pages`), and the newest
+  clean snapshot is kept however many leaked ones follow it. A leaked copy with
+  fewer rows in any app-owned table than that clean snapshot is refused as
+  damage. After an alert, compare the app tables against the clean snapshot
+  and restore from it if rows are missing.
 - **Anything else** is damage. The copy is kept as
   `muscat.db.nightly-<stamp>.sqlite.INTEGRITY-FAILED` in `$MUSCAT_DB_BACKUP_DIR`
   (default `~/temp`). Nothing was changed, but no rebuild will run until the file
