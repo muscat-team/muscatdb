@@ -244,8 +244,12 @@ API, safe while the server is running) to `$MUSCAT_DB_BACKUP_DIR` (default
 `$MUSCAT_TMPDIR`, i.e. `~/temp`) as `muscat.db.nightly-<stamp>.sqlite`, keeping
 the newest `$MUSCAT_DB_BACKUP_KEEP` (default 2). It aborts, leaving the live
 file untouched, if either that snapshot or the freshly built database fails
-`PRAGMA integrity_check`; a failed snapshot is kept with a `.CORRUPT` suffix.
-The integrity checks add roughly 3-4 minutes to the nightly run.
+`PRAGMA integrity_check`; a failed snapshot is kept with an `.INTEGRITY-FAILED`
+suffix. `integrity_check` output that is only `Page N: never used` is leaked page
+accounting, not damage: the build logs a warning and goes on. The integrity checks
+add roughly 3-4 minutes to the nightly run on an idle disk; see
+[Database integrity failure](notes/DEPLOYMENT.md#database-integrity-failure) when
+it refuses or runs for hours.
 
 ### LCO proposal sync
 

@@ -487,6 +487,65 @@ Starting the three ut5 workers at the same moment made two of them fail their fi
 
 ---
 
+## Database integrity failure
+
+The nightly `build-db` copies `muscat.db` with the SQLite backup API, runs
+`PRAGMA integrity_check` on the copy, and refuses to rebuild over a file that
+fails (#182). A refusal exits non-zero, so `nightly.sh` posts a Slack alert with
+the step name and the end of `logs/build-db.log`.
+
+### Read the reason first
+
+`logs/build-db.log` names the first problems and the kept copy:
+
+- **Only `Page N: never used` lines** are leaked pages. No row, index or table is
+  affected, and the rebuild replaces the file page for page. The build logs a
+  warning and carries on; there is nothing to do.
+- **Anything else** is damage. The copy is kept as
+  `muscat.db.nightly-<stamp>.sqlite.INTEGRITY-FAILED` in `$MUSCAT_DB_BACKUP_DIR`
+  (default `~/temp`). Nothing was changed, but no rebuild will run until the file
+  is sound.
+
+### A slow run is not a hung run
+
+The copy and the check each read the whole file, and the log records both times
+(`copy N s, check N s`) and warns when they total more than 30 minutes. On
+2026-10-20 they took 3 h 11 min, because the controller's weekly consistency
+check and patrol read (scheduled for 12:00; `storcli64 /c0 show cc`, `show pr`)
+were running on the same array. The `.part` file stays at 0 bytes until the copy
+commits. Do not kill the job: the verdict arrives at the end.
+
+### Restore from a verified snapshot
+
+1. Find the newest `muscat.db.nightly-*.sqlite` that passes, checking it
+   read-only (about 90 minutes on a busy disk):
+   `python3 -c "import sqlite3,sys; c=sqlite3.connect('file:'+sys.argv[1]+'?immutable=1',uri=True); print(c.execute('PRAGMA integrity_check').fetchall())" <snapshot>`
+2. List what the damaged file holds that the snapshot lacks. `frames`, `summaries`
+   and `targets` are rebuilt by `build-db`; compare the app-owned tables (jobs,
+   chat, LCO requests, users, notes) row by row, read-only, and save the
+   difference. A table the damaged file cannot read is lost.
+3. Stop `nightly.sh` and the servers (they run in tmux panes; save each server's
+   command, working directory and environment from `/proc/<pid>/` first so it
+   can be restarted as it was). Confirm nothing holds `muscat.db` open.
+4. Move `muscat.db`, `-wal` and `-shm` to `muscat.db.CORRUPTED-<date>*`. Never
+   delete them.
+5. Copy the verified snapshot to `muscat.db`, `chmod 644`, and `cmp` it against the
+   snapshot (only SQLite header bytes 19, 20, 28 and 96 may differ once a
+   connection has switched it to WAL).
+6. Start the servers, insert the saved rows (`INSERT OR IGNORE`), run `muscat-db
+   build-db`, then `muscat-db backfill-products --dry-run`, which must report 0
+   records if the product records are intact.
+
+### Cause
+
+Unknown. Corruption was found on 2026-09-11, 2026-10-11 (leaked pages, repaired
+with `VACUUM INTO`) and 2026-10-19 (`lco_monitor_leases` unreadable, restored
+from the 2026-10-19 00:30 snapshot). The RAID 6 array was `Optimal` on
+2026-10-20, its CacheVault healthy, with no drive, media or power events logged
+since boot, so a hardware fault is not indicated. Look for what interrupts a
+write: a killed process, a long-running writer during a backup, or several
+servers on one file.
+
 ## Shared filesystem
 
 The **linchpin assumption** for multi-host workers: `/ut2` and everything under it resolves identically on every host (the §12 shared-mount invariant).

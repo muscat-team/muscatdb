@@ -47,6 +47,19 @@ def _corrupt(path: Path) -> None:
         f.write(b"\xa5" * (size - 3 * 4096))
 
 
+def _leak_pages(path: Path, pages: int = 2) -> None:
+    """Append pages no b-tree references and grow the header's page count to
+    cover them: ``integrity_check`` then reports ``Page N: never used`` and
+    nothing else (issue #237), with every row intact."""
+    page_size = sqlite3.connect(str(path)).execute("PRAGMA page_size").fetchone()[0]
+    count = path.stat().st_size // page_size
+    with open(path, "r+b") as f:
+        f.seek(0, os.SEEK_END)
+        f.write(b"\0" * page_size * pages)
+        f.seek(28)
+        f.write((count + pages).to_bytes(4, "big"))
+
+
 def _make_wal_db(path: Path, notes: int = 1) -> None:
     """Like ``_make_db`` but persistently in WAL mode, as the live muscat.db
     is: the backup API copies page 1, so only a WAL source yields a WAL copy."""
@@ -105,7 +118,7 @@ def test_snapshot_of_corrupt_db_raises_and_keeps_forensic_copy(tmp_path, backups
         db_backup.snapshot(db)
 
     assert _snapshots(backups) == []
-    assert len(list(backups.glob("*.CORRUPT"))) == 1
+    assert len(list(backups.glob("*.INTEGRITY-FAILED"))) == 1
     assert list(backups.glob("*.part")) == []
 
 
@@ -117,7 +130,7 @@ def test_prune_keeps_newest_and_ignores_manual_backups(tmp_path, backups):
         db_backup.snapshot(db, now=base + datetime.timedelta(days=day))
     manual = backups / "muscat.db.backup-2026-08-28-pre-81-cleanup.sqlite"
     manual.write_bytes(b"manual")
-    forensic = backups / "muscat.db.nightly-20260101-000000.sqlite.CORRUPT"
+    forensic = backups / "muscat.db.nightly-20260101-000000.sqlite.INTEGRITY-FAILED"
     forensic.write_bytes(b"bad")
 
     removed = db_backup.prune(db, keep=2)
@@ -156,7 +169,7 @@ def test_corrupt_wal_snapshot_leaves_only_the_forensic_copy(tmp_path, backups):
     with pytest.raises(db_backup.IntegrityError):
         db_backup.snapshot(db)
 
-    assert [n for n in _names(backups) if not n.endswith(".CORRUPT")] == []
+    assert [n for n in _names(backups) if not n.endswith(".INTEGRITY-FAILED")] == []
 
 
 def test_snapshot_removes_part_when_the_check_fails_unexpectedly(tmp_path, backups, monkeypatch):
@@ -168,7 +181,7 @@ def test_snapshot_removes_part_when_the_check_fails_unexpectedly(tmp_path, backu
     def boom(path):
         raise OSError("disk went away")
 
-    monkeypatch.setattr(db_backup, "integrity_ok", boom)
+    monkeypatch.setattr(db_backup, "integrity_problems", boom)
 
     with pytest.raises(OSError, match="disk went away"):
         db_backup.snapshot(db)
@@ -210,6 +223,122 @@ def test_backup_keep_env(monkeypatch):
     assert db_backup.backup_keep() == 1
     monkeypatch.setenv("MUSCAT_DB_BACKUP_KEEP", "junk")
     assert db_backup.backup_keep() == db_backup.DEFAULT_KEEP
+
+
+# -- leaked pages are not corruption (issue #237) ----------------------------
+
+_LEAK = "*** in database main ***\nPage 11: never used\nPage 12: never used"
+
+
+@pytest.mark.parametrize("lines,expected", [
+    (["ok"], False),
+    ([], False),
+    (_LEAK.splitlines(), True),
+    (["Page 7: never used"], True),
+    (_LEAK.splitlines() + ["Tree 3 page 3 cell 0: Rowid 1 out of order"], False),
+    (["*** in database main ***"], False),
+    (["Page 5: btreeInitPage() returns error code 11"], False),
+    ([f"Page {i}: never used" for i in range(db_backup.INTEGRITY_REPORT_LIMIT)], False),
+])
+def test_only_unreferenced_pages_count_as_leaked(lines, expected):
+    assert db_backup.leaked_pages_only(lines) is expected
+
+
+def test_integrity_problems_splits_the_report_into_lines(tmp_path):
+    db = tmp_path / "muscat.db"
+    _make_db(db, notes=500)
+    assert db_backup.integrity_problems(db) == []
+    _leak_pages(db)
+    problems = db_backup.integrity_problems(db)
+    assert problems[0] == "*** in database main ***"
+    assert len(problems) == 3 and all(p.endswith(": never used") for p in problems[1:])
+    assert db_backup.leaked_pages_only(problems)
+    assert db_backup.integrity_ok(db) is False
+
+
+def test_integrity_problems_of_an_unreadable_file_is_not_a_leak(tmp_path):
+    db = tmp_path / "muscat.db"
+    _make_db(db, notes=5000)
+    _corrupt(db)
+    problems = db_backup.integrity_problems(db)
+    assert problems and not db_backup.leaked_pages_only(problems)
+
+
+def test_snapshot_of_a_db_with_only_leaked_pages_is_a_normal_snapshot(tmp_path, backups, caplog):
+    db = tmp_path / "muscat.db"
+    _make_db(db, notes=500)
+    _leak_pages(db)
+
+    with caplog.at_level("WARNING", logger=db_backup.logger.name):
+        snap = db_backup.snapshot(db)
+
+    assert snap in _snapshots(backups)
+    assert list(backups.glob("*.INTEGRITY-FAILED")) == []
+    assert any("unreferenced page" in r.message for r in caplog.records)
+    with sqlite3.connect(str(snap)) as c:
+        assert c.execute("SELECT COUNT(*) FROM target_notes").fetchone()[0] == 500
+
+
+def test_leaked_pages_plus_real_damage_is_still_refused(tmp_path, backups):
+    db = tmp_path / "muscat.db"
+    _make_db(db, notes=5000)
+    _corrupt(db)
+    _leak_pages(db)
+
+    with pytest.raises(db_backup.IntegrityError):
+        db_backup.snapshot(db)
+
+    assert len(list(backups.glob("*.INTEGRITY-FAILED"))) == 1
+
+
+def test_refusal_names_the_problem_the_kept_copy_and_the_runbook(tmp_path, backups):
+    db = tmp_path / "muscat.db"
+    _make_db(db, notes=5000)
+    _corrupt(db)
+
+    with pytest.raises(db_backup.IntegrityError) as exc:
+        db_backup.snapshot(db)
+
+    kept = next(backups.glob("*.INTEGRITY-FAILED"))
+    msg = str(exc.value)
+    assert str(kept) in msg
+    assert "notes/DEPLOYMENT.md" in msg
+    assert "restore from an earlier backup" in msg
+
+
+def test_snapshot_logs_how_long_the_copy_and_the_check_took(tmp_path, backups, caplog):
+    db = tmp_path / "muscat.db"
+    _make_db(db)
+    with caplog.at_level("INFO", logger=db_backup.logger.name):
+        db_backup.snapshot(db)
+    done = [r.message for r in caplog.records if "written to" in r.message]
+    assert done and "copy" in done[0] and "check" in done[0]
+
+
+def test_a_slow_snapshot_is_warned_about(tmp_path, backups, caplog, monkeypatch):
+    """On 2026-10-20 the copy and check took 3 h 11 min on a disk shared with a
+    RAID consistency check, and nothing said so until the verdict."""
+    db = tmp_path / "muscat.db"
+    _make_db(db)
+    monkeypatch.setattr(db_backup, "SLOW_SNAPSHOT_S", 0.0)
+    with caplog.at_level("WARNING", logger=db_backup.logger.name):
+        db_backup.snapshot(db)
+    assert any("slow" in r.message.lower() for r in caplog.records)
+
+
+def test_build_db_rebuilds_over_leaked_pages_and_drops_them(tmp_path, backups, no_real_obslog_scan):
+    """The rebuild copies a fresh image over the live file page for page, so
+    unreferenced pages go with the old image and no row is at risk."""
+    db = tmp_path / "muscat.db"
+    _make_db(db, notes=500)
+    _leak_pages(db)
+
+    build_db(str(db))
+
+    assert db_backup.integrity_ok(db)
+    with sqlite3.connect(str(db)) as c:
+        assert c.execute("SELECT COUNT(*) FROM target_notes").fetchone()[0] == 500
+    assert len(_snapshots(backups)) == 1
 
 
 # -- build_db integration ----------------------------------------------------
