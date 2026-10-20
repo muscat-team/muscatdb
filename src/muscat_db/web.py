@@ -81,7 +81,7 @@ from muscat_db.access import (
     object_hidden as _object_hidden,
     sql_not_denied as _sql_not_denied,
 )
-from muscat_db.product_visibility import ProductVisibility
+from muscat_db.product_visibility import ProductVisibility, default_run_dir
 from muscat_db import run_ownership
 from muscat_db.auth import (
     PROXY_SECRET_HEADER,
@@ -768,6 +768,36 @@ def _require_may_modify_run(level: str, inst: str, date: str, target: str, run_i
     group with the owner of. Call after the run is known to be visible."""
     if not _viewer_may_modify_run(level, inst, date, target, run_id):
         raise HTTPException(403, "only the run's owner, an admin, or someone in the owner's group may change it")
+
+
+def _run_id_taken(level: str, inst: str, date: str, target: str, run_id: str = "") -> bool:
+    """Whether a launch under this run id would replace an existing run: the run
+    directory exists, or a record or job row names an owner. A legacy
+    photometry run (no run id) shares the night's directory, so only an owner
+    makes it taken."""
+    if run_ownership.run_owner(level, inst, date, target, run_id):
+        return True
+    if level == "photometry" and not run_id:
+        return False
+    try:
+        return default_run_dir(level, inst, date, target, run_id).is_dir()
+    except ValueError:
+        return False
+
+
+def _require_may_replace_run(level: str, inst: str, date: str, target: str, run_id: str = "") -> None:
+    """403 a launch, re-run or in-place rewrite over a run the viewer may not
+    change (issue #272). A run id nobody has used yet stays open to everyone who
+    can see the night, so starting a new run needs no ownership."""
+    if _run_id_taken(level, inst, date, target, run_id):
+        _require_may_modify_run(level, inst, date, target, run_id)
+
+
+def _replace_guard(level: str, inst: str, date: str, target: str) -> Callable[[str], None]:
+    """Callback for ``start_run`` / ``start_fit`` / ``start_ttv_fit``: they call it
+    with the run id they derived, so the check covers the directory they will
+    clear and not a second derivation of it here."""
+    return lambda run_id: _require_may_replace_run(level, inst, date, target, run_id)
 
 
 # What a job-status poll returns for a run that does not exist; a hidden run
@@ -3406,7 +3436,8 @@ def transit_fit_run(request: Request, payload: dict = Body(...)):
     user_name = request.state.user
     _require_visible_night(inst, date, target)
     selected_csvs = _restrict_csv_selection(inst, date, target, selected_csvs)
-    result = fit.start_fit(inst, date, target, options, test_run=test_run, selected_csvs=selected_csvs, user_name=user_name)
+    result = fit.start_fit(inst, date, target, options, test_run=test_run, selected_csvs=selected_csvs, user_name=user_name,
+                           authorize_run=_replace_guard("transit_fit", inst, date, target))
     return _launch_response(result)
 
 
@@ -7165,12 +7196,15 @@ def jobs_rerun(request: Request, payload: dict = Body(...)):
             options[field] = value
     user_name = request.state.user
     if job["type"] == "photometry":
-        result = phot.start_run(inst, date, target, options=options, test_run=p.get("test_run", True), user_name=user_name)
+        result = phot.start_run(inst, date, target, options=options, test_run=p.get("test_run", True), user_name=user_name,
+                                authorize_run=_replace_guard("photometry", inst, date, target))
     elif job["type"] == "transit_fit":
-        result = fit.start_fit(inst, date, target, options=options, test_run=p.get("test_run", False), selected_csvs=_restrict_csv_selection(inst, date, target, p.get("selected_csvs")), user_name=user_name)
+        result = fit.start_fit(inst, date, target, options=options, test_run=p.get("test_run", False), selected_csvs=_restrict_csv_selection(inst, date, target, p.get("selected_csvs")), user_name=user_name,
+                               authorize_run=_replace_guard("transit_fit", inst, date, target))
     elif job["type"] == "ttv_fit":
         from muscat_db.ttv_fit import start_ttv_fit
-        result = start_ttv_fit(target, options, user_name)
+        result = start_ttv_fit(target, options, user_name,
+                               authorize_run=_replace_guard("ttv_fit", "", "", target))
     else:
         raise HTTPException(400, "unknown job type")
     return _launch_response(result)
@@ -7387,7 +7421,8 @@ def photometry_run(request: Request, payload: phot_api.RunRequest):
     telescope_err = _telescope_required_error(_db_path(), inst, date, target, options)
     if telescope_err:
         return phot_api.response(phot_api.ActionResponse, {"ok": False, "error": telescope_err}, status_code=400)
-    result = phot.start_run(inst, date, target, options=options, test_run=test_run, user_name=user_name)
+    result = phot.start_run(inst, date, target, options=options, test_run=test_run, user_name=user_name,
+                            authorize_run=_replace_guard("photometry", inst, date, target))
     if result.get("ok"):
         return phot_api.response(phot_api.ActionResponse, result)
     # 429 when a per-user job cap refused the launch (issue #265), 400 otherwise.
@@ -7440,6 +7475,8 @@ def photometry_postprocess(payload: phot_api.PostprocessRequest):
     if not run:
         return phot_api.response(phot_api.PostprocessResponse, {"ok": False, "error": "a run is required"}, status_code=400)
     _require_visible_run("photometry", inst, date, target, run)
+    if payload.get("apply", False):  # a dry run only reads the run
+        _require_may_modify_run("photometry", inst, date, target, run)
     result = postproc.postprocess(
         inst,
         date,
@@ -7475,6 +7512,7 @@ def photometry_postprocess_restore(payload: phot_api.RestoreRequest):
     if not run:
         return phot_api.response(phot_api.RestoreResponse, {"ok": False, "error": "a run is required"}, status_code=400)
     _require_visible_run("photometry", inst, date, target, run)
+    _require_may_modify_run("photometry", inst, date, target, run)
     result = postproc.restore_clip(inst, date, target, run)
     if not result.get("ok"):
         return phot_api.response(phot_api.RestoreResponse, result, status_code=400)
@@ -7944,7 +7982,8 @@ def api_start_ttv_fit(request: Request, payload: dict = Body(...)):
     options, err = _resolve_ttv_options(options)
     if err:
         return JSONResponse({"ok": False, "error": err}, status_code=400)
-    result = ttv.start_ttv_fit(target, options, request.state.user)
+    result = ttv.start_ttv_fit(target, options, request.state.user,
+                               authorize_run=_replace_guard("ttv_fit", "", "", target))
     if result.get("limit_exceeded"):
         return _launch_response(result)
     return JSONResponse(result)

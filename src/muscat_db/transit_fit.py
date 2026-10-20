@@ -3,6 +3,7 @@ run the transit-fit pipeline, poll logs, and return outputs/plots.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 import csv
 import datetime
 import json
@@ -1514,8 +1515,13 @@ def start_fit(
     test_run: bool = False,
     selected_csvs: list[str] | None = None,
     user_name: str | None = None,
+    authorize_run: Callable[[str], None] | None = None,
 ) -> dict:
     """Prepare inputs and launch a transit fit using the timer-fit script.
+
+    *authorize_run* is called with the derived run id before the run directory
+    is touched; it raises to refuse a launch over a run the caller may not
+    replace.
 
     If *selected_csvs* is given, only CSVs whose filename appears in the list
     are included (useful when the user unchecks some lightcurves in the UI).
@@ -1557,6 +1563,8 @@ def start_fit(
     run_name = str(options.get("run_name") or "").strip()
     site, telescope, mode = selected_site_mode(inst, [c.name for c in csvs])
     run_id = build_run_id(site, mode, run_name, telescope=telescope)
+    if authorize_run is not None:
+        authorize_run(run_id)
     try:
         rdir = fit_output_dir(inst, date, target, run_id)
     except ValueError as exc:

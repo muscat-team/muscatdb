@@ -23,6 +23,7 @@ This module never trusts user input for filesystem access: see
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import csv as _csv
 import datetime
 import hashlib
@@ -1807,9 +1808,14 @@ def start_run(
     options: dict | None = None,
     test_run: bool = True,
     user_name: str | None = None,
+    authorize_run: Callable[[str], None] | None = None,
 ) -> dict:
     """Launch a reduction in the background. Returns ``{ok, key}`` or
     ``{ok: False, error}``. A run already in flight for the same key is reused.
+
+    *authorize_run* is called with the derived run id before anything is
+    deleted or queued; it raises to refuse a launch over a run the caller may
+    not replace.
     """
     if inst not in INSTRUMENTS:
         return {"ok": False, "error": f"unknown instrument {inst!r}"}
@@ -1830,6 +1836,8 @@ def start_run(
     telescope = (opts.get("telescope") or "").strip().lower() if inst in MULTISITE_INSTRUMENTS else ""
     mode = (opts.get("mode") or "").strip().lower() if inst in MULTISITE_MODES else ""
     run_id = build_run_id(inst, site, mode, run_name, telescope=telescope)
+    if authorize_run is not None:
+        authorize_run(run_id)
     key = job_key(inst, date, target, run_id)
     run_type = "test" if test_run else "full"
 

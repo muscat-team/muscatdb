@@ -930,7 +930,7 @@ def test_ttv_start_refuses_a_hidden_fit_on_an_open_night(client, env, monkeypatc
     fdir = fit.fit_output_dir(INST, "260101", "OPENTGT", "orphanfit")
     (fdir / "out").mkdir(parents=True)  # no record: undetermined, so hidden
     started = {}
-    monkeypatch.setattr(ttv, "start_ttv_fit", lambda t, options, user: started.update(options=options) or {"ok": True})
+    monkeypatch.setattr(ttv, "start_ttv_fit", lambda t, options, user, **kw: started.update(options=options) or {"ok": True})
     monkeypatch.setattr(web, "_transit_fit_available", lambda: (lambda *a: True))
     monkeypatch.setattr(web, "_get_run_fitted_params", lambda *a: {"b": {"tc": 2460004.02, "unc": 0.002}})
     body = {"target": "OPENTGT", "options": {

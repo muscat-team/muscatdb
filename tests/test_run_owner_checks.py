@@ -20,7 +20,9 @@ Fixture runs are on the open night 260103 of ``OPENTGT``, so ``alice`` and
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -260,3 +262,132 @@ def test_jobs_page_cancel_button_is_disabled_for_a_viewer_who_may_not_cancel(cli
     row = row[: row.index("</tr>")]
     cancel = row[row.rindex("<button", 0, row.index('data-job-action="cancel"')): row.index(">Cancel</button>")]
     assert ("disabled" in cancel) is disabled
+
+
+# ── launching over an existing run (review of #276) ─────────────────────
+#
+# start_run / start_fit / start_ttv_fit delete the products of the run id they
+# derive before launching, so a launch under another user's run name is a
+# delete the six delete/cancel routes would have refused.
+
+_OPTS = {"run_name": RUN, "overwrite": True}
+LAUNCHES = {
+    "photometry/run": (
+        {"inst": INST, "date": DATE, "target": TARGET, "options": _OPTS, "test_run": False},
+        lambda: phot.run_output_dir(INST, DATE, TARGET, RUN),
+        "/api/photometry/run",
+    ),
+    "transit-fit/run": (
+        {"inst": INST, "date": DATE, "target": TARGET, "options": {"run_name": RUN}},
+        lambda: fit.fit_output_dir(INST, DATE, TARGET, RUN),
+        "/api/transit-fit/run",
+    ),
+    "ttv-fit/start": (
+        {"target": TARGET, "options": {"run_name": RUN}},
+        lambda: ttv.ttv_output_dir(TARGET, RUN),
+        "/api/ttv-fit/start",
+    ),
+}
+_LAUNCH = pytest.mark.parametrize("route", sorted(LAUNCHES))
+
+
+@pytest.fixture
+def lax(env, client):
+    """The client, but launches are stubbed to fail after the guard and a
+    server error comes back as a 500 instead of raising."""
+    from fastapi.testclient import TestClient
+
+    from muscat_db import web
+
+    def no_launch(*a, **k):
+        raise OSError("launch stubbed")
+
+    mp = pytest.MonkeyPatch()
+    for mod in (phot, fit, ttv):
+        mp.setattr(mod.subprocess, "Popen", no_launch)
+    # start_run looks for the night's raw frames before it derives the run id.
+    (Path(os.environ["MUSCAT_DATA_DIR"]) / "Sinistro" / DATE).mkdir(parents=True, exist_ok=True)
+    yield TestClient(web.app, client=("127.0.0.1", 12345), raise_server_exceptions=False)
+    mp.undo()
+
+
+def _tree(rdir):
+    return {p.relative_to(rdir).as_posix(): (p.stat().st_size, p.read_bytes() if p.is_file() else b"")
+            for p in sorted(rdir.rglob("*"))}
+
+
+def _launch(client, route, user, name=None):
+    payload, rdir, path = LAUNCHES[route]
+    if name:
+        payload = json.loads(json.dumps(payload))
+        payload["options"]["run_name"] = name
+    return _post(client, path, payload, user=user), rdir()
+
+
+@_LAUNCH
+def test_launch_over_another_users_run_is_refused_and_the_files_stay(lax, route):
+    _own_all("alice")
+    rdir = LAUNCHES[route][1]()
+    before = _tree(rdir)
+
+    resp, _ = _launch(lax, route, "bob")
+
+    assert resp.status_code == 403
+    assert _tree(rdir) == before
+    assert json.loads((rdir / product_record.RECORD_NAME).read_text())["author"] == "alice"
+
+
+@_LAUNCH
+def test_owner_admin_and_group_mate_may_relaunch_a_run(lax, env, route):
+    _own_all("alice")
+    _make_group(env, "lab", "alice", "carol")
+    for user in ("alice", "root", "carol"):
+        _own_all("alice")  # a launch rewrites the record with its own author
+        assert _launch(lax, route, user)[0].status_code != 403, user
+
+
+@_LAUNCH
+def test_a_new_run_name_stays_open_to_anyone_who_can_see_the_night(lax, route):
+    _own_all("alice")
+    resp, _ = _launch(lax, route, "bob", name="bobs-own-run")
+    assert resp.status_code != 403
+
+
+@pytest.mark.parametrize("kind", ["photometry", "transit_fit", "ttv_fit"])
+def test_rerun_of_another_users_job_is_refused(lax, kind):
+    _own_all("alice")
+    key = next(j["key"] for j in get_job_store().all()
+               if j["type"] == kind and j["target"] == TARGET)
+    rdir = {"photometry": ROUTES["photometry/delete"], "transit_fit": ROUTES["transit-fit/delete"],
+            "ttv_fit": ROUTES["ttv-fit/delete"]}[kind][1]()
+    before = _tree(rdir)
+
+    assert _post(lax, "/api/jobs/rerun", {"key": key}, user="bob").status_code == 403
+    assert _tree(rdir) == before
+    assert _post(lax, "/api/jobs/rerun", {"key": key}, user="alice").status_code != 403
+
+
+POST = {"inst": INST, "date": DATE, "target": TARGET, "run": RUN}
+
+
+def test_postprocess_apply_and_restore_are_refused_to_another_user(lax):
+    _own_all("alice")
+    rdir = ROUTES["photometry/delete"][1]()
+    before = _tree(rdir)
+
+    for path, extra in (("postprocess", {"apply": True}), ("postprocess/restore", {})):
+        resp = _post(lax, f"/api/photometry/{path}", {**POST, **extra}, user="bob")
+        assert resp.status_code == 403, path
+    assert _tree(rdir) == before
+
+
+def test_postprocess_dry_run_stays_open_to_anyone_who_can_see_the_run(lax):
+    _own_all("alice")
+    resp = _post(lax, "/api/photometry/postprocess", {**POST, "apply": False}, user="bob")
+    assert resp.status_code != 403
+
+
+def test_postprocess_apply_is_allowed_to_the_owner(lax):
+    _own_all("alice")
+    resp = _post(lax, "/api/photometry/postprocess", {**POST, "apply": True}, user="alice")
+    assert resp.status_code != 403

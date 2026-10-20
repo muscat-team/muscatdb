@@ -3,6 +3,7 @@ run the harmonic TTV pipeline, poll logs, and return outputs/plots.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 import datetime
 import json
 import logging
@@ -475,6 +476,7 @@ def start_ttv_fit(
     target: str,
     options: dict,
     user_name: str | None = None,
+    authorize_run: Callable[[str], None] | None = None,
 ) -> dict:
     if not (target or "").strip():
         return {"ok": False, "error": "target is required"}
@@ -482,6 +484,11 @@ def start_ttv_fit(
         _target_dir_name(target)
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
+
+    # Refuse a launch over a run the caller may not replace before anything else,
+    # so the answer does not depend on whether the options are valid.
+    if authorize_run is not None:
+        authorize_run(((options or {}).get("run_name") or "").strip())
 
     err = validate_ttv_options(options)
     if err:
