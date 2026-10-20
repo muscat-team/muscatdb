@@ -880,7 +880,7 @@ def test_ephemeris_dataset_run_name_uses_transit_coverage_suffix():
 
     render_table = _function_body(html, "renderDatasetsTable")
     assert "['full', 'ing', 'egr'].includes(d.transit_coverage)" in render_table
-    assert "${d.run_name}${coverageSuffix}" in render_table
+    assert "${escapeAttr(d.run_name)}${coverageSuffix}" in render_table
     assert "runTypeBadge" not in render_table
 
 
