@@ -24,6 +24,7 @@ import logging
 import os
 import subprocess
 from pathlib import Path
+from urllib.parse import quote, unquote
 
 from muscat_db.db_backup import _NIGHTLY_TAG, backup_dir, backup_keep
 
@@ -33,30 +34,107 @@ _SUFFIX = ".dump"
 # Generous: the control plane is a few MB, but the backup disk is shared with
 # the RAID that made a muscat.db snapshot take 3 h on 2026-10-20.
 _TOOL_TIMEOUT_S = 3600
+_URI_SCHEMES = ("postgresql://", "postgres://")
 
 
 class ControlPlaneBackupError(RuntimeError):
     """The control-plane dump could not be written or verified."""
 
 
+def _split_uri(dsn: str) -> tuple[str, str, str]:
+    """:func:`_split_dsn` for the ``postgresql://`` form. Only the password
+    is cut out; host list, port and query parameters go to libpq untouched."""
+    scheme, rest = dsn.split("://", 1)
+    rest, _, query = rest.partition("?")
+    netloc, _, path = rest.partition("/")
+    userinfo, at, hostspec = netloc.rpartition("@")
+    password = ""
+    if at:
+        user, _, encoded_password = userinfo.partition(":")
+        password = unquote(encoded_password)
+        userinfo = user + "@"
+    dbname = unquote(path)
+    kept: list[str] = []
+    for item in query.split("&") if query else []:
+        name, _, value = item.partition("=")
+        if unquote(name) == "password":
+            password = unquote(value)
+            continue
+        if unquote(name) == "dbname":
+            dbname = unquote(value)
+        kept.append(item)
+    conninfo = f"{scheme}://{userinfo}{hostspec}/{path}"
+    if kept:
+        conninfo += "?" + "&".join(kept)
+    return conninfo, password, dbname
+
+
+def _parse_keywords(dsn: str) -> list[tuple[str, str]]:
+    """``key = value`` pairs of a libpq keyword/value conninfo: values are
+    bare (backslash escapes) or single-quoted (``\\'`` and ``\\\\``)."""
+    pairs: list[tuple[str, str]] = []
+    i, n = 0, len(dsn)
+    while True:
+        while i < n and dsn[i].isspace():
+            i += 1
+        if i >= n:
+            return pairs
+        start = i
+        while i < n and dsn[i] != "=" and not dsn[i].isspace():
+            i += 1
+        key = dsn[start:i]
+        while i < n and dsn[i].isspace():
+            i += 1
+        if not key or i >= n or dsn[i] != "=":
+            raise ValueError(f"missing '=' after {key!r}")
+        i += 1
+        while i < n and dsn[i].isspace():
+            i += 1
+        quoted = i < n and dsn[i] == "'"
+        i += quoted
+        value: list[str] = []
+        while i < n:
+            ch = dsn[i]
+            if ch == "\\" and i + 1 < n:
+                value.append(dsn[i + 1])
+                i += 2
+                continue
+            if (quoted and ch == "'") or (not quoted and ch.isspace()):
+                break
+            value.append(ch)
+            i += 1
+        if quoted:
+            if i >= n:
+                raise ValueError(f"unterminated quoted value for {key!r}")
+            i += 1
+        pairs.append((key, "".join(value)))
+
+
+def _split_keywords(dsn: str) -> tuple[str, str, str]:
+    """:func:`_split_dsn` for the ``key=value`` form."""
+    try:
+        pairs = _parse_keywords(dsn)
+    except ValueError as exc:
+        raise ControlPlaneBackupError(f"MUSCAT_POSTGRES_DSN is not a valid connection string: {exc}") from None
+    params = dict(pairs)
+    password = params.pop("password", "")
+    conninfo = " ".join(
+        "{}='{}'".format(k, v.replace("\\", "\\\\").replace("'", "\\'")) for k, v in params.items()
+    )
+    return conninfo, password, params.get("dbname", "")
+
+
 def _split_dsn(dsn: str) -> tuple[str, str, str]:
-    """``(conninfo without password, password, dbname)`` for *dsn*."""
-    try:
-        from psycopg.conninfo import conninfo_to_dict, make_conninfo
-    except ImportError as exc:
-        raise ControlPlaneBackupError(
-            "the control-plane backup needs the 'cluster' extra (psycopg): "
-            "`uv sync --extra cluster`"
-        ) from exc
-    try:
-        params = conninfo_to_dict(dsn)
-    except Exception as exc:
-        raise ControlPlaneBackupError("MUSCAT_POSTGRES_DSN is not a valid connection string") from exc
-    password = str(params.pop("password", "") or "")
-    dbname = str(params.get("dbname") or "")
+    """``(conninfo without password, password, dbname)`` for *dsn*, in
+    either libpq form. Parsed here rather than with psycopg so the backup
+    needs no 'cluster' extra: it only shells out to pg_dump."""
+    if dsn.startswith(_URI_SCHEMES):
+        conninfo, password, dbname = _split_uri(dsn)
+    else:
+        conninfo, password, dbname = _split_keywords(dsn)
     if not dbname:
         raise ControlPlaneBackupError("MUSCAT_POSTGRES_DSN names no database to dump")
-    return make_conninfo("", **params), password, dbname
+    return conninfo, password, dbname
 
 
 def _run(argv: list[str], env: dict[str, str], password: str) -> None:
@@ -69,7 +147,9 @@ def _run(argv: list[str], env: dict[str, str], password: str) -> None:
     if res.returncode != 0:
         detail = (res.stderr or res.stdout or "").strip()
         if password:
-            detail = detail.replace(password, "***")
+            # Both spellings: a URI DSN carries the password percent-encoded.
+            for secret in (password, quote(password, safe="")):
+                detail = detail.replace(secret, "***")
         raise ControlPlaneBackupError(f"{argv[0]} exited {res.returncode}: {detail[-500:]}")
 
 

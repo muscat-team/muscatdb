@@ -65,7 +65,50 @@ def test_password_is_passed_by_environment_never_argv(tmp_path, monkeypatch):
     assert not any("s3cret" in a for a in argv)
     assert kwargs["env"]["PGPASSWORD"] == "s3cret"
     conninfo = argv[argv.index("--dbname") + 1]
-    assert "dbname=muscatdb_prod" in conninfo and "host=db.example" in conninfo
+    assert conninfo == "postgresql://muscatdb@db.example:5432/muscatdb_prod"
+
+
+@pytest.mark.parametrize(
+    ("dsn", "conninfo", "password", "dbname"),
+    [
+        # Percent-encoded password, and a password in the query string.
+        ("postgresql://u:p%40ss%2Fw@h:5432/db", "postgresql://u@h:5432/db", "p@ss/w", "db"),
+        ("postgres://u@h/db?sslmode=require&password=pw", "postgres://u@h/db?sslmode=require", "pw", "db"),
+        # Multi-host lists and an '@' inside the user name pass through.
+        ("postgresql://a%40b:pw@h1:5432,h2:5433/db", "postgresql://a%40b@h1:5432,h2:5433/db", "pw", "db"),
+        ("postgresql:///db?host=/run/postgresql", "postgresql:///db?host=/run/postgresql", "", "db"),
+        # Keyword form, quoted values with escapes.
+        (
+            "host=h dbname = db password='it\\'s a \\\\secret' user=u",
+            "host='h' dbname='db' user='u'",
+            "it's a \\secret",
+            "db",
+        ),
+    ],
+)
+def test_split_dsn_cuts_out_only_the_password(dsn, conninfo, password, dbname):
+    assert pg_backup._split_dsn(dsn) == (conninfo, password, dbname)
+
+
+@pytest.mark.parametrize("dsn", ["host=h dbname", "host=h password='unterminated dbname=db"])
+def test_malformed_keyword_dsn_is_an_error(dsn):
+    with pytest.raises(pg_backup.ControlPlaneBackupError, match="not a valid connection string"):
+        pg_backup._split_dsn(dsn)
+
+
+def test_encoded_password_is_redacted_too(tmp_path, monkeypatch):
+    dsn = "postgresql://u:p%40ss@h/db"
+
+    class _Leaky(_FakeRun):
+        def __call__(self, argv, **kwargs):
+            res = super().__call__(argv, **kwargs)
+            res.stderr = f"connection to {dsn} failed (password p@ss)"
+            return res
+
+    monkeypatch.setattr(pg_backup.subprocess, "run", _Leaky(fail="pg_dump"))
+    with pytest.raises(pg_backup.ControlPlaneBackupError) as info:
+        pg_backup.dump_control_plane(dsn, dest_dir=tmp_path, now=_NOW)
+    assert "p@ss" not in str(info.value) and "p%40ss" not in str(info.value)
 
 
 def test_failed_pg_dump_leaves_no_archive(tmp_path, monkeypatch):
