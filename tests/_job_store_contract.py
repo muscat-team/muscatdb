@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import time
 
-from muscat_db import job_store
+from muscat_db import database, job_store
 
 
 def save(store, *, target, state, started_at, type_="photometry", run_id="", **kw):
@@ -98,6 +98,26 @@ class JobStoreContractTests:
         save(store, type_="transit_fit", target="OTHER", state="pending", started_at=50.0)
         pend = store.pending("photometry")
         assert [r["target"] for r in pend] == ["P1", "P2"]  # oldest-first, photometry only
+
+    def test_pending_breaks_started_at_ties_by_key(self, store):
+        save(store, target="B", state="pending", started_at=100.0)
+        save(store, target="A", state="pending", started_at=100.0)
+        assert [r["target"] for r in store.pending("photometry")] == ["A", "B"]
+
+    def test_pending_does_not_read_the_whole_job_history(self, store, monkeypatch):
+        """Issue #51 step D: every drain pass of every worker unit calls
+        pending(), so it must filter in SQL, not load all() and filter."""
+        save(store, target="P", state="pending", started_at=100.0)
+        save(store, target="D", state="done", started_at=50.0)
+
+        def _full_scan(*_a, **_k):
+            raise AssertionError("pending() read the whole job history")
+
+        monkeypatch.setattr(database, "get_persisted_jobs", _full_scan)
+        monkeypatch.setattr(store, "all", _full_scan)
+        pend = store.pending("photometry")
+        assert [r["target"] for r in pend] == ["P"]
+        assert pend[0]["inst"] == "muscat4" and pend[0]["date"] == "260101"
 
     # --- instant dispatch: wait_for_work (architecture issue #51,
     # "Signalling & live logs") -----------------------------------------

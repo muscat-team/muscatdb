@@ -485,13 +485,7 @@ class DatabaseJobStore(JobRepository, JobQueue, JobConcurrency):
             logger.debug("failed to signal work for pipeline=%s", type_, exc_info=True)
 
     def pending(self, type_: str) -> list[dict]:
-        rows = [
-            j
-            for j in database.get_persisted_jobs()
-            if j.get("type") == type_ and j.get("state") == "pending"
-        ]
-        rows.sort(key=lambda j: j.get("started_at") or 0)
-        return rows
+        return database.get_pending_persisted_jobs(type_)
 
     def claim_slot(
         self,
@@ -981,9 +975,17 @@ class PostgresJobStore(JobRepository, JobQueue, JobConcurrency):
             logger.debug("failed to signal work for pipeline=%s", type_, exc_info=True)
 
     def pending(self, type_: str) -> list[dict]:
-        rows = [j for j in self.all() if j.get("type") == type_ and j.get("state") == "pending"]
-        rows.sort(key=lambda j: j.get("started_at") or 0)
-        return rows
+        # Filtered in SQL (issue #51 step D): every drain pass of every
+        # worker unit calls this, and the job history only grows.
+        with self._pool.connection() as conn:
+            cur = conn.execute(
+                "SELECT * FROM jobs WHERE state = 'pending' AND type = %s "
+                "ORDER BY started_at, key",
+                (type_,),
+            )
+            columns = [d.name for d in cur.description]
+            rows = cur.fetchall()
+        return _pg_rows_to_dicts(columns, rows)
 
     def _signal_work(self, type_: str) -> None:
         if not _NOTIFY_ENABLED:

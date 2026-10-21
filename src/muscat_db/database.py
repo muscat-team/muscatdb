@@ -2807,6 +2807,33 @@ def get_active_persisted_jobs() -> list[dict]:
         return result
 
 
+def get_pending_persisted_jobs(type_: str) -> list[dict]:
+    """Return pending rows of *type_*, oldest-first (FIFO drain order).
+
+    Every pending-drain pass calls this, so it filters in SQL on the
+    active-state index rather than reading the whole job history.
+    """
+    path = db_path()
+    with get_conn(path) as conn:
+        _ensure_jobs_migrated(conn, path)
+        cur = conn.execute(
+            """SELECT * FROM jobs
+               WHERE state = 'pending' AND type = ?
+               ORDER BY started_at, key""",
+            (type_,),
+        )
+        columns = [d[0] for d in cur.description]
+        result = []
+        for row in cur.fetchall():
+            item = dict(zip(columns, row))
+            item["inst"] = item["instrument"]
+            item["date"] = item["obsdate"]
+            if not str(item.get("run_name") or "").strip():
+                item["run_name"] = str(item.get("run_id") or "").strip()
+            result.append(item)
+        return result
+
+
 def save_ephemeris_view(state: dict) -> dict:
     """Persist a deterministic ephemeris page view and return its slug."""
     path = db_path()
