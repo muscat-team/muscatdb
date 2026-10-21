@@ -639,14 +639,87 @@ def grant_target(db_path: str, username: str, target: str, granted_by: str) -> b
     return created
 
 
-def revoke_target(db_path: str, username: str, target: str) -> bool:
+def revoke_target(db_path: str, username: str, target: str, revoked_by: str = "") -> bool:
     with get_conn(db_path) as conn:
         _ensure_schema(conn)
         removed = access_groups.remove_target_grants(
-            conn, access_groups.user_group(username), target
+            conn, access_groups.user_group(username), target, revoked_by
         )
         conn.commit()
     return removed > 0
+
+
+def create_group(db_path: str, name: str, description: str = "") -> bool:
+    """Create an explicit group. Returns False if one by that name exists.
+    The caller checks the name with :func:`access_groups.check_group_name`."""
+    with get_conn(db_path) as conn:
+        _ensure_schema(conn)
+        created = access_groups.ensure_group(conn, name, description)
+        conn.commit()
+    return created
+
+
+def group_exists(db_path: str, name: str) -> bool:
+    with get_conn(db_path) as conn:
+        _ensure_schema(conn)
+        return access_groups.group_exists(conn, name)
+
+
+def add_group_member(db_path: str, group: str, username: str, added_by: str) -> bool:
+    with get_conn(db_path) as conn:
+        _ensure_schema(conn)
+        added = access_groups.add_member(conn, group, username, added_by)
+        conn.commit()
+    return added
+
+
+def remove_group_member(db_path: str, group: str, username: str) -> bool:
+    with get_conn(db_path) as conn:
+        _ensure_schema(conn)
+        removed = access_groups.remove_member(conn, group, username)
+        conn.commit()
+    return removed
+
+
+def grant_group(
+    db_path: str,
+    group: str,
+    selector: access_groups.Selector,
+    note: str,
+    granted_by: str,
+) -> int | None:
+    """Grant *selector* to *group*. A ``user:<name>`` group is created on the
+    way, with that user as its member, as :func:`grant_target` does. Returns
+    the new grant's id, or ``None`` when an identical grant exists."""
+    with get_conn(db_path) as conn:
+        _ensure_schema(conn)
+        if group.lower().startswith(access_groups.USER_PREFIX):
+            username = group[len(access_groups.USER_PREFIX):]
+            access_groups.ensure_group(conn, group, f"direct grants for {username}", builtin=True)
+            access_groups.add_member(conn, group, username, granted_by)
+        created = access_groups.add_grant(
+            conn,
+            group,
+            proposal_id=selector.proposal_id,
+            instrument=selector.instrument,
+            target=selector.target,
+            date_from=selector.date_from,
+            date_to=selector.date_to,
+            note=note,
+            granted_by=granted_by,
+        )
+        grant_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0] if created else None
+        conn.commit()
+    return grant_id
+
+
+def revoke_group_grant(db_path: str, grant_id: int, revoked_by: str) -> dict | None:
+    """Revoke one grant by id, keeping it in ``group_grants_revoked``."""
+    with get_conn(db_path) as conn:
+        _ensure_schema(conn)
+        row = access_groups.revoke_grant(conn, grant_id, revoked_by)
+        conn.commit()
+    return row
 
 
 def target_matches_observations(db_path: str, target: str) -> bool:
@@ -719,6 +792,16 @@ def explain_user(db_path: str, username: str) -> dict:
         "target_grants": list_target_grants(db_path, username),
         "unmatched_grants": sorted(granted - observed),
         "unmatched_restrictions": sorted(restricted - observed),
+        # group grants (#228) that match no observation: data gone dark
+        "dead_group_grants": [
+            {
+                "id": g.id,
+                "group": g.group,
+                "label": access_groups.grant_label(vars(g)),
+                "target": g.target,
+            }
+            for g in access_groups.dead_grants(db_path, username)
+        ],
     }
 
 

@@ -428,6 +428,26 @@ CREATE TABLE IF NOT EXISTS group_grants (
            OR target IS NOT NULL OR date_from IS NOT NULL)
 );
 CREATE INDEX IF NOT EXISTS idx_group_grants_group ON group_grants(groupname);
+
+-- Revoked grants, moved here from group_grants (issue #228, step 4) so the
+-- history of who could see what survives. A separate table rather than a
+-- revoked_at column on group_grants: no reader of the live grants can forget
+-- to filter one out. ``id`` is the grant's own id, which AUTOINCREMENT never
+-- reuses.
+CREATE TABLE IF NOT EXISTS group_grants_revoked (
+    id          INTEGER PRIMARY KEY,
+    groupname   TEXT NOT NULL COLLATE NOCASE,
+    proposal_id TEXT COLLATE NOCASE,
+    instrument  TEXT COLLATE NOCASE,
+    target      TEXT,
+    date_from   TEXT,
+    date_to     TEXT,
+    note        TEXT NOT NULL DEFAULT '',
+    granted_by  TEXT NOT NULL DEFAULT '',
+    granted_at  TEXT NOT NULL DEFAULT '',
+    revoked_by  TEXT NOT NULL DEFAULT '',
+    revoked_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 # Idempotent schema migrations for columns added after initial deployment.
@@ -927,6 +947,7 @@ _APP_OWNED_TABLES = (
     "group_members",
     "group_exclusions",
     "group_grants",
+    "group_grants_revoked",
 )
 
 

@@ -47,6 +47,12 @@ uv run muscat-db access unrestrict <proposal_id>   # also shares a newly ingeste
 uv run muscat-db access grant <user> <proposal_id>
 uv run muscat-db access revoke <user> <proposal_id>
 uv run muscat-db access explain <user> [--target <name>]   # read-only: what <user> sees, per proposal
+# Access groups (issue #228): grants are ANDed fields; `user:<name>` is one user
+uv run muscat-db access group create <group> [--description "..."]
+uv run muscat-db access group add <group> <user>      # / remove
+uv run muscat-db access group grant <group> [--proposal P] [--instrument I] [--target T] [--date YYMMDD | --from A --to B] [--note "..."]
+uv run muscat-db access group revoke <grant-id>       # kept in group_grants_revoked
+uv run muscat-db access group list [<group>]          # read-only
 uv run muscat-db access list [--user <user>]
 # Scoped viewer (issue #202): sees only the proposals granted to them
 uv run muscat-db access scope <user> [--off]

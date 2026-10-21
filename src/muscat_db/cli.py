@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import getpass
 import os
 import re
@@ -1342,6 +1343,13 @@ access_app = typer.Typer(
 )
 app.add_typer(access_app)
 
+group_app = typer.Typer(
+    name="group",
+    help="Access groups (issue #228): create groups, add members, grant data to them.",
+    no_args_is_help=True,
+)
+access_app.add_typer(group_app)
+
 
 def _warn_restriction_gaps(db: str, proposal_id: str) -> None:
     """Say loudly what a new restriction does not yet cover."""
@@ -1563,7 +1571,7 @@ def access_revoke_target(
     from muscat_db import access
     from muscat_db.database import db_path
 
-    if not access.revoke_target(db_path(), username, target.strip()):
+    if not access.revoke_target(db_path(), username, target.strip(), getpass.getuser()):
         console.print(f"[yellow]{username} had no target grant for {target}[/]")
         raise typer.Exit(1)
     console.print(f"[green]{username} revoked from target {target}[/]")
@@ -1689,6 +1697,202 @@ def access_groups_check(
     raise typer.Exit(1)
 
 
+def _refuse_implicit_group(group: str, action: str) -> None:
+    """Exit 1 for a group whose membership is implied, saying what to use."""
+    from muscat_db import access_groups
+
+    name = group.lower()
+    if name == access_groups.EVERYONE:
+        console.print(
+            "[red]Every user is in `everyone`. To take one out of it, make them a "
+            "scoped viewer with `muscat-db access scope <user>`.[/]"
+        )
+    elif name == access_groups.ADMIN:
+        console.print(
+            f"[red]`admin` mirrors users.is_admin, so it cannot be {action}. "
+            "Use `muscat-db htpasswd promote <user>`.[/]"
+        )
+    elif name.startswith(access_groups.USER_PREFIX):
+        console.print(
+            f"[red]`{group}` holds one user's direct grants and has no other members "
+            f"(`user:` groups are made by `access group grant user:<name> ...`).[/]"
+        )
+    else:
+        return
+    raise typer.Exit(1)
+
+
+@group_app.command("create")
+def access_group_create(
+    name: str = typer.Argument(..., help="Group name, e.g. toi6109-team"),
+    description: str = typer.Option("", "--description", "-d", help="Free-text note"),
+):
+    """Create a group. Add members with `group add`, data with `group grant`."""
+    from muscat_db import access, access_groups
+    from muscat_db.database import db_path
+
+    problem = access_groups.check_group_name(name)
+    if problem:
+        console.print(f"[red]Error: {problem}[/]")
+        raise typer.Exit(1)
+    if not access.create_group(db_path(), name, description):
+        console.print(f"[yellow]Group {name} already exists[/]")
+        raise typer.Exit(1)
+    console.print(f"[green]Group {name} created[/]")
+
+
+@group_app.command("add")
+def access_group_add(
+    group: str = typer.Argument(..., help="Group name"),
+    username: str = typer.Argument(..., help="nginx username"),
+):
+    """Add a user to a group, so they see everything granted to it."""
+    from muscat_db import access
+    from muscat_db.database import db_path
+
+    _refuse_implicit_group(group, "joined")
+    db = db_path()
+    if not access.group_exists(db, group):
+        console.print(f"[red]Error: no group {group}; create it with `access group create`[/]")
+        raise typer.Exit(1)
+    if not access.user_exists(db, username):
+        console.print(
+            f"[yellow]{username} has no users row yet (not added via `muscat-db "
+            "htpasswd add`, or has never logged in). Adding anyway.[/]"
+        )
+    if access.add_group_member(db, group, username, getpass.getuser()):
+        console.print(f"[green]{username} added to {group}[/]")
+    else:
+        console.print(f"[yellow]{username} is already in {group}[/]")
+
+
+@group_app.command("remove")
+def access_group_remove(
+    group: str = typer.Argument(..., help="Group name"),
+    username: str = typer.Argument(..., help="nginx username"),
+):
+    """Remove a user from a group."""
+    from muscat_db import access
+    from muscat_db.database import db_path
+
+    _refuse_implicit_group(group, "left")
+    if not access.remove_group_member(db_path(), group, username):
+        console.print(f"[yellow]{username} is not in {group}[/]")
+        raise typer.Exit(1)
+    console.print(f"[green]{username} removed from {group}[/]")
+
+
+@group_app.command("grant")
+def access_group_grant(
+    group: str = typer.Argument(..., help="Group name, `everyone`, or `user:<name>` for one user"),
+    proposal_id: str | None = typer.Option(None, "--proposal", help="LCO proposal id"),
+    instrument: str | None = typer.Option(None, "--instrument", help="Instrument, e.g. sinistro"),
+    target: str | None = typer.Option(None, "--target", help="Target name (spaces and case ignored)"),
+    date: str | None = typer.Option(None, "--date", help="One obsdate, YYMMDD"),
+    date_from: str | None = typer.Option(None, "--from", help="First obsdate, YYMMDD (inclusive)"),
+    date_to: str | None = typer.Option(None, "--to", help="Last obsdate, YYMMDD (inclusive)"),
+    note: str = typer.Option("", "--note", help="Why, for the record"),
+    granted_by: str = typer.Option(
+        None, "--by", help="Recorded as the granting admin (default: your OS user)"
+    ),
+):
+    """Grant a group the observations matching every given field.
+
+    Fields are ANDed: `--proposal CON2025B-002 --target TOI-6109` is that
+    target within that proposal only. Prints the grant id for `group revoke`.
+    """
+    from muscat_db import access, access_groups
+    from muscat_db.database import db_path
+    from muscat_db.instruments import INSTRUMENTS
+
+    if group.lower() == access_groups.ADMIN:
+        _refuse_implicit_group(group, "granted data")
+    db = db_path()
+    is_user_group = group.lower().startswith(access_groups.USER_PREFIX)
+    if not is_user_group and not access.group_exists(db, group):
+        console.print(f"[red]Error: no group {group}; create it with `access group create`[/]")
+        raise typer.Exit(1)
+    try:
+        selector = access_groups.check_selector(
+            proposal_id=proposal_id,
+            instrument=instrument,
+            target=target,
+            date=date,
+            date_from=date_from,
+            date_to=date_to,
+            instruments=INSTRUMENTS,
+        )
+    except ValueError as exc:
+        console.print(f"[red]Error: {exc}[/]")
+        raise typer.Exit(1) from exc
+    if selector.proposal_id is not None:
+        observed = access.observed_spelling(db, selector.proposal_id)
+        if observed is not None:
+            selector = dataclasses.replace(selector, proposal_id=observed)
+    grant_id = access.grant_group(db, group, selector, note, granted_by or getpass.getuser())
+    label = access_groups.grant_label(dataclasses.asdict(selector))
+    if grant_id is None:
+        console.print(f"[yellow]{group} already has {label}[/]")
+        raise typer.Exit(1)
+    console.print(f"[green]Grant #{grant_id}: {group} sees {label}[/]")
+    if not access_groups.matching_summaries(db, access_groups.load_grant(db, grant_id)):
+        console.print(
+            f"[yellow]Grant #{grant_id} matches no observation yet (typo, renamed "
+            "target, or not yet ingested?), so it shows its group nothing.[/]"
+        )
+
+
+@group_app.command("revoke")
+def access_group_revoke(
+    grant_id: int = typer.Argument(..., help="Grant id, from `group list` or `group grant`"),
+    revoked_by: str = typer.Option(
+        None, "--by", help="Recorded as the revoking admin (default: your OS user)"
+    ),
+):
+    """Revoke one grant. It is kept in the revoked-grant history."""
+    from muscat_db import access, access_groups
+    from muscat_db.database import db_path
+
+    row = access.revoke_group_grant(db_path(), grant_id, revoked_by or getpass.getuser())
+    if row is None:
+        console.print(f"[yellow]No grant #{grant_id}[/]")
+        raise typer.Exit(1)
+    console.print(
+        f"[green]Grant #{grant_id} revoked: {row['groupname']} no longer sees "
+        f"{access_groups.grant_label(row)}[/]"
+    )
+
+
+@group_app.command("list")
+def access_group_list(
+    group: str | None = typer.Argument(None, help="Only this group"),
+):
+    """List groups with their members and grants (read-only)."""
+    from muscat_db import access_groups
+    from muscat_db.database import db_path
+
+    groups = access_groups.list_groups(db_path(), group)
+    if not groups:
+        console.print(f"[yellow]No group {group}[/]" if group else "[yellow]No groups yet[/]")
+        raise typer.Exit(1 if group else 0)
+    for g in groups:
+        kind = " (built-in)" if g["builtin"] else ""
+        desc = f" -- {g['description']}" if g["description"] else ""
+        console.print(f"[bold cyan]{g['name']}[/]{kind}{desc}")
+        if g["name"].lower() == access_groups.EVERYONE:
+            console.print("  members: every user" + (
+                f", except {', '.join(g['excluded'])}" if g["excluded"] else ""
+            ))
+        else:
+            console.print(f"  members: {', '.join(g['members']) or '-'}")
+        for grant in g["grants"]:
+            by = f" (by {grant['granted_by']})" if grant["granted_by"] else ""
+            note = f" -- {grant['note']}" if grant["note"] else ""
+            console.print(f"  #{grant['id']} {access_groups.grant_label(grant)}{by}{note}")
+        if not g["grants"]:
+            console.print("  no grants")
+
+
 @access_app.command("explain")
 def access_explain(
     username: str = typer.Argument(..., help="nginx username"),
@@ -1742,6 +1946,11 @@ def access_explain(
         )
     for pid in info["unmatched_restrictions"]:
         console.print(f"[yellow]Restriction {pid} matches no observation.[/]")
+    for g in info["dead_group_grants"]:
+        console.print(
+            f"[yellow]Group grant #{g['id']} ({g['group']}: {g['label']}) matches no "
+            f"observation, so it shows {username} nothing.[/]"
+        )
 
     if target is not None:
         rows = access.explain_target(db, username, target)

@@ -27,6 +27,7 @@ after that is hidden until the next build: it fails closed, like #202.
 from __future__ import annotations
 
 import logging
+import re
 import sqlite3
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
@@ -321,14 +322,45 @@ def scoped_target_rules(
     )
 
 
-def remove_target_grants(conn: sqlite3.Connection, group: str, target: str) -> int:
-    """Delete *group*'s grants on *target* (case-insensitive). Returns the count."""
-    cur = conn.execute(
-        "DELETE FROM group_grants WHERE groupname = ? AND target IS NOT NULL "
-        "AND lower(target) = lower(?)",
-        (group, target),
+_GRANT_COLUMNS = (
+    "id, groupname, proposal_id, instrument, target, date_from, date_to, "
+    "note, granted_by, granted_at"
+)
+
+
+def _archive_grants(conn: sqlite3.Connection, where: str, params: tuple, revoked_by: str) -> int:
+    """Move the grants selected by *where* to ``group_grants_revoked``, so a
+    revoke keeps its history. *where* is a trusted literal. Returns the count."""
+    conn.execute(
+        f"INSERT INTO group_grants_revoked ({_GRANT_COLUMNS}, revoked_by) "
+        f"SELECT {_GRANT_COLUMNS}, ? FROM group_grants WHERE {where}",
+        (revoked_by, *params),
     )
-    return cur.rowcount
+    return conn.execute(f"DELETE FROM group_grants WHERE {where}", params).rowcount
+
+
+def remove_target_grants(
+    conn: sqlite3.Connection, group: str, target: str, revoked_by: str = ""
+) -> int:
+    """Revoke *group*'s grants on *target* (case-insensitive). Returns the count."""
+    return _archive_grants(
+        conn,
+        "groupname = ? AND target IS NOT NULL AND lower(target) = lower(?)",
+        (group, target),
+        revoked_by,
+    )
+
+
+def revoke_grant(conn: sqlite3.Connection, grant_id: int, revoked_by: str = "") -> dict | None:
+    """Revoke one grant by id. Returns the revoked row, or ``None`` if no live
+    grant has that id."""
+    row = conn.execute(
+        f"SELECT {_GRANT_COLUMNS} FROM group_grants WHERE id = ?", (grant_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    _archive_grants(conn, "id = ?", (grant_id,), revoked_by)
+    return dict(zip([c.strip() for c in _GRANT_COLUMNS.split(",")], row))
 
 
 # ── writes (CLI only) ───────────────────────────────────────────────────
@@ -340,6 +372,17 @@ def ensure_group(
     cur = conn.execute(
         "INSERT OR IGNORE INTO groups (name, description, builtin) VALUES (?, ?, ?)",
         (name, description, 1 if builtin else 0),
+    )
+    return cur.rowcount > 0
+
+
+def group_exists(conn: sqlite3.Connection, name: str) -> bool:
+    return conn.execute("SELECT 1 FROM groups WHERE name = ?", (name,)).fetchone() is not None
+
+
+def remove_member(conn: sqlite3.Connection, group: str, username: str) -> bool:
+    cur = conn.execute(
+        "DELETE FROM group_members WHERE groupname = ? AND username = ?", (group, username)
     )
     return cur.rowcount > 0
 
@@ -561,3 +604,167 @@ def parity(db_path: str, normalize: Callable[[str], str] | None = None) -> list[
                     }
                 )
     return mismatches
+
+
+# ── admin CLI support (rollout step 4) ──────────────────────────────────
+
+# A group made by hand: no ``user:`` prefix (those are made implicitly per
+# user) and short enough to read in a table.
+_GROUP_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+_YYMMDD = re.compile(r"\d{6}")
+RESERVED_GROUPS = (EVERYONE, ADMIN)
+
+
+def check_group_name(name: str) -> str | None:
+    """Why *name* cannot be created as a group, or ``None`` when it can."""
+    if name.lower() in RESERVED_GROUPS:
+        return f"'{name}' is a built-in group"
+    if name.lower().startswith(USER_PREFIX):
+        return f"'{USER_PREFIX}<name>' groups are made by granting to one user"
+    if not _GROUP_NAME.fullmatch(name):
+        return (
+            "a group name is 1-64 letters, digits, '_', '.' or '-', "
+            "starting with a letter or digit"
+        )
+    return None
+
+
+@dataclass(frozen=True)
+class Selector:
+    """The fields of one grant, checked. ``None`` means "any"."""
+
+    proposal_id: str | None = None
+    instrument: str | None = None
+    target: str | None = None
+    date_from: str | None = None
+    date_to: str | None = None
+
+
+def check_selector(
+    *,
+    proposal_id: str | None,
+    instrument: str | None,
+    target: str | None,
+    date: str | None,
+    date_from: str | None,
+    date_to: str | None,
+    instruments: Iterable[str],
+) -> Selector:
+    """Validate a grant's fields, or raise :class:`ValueError` saying why."""
+    proposal_id = (proposal_id or "").strip() or None
+    target = (target or "").strip() or None
+    instrument = (instrument or "").strip().lower() or None
+    if date is not None and (date_from is not None or date_to is not None):
+        raise ValueError("Give either --date or --from/--to, not both.")
+    if date_to is not None and date_from is None:
+        raise ValueError("--to needs --from.")
+    if date is not None:
+        date_from = date_to = date
+    for value in (date_from, date_to):
+        if value is not None and not _YYMMDD.fullmatch(value):
+            raise ValueError(f"Dates are YYMMDD obsdates, got '{value}'.")
+    if date_from is not None and date_to is None:
+        date_to = date_from
+    if date_from is not None and date_from > date_to:
+        raise ValueError(f"--from {date_from} is after --to {date_to}.")
+    known = sorted(instruments)
+    if instrument is not None and instrument not in known:
+        raise ValueError(f"unknown instrument '{instrument}' (known: {', '.join(known)}).")
+    if not (proposal_id or instrument or target or date_from):
+        raise ValueError("Give at least one of --proposal, --instrument, --target or --date/--from.")
+    return Selector(proposal_id, instrument, target, date_from, date_to)
+
+
+def grant_label(row: dict) -> str:
+    """One grant as ``field=value`` pairs, the way the CLI prints it."""
+    parts = []
+    if row.get("proposal_id") is not None:
+        parts.append(f"proposal={row['proposal_id'] or '(blank)'}")
+    if row.get("instrument") is not None:
+        parts.append(f"instrument={row['instrument']}")
+    if row.get("target") is not None:
+        parts.append(f"target={row['target']}")
+    if row.get("date_from") is not None:
+        same = row["date_from"] == row.get("date_to")
+        parts.append(f"date={row['date_from']}" if same else f"dates={row['date_from']}-{row['date_to']}")
+    return " ".join(parts)
+
+
+def list_groups(db_path: str, name: str | None = None) -> list[dict]:
+    """Groups with their members, exclusions and live grants, for ``access
+    group list``. Hidden ``user:<name>`` groups are included: they hold the
+    direct grants."""
+    with get_conn(db_path) as conn:
+        _apply_schema(conn)
+        where, params = ("WHERE name = ?", (name,)) if name else ("", ())
+        groups = conn.execute(
+            f"SELECT name, description, builtin FROM groups {where} ORDER BY builtin DESC, name",
+            params,
+        ).fetchall()
+        out = []
+        for gname, desc, builtin in groups:
+            members = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT username FROM group_members WHERE groupname = ? ORDER BY username",
+                    (gname,),
+                )
+            ]
+            excluded = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT username FROM group_exclusions WHERE groupname = ? ORDER BY username",
+                    (gname,),
+                )
+            ]
+            cols = [c.strip() for c in _GRANT_COLUMNS.split(",")]
+            grants = [
+                dict(zip(cols, r))
+                for r in conn.execute(
+                    f"SELECT {_GRANT_COLUMNS} FROM group_grants WHERE groupname = ? ORDER BY id",
+                    (gname,),
+                )
+            ]
+            out.append(
+                {
+                    "name": gname,
+                    "description": desc,
+                    "builtin": bool(builtin),
+                    "members": members,
+                    "excluded": excluded,
+                    "grants": grants,
+                }
+            )
+    return out
+
+
+def matching_summaries(db_path: str, grant: Grant) -> int:
+    """How many ``summaries`` rows *grant* matches. Zero means the grant shows
+    its group nothing: a typo, a renamed target, or data not yet ingested."""
+    clause, params = grant.sql()
+    if clause == "0":
+        return 0
+    with get_conn(db_path) as conn:
+        return conn.execute(f"SELECT COUNT(*) FROM summaries WHERE {clause}", params).fetchone()[0]
+
+
+def dead_grants(db_path: str, user: str | None, normalize: Callable[[str], str] | None = None) -> list[Grant]:
+    """The grants reaching *user* that match no observation."""
+    return [g for g in load_access(db_path, user, normalize).grants if not matching_summaries(db_path, g)]
+
+
+def load_grant(db_path: str, grant_id: int, normalize: Callable[[str], str] | None = None) -> Grant:
+    """One live grant by id, its target resolved as :func:`load_access` does."""
+    with get_conn(db_path) as conn:
+        r = conn.execute(
+            "SELECT id, groupname, proposal_id, instrument, target, date_from, date_to "
+            "FROM group_grants WHERE id = ?",
+            (grant_id,),
+        ).fetchone()
+        if r is None:
+            raise KeyError(grant_id)
+        objects = None
+        if r[4] is not None:
+            names = [o[0] for o in conn.execute("SELECT DISTINCT object FROM summaries")]
+            objects = _resolve_objects([r[4]], names, normalize)[r[4]]
+    return Grant(*r, objects=objects)
