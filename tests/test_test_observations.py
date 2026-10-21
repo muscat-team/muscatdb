@@ -145,7 +145,52 @@ def test_draft_may_not_change_protected_keys():
     edited_window = {**plan["window"], "end": _transit(5)["end"]}
     with pytest.raises(subject.TestObservationError, match="window"):
         subject.merge_plan_override(plan, {"window": edited_window})
-    assert subject.merge_plan_override(plan, {"window": plan["window"], "exposure_budget_s": 300})["exposure_budget_s"] == 300
+    with pytest.raises(subject.TestObservationError, match="exposure_budget_s"):
+        subject.merge_plan_override(plan, {"exposure_budget_s": 6000})
+    # Unchanged protected keys (the draft echoes them back) are accepted.
+    assert subject.merge_plan_override(plan, {"window": plan["window"], "warnings": ["x"]})["warnings"] == ["x"]
+
+
+def _edit_first(plan: dict, **changes) -> list[dict]:
+    configs = [dict(c) for c in plan["configurations"]]
+    configs[0] = {**configs[0], **changes}
+    return configs
+
+
+def test_draft_may_edit_exposures_and_repeats_and_estimates_follow():
+    plan = subject.generate_plan(_payload())
+    configs = _edit_first(plan, exposure_times={"rp": 25.0}, exposure_time=25.0, repeats=4)
+    merged = subject.merge_plan_override(plan, {"configurations": configs})
+    assert merged["configurations"][0]["exposure_times"] == {"rp": 25.0}
+    assert merged["configurations"][0]["repeats"] == 4
+    assert merged["estimated_exposure_s"] == pytest.approx(sum(c["exposure_time"] * c["repeats"] for c in configs))
+    assert merged["estimated_wall_clock_s"] == pytest.approx(
+        subject.SETUP_OVERHEAD_S + merged["estimated_exposure_s"]
+        + plan["readout_overhead_s"] * sum(c["repeats"] for c in configs))
+    assert plan["configurations"][0]["exposure_time"] == 30.0  # stored plan left intact
+
+
+@pytest.mark.parametrize("changes, match", [
+    ({"center_ra": 5.0}, "center_ra"),
+    ({"center_dec": 5.0}, "center_dec"),
+    ({"pa_deg": 90}, "pa_deg"),
+    ({"defocus_mm": 3.0}, "defocus_mm"),
+    ({"fov_index": 1}, "fov_index"),
+    ({"exposure_times": {"ip": 30.0}}, "bands"),
+    ({"exposure_time": 99.0}, "longest"),
+    ({"repeats": 1}, "repeats"),
+    ({"exposure_times": {"rp": 500.0}, "exposure_time": 500.0}, "budget"),
+])
+def test_draft_may_not_move_pointing_focus_or_break_the_budget(changes, match):
+    plan = subject.generate_plan(_payload())
+    with pytest.raises(subject.TestObservationError, match=match):
+        subject.merge_plan_override(plan, {"configurations": _edit_first(plan, **changes)})
+
+
+def test_draft_may_not_drop_configurations():
+    plan = subject.generate_plan(_payload())
+    with pytest.raises(subject.TestObservationError, match="keep its"):
+        subject.merge_plan_override(plan, {"configurations": plan["configurations"][:1]})
 
 
 def test_request_window_rejects_overlap_and_expiry():
@@ -166,7 +211,7 @@ def test_test_request_uses_only_the_test_window(monkeypatch):
     params = {"name": "X", "proposal": "P", "target_name": "WASP-12", "ra": 1.0, "dec": 2.0, "site": "coj",
               "windows": plan["science_windows"], "filter": "rp", "readout_mode": "central_2k_2x2"}
     monkeypatch.setattr(lco, "_clip_windows_to_observability", lambda *a, **k: None)
-    rg = web._test_request(record, params)
+    rg, _plan = web._test_request(record, params)
     assert rg["requests"][0]["windows"] == [plan["window"]]
     assert rg["name"].startswith("TEST ")
     targets = {(c["target"]["ra"], c["target"]["dec"]) for c in rg["requests"][0]["configurations"]}
@@ -316,3 +361,33 @@ def test_plan_route_fixes_pa_and_tests_optimized_and_centred_fovs(db, monkeypatc
     assert [(f["center_ra"], f["center_dec"], f["pa_deg"]) for f in plan["fov_candidates"]] == [(1.01, 2.01, 0), (1.0, 2.0, 0)]
     assert plan["science_windows"] == body["windows"]
     assert {c["fov_index"] for c in plan["configurations"]} == {0, 1}
+
+
+def test_submit_stores_the_draft_edits_the_analysis_matches_against(db, monkeypatch):
+    # A draft edit changes the exposure LCO takes; the stored plan has to
+    # follow, or match_configuration compares frames with the old times.
+    from fastapi.testclient import TestClient
+
+    from muscat_db import web
+
+    monkeypatch.setattr(subject, "db_path", lambda: str(db))
+    monkeypatch.setattr(lco, "_clip_windows_to_observability", lambda *a, **k: None)
+    monkeypatch.setattr(web.lco, "max_allowable_ipp", lambda rg, user: {})
+    monkeypatch.setattr(web.lco, "submit_requestgroup", lambda rg, user: {"id": 1})
+    monkeypatch.setattr(web, "_submitted_request_ids", lambda result: [11])
+    monkeypatch.setattr(web, "_record_lco_submission", lambda *a, **k: {})
+    plan = subject.generate_plan(_payload(now=_iso(dt.datetime.now(dt.timezone.utc))))
+    record = subject.create_record(plan, db)
+    edited = _edit_first(plan, exposure_times={"rp": 25.0}, exposure_time=25.0)
+    params = {"name": "X", "proposal": "P", "target_name": "WASP-12", "ra": 1.0, "dec": 2.0, "site": "coj",
+              "filter": "rp", "readout_mode": "central_2k_2x2", "plan_override": {"configurations": edited}}
+    client = TestClient(web.app)
+    url = f"/api/lco/test-observations/{record['id']}"
+    dry = client.post(f"{url}/ipp", json=params)
+    assert dry.status_code == 200, dry.text
+    sent = client.post(f"{url}/submit", json={**params, "confirm": True, "dry_run_hash": dry.json()["payload_hash"]})
+    assert sent.status_code == 200, sent.text
+    stored = subject.get_record(record["id"], db)
+    assert stored["state"] == "submitted"
+    assert stored["plan"]["configurations"][0]["exposure_times"] == {"rp": 25.0}
+    assert stored["plan"]["configurations"][0]["exposure_time"] == 25.0

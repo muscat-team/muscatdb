@@ -74,8 +74,12 @@ MIN_TEST_WINDOW_S = 3600.0
 # Plan keys the editable draft may not override: they carry the guarded
 # provenance the request is built and validated from.
 PROTECTED_PLAN_KEYS = frozenset({
-    "version", "kind", "target", "target_coord", "fov_candidates", "window", "science_windows",
+    "version", "kind", "target", "target_coord", "fov_candidates", "window", "window_mode",
+    "science_windows", "exposure_budget_s", "readout_overhead_s",
 })
+# Per-configuration fields the draft may edit. Pointing, PA, focus and FOV stay
+# as planned: they are what the guards above checked.
+EDITABLE_CONFIG_KEYS = frozenset({"exposure_times", "exposure_time", "repeats"})
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS test_observations (
@@ -84,7 +88,7 @@ CREATE TABLE IF NOT EXISTS test_observations (
  request_ids_json TEXT NOT NULL DEFAULT '[]', payload_hash TEXT NOT NULL DEFAULT '',
  state TEXT NOT NULL DEFAULT 'draft', analysis_version TEXT NOT NULL,
  recommendation_json TEXT NOT NULL DEFAULT '{}', failure_detail TEXT NOT NULL DEFAULT '',
- created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+ created_at TEXT NOT NULL, updated_at TEXT NOT NULL, created_by TEXT NOT NULL DEFAULT ''
 );
 """
 
@@ -281,10 +285,8 @@ def generate_plan(payload: dict) -> dict:
             f"exposure budget ({budget:g} s) cannot retain a test for every FOV; "
             "raise the budget or lower the nominal exposure"
         )
-    n_exposures = sum(c["repeats"] for c in kept)
-    wall_clock = SETUP_OVERHEAD_S + used + readout_s * n_exposures
-    if (_parse_utc(window["end"]) - _parse_utc(window["start"])).total_seconds() < wall_clock:
-        raise TestObservationError("test window is shorter than the estimated test duration")
+    wall_clock = _wall_clock_s(kept, readout_s)
+    _check_fits_window(window, wall_clock)
     warnings.extend(w for w in payload.get("plan_warnings") or [] if w)
     return {
         "version": ANALYSIS_VERSION, "kind": kind, "target": payload.get("target_name"), "site": payload.get("site"),
@@ -298,14 +300,77 @@ def generate_plan(payload: dict) -> dict:
     }
 
 
+def _exposure_s(configs: list[dict]) -> float:
+    return sum(float(c["exposure_time"]) * int(c["repeats"]) for c in configs)
+
+
+def _wall_clock_s(configs: list[dict], readout_s: float) -> float:
+    return SETUP_OVERHEAD_S + _exposure_s(configs) + readout_s * sum(int(c["repeats"]) for c in configs)
+
+
+def _check_fits_window(window: dict, wall_clock: float) -> None:
+    if (_parse_utc(window["end"]) - _parse_utc(window["start"])).total_seconds() < wall_clock:
+        raise TestObservationError("test window is shorter than the estimated test duration")
+
+
+def _edited_configuration(stored: dict, edited: Any, index: int) -> dict:
+    """One draft configuration: only exposures and repeats may differ from the plan."""
+    if not isinstance(edited, dict):
+        raise TestObservationError(f"configuration {index} must be an object")
+    changed = sorted(k for k in set(stored) | set(edited)
+                     if k not in EDITABLE_CONFIG_KEYS and edited.get(k) != stored.get(k))
+    if changed:
+        raise TestObservationError(
+            f"draft may not change {', '.join(changed)} of configuration {index}; create a new draft instead"
+        )
+    times = edited.get("exposure_times")
+    if not isinstance(times, dict) or set(times) != set(stored["exposure_times"]):
+        raise TestObservationError(f"configuration {index} must keep the bands {', '.join(sorted(stored['exposure_times']))}")
+    times = {band: _number(value, f"configuration {index} {band} exposure time") for band, value in times.items()}
+    exposure_time = max(times.values())
+    if abs(_number(edited.get("exposure_time"), f"configuration {index} exposure time") - exposure_time) > 1e-9:
+        raise TestObservationError(f"configuration {index}: exposure_time must equal the longest of exposure_times")
+    try:
+        repeats = int(edited.get("repeats"))
+    except (TypeError, ValueError) as exc:
+        raise TestObservationError(f"configuration {index}: repeats must be an integer") from exc
+    if repeats < MIN_REPEATS or repeats != edited.get("repeats"):
+        raise TestObservationError(f"configuration {index}: repeats must be an integer of at least {MIN_REPEATS}")
+    return {**stored, "exposure_times": times, "exposure_time": exposure_time, "repeats": repeats}
+
+
 def merge_plan_override(plan: dict, override: dict | None) -> dict:
-    """Overlay the editable draft on the stored plan, refusing protected keys."""
+    """Overlay the editable draft on the stored plan, refusing protected keys.
+
+    Configurations may only change their exposures and repeats; the result is
+    re-checked against the exposure budget and the test window, and its
+    estimates are recomputed so the stored plan matches what is submitted.
+    """
     if not override:
         return plan
     changed = sorted(k for k in override if k in PROTECTED_PLAN_KEYS and override[k] != plan.get(k))
     if changed:
         raise TestObservationError(f"draft may not change {', '.join(changed)}; create a new draft instead")
-    return {**plan, **override}
+    if plan.get("version") != ANALYSIS_VERSION:
+        raise TestObservationError("draft predates the current test planner; create a new draft")
+    configs = plan["configurations"]
+    edited = override.get("configurations", configs)
+    if not isinstance(edited, list) or len(edited) != len(configs):
+        raise TestObservationError(
+            f"draft must keep its {len(configs)} configuration(s); create a new draft to change them"
+        )
+    configs = [_edited_configuration(stored, item, i) for i, (stored, item) in enumerate(zip(configs, edited))]
+    used = _exposure_s(configs)
+    budget = float(plan["exposure_budget_s"])
+    if used > budget + 1e-9:
+        raise TestObservationError(f"draft exposures total {used:g} s, over the {budget:g} s test budget")
+    readout_s = float(plan["readout_overhead_s"])
+    wall_clock = _wall_clock_s(configs, readout_s)
+    _check_fits_window(plan["window"], wall_clock)
+    return {
+        **plan, **override, "configurations": configs,
+        "estimated_exposure_s": round(used, 6), "estimated_wall_clock_s": round(wall_clock, 6),
+    }
 
 
 def request_window(plan: dict, now: dt.datetime | None = None) -> dict:
@@ -339,6 +404,10 @@ def _connect(path=None):
     conn = connect(path or db_path())
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(test_observations)")}
+    if "created_by" not in columns:
+        # Tables created before ownership was recorded; their rows stay ownerless.
+        conn.execute("ALTER TABLE test_observations ADD COLUMN created_by TEXT NOT NULL DEFAULT ''")
     return conn
 
 
@@ -346,12 +415,12 @@ def _now_iso() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def create_record(plan: dict, path=None) -> dict:
+def create_record(plan: dict, path=None, *, created_by: str = "") -> dict:
     identifier = str(uuid.uuid4())
     now = _now_iso()
     with _connect(path) as conn:
-        conn.execute("INSERT INTO test_observations (id,target,instrument,site,transit_json,plan_json,analysis_version,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
-                     (identifier, plan.get("target") or "", plan["kind"], plan.get("site") or "", json.dumps(plan.get("transit") or {}, sort_keys=True), json.dumps(plan, sort_keys=True), ANALYSIS_VERSION, now, now))
+        conn.execute("INSERT INTO test_observations (id,target,instrument,site,transit_json,plan_json,analysis_version,created_at,updated_at,created_by) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                     (identifier, plan.get("target") or "", plan["kind"], plan.get("site") or "", json.dumps(plan.get("transit") or {}, sort_keys=True), json.dumps(plan, sort_keys=True), ANALYSIS_VERSION, now, now, created_by or ""))
     return get_record(identifier, path)
 
 
@@ -384,7 +453,7 @@ def list_records(*, target: str | None = None, limit: int = 20, path=None) -> li
 
 def update_record(identifier: str, *, state: str, payload_hash: str | None = None, request_ids=None,
                   failure_detail: str = "", result: dict | None = None, recommendation: dict | None = None,
-                  path=None) -> dict:
+                  plan: dict | None = None, path=None) -> dict:
     if state not in STATES:
         raise TestObservationError(f"invalid lifecycle state: {state}")
     now = _now_iso()
@@ -396,8 +465,10 @@ def update_record(identifier: str, *, state: str, payload_hash: str | None = Non
         changed = conn.execute(
             "UPDATE test_observations SET state=?, payload_hash=COALESCE(?,payload_hash), "
             "request_ids_json=COALESCE(?,request_ids_json), result_json=COALESCE(?,result_json), "
-            "recommendation_json=COALESCE(?,recommendation_json), failure_detail=?, updated_at=? WHERE id=?",
-            (state, payload_hash, encoded(request_ids), encoded(result), encoded(recommendation), failure_detail, now, identifier),
+            "recommendation_json=COALESCE(?,recommendation_json), plan_json=COALESCE(?,plan_json), "
+            "failure_detail=?, updated_at=? WHERE id=?",
+            (state, payload_hash, encoded(request_ids), encoded(result), encoded(recommendation), encoded(plan),
+             failure_detail, now, identifier),
         )
         if not changed.rowcount:
             raise KeyError(identifier)

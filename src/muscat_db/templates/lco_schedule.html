@@ -3563,6 +3563,11 @@
       lines.push(focus.recommended
         ? 'Defocus recommended: ' + (focus.defocus_mm !== null ? focus.defocus_mm + ' mm' : 'amount not calibrated') + ' — ' + focus.reason + (focus.note ? ' (' + focus.note + ')' : '')
         : 'No defocus: ' + focus.reason);
+      var atFocus = rec.exposure_times_target_defocused;
+      if (focus.recommended && atFocus) {
+        lines.push('Target-safe exposures at ' + focus.defocus_mm + ' mm: ' +
+          Object.keys(atFocus).map(function (b) { return b + ' ' + fmtSeconds(atFocus[b]) + ' s'; }).join(', '));
+      }
     }
     (rec.contamination || []).forEach(function (c) {
       lines.push('Possible contamination (' + c.source + (c.bands ? ' ' + c.bands.join('/') : '') + '): ' + c.sep_arcsec + '" away, ' +
@@ -3588,7 +3593,13 @@
     if (!currentRecommendation) return;
     var rec = currentRecommendation.recommendation || {};
     var kind = currentRecommendation.instrument;
-    var times = which === 'target' ? rec.exposure_times_target : rec.exposure_times_with_comparison;
+    // With a recommended defocus, apply the exposures rescaled to it: the
+    // in-focus safe exposures would keep the duty cycle loss defocus fixes.
+    var focus = rec.defocus && rec.defocus.recommended && rec.defocus.defocus_mm !== null ? rec.defocus.defocus_mm : null;
+    var defocused = which === 'target' ? rec.exposure_times_target_defocused : rec.exposure_times_with_comparison_defocused;
+    var useDefocus = focus !== null && !!defocused;
+    var times = useDefocus ? defocused
+      : (which === 'target' ? rec.exposure_times_target : rec.exposure_times_with_comparison);
     if (!times) return;
     if (isSingleFilterKind(kind) !== isSingleFilterKind(val('sch-kind'))) {
       msg('msg-test-apply', 'Science obs instrument does not match this test (' + kind + ').', 'err'); return;
@@ -3601,9 +3612,12 @@
       ['g', 'r', 'i', 'z'].forEach(function (b) { if (times[b] !== undefined) setField('sch-exp-' + b, times[b]); });
     }
     var applied = 'Applied ' + (which === 'target' ? 'target-safe' : 'comparison-safe') + ' exposures';
-    if (rec.defocus && rec.defocus.recommended && rec.defocus.defocus_mm !== null) {
-      setField('sch-defocus', rec.defocus.defocus_mm);
-      applied += ' and ' + rec.defocus.defocus_mm + ' mm defocus';
+    if (useDefocus) {
+      setField('sch-defocus', focus);
+      applied += ' at ' + focus + ' mm defocus';
+    } else if (focus !== null) {
+      // A recommendation stored before defocused exposures were computed.
+      applied += ' (in focus); defocus not applied: re-analyze to get exposures at ' + focus + ' mm';
     }
     if (!rec.target_centred) applied += '. The science request still points at the target; the optimized FOV centre is not applied.';
     msg('msg-test-apply', applied, 'ok');

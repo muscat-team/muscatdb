@@ -1946,15 +1946,18 @@ def test_test_request_overlays_plan_override(monkeypatch):
     monkeypatch.setattr(_web.lco, "build_requestgroup",
                         lambda kind, base, configurations=None: {"kind": kind, "configs": configurations})
     window = {"start": "2999-01-01T00:00:00Z", "end": "2999-01-02T00:00:00Z"}
-    record = {"id": "t1", "plan": {"kind": "sinistro", "exposure_time": 60, "target": "X", "window": window}}
+    record = {"id": "t1", "plan": {
+        "version": _web.test_observations.ANALYSIS_VERSION, "kind": "sinistro", "target": "X", "window": window,
+        "configurations": [], "exposure_budget_s": 600, "readout_overhead_s": 9.0, "warnings": [],
+    }}
 
-    _web._test_request(record, {"name": "TEST X"})
-    assert captured["plan"]["exposure_time"] == 60  # stored plan used as-is
+    _rg, plan = _web._test_request(record, {"name": "TEST X"})
+    assert captured["plan"]["warnings"] == [] and plan is captured["plan"]  # stored plan used as-is
 
-    _web._test_request(record, {"name": "TEST X"}, {"exposure_time": 999})
-    assert captured["plan"]["exposure_time"] == 999  # override applied
-    assert captured["plan"]["target"] == "X"         # untouched keys preserved
-    assert record["plan"]["exposure_time"] == 60     # stored record left intact
+    _web._test_request(record, {"name": "TEST X"}, {"warnings": ["edited"]})
+    assert captured["plan"]["warnings"] == ["edited"]  # override applied
+    assert captured["plan"]["target"] == "X"           # untouched keys preserved
+    assert record["plan"]["warnings"] == []            # stored record left intact
 
 
 def test_lco_split_partial_booking_still_registers_successful_leg(mock_db, monkeypatch):

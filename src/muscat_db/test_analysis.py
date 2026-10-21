@@ -67,6 +67,10 @@ GAIA_FAINT_LIMIT = 21.0
 # sep's OBJ_TRUNC flag: the source runs off the image edge.
 SEP_OBJ_TRUNC = 2
 DEFOCUS_STEP_MM = {"muscat": 0.5, "sinistro": 0.5, "qhy600": 0.025}
+# exposure._muscat3_coef's empirical focus table stops here (it clamps beyond),
+# so predictions past it would wrongly plateau.
+MUSCAT3_TABLE_MAX_FOCUS_MM = 6.0
+FOCUS_TOL_MM = 1e-6
 # Plan band key (muscat's simultaneous cameras) -> exposure-calculator band.
 MUSCAT_BAND_CODES = {"g": "gp", "r": "rp", "i": "ip", "z": "zs"}
 
@@ -156,7 +160,9 @@ def read_frame(path: Path | str) -> Frame:
     return Frame(
         path=str(path), request_id=request_id, filter=str(header.get("FILTER") or ""),
         exptime=exptime, reqtime=_header_float(header, "REQTIME") or exptime,
-        defocus=_header_float(header, "FOCOBOFF", "FOCDMD"), ra=ra, dec=dec, level=level,
+        # Only the defocus offset is comparable with the plan; FOCDMD is the
+        # absolute demanded focus position, so it is not a fallback.
+        defocus=_header_float(header, "FOCOBOFF"), ra=ra, dec=dec, level=level,
         pixscale=_header_float(header, "PIXSCALE") or float("nan"), sources=sources,
     )
 
@@ -202,12 +208,16 @@ def _safe_exposure(total: float, exptime: float, level: float) -> tuple[float, b
 
 
 def _combine(estimates: list[tuple[float, bool]]) -> tuple[float, bool] | None:
-    """Most conservative safe exposure; exact estimates win over upper limits."""
-    exact = [t for t, bound in estimates if not bound]
-    if exact:
-        return min(exact), False
-    bounds = [t for t, bound in estimates if bound]
-    return (min(bounds), True) if bounds else None
+    """Most conservative safe exposure over every frame.
+
+    A saturated frame still bounds the safe exposure from above, so it competes
+    with the unsaturated estimates; the result is an upper limit only when that
+    bound is the smallest.
+    """
+    if not estimates:
+        return None
+    # On a tie the exact estimate wins (False sorts first).
+    return min(estimates, key=lambda e: (e[0], e[1]))
 
 
 def _floor_seconds(seconds: float) -> float:
@@ -232,14 +242,21 @@ def _target_index(frame: Frame, ra: float, dec: float) -> int | None:
     return found[0] if found else None
 
 
+def _nearest_offset(frame: Frame, ra: float, dec: float) -> float | None:
+    if not len(frame.sources["ra"]):
+        return None
+    return float(np.min(_offsets_arcsec(frame.sources["ra"], frame.sources["dec"], ra, dec)))
+
+
 def _group_stats(frames: list[Frame], ra: float, dec: float) -> dict:
     """Target and comparison safe exposures for the frames of one FOV and band."""
-    target_estimates, target_fwhm, target_flux, target_sep = [], [], [], []
+    target_estimates, target_fwhm, target_flux, target_sep, nearest_sep = [], [], [], [], []
     for frame in frames:
         index = _target_index(frame, ra, dec)
         if index is None:
             continue
         target_sep.append(float(_offsets_arcsec(frame.sources["ra"][index], frame.sources["dec"][index], ra, dec)))
+        nearest_sep.append(_nearest_offset(frame, ra, dec))
         total = frame.sources["peak"][index] + frame.sources["background"][index]
         if total > 0:
             target_estimates.append(_safe_exposure(total, frame.exptime, frame.level))
@@ -256,6 +273,10 @@ def _group_stats(frames: list[Frame], ra: float, dec: float) -> dict:
         "fwhm_arcsec": round(float(np.median(target_fwhm)), 3) if target_fwhm else None,
         "flux_rate": float(np.median(target_flux)) if target_flux else None,
         "offset_arcsec": round(float(np.median(target_sep)), 2),
+        # Closest source of any brightness. When it sits on the coordinates
+        # but is not the one taken as the target, the identification is
+        # ambiguous: a brighter neighbour may have been picked instead.
+        "nearest_source_offset_arcsec": round(float(np.median(nearest_sep)), 2),
     }
 
     reference = max(frames, key=lambda f: len(f.sources["ra"]))
@@ -311,23 +332,48 @@ def _choose_fov(fov_stats: dict[int, dict[str, dict]]) -> int | None:
     return max(sorted(eligible), key=lambda index: eligible[index])
 
 
+def _interpolate_coef(points: list[tuple[float, float, float]], focus: float) -> tuple[float, float] | None:
+    """Linear (coef, fwhm_pix) between calibrated focus points; None outside them.
+
+    exposure.get_coeff bins focus to 0.5 mm and returns the nearest point,
+    which is too coarse for a defocus search in 0.025 mm steps and plateaus
+    beyond the last point.
+    """
+    if focus < points[0][0] - FOCUS_TOL_MM or focus > points[-1][0] + FOCUS_TOL_MM:
+        return None
+    for (f0, c0, w0), (f1, c1, w1) in zip(points, points[1:]):
+        if focus <= f1 + FOCUS_TOL_MM:
+            frac = 0.0 if f1 == f0 else min(1.0, max(0.0, (focus - f0) / (f1 - f0)))
+            return c0 + (c1 - c0) * frac, w0 + (w1 - w0) * frac
+    return points[-1][1], points[-1][2]
+
+
 def default_coef_lookup(instrument: str) -> CoefLookup | None:
     """Peak coefficient vs focus from the exposure calculator, when it is calibrated.
 
-    muscat3/muscat4 use the MuSCAT3 focus table (or their own DB calibration).
-    Other instruments only have the MuSCAT3 table rescaled by aperture, whose mm
-    scale does not transfer to different optics, so they need at least two
-    calibrated focus points of their own.
+    A band with at least two calibrated focus points of the instrument's own is
+    interpolated between them. Otherwise muscat3/muscat4 fall back to the
+    MuSCAT3 empirical table up to its last focus point; other instruments only
+    have that table rescaled by aperture, whose mm scale does not transfer to
+    different optics, so they get no prediction. Outside the calibrated range
+    the lookup returns None rather than extrapolating.
     """
     from muscat_db import exposure
 
-    coeffs = exposure.load_coeffs(instrument)
-    needs_own_calibration = test_observations.kind_family(instrument) != "muscat"
+    points: dict[str, list[tuple[float, float, float]]] = {}
+    for (band, focus), (coef, fwhm, _n) in exposure.load_coeffs(instrument).items():
+        points.setdefault(band, []).append((abs(float(focus)), float(coef), float(fwhm)))
+    points = {band: sorted(p) for band, p in points.items()}
+    is_muscat = test_observations.kind_family(instrument) == "muscat"
 
     def lookup(band: str, focus_mm: float):
-        if needs_own_calibration and sum(1 for (b, _f) in coeffs if b == band) < 2:
-            return None
-        return exposure.get_coeff(instrument, band, abs(focus_mm), coeffs)
+        focus = abs(focus_mm)
+        own = points.get(band) or []
+        if len(own) >= 2:
+            return _interpolate_coef(own, focus)
+        if is_muscat and focus <= MUSCAT3_TABLE_MAX_FOCUS_MM + FOCUS_TOL_MM:
+            return exposure._scale_coef(instrument, band, focus)
+        return None
 
     return lookup
 
@@ -358,23 +404,46 @@ def recommend_defocus(kind: str, target_exptime: dict[str, float], tested_focus:
         return result
     limit = lco._DEFOCUS_LIMIT_MM[kind]
     step = DEFOCUS_STEP_MM[test_observations.kind_family(kind)]
+    # Every band needs a coefficient, not only the bright ones: defocus widens
+    # the PSF on all cameras, so every applied exposure has to be rescaled.
     base = {}
-    for band in bright:
+    for band in target_exptime:
         code = _calculator_band(kind, band)
         coef = coef_lookup(code, tested_focus) if code else None
         if coef is None:
             result["note"] = f"no focus calibration for band {band}; choose a defocus and re-test"
             return result
         base[band] = (code, coef[0])
-    focus = abs(tested_focus)
-    while focus < limit - 1e-9:
-        focus = min(limit, round(focus + step, 6))
-        predicted = {band: bright[band] * 10 ** (c0 - coef_lookup(code, focus)[0]) for band, (code, c0) in base.items()}
-        if all(t >= needed for t in predicted.values()):
-            result.update(defocus_mm=focus, predicted_exptime_s={b: _floor_seconds(t) for b, t in predicted.items()})
+    focus, scale = abs(tested_focus), None
+    while focus < limit - FOCUS_TOL_MM:
+        trial = min(limit, round(focus + step, 6))
+        coefs = {band: coef_lookup(code, trial) for band, (code, _c0) in base.items()}
+        if any(c is None for c in coefs.values()):
+            break  # beyond the calibrated focus range
+        focus = trial
+        # Peak per second drops by 10**(c0 - c), so the same peak takes that much longer.
+        scale = {band: 10 ** (base[band][1] - coefs[band][0]) for band in base}
+        if all(bright[b] * scale[b] >= needed for b in bright):
+            result.update(_defocused(focus, scale, target_exptime))
             return result
-    result.update(defocus_mm=limit, note=f"even the ±{limit:g} mm limit keeps the exposure below {needed:.1f} s")
+    if scale is None:
+        result["note"] = f"focus calibration does not extend past {abs(tested_focus):g} mm; choose a defocus and re-test"
+        return result
+    result.update(_defocused(focus, scale, target_exptime))
+    if focus >= limit - FOCUS_TOL_MM:
+        result["note"] = f"even the ±{limit:g} mm limit keeps the exposure below {needed:.1f} s"
+    else:
+        result["note"] = (f"focus calibration ends at {focus:g} mm, where the exposure is still below {needed:.1f} s; "
+                          "a larger defocus is uncalibrated")
     return result
+
+
+def _defocused(focus: float, scale: dict[str, float], target_exptime: dict[str, float]) -> dict:
+    return {
+        "defocus_mm": focus,
+        "exposure_scale": {b: round(s, 6) for b, s in scale.items()},
+        "predicted_exptime_s": {b: _floor_seconds(t * scale[b]) for b, t in target_exptime.items()},
+    }
 
 
 def _contamination(frames_by_band: dict[str, list[Frame]], ra: float, dec: float, radius: float,
@@ -432,6 +501,13 @@ def _contamination(frames_by_band: dict[str, list[Frame]], ra: float, dec: float
             found.append({"source": "gaia", "sep_arcsec": round(float(sep[j]), 1),
                           "dmag": round(dmag, 2), "flux_ratio": round(ratio, 4)})
     return found, warnings
+
+
+def _is_target_centred(fov: dict, index: int) -> bool:
+    """By the candidate's label; unlabelled (client-supplied) plans keep the
+    planner's order, where candidate 1 is the target-centred FOV."""
+    label = fov.get("label")
+    return label == "target-centred" if label else index == 1
 
 
 def default_gaia_query(ra: float, dec: float, radius: float):
@@ -510,7 +586,12 @@ def analyze_record(record: dict, paths: list[Path], *, gaia_query: GaiaQuery | N
     contamination, warnings = _contamination(frames_by_band, ra, dec, radius, gaia_query)
 
     offset = max(s["target"]["offset_arcsec"] for s in bands.values())
-    if offset > TARGET_MATCH_ARCSEC:
+    nearest = min(s["target"]["nearest_source_offset_arcsec"] for s in bands.values())
+    if offset > TARGET_MATCH_ARCSEC and nearest <= TARGET_MATCH_ARCSEC:
+        warnings.append(f"target identification is ambiguous: the brightest source within {TARGET_SEARCH_ARCSEC:g}\" "
+                        f"({offset:.1f}\" away) was taken as the target, but a fainter source lies {nearest:.1f}\" "
+                        "from the coordinates; confirm which star is the target before applying")
+    elif offset > TARGET_MATCH_ARCSEC:
         warnings.append(f"target taken as the brightest source {offset:.1f}\" from its coordinates; "
                         "check the coordinates' proper motion/epoch")
     for band, stats in bands.items():
@@ -521,13 +602,18 @@ def analyze_record(record: dict, paths: list[Path], *, gaia_query: GaiaQuery | N
             warnings.append(f"{band}: brightest comparison saturated in every test frame; its limit is an upper bound")
     if contamination:
         warnings.append(f"{len(contamination)} source(s) within {radius:.0f}\" may contaminate the target aperture")
+    comparison_times = {b: s["exptime_with_comparison_s"] for b, s in bands.items()}
+    scale = defocus.get("exposure_scale") or {}
     recommendation = {
         "fov_index": best, "center_ra": fov["center_ra"], "center_dec": fov["center_dec"], "pa_deg": 0,
-        # Candidate 1 is the target-centred FOV; a single candidate means the
-        # optimized pointing already was target-centred.
-        "target_centred": best == 1 or len(plan["fov_candidates"]) == 1,
+        # A single candidate means the optimized pointing already was target-centred.
+        "target_centred": _is_target_centred(fov, best) or len(plan["fov_candidates"]) == 1,
         "exposure_times_target": target_times,
-        "exposure_times_with_comparison": {b: s["exptime_with_comparison_s"] for b, s in bands.items()},
+        "exposure_times_with_comparison": comparison_times,
+        # The same safe peaks at the recommended defocus: Apply uses these when
+        # it also sets the defocus, otherwise the duty cycle loss would remain.
+        "exposure_times_target_defocused": {b: _floor_seconds(t * scale[b]) for b, t in target_times.items()} if scale else None,
+        "exposure_times_with_comparison_defocused": {b: _floor_seconds(t * scale[b]) for b, t in comparison_times.items()} if scale else None,
         "safe_level_frac": SAFE_LEVEL_FRAC, "tested_defocus_mm": tested_focus,
         "defocus": defocus, "contamination_radius_arcsec": round(radius, 1),
         "contamination": contamination, "warnings": warnings,

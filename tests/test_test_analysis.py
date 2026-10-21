@@ -247,3 +247,85 @@ def test_gaia_failure_is_a_warning_not_an_error(tmp_path):
 
     _, rec = subject.analyze_record(_record(plan), paths, gaia_query=broken, coef_lookup=None)
     assert any("vizier down" in w for w in rec["warnings"])
+
+
+def test_saturated_frame_still_bounds_an_unsaturated_estimate():
+    # A clipped frame only bounds the safe exposure from above, but that bound
+    # is still real: it must not be dropped for a longer unsaturated estimate.
+    assert subject._combine([(10.0, False), (5.0, True)]) == (5.0, True)
+    assert subject._combine([(10.0, False), (20.0, True)]) == (10.0, False)
+    assert subject._combine([(5.0, True), (5.0, False)]) == (5.0, False)
+    assert subject._combine([]) is None
+
+
+def test_focus_coefficients_interpolate_and_stop_outside_calibration(monkeypatch):
+    from muscat_db import exposure
+
+    assert subject._interpolate_coef([(0.0, 1.0, 5.0), (2.0, 0.0, 15.0)], 1.0) == pytest.approx((0.5, 10.0))
+    assert subject._interpolate_coef([(0.0, 1.0, 5.0), (2.0, 0.0, 15.0)], 2.5) is None
+    monkeypatch.setattr(exposure, "load_coeffs", lambda instrument: {
+        ("rp", 0.0): (1.0, 5.0, 3), ("rp", 0.1): (0.0, 10.0, 3),
+    })
+    qhy = subject.default_coef_lookup("qhy600")
+    # get_coeff would bin 0.05 mm to 0 and return the nearest point.
+    assert qhy("rp", 0.05) == pytest.approx((0.5, 7.5))
+    assert qhy("rp", 0.2) is None
+    assert qhy("gp", 0.0) is None  # no calibration of its own, and not a MuSCAT
+    monkeypatch.setattr(exposure, "load_coeffs", lambda instrument: {})
+    m3 = subject.default_coef_lookup("muscat3")
+    assert m3("rp", 3.0) == pytest.approx(exposure._scale_coef("muscat3", "rp", 3.0))
+    # The MuSCAT3 table clamps past 6 mm; a plateau there is not a prediction.
+    assert m3("rp", 7.0) is None
+
+
+def test_defocus_rescales_every_band_not_only_the_bright_one():
+    rec = subject.recommend_defocus("muscat3", {"r": 4.0, "g": 60.0}, 0.0, 6.0, _muscat3_coef)
+    assert set(rec["exposure_scale"]) == {"r", "g"}
+    assert rec["predicted_exptime_s"]["g"] == pytest.approx(
+        subject._floor_seconds(60.0 * rec["exposure_scale"]["g"]))
+    assert rec["predicted_exptime_s"]["r"] >= 18.0
+
+
+def test_defocus_stops_where_the_calibration_ends():
+    def short_calibration(band, focus):
+        # Peak halves per mm, but only calibrated up to 1 mm.
+        return (1.0 - 0.30103 * abs(focus), 5.0) if abs(focus) <= 1.0 else None
+
+    rec = subject.recommend_defocus("muscat3", {"r": 2.0}, 0.0, 6.0, short_calibration)
+    assert rec["defocus_mm"] == 1.0
+    assert rec["predicted_exptime_s"]["r"] == pytest.approx(4.0, abs=0.1)
+    assert "calibration ends" in rec["note"]
+
+
+def test_bright_target_recommendation_carries_exposures_at_the_defocus(tmp_path):
+    plan = _plan(exposures=(1.0, 2.0), fovs=((150.0, 20.0),))
+    # 20000 e-/s: 2.5 s target-safe, far below the 18 s a 6 s readout needs.
+    paths = _frames(tmp_path, plan, lambda fov_index, f: [_star(0, 20000), _star(60, 30000), _star(120, 2000)])
+    _result, rec = subject.analyze_record(_record(plan), paths, gaia_query=_no_gaia, coef_lookup=_muscat3_coef)
+    assert rec["defocus"]["recommended"] and rec["defocus"]["defocus_mm"]
+    scale = rec["defocus"]["exposure_scale"]
+    for band, t in rec["exposure_times_target"].items():
+        assert rec["exposure_times_target_defocused"][band] == pytest.approx(subject._floor_seconds(t * scale[band]))
+    for band, t in rec["exposure_times_with_comparison"].items():
+        assert rec["exposure_times_with_comparison_defocused"][band] == pytest.approx(subject._floor_seconds(t * scale[band]))
+
+
+def test_focus_demand_is_not_read_as_the_defocus_offset(tmp_path):
+    path = _write(tmp_path / "f.fits", filt="rp", exptime=10, pointing=(150.0, 20.0), stars=[_star(0, 1000)])
+    with fits.open(path, mode="update") as hdul:
+        del hdul["SCI"].header["FOCOBOFF"]
+        hdul["SCI"].header["FOCDMD"] = 12.3
+    assert subject.read_frame(path).defocus is None
+
+
+def test_target_centred_follows_the_fov_label():
+    assert subject._is_target_centred({"label": "target-centred"}, 0) is True
+    assert subject._is_target_centred({"label": "optimized"}, 1) is False
+    assert subject._is_target_centred({}, 1) is True
+
+
+def test_brighter_neighbour_off_the_coordinates_is_reported_as_ambiguous(tmp_path):
+    plan = _plan(fovs=((150.0, 20.0),))
+    paths = _frames(tmp_path, plan, lambda fov_index, f: [_star(0.5, 20), _star(6, 2000), _star(90, 600), _star(150, 300)], filters=("rp",))
+    _result, rec = subject.analyze_record(_record(plan), paths, gaia_query=_no_gaia, coef_lookup=None)
+    assert any("ambiguous" in w for w in rec["warnings"])

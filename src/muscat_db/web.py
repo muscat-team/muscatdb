@@ -5129,7 +5129,7 @@ def _test_saturation_model(kind: str, ra, dec, focus_mm: float, filter_name: str
 
 
 @lco_router.post("/test-observations/plan", response_class=JSONResponse)
-def api_lco_test_plan(payload: dict = Body(...)):
+def api_lco_test_plan(request: Request, payload: dict = Body(...)):
     """Generate and persist a deterministic, observer-reviewable test plan.
 
     Two FOVs are tested, both at PA 0: the optimizer's pointing and the
@@ -5173,15 +5173,41 @@ def api_lco_test_plan(payload: dict = Body(...)):
             payload["saturation_model"] = model
             payload["plan_warnings"] = [*(payload.get("plan_warnings") or []), *warnings]
         plan = test_observations.generate_plan(payload)
-        record = test_observations.create_record(plan)
+        record = test_observations.create_record(plan, created_by=_request_user(request) or "")
         return JSONResponse({"ok": True, "record": record})
     except test_observations.TestObservationError as exc:
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
 
 
-def _test_request(record: dict, params: dict, plan_override: dict | None = None) -> dict:
-    # The editable draft may carry small tweaks to the displayed plan; overlay
-    # them on the stored plan (which still holds the guarded internal keys).
+def _test_hidden(record: dict, denied: frozenset[str] | None = None) -> bool:
+    """Whether a test observation is on a target the viewer may not see (#144).
+    The record carries no proposal, so its target decides, as on /target."""
+    denied = _viewer_denied() if denied is None else denied
+    return _object_hidden(_db_path(), str(record.get("target") or ""), denied)
+
+
+def _visible_test_record(observation_id: str) -> dict:
+    """The record, or KeyError when it does not exist or the viewer may not see
+    it, so a hidden test answers exactly like a missing one."""
+    record = test_observations.get_record(observation_id)
+    if _test_hidden(record):
+        raise KeyError(observation_id)
+    return record
+
+
+def _may_modify_test(record: dict, user: str | None) -> bool:
+    """The creator or an admin, with the Jobs page's convention that a record
+    without an owner belongs to the ``anonymous`` (local) user."""
+    if _jobs_user_is_admin(user):
+        return True
+    owner = (record.get("created_by") or "anonymous").strip() or "anonymous"
+    return owner == ((user or "anonymous").strip() or "anonymous")
+
+
+def _test_request(record: dict, params: dict, plan_override: dict | None = None) -> tuple[dict, dict]:
+    """(request group, merged plan). The editable draft may carry small tweaks
+    to the displayed plan; overlay them on the stored plan (which still holds
+    the guarded internal keys)."""
     plan = test_observations.merge_plan_override(record["plan"], plan_override)
     base = {**params, "kind": plan["kind"]}
     base["name"] = str(base.get("name") or f"TEST {plan.get('target') or record['id']}")
@@ -5191,14 +5217,14 @@ def _test_request(record: dict, params: dict, plan_override: dict | None = None)
     # form still carries.
     base["windows"] = [test_observations.request_window(plan)]
     configs = test_observations.request_configurations(plan, base)
-    return lco.build_requestgroup(plan["kind"], base, configurations=configs)
+    return lco.build_requestgroup(plan["kind"], base, configurations=configs), plan
 
 
 @lco_router.post("/test-observations/{observation_id}/ipp", response_class=JSONResponse)
 def api_lco_test_ipp(observation_id: str, request: Request, payload: dict = Body(...)):
     try:
-        record = test_observations.get_record(observation_id)
-        rg = _test_request(record, payload, payload.get("plan_override"))
+        record = _visible_test_record(observation_id)
+        rg, _plan = _test_request(record, payload, payload.get("plan_override"))
         ipp = lco.max_allowable_ipp(rg, _request_user(request))
         digest = lco.payload_hash(rg)
         record = test_observations.update_record(observation_id, state="validated", payload_hash=digest)
@@ -5216,14 +5242,16 @@ def api_lco_test_submit(observation_id: str, request: Request, payload: dict = B
     if not payload.get("confirm"):
         return JSONResponse({"ok": False, "error": "submission requires explicit confirm"}, status_code=400)
     try:
-        record = test_observations.get_record(observation_id)
-        rg = _test_request(record, payload, payload.get("plan_override"))
+        record = _visible_test_record(observation_id)
+        rg, plan = _test_request(record, payload, payload.get("plan_override"))
         digest = lco.payload_hash(rg)
         if not payload.get("dry_run_hash") or payload["dry_run_hash"] != digest or record["payload_hash"] != digest:
             return JSONResponse({"ok": False, "error": "no matching test-observation dry-run; run the dry-run again"}, status_code=409)
         result = lco.submit_requestgroup(rg, _request_user(request))
         ids = _submitted_request_ids(result)
-        record = test_observations.update_record(observation_id, state="submitted", request_ids=ids)
+        # Store the plan as submitted: the analysis matches frames against its
+        # exposure times, so draft edits must not be lost here.
+        record = test_observations.update_record(observation_id, state="submitted", request_ids=ids, plan=plan)
         params = {**payload, "kind": record["plan"]["kind"], "target_name": record["plan"].get("target") or ""}
         monitoring = _record_lco_submission(result, rg, params, _request_user(request))
         return JSONResponse({"ok": True, "result": result, "record": record, "monitoring": monitoring})
@@ -5237,22 +5265,32 @@ def api_lco_test_submit(observation_id: str, request: Request, payload: dict = B
 
 @lco_router.get("/test-observations", response_class=JSONResponse)
 def api_lco_test_list(target: str | None = None, limit: int = 20):
-    """Recent test observations, newest first, optionally for one target."""
-    return JSONResponse({"ok": True, "records": test_observations.list_records(target=target or None, limit=limit)})
+    """Recent test observations, newest first, optionally for one target.
+    Tests on targets the viewer may not see are left out."""
+    denied = _viewer_denied()
+    records = test_observations.list_records(target=target or None, limit=limit)
+    return JSONResponse({"ok": True, "records": [r for r in records if not _test_hidden(r, denied)]})
 
 
 @lco_router.get("/test-observations/{observation_id}", response_class=JSONResponse)
 def api_lco_test_status(observation_id: str):
     try:
-        return JSONResponse({"ok": True, "record": test_observations.get_record(observation_id)})
+        return JSONResponse({"ok": True, "record": _visible_test_record(observation_id)})
     except KeyError:
         return JSONResponse({"ok": False, "error": "test observation not found"}, status_code=404)
 
 
 @lco_router.post("/test-observations/{observation_id}/analyze", response_class=JSONResponse)
-def api_lco_test_analyze(observation_id: str):
-    """Re-run the analysis of a finished test on its ingested frames."""
+def api_lco_test_analyze(observation_id: str, request: Request):
+    """Re-run the analysis of a finished test on its ingested frames.
+
+    It overwrites the stored result, so only the test's creator or an admin
+    may run it.
+    """
     try:
+        record = _visible_test_record(observation_id)
+        if not _may_modify_test(record, _request_user(request)):
+            return JSONResponse({"ok": False, "error": "only the test's creator or an admin may re-analyze it"}, status_code=403)
         return JSONResponse({"ok": True, "record": test_observations.reanalyze(observation_id)})
     except KeyError:
         return JSONResponse({"ok": False, "error": "test observation not found"}, status_code=404)
