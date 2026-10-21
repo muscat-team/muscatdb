@@ -45,6 +45,7 @@ def tree(tmp_path):
     _stub(
         bin_dir / "uv",
         f'echo "$3" >> "{calls}"\n'
+        '[ "$3" = "build-db" ] && [ -n "${LEAK:-}" ] && echo "WARNING INTEGRITY-LEAK: muscat.db"\n'
         '[ "$3" = "${FAIL_CMD:-}" ] && { echo "boom from $3" ; exit "${FAIL_CODE:-3}"; }\n'
         'exit 0\n',
     )
@@ -87,6 +88,25 @@ def test_refused_build_alerts_with_step_name_and_log_tail_and_exits_nonzero(tree
     assert "hooks.example.invalid" in posted
     assert "build-db failed (exit 7)" in posted
     assert "boom from build-db" in posted
+
+
+def test_leaked_pages_snapshot_alerts_even_though_the_build_succeeds(tree):
+    result = _run(tree, "run", LEAK="1")
+
+    assert result.returncode == 0
+    posted = _read(tree["posts"])
+    assert "rows may be lost" in posted
+    assert "INTEGRITY-LEAK" in posted
+
+
+def test_a_leak_logged_by_an_earlier_run_does_not_alert_again(tree):
+    assert _run(tree, "run", LEAK="1").returncode == 0
+    tree["posts"].unlink()
+
+    result = _run(tree, "run")
+
+    assert result.returncode == 0
+    assert _read(tree["posts"]) == ""
 
 
 def test_failed_scan_stops_the_chain_before_build_db(tree):

@@ -209,3 +209,28 @@ def test_access_listener_logs_the_validated_email():
     assert '"$cf_email"' in fmt and "$http_cf_connecting_ip" in fmt
     server = code[code.index("server {"):]
     assert "access_log /var/log/nginx/muscat-db-access.log muscat_access;" in server
+
+
+
+@pytest.mark.parametrize("name", ["nginx.conf", "nginx-staging.conf"])
+def test_htpasswd_listeners_do_not_expose_the_jwt_check(name):
+    """These listeners proxy every path with the proxy secret, so without an
+    exact-match 404 any htpasswd user could call the endpoint meant for the
+    Access listener's auth_request subrequest."""
+    conf = (Path(__file__).resolve().parents[1] / "deploy" / name).read_text()
+    code = "\n".join(l for l in conf.splitlines() if not l.lstrip().startswith("#"))
+    assert "auth_basic " in code  # still the htpasswd listener
+    assert code.count(f"location = {cf_access.AUTH_PATH}") == 1
+    block = code[code.index(f"location = {cf_access.AUTH_PATH}"):]
+    block = block[:block.index("}") + 1]
+    assert "return 404;" in block and "proxy_pass" not in block
+
+
+def test_only_the_access_listener_proxies_the_jwt_check():
+    deploy = Path(__file__).resolve().parents[1] / "deploy"
+    proxying = []
+    for conf in sorted(deploy.glob("nginx*.conf")):
+        code = "\n".join(l for l in conf.read_text().splitlines() if not l.lstrip().startswith("#"))
+        if f"proxy_pass http://127.0.0.1:8001{cf_access.AUTH_PATH}" in code:
+            proxying.append(conf.name)
+    assert proxying == ["nginx-access.conf"]

@@ -128,7 +128,8 @@
                   data-date="{{ j.date }}"
                   data-target="{{ j.target }}"
                   data-run="{{ j.run_id }}"
-                  data-job-action="cancel">Cancel</button>
+                  data-job-action="cancel"{% if not j.can_cancel %}
+                  disabled title="Only the run's owner, an admin, or someone in the owner's group can cancel it"{% endif %}>Cancel</button>
         {% elif j.state == 'cancelling' %}
           <button class="btn sm" disabled="">Cancelling…</button>
         {% elif j.state == 'pending' %}
@@ -139,7 +140,8 @@
                   data-date="{{ j.date }}"
                   data-target="{{ j.target }}"
                   data-run="{{ j.run_id }}"
-                  data-job-action="cancel">Cancel</button>
+                  data-job-action="cancel"{% if not j.can_cancel %}
+                  disabled title="Only the run's owner, an admin, or someone in the owner's group can cancel it"{% endif %}>Cancel</button>
         {% else %}
           <button class="btn sm" data-job-action="rerun" data-key="{{ j.key }}" title="Re-run this job">⟳ Re-run</button>
         {% endif %}

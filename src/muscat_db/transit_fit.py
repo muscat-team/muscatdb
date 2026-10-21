@@ -3,6 +3,7 @@ run the transit-fit pipeline, poll logs, and return outputs/plots.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 import csv
 import datetime
 import json
@@ -1514,8 +1515,13 @@ def start_fit(
     test_run: bool = False,
     selected_csvs: list[str] | None = None,
     user_name: str | None = None,
+    authorize_run: Callable[[str], None] | None = None,
 ) -> dict:
     """Prepare inputs and launch a transit fit using the timer-fit script.
+
+    *authorize_run* is called with the derived run id before the run directory
+    is touched; it raises to refuse a launch over a run the caller may not
+    replace.
 
     If *selected_csvs* is given, only CSVs whose filename appears in the list
     are included (useful when the user unchecks some lightcurves in the UI).
@@ -1557,6 +1563,8 @@ def start_fit(
     run_name = str(options.get("run_name") or "").strip()
     site, telescope, mode = selected_site_mode(inst, [c.name for c in csvs])
     run_id = build_run_id(site, mode, run_name, telescope=telescope)
+    if authorize_run is not None:
+        authorize_run(run_id)
     try:
         rdir = fit_output_dir(inst, date, target, run_id)
     except ValueError as exc:
@@ -1897,8 +1905,10 @@ def delete_fit(inst: str, date: str, target: str, run_id: str = "") -> dict:
             try:
                 shutil.rmtree(rdir)
                 removed += 1
-            except OSError:
-                pass
+            except OSError as exc:
+                logger.warning("could not delete fit run %s", rdir, exc_info=True)
+                return {"ok": False, "delete_failed": True,
+                        "error": f"could not delete the run: {exc.strerror or exc}"}
     else:
         # Legacy single-dir run — remove output files from the base target
         # directory without removing the directory itself or named-run
@@ -1911,6 +1921,7 @@ def delete_fit(inst: str, date: str, target: str, run_id: str = "") -> dict:
                 rdir / "sys.yaml",
                 rdir / "meta.yaml",
             ]
+            failed = []
             for p in legacy_targets:
                 try:
                     if p.is_dir():
@@ -1920,7 +1931,11 @@ def delete_fit(inst: str, date: str, target: str, run_id: str = "") -> dict:
                         p.unlink()
                         removed += 1
                 except OSError:
-                    pass
+                    logger.warning("could not delete %s", p, exc_info=True)
+                    failed.append(p.name)
+            if failed:
+                return {"ok": False, "delete_failed": True,
+                        "error": f"could not delete: {', '.join(failed)}"}
 
     db_key = f"transit_fit:{inst}/{date}/{_target_dir_name(target)}"
     if run_id:

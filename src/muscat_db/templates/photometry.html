@@ -640,11 +640,11 @@
       <button class="btn primary" type="button" id="run-full-btn" {% if raw_missing %}disabled{% endif %}>
         ▶ Run Full Reduction (all frames)
       </button>
-      <button class="btn" type="button" id="cancel-btn" style="display:none;border-color:var(--red);color:var(--red);">
+      <button class="btn" type="button" id="cancel-btn" style="display:none;border-color:var(--red);color:var(--red);" {% if not can_modify_run %}disabled title="Only the run's owner, an admin, or someone in the owner's group can change it"{% endif %}>
         ■ Cancel
       </button>
       {% if outputs and outputs.has_any %}
-      <button class="btn" type="button" id="delete-btn" style="border-color:var(--red);color:var(--red);margin-left:auto;">
+      <button class="btn" type="button" id="delete-btn" style="border-color:var(--red);color:var(--red);margin-left:auto;" {% if not can_modify_run %}disabled title="Only the run's owner, an admin, or someone in the owner's group can change it"{% endif %}>
         🗑 Delete Reduction
       </button>
       {% endif %}
@@ -1931,7 +1931,7 @@
         if (typeof window.showLoading === 'function') window.showLoading('Reloading…');
         setTimeout(function () { window.location.reload(); }, 800);
       } else {
-        window.showMessageModal('Error', 'Delete failed: ' + (res.error || 'unknown error'));
+        window.showMessageModal('Error', 'Delete failed: ' + (res.error || res.detail || 'unknown error'));
         deleteBtn.disabled = false;
         deleteBtn.textContent = '🗑 Delete Reduction';
       }
