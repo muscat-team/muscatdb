@@ -32,6 +32,8 @@ from pathlib import Path
 import numpy as np
 from astropy.io import fits
 
+from muscat_db.database import EXPOSURE_MODELS_SCHEMA
+
 # Bright stars used for the peak fraction must stay well inside the linear range
 # and well above the sky noise.
 FPK_MAX_LEVEL_FRAC = 0.7
@@ -257,17 +259,7 @@ def peak_rate(model: BandModel, mag: float, airmass: float, extinction: float,
 
 # --- storage and lookup ------------------------------------------------------------
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS exposure_models (
-    instrument  TEXT NOT NULL,
-    band        TEXT NOT NULL,
-    mode        TEXT NOT NULL DEFAULT '',
-    params_json TEXT NOT NULL,
-    n_frames    INTEGER NOT NULL DEFAULT 0,
-    updated_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (instrument, band, mode)
-);
-"""
+SCHEMA = EXPOSURE_MODELS_SCHEMA
 
 # Two readout modes of one camera share a fit when their pixels are the same
 # size (QHY600's central30x30 is a crop of full_frame).

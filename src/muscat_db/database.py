@@ -47,6 +47,19 @@ def format_elapsed(seconds: int) -> str:
     return f"{days}d {hrs}h"
 
 
+# Fitted exposure models written by Calibrate (exposure_model.save_models).
+# Part of SCHEMA so build_db creates it in the fresh image it restores into.
+EXPOSURE_MODELS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS exposure_models (
+    instrument  TEXT NOT NULL,
+    band        TEXT NOT NULL,
+    mode        TEXT NOT NULL DEFAULT '',
+    params_json TEXT NOT NULL,
+    n_frames    INTEGER NOT NULL DEFAULT 0,
+    updated_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (instrument, band, mode)
+);
+"""
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS frames (
@@ -182,7 +195,7 @@ CREATE TABLE IF NOT EXISTS exposure_coeffs (
     updated_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (instrument, band, focus_mm)
 );
-
+""" + EXPOSURE_MODELS_SCHEMA + """
 CREATE TABLE IF NOT EXISTS exposure_jobs (
     id          TEXT PRIMARY KEY,
     instrument  TEXT NOT NULL,
@@ -885,8 +898,8 @@ def _set_temp_store_dir(conn: sqlite3.Connection, db_file: str) -> None:
 # Tables owned by the app rather than derived from the obslog CSVs. build_db
 # rebuilds the observation tables (frames/summaries/targets) from scratch, so
 # these must be copied across the atomic swap or the daily cron silently wipes
-# user notes, manual identification overrides, exposure calibration coefficients,
-# job history, saved ephemeris views, closed-loop test observations, and LCO
+# user notes, manual identification overrides, exposure calibration coefficients
+# and fitted exposure models, job history, saved ephemeris views, closed-loop test observations, and LCO
 # request-monitoring state on every successful build.  Monitor leases are
 # deliberately excluded because they are process-local and must be reacquired.
 _APP_OWNED_TABLES = (
@@ -896,6 +909,7 @@ _APP_OWNED_TABLES = (
     "target_notes",
     "target_overrides",
     "exposure_coeffs",
+    "exposure_models",
     "test_observations",
     "lco_observation_requests",
     "lco_observation_frames",

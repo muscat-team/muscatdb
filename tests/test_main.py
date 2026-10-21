@@ -1291,6 +1291,36 @@ class TestDatabase:
         finally:
             os.unlink(db_path)
 
+    def test_build_db_preserves_calibrated_exposure_models(self, tmp_obslog):
+        # A model stored by Calibrate must survive the nightly rebuild, or the
+        # page silently falls back to the built-in defaults after 05:00.
+        from muscat_db.database import build_db, get_conn
+        from muscat_db.exposure_model import BandModel, save_models, stored_models
+        model = BandModel(
+            band="rp", mode="", zp_safe=23.1, zp_median=23.3, a_focus=0.12,
+            a_defocus=None, defocus_c=None, defocus_c_safe=None,
+            seeing_good=1.4, seeing_median=1.9, pixscale=0.389,
+            level=120000.0, n_frames=42,
+        )
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            db_path = f.name
+        try:
+            build_db(db_path)
+            with get_conn(db_path) as conn:
+                save_models(conn, "sinistro", [model])
+
+            build_db(db_path)
+
+            with get_conn(db_path) as conn:
+                stored = stored_models(conn, "sinistro")
+            assert ("rp", "") in stored
+            restored, _updated = stored[("rp", "")]
+            assert restored.zp_safe == 23.1
+            assert restored.n_frames == 42
+            assert restored.source == "archive"
+        finally:
+            os.unlink(db_path)
+
     def test_build_db_skips_noncanonical_obslog_dirs(self, tmp_obslog):
         from muscat_db.database import build_db, get_dates
         junk_dir = f"{tmp_obslog}/muscat/csv_old_220914"
