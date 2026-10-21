@@ -232,6 +232,71 @@ class JobStoreContractTests:
     def test_reconcile_on_empty_pipeline_is_noop(self, store):
         assert store.reconcile_slots("photometry") == 0
 
+    # --- claim tied to the pending row (issue #51 step A) ---------------
+    #
+    # A pending-drain claim passes the drained row's key as pending_key: the
+    # slot insert and the row's pending -> running move are one transaction,
+    # so a slot that reconcile_slots frees mid-launch cannot be re-won for the
+    # same row, and a stale pending() snapshot cannot relaunch a row that
+    # already moved on.
+
+    _PENDING_KEY = "photometry:muscat4/260101/HIP1"
+
+    def _enqueue_hip1(self, store):
+        store.enqueue(
+            type_="photometry", inst="muscat4", date="260101", target="HIP1",
+            started_at=100.0, run_type="full",
+        )
+
+    def test_claim_from_pending_moves_row_to_running(self, store):
+        self._enqueue_hip1(store)
+        assert store.claim_slot("photometry", "muscat4/260101/HIP1", 1, pending_key=self._PENDING_KEY) is True
+        row = store.get(self._PENDING_KEY)
+        assert row["state"] == "running"
+        assert row["owner"] == job_store.current_owner()
+        assert row["instance_id"] == job_store.current_instance_id()
+        assert time.time() - row["heartbeat_at"] < 60
+
+    def test_claim_from_pending_survives_a_concurrent_reconcile(self, store):
+        """The double-launch race: another process's sync pass runs
+        reconcile_slots between this claim and the launcher's own
+        save(state="running"). The slot must survive it, and a second drainer
+        holding the same pending() snapshot must lose."""
+        self._enqueue_hip1(store)
+        assert store.claim_slot("photometry", "muscat4/260101/HIP1", 2, pending_key=self._PENDING_KEY) is True
+        assert store.reconcile_slots("photometry") == 0
+        assert store.claim_slot("photometry", "muscat4/260101/HIP1", 2, pending_key=self._PENDING_KEY) is False
+        assert store.count_claimed("photometry") == 1
+
+    def test_claim_from_pending_refuses_a_row_that_already_finished(self, store):
+        """A stale pending() snapshot: the row ran and finished, and its slot
+        was released, before this drainer reached it."""
+        save(store, target="HIP1", state="done", started_at=100.0)
+        assert store.claim_slot("photometry", "muscat4/260101/HIP1", 1, pending_key=self._PENDING_KEY) is False
+        assert store.count_claimed("photometry") == 0
+        assert store.get(self._PENDING_KEY)["state"] == "done"
+
+    def test_claim_from_pending_refuses_a_missing_row(self, store):
+        assert store.claim_slot("photometry", "muscat4/260101/HIP1", 1, pending_key=self._PENDING_KEY) is False
+        assert store.count_claimed("photometry") == 0
+
+    def test_claim_from_pending_at_capacity_leaves_row_pending(self, store):
+        self._enqueue_hip1(store)
+        assert store.claim_slot("photometry", "other", 1) is True
+        assert store.claim_slot("photometry", "muscat4/260101/HIP1", 1, pending_key=self._PENDING_KEY) is False
+        assert store.get(self._PENDING_KEY)["state"] == "pending"
+
+    def test_claim_from_pending_uses_the_given_row_key(self, store):
+        """The row key is passed in, never derived from holder_key: ttv_fit's
+        slot key (target/run) differs from its row key (ttv_fit:_/_/target/run)."""
+        store.enqueue(
+            type_="ttv_fit", inst="_", date="_", target="HIP1", started_at=100.0,
+            run_id="default",
+        )
+        row_key = "ttv_fit:_/_/HIP1/default"
+        assert store.claim_slot("ttv_fit", "HIP1/default", 1, pending_key=row_key) is True
+        assert store.get(row_key)["state"] == "running"
+
     # --- per-host concurrency cap (architecture issue #51's rejected
     # os.getloadavg() replacement) --------------------------------------
     #
