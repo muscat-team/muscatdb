@@ -136,6 +136,7 @@ from muscat_db.catalog import (
     _query_target_planets_toi,
     _resolve_all_aliases,
     _resolve_archive_coords,
+    resolve_target_astrometry,
     resolve_lco_key_project_name,
     _target_tic_id,
     _toi_db_membership,
@@ -6247,15 +6248,14 @@ def _target_coordinates(target: str) -> dict | None:
     SIMBAD.
 
     The ephemeris catalogs (NASA/TOI) are consulted first via
-    ``_resolve_archive_coords``; when the target is in neither, it falls back to
-    SIMBAD name resolution (both cached), so a catalog-less target still gets
+    ``resolve_target_astrometry``; when the target is in neither, it falls back
+    to SIMBAD name resolution (both cached), so a catalog-less target still gets
     coordinates instead of an empty RA/Dec field. Returns ``{"ra", "dec",
-    "source"}`` (source one of nasa/toi/simbad) or None when unresolved."""
-    resolved = _resolve_archive_coords(target)
-    if resolved is None:
-        return None
-    ra, dec, source = resolved
-    return {"ra": ra, "dec": dec, "source": source}
+    "source", "epoch", "pmra", "pmdec"}`` (source one of nasa/toi/simbad;
+    epoch a Julian year; proper motion mas/yr, None when unknown) or None when
+    unresolved. The epoch matters: the catalogs are Gaia DR2 at 2015.5, so a
+    high proper-motion star is arcseconds away from its catalog position."""
+    return resolve_target_astrometry(target)
 
 
 @ephemeris_router.get("/target-info", response_class=JSONResponse)
