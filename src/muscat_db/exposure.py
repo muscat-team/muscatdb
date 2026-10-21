@@ -36,6 +36,7 @@ except ImportError:
     _Vizier = None  # type: ignore
     _HAS_ASTROQUERY = False
 
+from muscat_db import exposure_model
 from muscat_db.instruments import INSTRUMENTS
 from muscat_db.database import connect, db_path, SCHEMA
 
@@ -818,6 +819,7 @@ def _conn():
             if path not in _EXPOSURE_SCHEMA_PATHS:
                 c.executescript(SCHEMA)
                 c.executescript(SCHEMA_EXPOSURE)
+                c.executescript(exposure_model.SCHEMA)
                 _EXPOSURE_SCHEMA_PATHS.add(path)
     return c
 
@@ -854,15 +856,19 @@ def _scale_coef(instrument: str, band: str, focus_mm: float) -> tuple[float, flo
     """Scale MuSCAT3 empirical coef for other instruments.
 
     The scaling accounts for differences in collecting area and pixel scale:
-    peak ∝ A_tel / pixel_scale²  (more area = more photons, finer pixels = spread more)
+    peak ∝ A_tel * pixel_scale²  (more area = more photons; a star much wider
+    than a pixel puts more of its light in a bigger pixel)
 
-    For uncalibrated instruments, this provides a rough estimate.
+    Only the raw-frame instruments (muscat, muscat2) still use this: the
+    BANZAI-reduced ones use the archive-calibrated exposure_model instead.
+    It is unvalidated for them -- their frames carry no photometric zeropoint
+    to check it against.
     """
     coef, fwhm = _muscat3_coef(band, focus_mm)
     params = INSTRUMENT_PARAMS.get(instrument, {})
     muscat3_params = INSTRUMENT_PARAMS.get("muscat3", {})
     area_ratio = (params.get("aperture_m", 1.0) / muscat3_params.get("aperture_m", 2.0)) ** 2
-    ps_ratio = (muscat3_params.get("pixel_scale", 0.267) / params.get("pixel_scale", 0.267)) ** 2
+    ps_ratio = (params.get("pixel_scale", 0.267) / muscat3_params.get("pixel_scale", 0.267)) ** 2
     gain_ratio = params.get("gain", 1.8) / muscat3_params.get("gain", 1.8)
     coef = coef + math.log10(area_ratio) + math.log10(ps_ratio) + math.log10(gain_ratio)
     # Scale FWHM by pixel scale ratio (coarser pixels = fewer pixels for same PSF)
@@ -903,6 +909,16 @@ def get_coeff(instrument: str, band: str, focus_mm: float, coeffs: dict | None =
 
 def calibration_status(instrument: str) -> dict:
     """Return count of calibrated bands and focus points for an instrument."""
+    if instrument in exposure_model.MODEL_INSTRUMENTS:
+        conn = _conn()
+        try:
+            stored = exposure_model.stored_models(conn, instrument)
+        finally:
+            conn.close()
+        bands = [{"band": band, "mode": mode, "n_frames": model.n_frames, "updated_at": updated}
+                 for (band, mode), (model, updated) in sorted(stored.items())]
+        return {"n_bands": len(bands), "bands": bands, "model": "archive",
+                "source": "archive" if bands else "default"}
     conn = _conn()
     rows = conn.execute(
         """SELECT band, COUNT(*), SUM(n_frames), MAX(updated_at)
@@ -1103,6 +1119,11 @@ def calibrate_instrument(
 
     if cancel_event is not None and cancel_event.is_set():
         return {"ok": False, "cancelled": True, "instrument": instrument}
+    if instrument in exposure_model.MODEL_INSTRUMENTS:
+        return exposure_model.calibrate(
+            instrument, INSTRUMENTS[instrument].data_dir, EXTINCTION, _conn,
+            cancel_event=cancel_event, progress=progress,
+        )
 
     conn = _conn()
     exact_clause = ", ".join(f"'{s}'" for s in _TARGET_EXCLUDE_EXACT)
@@ -1331,6 +1352,49 @@ def calibrate_instrument(
 # ---------------------------------------------------------------------------
 
 
+class UncalibratedBandError(ValueError):
+    """No model exists for this instrument band (and readout mode)."""
+
+
+def _archive_model(instrument: str, band: str, confmode: str | None) -> exposure_model.BandModel:
+    conn = _conn()
+    try:
+        models = exposure_model.models_for(conn, instrument)
+    finally:
+        conn.close()
+    model = exposure_model.lookup(
+        models, instrument, band, confmode, _NARROW_TO_BROADBAND,
+        lambda b: 2.5 * _narrowband_offset(b),
+    )
+    if model is None:
+        raise UncalibratedBandError(f"no exposure model for {instrument} band {band}")
+    return model
+
+
+def _archive_result(instrument: str, band: str, mag: float, focus_mm: float, exptime: float,
+                    airmass: float, confmode: str | None, seeing: float | None,
+                    peak_e: float | None = None) -> dict:
+    """calc_peak's result shape from the archive model (all values in electrons)."""
+    model = _archive_model(instrument, band, confmode)
+    k = EXTINCTION.get(band, 0.10)
+    rate = exposure_model.peak_rate(model, mag, airmass, k, focus_mm, seeing)
+    if peak_e is None:
+        peak_e = rate * exptime
+    else:
+        exptime = peak_e / rate
+    fwhm = exposure_model.fwhm_arcsec(model, focus_mm, seeing, safe=True)
+    pct = peak_e / model.level * 100.0
+    return {
+        "band": band, "mag": mag, "exptime": round(exptime, 1), "focus_mm": focus_mm, "airmass": airmass,
+        # BANZAI products are in electrons (GAIN=1), so ADU and e- coincide.
+        "peak_adu": round(peak_e, 0), "peak_electrons": round(peak_e, 0),
+        "fwhm_pix": round(fwhm / model.pixscale, 2), "fwhm_arcsec": round(fwhm, 2),
+        "pct_full_well": round(pct, 1), "is_saturated": peak_e >= model.level,
+        "full_well": model.level, "seeing_arcsec": round(seeing or model.seeing_good, 2),
+        "readout_mode": model.mode or None, "model_source": model.source,
+    }
+
+
 def calc_peak(
     instrument: str,
     band: str,
@@ -1338,8 +1402,15 @@ def calc_peak(
     focus_mm: float,
     exptime: float,
     airmass: float = 1.1,
+    confmode: str | None = None,
+    seeing: float | None = None,
 ) -> dict:
     """Estimate peak pixel count (ADU and electrons) and FWHM.
+
+    BANZAI-reduced instruments use the archive-calibrated model
+    (:mod:`muscat_db.exposure_model`), where ``confmode`` selects the readout
+    mode and ``seeing`` (arcsec) defaults to the instrument's good seeing.
+    muscat/muscat2 use the legacy coefficient table and ignore both.
 
     Returns:
         {
@@ -1354,6 +1425,8 @@ def calc_peak(
             "fwhm_arcsec": float,
         }
     """
+    if instrument in exposure_model.MODEL_INSTRUMENTS:
+        return _archive_result(instrument, band, mag, focus_mm, exptime, airmass, confmode, seeing)
     coeffs = load_coeffs(instrument)
     coef, fwhm_pix = get_coeff(instrument, band, focus_mm, coeffs)
     k = EXTINCTION.get(band, 0.10)
@@ -1387,11 +1460,15 @@ def calc_exptime(
     focus_mm: float,
     target_adu: float,
     airmass: float = 1.1,
+    confmode: str | None = None,
+    seeing: float | None = None,
 ) -> dict:
     """Estimate exposure time needed to reach a target peak ADU.
 
     Returns same dict as calc_peak but with exptime as the derived value.
     """
+    if instrument in exposure_model.MODEL_INSTRUMENTS:
+        return _archive_result(instrument, band, mag, focus_mm, 0.0, airmass, confmode, seeing, peak_e=target_adu)
     coeffs = load_coeffs(instrument)
     coef, fwhm_pix = get_coeff(instrument, band, focus_mm, coeffs)
     k = EXTINCTION.get(band, 0.10)
@@ -1419,6 +1496,65 @@ def calc_exptime(
     }
 
 
+def full_well_e(instrument: str, band: str, confmode: str | None = None) -> float:
+    """Saturation level (e-) for one instrument band and readout mode."""
+    if instrument in exposure_model.MODEL_INSTRUMENTS:
+        return _archive_model(instrument, band, confmode).level
+    return _full_well_gain(instrument, band)[0]
+
+
+# Focus grid for the model's coefficient table, per kind family (mm).
+_MODEL_FOCUS_STEP_MM = {"qhy600": 0.1}
+
+
+def model_coeff_rows(instrument: str, confmode: str | None = None) -> list[dict]:
+    """The archive model expressed as the legacy coefficient table.
+
+    ``coef`` is log10 of the peak (e-) a mag-0 star gives in 60 s at airmass
+    1.1, the quantity the legacy table stored, so the page's table and plot
+    keep their meaning. Focus runs up to LCO's defocus limit.
+    """
+    from muscat_db import lco
+
+    conn = _conn()
+    try:
+        models = exposure_model.models_for(conn, instrument)
+    finally:
+        conn.close()
+    mode = confmode if confmode in exposure_model.MODEL_MODES.get(instrument, ()) else exposure_model.default_mode(instrument)
+    limit = min(lco._DEFOCUS_LIMIT_MM.get(instrument, 6.0), 6.0)
+    step = _MODEL_FOCUS_STEP_MM.get(instrument, 0.5)
+    rows = []
+    for (band, model_mode), model in sorted(models.items()):
+        if model_mode != mode:
+            continue
+        for i in range(int(round(limit / step)) + 1):
+            focus = round(i * step, 3)
+            rate = exposure_model.peak_rate(model, 0.0, 1.1, EXTINCTION.get(band, 0.10), focus)
+            fwhm = exposure_model.fwhm_arcsec(model, focus, safe=True)
+            rows.append({"band": band, "focus_mm": focus, "coef": round(math.log10(rate * 60.0), 4),
+                         "fwhm_pix": round(fwhm / model.pixscale, 2), "n_frames": model.n_frames})
+    return rows
+
+
+def model_summary(instrument: str) -> dict:
+    """Per readout mode and band: saturation level, default seeing, pixel scale, source."""
+    if instrument not in exposure_model.MODEL_INSTRUMENTS:
+        return {}
+    conn = _conn()
+    try:
+        models = exposure_model.models_for(conn, instrument)
+    finally:
+        conn.close()
+    summary: dict = {}
+    for (band, mode), model in sorted(models.items()):
+        summary.setdefault(mode, {})[band] = {
+            "level": model.level, "seeing_good": round(model.seeing_good, 2),
+            "pixscale": model.pixscale, "source": model.source,
+        }
+    return summary
+
+
 def calc_all_bands(
     instrument: str,
     mags: dict[str, float],
@@ -1430,6 +1566,7 @@ def calc_all_bands(
     target_adu: float | None = None,
     confmode: str | None = None,
     extra_sources: list[dict] | None = None,
+    seeing: float | None = None,
 ) -> dict:
     """Calculate for all bands, optionally across the target plus extra sources.
 
@@ -1442,8 +1579,11 @@ def calc_all_bands(
     whole instrument. When ``target_adu`` is provided (custom ADU mode), it
     overrides the sat_frac-derived target uniformly across all bands.
 
-    confmode: Sinistro readout mode ("central_2k_2x2" or "full_frame"), currently
-    not used for calculation but may affect full well in future versions.
+    confmode: readout mode of a multi-site instrument (Sinistro
+    "central_2k_2x2"/"full_frame", QHY600 "central30x30"/"full_frame"). It
+    sets the pixel scale and saturation level: Sinistro's 2x2-binned mode
+    saturates near 2x the unbinned level. ``seeing`` (arcsec) defaults to the
+    instrument's good seeing.
 
     ``extra_sources`` is an optional list of ``{"label": str, "mags": {band: mag}}``
     dicts (e.g. bright comparison stars from the FOV optimizer). MuSCAT
@@ -1470,14 +1610,14 @@ def calc_all_bands(
                 if target_adu is not None:
                     band_target_adu = target_adu
                 else:
-                    full_well_b, _gain_b = _full_well_gain(instrument, band)
+                    full_well_b = full_well_e(instrument, band, confmode)
                     # full_well is in electrons; convert the sat_frac target back
                     # to the frame's native units (electrons for BANZAI data, so
                     # the factor is 1.0 -- not the CCD gain).
                     band_target_adu = (full_well_b * sat_frac) / _electron_gain(instrument)
-                r = calc_exptime(instrument, band, mag, focus_mm, band_target_adu, airmass)
+                r = calc_exptime(instrument, band, mag, focus_mm, band_target_adu, airmass, confmode, seeing)
             else:
-                r = calc_peak(instrument, band, mag, focus_mm, exptime or 30.0, airmass)
+                r = calc_peak(instrument, band, mag, focus_mm, exptime or 30.0, airmass, confmode, seeing)
             r["source_label"] = label
             r["is_target"] = source_idx == 0
             r["_sort_key"] = (band_order.get(band, 99), source_idx)
