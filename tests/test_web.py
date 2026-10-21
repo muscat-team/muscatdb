@@ -1945,7 +1945,8 @@ def test_test_request_overlays_plan_override(monkeypatch):
     monkeypatch.setattr(_web.test_observations, "request_configurations", fake_request_configurations)
     monkeypatch.setattr(_web.lco, "build_requestgroup",
                         lambda kind, base, configurations=None: {"kind": kind, "configs": configurations})
-    record = {"id": "t1", "plan": {"kind": "sinistro", "exposure_time": 60, "target": "X"}}
+    window = {"start": "2999-01-01T00:00:00Z", "end": "2999-01-02T00:00:00Z"}
+    record = {"id": "t1", "plan": {"kind": "sinistro", "exposure_time": 60, "target": "X", "window": window}}
 
     _web._test_request(record, {"name": "TEST X"})
     assert captured["plan"]["exposure_time"] == 60  # stored plan used as-is

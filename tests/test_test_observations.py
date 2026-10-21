@@ -1,23 +1,69 @@
 import datetime as dt
+import time
+from pathlib import Path
 
 import pytest
 
 from muscat_db import lco, test_observations as subject
+from muscat_db.database import _apply_schema, connect
+
+NOW = dt.datetime(2026, 10, 21, 0, 0, tzinfo=dt.timezone.utc)
+
+
+def _iso(value: dt.datetime) -> str:
+    return value.isoformat().replace("+00:00", "Z")
+
+
+def _transit(days: float, hours: float = 4.0) -> dict:
+    start = NOW + dt.timedelta(days=days)
+    return {"start": _iso(start), "end": _iso(start + dt.timedelta(hours=hours))}
 
 
 def _payload(**overrides):
     payload = {
-        "kind": "sinistro", "target_name": "WASP-12", "site": "coj", "filter": "rp",
-        "exposure_time": 30, "exposure_budget_s": 600, "estimated_overhead_s": 5,
+        "kind": "sinistro", "target_name": "WASP-12", "site": "coj", "filter": "rp", "ra": 1.0, "dec": 2.0,
+        "exposure_time": 30, "exposure_budget_s": 600, "readout_mode": "central_2k_2x2",
         "fov_candidates": [
-            {"center_ra": 1.0, "center_dec": 2.0, "pa_deg": 0, "edge_margin_arcsec": 40},
-            {"center_ra": 1.01, "center_dec": 2.01, "pa_deg": 15, "edge_margin_arcsec": 35},
+            {"center_ra": 1.01, "center_dec": 2.01, "pa_deg": 0, "edge_margin_arcsec": 40},
+            {"center_ra": 1.0, "center_dec": 2.0, "pa_deg": 0, "edge_margin_arcsec": 35},
         ],
-        "capabilities": {}, "provenance": {"calculator": "unit-test"},
+        "science_windows": [_transit(5)], "now": _iso(NOW), "provenance": {"calculator": "unit-test"},
     }
     payload.update(overrides)
     return payload
 
+
+# --- test window ---------------------------------------------------------------
+
+def test_today_window_runs_24_hours_from_now():
+    window = subject.plan_test_window("today", [_transit(5)], NOW)
+    assert window == {"start": _iso(NOW), "end": _iso(NOW + dt.timedelta(hours=24))}
+
+
+def test_today_window_stops_at_a_transit_inside_the_next_24_hours():
+    transit = _transit(0.5)
+    window = subject.plan_test_window("today", [transit], NOW)
+    assert window["end"] == transit["start"]
+
+
+def test_lead_window_ends_two_days_before_the_first_transit():
+    window = subject.plan_test_window("lead", [_transit(9), _transit(5)], NOW)
+    assert window["end"] == _iso(NOW + dt.timedelta(days=4))
+
+
+def test_lead_window_needs_room_before_the_transit():
+    with pytest.raises(subject.TestObservationError, match="1-day lead"):
+        subject.plan_test_window("lead", [_transit(1.01)], NOW)
+    with pytest.raises(subject.TestObservationError, match="upcoming transit"):
+        subject.plan_test_window("lead", [], NOW)
+
+
+def test_window_refused_while_a_science_window_is_open():
+    with pytest.raises(subject.TestObservationError, match="already open"):
+        subject.plan_test_window("today", [_transit(-0.01)], NOW)
+
+
+# --- plan ------------------------------------------------------------------------
 
 def test_plan_is_deterministic_and_retains_both_fovs():
     first = subject.generate_plan(_payload())
@@ -25,18 +71,54 @@ def test_plan_is_deterministic_and_retains_both_fovs():
     assert first == second
     assert {item["fov_index"] for item in first["configurations"]} == {0, 1}
     assert all(item["repeats"] >= 3 for item in first["configurations"])
+    assert all(item["pa_deg"] == 0 for item in first["configurations"])
     assert first["estimated_exposure_s"] <= 600
-    assert first["estimated_wall_clock_s"] > first["estimated_exposure_s"]
+    assert first["window"] == {"start": _iso(NOW), "end": _iso(NOW + dt.timedelta(hours=24))}
+    assert first["target_coord"] == {"ra": 1.0, "dec": 2.0}
 
 
-def test_focus_requires_fresh_verified_capability():
-    unsupported = subject.generate_plan(_payload(defocus_mm=2))
-    assert {item["defocus_mm"] for item in unsupported["configurations"]} == {2}
-    fresh = dt.datetime.now(dt.timezone.utc).isoformat()
-    supported = subject.generate_plan(_payload(defocus_mm=2, capabilities={
-        "fetched_at": fresh, "defocus": {"field": "defocus", "writable": True, "min": 0, "max": 6, "step": 1},
-    }))
-    assert {item["defocus_mm"] for item in supported["configurations"]} <= {1, 2, 3}
+def test_plan_wall_clock_counts_setup_and_readout_per_exposure():
+    plan = subject.generate_plan(_payload())
+    n_exposures = sum(c["repeats"] for c in plan["configurations"])
+    assert plan["readout_overhead_s"] == 9.0  # LCO central_2k_2x2 overhead
+    assert plan["estimated_wall_clock_s"] == pytest.approx(
+        subject.SETUP_OVERHEAD_S + plan["estimated_exposure_s"] + 9.0 * n_exposures)
+
+
+def test_plan_rejects_rotated_fov():
+    fovs = _payload()["fov_candidates"]
+    fovs[0]["pa_deg"] = 15
+    with pytest.raises(subject.TestObservationError, match="rotation"):
+        subject.generate_plan(_payload(fov_candidates=fovs))
+
+
+def test_plan_requires_exactly_two_fovs():
+    with pytest.raises(subject.TestObservationError, match="exactly two"):
+        subject.generate_plan(_payload(fov_candidates=_payload()["fov_candidates"][:1]))
+
+
+def test_identical_fovs_are_tested_once():
+    same = [{"center_ra": 1.0, "center_dec": 2.0, "pa_deg": 0}, {"center_ra": 1.0, "center_dec": 2.0, "pa_deg": 0}]
+    plan = subject.generate_plan(_payload(fov_candidates=same))
+    assert {c["fov_index"] for c in plan["configurations"]} == {0}
+    assert any("one FOV" in w for w in plan["warnings"])
+
+
+def test_focus_is_held_at_the_nominal_defocus():
+    plan = subject.generate_plan(_payload(defocus_mm=2))
+    assert {item["defocus_mm"] for item in plan["configurations"]} == {2}
+
+
+def test_defocus_beyond_instrument_limit_is_rejected():
+    with pytest.raises(subject.TestObservationError, match="0.5"):
+        subject.generate_plan(_payload(kind="qhy600", readout_mode="central30x30", defocus_mm=1.0))
+
+
+def test_predicted_target_saturation_removes_the_long_exposure():
+    # 30 s nominal: 45 s exposures reach 4000 e-/s * 45 s = 180000 >= 150000.
+    plan = subject.generate_plan(_payload(saturation_model={"rp": {"rate": 4000.0, "level": 150000.0}}))
+    assert all(c["exposure_time"] < 45 for c in plan["configurations"])
+    assert any(r["reason"] == "target predicted to saturate" for r in plan["removed_combinations"])
 
 
 def test_clipping_deduplicates_and_reports_removed():
@@ -44,17 +126,51 @@ def test_clipping_deduplicates_and_reports_removed():
     assert any("duplicate" in item["reason"] for item in plan["removed_combinations"])
 
 
-def test_budget_too_small_for_both_nominal_fovs_fails():
-    with pytest.raises(subject.TestObservationError, match="both FOVs"):
+def test_budget_error_names_the_actual_budget():
+    with pytest.raises(subject.TestObservationError, match=r"exposure budget \(100 s\)"):
         subject.generate_plan(_payload(exposure_budget_s=100))
 
 
-def test_record_round_trip(tmp_path):
-    path = tmp_path / "test.sqlite"
-    created = subject.create_record(subject.generate_plan(_payload()), path)
-    assert created["state"] == "draft"
-    updated = subject.update_record(created["id"], state="validated", payload_hash="abc", path=path)
-    assert updated["payload_hash"] == "abc"
+def test_plan_fails_when_the_window_cannot_hold_the_test():
+    # 1.05 h window; two nominal 3x600 s tests plus setup/readout need ~1.07 h.
+    with pytest.raises(subject.TestObservationError, match="shorter than the estimated"):
+        subject.generate_plan(_payload(science_windows=[_transit(1.05 / 24)], exposure_time=600,
+                                       exposure_budget_s=4000, exposure_limits={"max": 900}))
+
+
+# --- draft override and request window --------------------------------------------
+
+def test_draft_may_not_change_protected_keys():
+    plan = subject.generate_plan(_payload())
+    edited_window = {**plan["window"], "end": _transit(5)["end"]}
+    with pytest.raises(subject.TestObservationError, match="window"):
+        subject.merge_plan_override(plan, {"window": edited_window})
+    assert subject.merge_plan_override(plan, {"window": plan["window"], "exposure_budget_s": 300})["exposure_budget_s"] == 300
+
+
+def test_request_window_rejects_overlap_and_expiry():
+    plan = subject.generate_plan(_payload())
+    assert subject.request_window(plan, NOW) == plan["window"]
+    with pytest.raises(subject.TestObservationError, match="expired"):
+        subject.request_window(plan, NOW + dt.timedelta(hours=23.5))
+    overlapping = {**plan, "science_windows": [_transit(0.5)]}
+    with pytest.raises(subject.TestObservationError, match="overlaps"):
+        subject.request_window(overlapping, NOW)
+
+
+def test_test_request_uses_only_the_test_window(monkeypatch):
+    from muscat_db import web
+
+    plan = subject.generate_plan(_payload(now=_iso(dt.datetime.now(dt.timezone.utc))))
+    record = {"id": "t1", "plan": plan}
+    params = {"name": "X", "proposal": "P", "target_name": "WASP-12", "ra": 1.0, "dec": 2.0, "site": "coj",
+              "windows": plan["science_windows"], "filter": "rp", "readout_mode": "central_2k_2x2"}
+    monkeypatch.setattr(lco, "_clip_windows_to_observability", lambda *a, **k: None)
+    rg = web._test_request(record, params)
+    assert rg["requests"][0]["windows"] == [plan["window"]]
+    assert rg["name"].startswith("TEST ")
+    targets = {(c["target"]["ra"], c["target"]["dec"]) for c in rg["requests"][0]["configurations"]}
+    assert targets == {(1.01, 2.01), (1.0, 2.0)}
 
 
 def test_ordered_configs_leave_normal_payload_unchanged():
@@ -69,3 +185,134 @@ def test_ordered_configs_leave_normal_payload_unchanged():
         {"exposure_time": 10}, {"exposure_time": 20},
     ])
     assert [c["instrument_configs"][0]["exposure_time"] for c in multi["requests"][0]["configurations"]] == [10, 20]
+
+
+# --- persistence and lifecycle --------------------------------------------------
+
+@pytest.fixture
+def db(tmp_path):
+    path = tmp_path / "test.sqlite"
+    with connect(path) as conn:
+        _apply_schema(conn)
+    return path
+
+
+def _monitor(path, request_id: int, monitor_state: str, request_state: str = "PENDING"):
+    now = time.time()
+    with connect(path) as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO lco_observation_requests (request_id, requestgroup_id, request_state, "
+            "monitor_state, created_at, updated_at) VALUES (?,?,?,?,?,?)",
+            (request_id, 1, request_state, monitor_state, now, now),
+        )
+        conn.commit()
+
+
+def _submitted(path, ids=(11,)):
+    record = subject.create_record(subject.generate_plan(_payload()), path)
+    return subject.update_record(record["id"], state="submitted", request_ids=list(ids), path=path)
+
+
+def test_record_round_trip_with_result_and_recommendation(db):
+    created = subject.create_record(subject.generate_plan(_payload()), db)
+    assert created["state"] == "draft"
+    updated = subject.update_record(created["id"], state="complete", payload_hash="abc",
+                                    result={"frames_analyzed": 3}, recommendation={"fov_index": 0}, path=db)
+    assert updated["payload_hash"] == "abc"
+    assert updated["result"] == {"frames_analyzed": 3}
+    assert updated["recommendation"] == {"fov_index": 0}
+    assert [r["id"] for r in subject.list_records(target="WASP-12", path=db)] == [created["id"]]
+    assert subject.list_records(target="other", path=db) == []
+
+
+def _never_analyze(record, frames):
+    raise AssertionError("must not analyze")
+
+
+def test_advance_waits_until_the_monitor_registers_every_request(db):
+    record = _submitted(db, ids=(11, 12))
+    _monitor(db, 11, "monitoring")
+    assert subject.advance(path=db, analyze=_never_analyze) == 0
+    assert subject.get_record(record["id"], db)["state"] == "submitted"
+
+
+def test_advance_follows_pending_then_downloading(db):
+    record = _submitted(db)
+    _monitor(db, 11, "monitoring")
+    subject.advance(path=db, analyze=_never_analyze)
+    assert subject.get_record(record["id"], db)["state"] == "pending"
+    _monitor(db, 11, "downloading")
+    subject.advance(path=db, analyze=_never_analyze)
+    assert subject.get_record(record["id"], db)["state"] == "downloading"
+
+
+def test_advance_analyzes_terminal_requests(db, monkeypatch):
+    record = _submitted(db)
+    _monitor(db, 11, "complete", "COMPLETED")
+    monkeypatch.setattr(subject, "ingested_frame_paths", lambda conn, ids: [Path("a.fits")])
+    seen = {}
+
+    def analyze(rec, frames):
+        seen["frames"] = frames
+        return {"missing_configurations": []}, {"fov_index": 1}
+
+    assert subject.advance(path=db, analyze=analyze) == 1
+    done = subject.get_record(record["id"], db)
+    assert done["state"] == "complete"
+    assert done["recommendation"] == {"fov_index": 1}
+    assert seen["frames"] == [Path("a.fits")]
+
+
+def test_advance_marks_partial_when_configurations_are_missing(db, monkeypatch):
+    record = _submitted(db)
+    _monitor(db, 11, "complete", "COMPLETED")
+    monkeypatch.setattr(subject, "ingested_frame_paths", lambda conn, ids: [Path("a.fits")])
+    subject.advance(path=db, analyze=lambda rec, frames: ({"missing_configurations": [2]}, {}))
+    assert subject.get_record(record["id"], db)["state"] == "partial"
+
+
+def test_advance_fails_without_frames_and_records_analysis_errors(db, monkeypatch):
+    empty = _submitted(db)
+    _monitor(db, 11, "terminal_no_data", "WINDOW_EXPIRED")
+    subject.advance(path=db, analyze=_never_analyze)
+    failed = subject.get_record(empty["id"], db)
+    assert failed["state"] == "failed"
+    assert "WINDOW_EXPIRED" in failed["failure_detail"]
+
+    broken = _submitted(db, ids=(21,))
+    _monitor(db, 21, "complete", "COMPLETED")
+    monkeypatch.setattr(subject, "ingested_frame_paths", lambda conn, ids: [Path("a.fits")])
+
+    def explode(rec, frames):
+        raise RuntimeError("boom")
+
+    subject.advance(path=db, analyze=explode)
+    record = subject.get_record(broken["id"], db)
+    assert record["state"] == "failed"
+    assert "boom" in record["failure_detail"]
+
+
+def test_plan_route_fixes_pa_and_tests_optimized_and_centred_fovs(db, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from muscat_db import exposure, fov, web
+
+    captured = {}
+
+    def fake_optimize(kind, **kwargs):
+        captured.update(kwargs)
+        return fov.FovResult(ok=True, instrument=kind, ra=1.0, dec=2.0, center_ra=1.01, center_dec=2.01, pa_deg=0.0)
+
+    monkeypatch.setattr(web.fov_opt, "optimize", fake_optimize)
+    monkeypatch.setattr(exposure, "lookup_magnitudes_with_fallback", lambda ra, dec: ({"rp": 12.0}, "test", False))
+    monkeypatch.setattr(exposure, "load_coeffs", lambda instrument: {})
+    monkeypatch.setattr(subject, "db_path", lambda: str(db))
+    body = {k: v for k, v in _payload().items() if k not in ("fov_candidates", "now", "science_windows")}
+    body["windows"] = [_transit(400)]
+    response = TestClient(web.app).post("/api/lco/test-observations/plan", json=body)
+    assert response.status_code == 200, response.text
+    plan = response.json()["record"]["plan"]
+    assert captured["pa_step_deg"] == 180.0
+    assert [(f["center_ra"], f["center_dec"], f["pa_deg"]) for f in plan["fov_candidates"]] == [(1.01, 2.01, 0), (1.0, 2.0, 0)]
+    assert plan["science_windows"] == body["windows"]
+    assert {c["fov_index"] for c in plan["configurations"]} == {0, 1}
