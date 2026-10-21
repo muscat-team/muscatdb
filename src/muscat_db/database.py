@@ -47,6 +47,19 @@ def format_elapsed(seconds: int) -> str:
     return f"{days}d {hrs}h"
 
 
+# Fitted exposure models written by Calibrate (exposure_model.save_models).
+# Part of SCHEMA so build_db creates it in the fresh image it restores into.
+EXPOSURE_MODELS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS exposure_models (
+    instrument  TEXT NOT NULL,
+    band        TEXT NOT NULL,
+    mode        TEXT NOT NULL DEFAULT '',
+    params_json TEXT NOT NULL,
+    n_frames    INTEGER NOT NULL DEFAULT 0,
+    updated_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (instrument, band, mode)
+);
+"""
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS frames (
@@ -182,7 +195,7 @@ CREATE TABLE IF NOT EXISTS exposure_coeffs (
     updated_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (instrument, band, focus_mm)
 );
-
+""" + EXPOSURE_MODELS_SCHEMA + """
 CREATE TABLE IF NOT EXISTS exposure_jobs (
     id          TEXT PRIMARY KEY,
     instrument  TEXT NOT NULL,
@@ -885,8 +898,8 @@ def _set_temp_store_dir(conn: sqlite3.Connection, db_file: str) -> None:
 # Tables owned by the app rather than derived from the obslog CSVs. build_db
 # rebuilds the observation tables (frames/summaries/targets) from scratch, so
 # these must be copied across the atomic swap or the daily cron silently wipes
-# user notes, manual identification overrides, exposure calibration coefficients,
-# job history, saved ephemeris views, closed-loop test observations, and LCO
+# user notes, manual identification overrides, exposure calibration coefficients
+# and fitted exposure models, job history, saved ephemeris views, closed-loop test observations, and LCO
 # request-monitoring state on every successful build.  Monitor leases are
 # deliberately excluded because they are process-local and must be reacquired.
 _APP_OWNED_TABLES = (
@@ -896,6 +909,7 @@ _APP_OWNED_TABLES = (
     "target_notes",
     "target_overrides",
     "exposure_coeffs",
+    "exposure_models",
     "test_observations",
     "lco_observation_requests",
     "lco_observation_frames",
@@ -1051,7 +1065,7 @@ def build_db(db_path: str, progress=None) -> int:
     # (issue #182, finding 1). The snapshot is the disaster-recovery point for
     # a rebuild that goes wrong after this point.
     if os.path.exists(db_path):
-        db_backup.snapshot(db_path)
+        db_backup.snapshot(db_path, app_tables=_APP_OWNED_TABLES)
         db_backup.prune(db_path)
 
     # Phase 1: discover all CSVs (cheap walk so we can size the progress bar).
@@ -2794,6 +2808,33 @@ def get_active_persisted_jobs() -> list[dict]:
             """SELECT * FROM jobs
                WHERE state IN ('running', 'cancelling', 'pending')
                ORDER BY started_at DESC"""
+        )
+        columns = [d[0] for d in cur.description]
+        result = []
+        for row in cur.fetchall():
+            item = dict(zip(columns, row))
+            item["inst"] = item["instrument"]
+            item["date"] = item["obsdate"]
+            if not str(item.get("run_name") or "").strip():
+                item["run_name"] = str(item.get("run_id") or "").strip()
+            result.append(item)
+        return result
+
+
+def get_pending_persisted_jobs(type_: str) -> list[dict]:
+    """Return pending rows of *type_*, oldest-first (FIFO drain order).
+
+    Every pending-drain pass calls this, so it filters in SQL on the
+    active-state index rather than reading the whole job history.
+    """
+    path = db_path()
+    with get_conn(path) as conn:
+        _ensure_jobs_migrated(conn, path)
+        cur = conn.execute(
+            """SELECT * FROM jobs
+               WHERE state = 'pending' AND type = ?
+               ORDER BY started_at, key""",
+            (type_,),
         )
         columns = [d[0] for d in cur.description]
         result = []

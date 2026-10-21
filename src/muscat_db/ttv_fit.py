@@ -3,6 +3,7 @@ run the harmonic TTV pipeline, poll logs, and return outputs/plots.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 import datetime
 import json
 import logging
@@ -475,6 +476,7 @@ def start_ttv_fit(
     target: str,
     options: dict,
     user_name: str | None = None,
+    authorize_run: Callable[[str], None] | None = None,
 ) -> dict:
     if not (target or "").strip():
         return {"ok": False, "error": "target is required"}
@@ -482,6 +484,11 @@ def start_ttv_fit(
         _target_dir_name(target)
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
+
+    # Refuse a launch over a run the caller may not replace before anything else,
+    # so the answer does not depend on whether the options are valid.
+    if authorize_run is not None:
+        authorize_run(((options or {}).get("run_name") or "").strip())
 
     err = validate_ttv_options(options)
     if err:
@@ -845,8 +852,10 @@ def delete_ttv_fit(target: str, run_name: str = "") -> dict:
         try:
             shutil.rmtree(rdir)
             removed += 1
-        except OSError:
-            pass
+        except OSError as exc:
+            logger.warning("could not delete TTV run %s", rdir, exc_info=True)
+            return {"ok": False, "delete_failed": True,
+                    "error": f"could not delete the run: {exc.strerror or exc}"}
     job_key = ttv_job_key(target, run_name)
     db_key = f"ttv_fit:{job_key}"
     get_job_store().delete(db_key)
@@ -1469,17 +1478,28 @@ def sync_jobs() -> None:
                 except ValueError:
                     store.save(type_="ttv_fit", inst="_", date="_", target=target, state="error", returncode=-1, elapsed=0, started_at=entry["started_at"], error_desc="Invalid target", run_id=run_seg, run_name=run_name)
                     continue
-                # Atomic: at most one process/caller ever wins this claim for a
-                # given key, so two workers draining the same pending row can
-                # never both launch it.
-                if not store.claim_slot("ttv_fit", key, _MAX_FULL_JOBS, **claim_caps(entry.get("user_name"))):
+                # Atomic: the slot and this row's pending -> running move are one
+                # transaction, so two workers draining the same pending row can
+                # never both launch it, even if a reconcile_slots pass elsewhere
+                # frees the slot before the save(state="running") below.
+                if not store.claim_slot("ttv_fit", key, _MAX_FULL_JOBS, **claim_caps(entry.get("user_name")), pending_key=entry["key"]):
                     continue
-                rdir.mkdir(parents=True, exist_ok=True)
-                csv_content = opts.get("csv_content", "")
-                ini_content = opts.get("ini_content", "")
-                input_dir = write_ttv_inputs(rdir, csv_content, ini_content, opts, user_name=entry.get("user_name"))
+                try:
+                    rdir.mkdir(parents=True, exist_ok=True)
+                    csv_content = opts.get("csv_content", "")
+                    ini_content = opts.get("ini_content", "")
+                    input_dir = write_ttv_inputs(rdir, csv_content, ini_content, opts, user_name=entry.get("user_name"))
+                    harmonic = _harmonic_prefix()
+                except Exception as exc:
+                    # The claim already moved the row to running: leave it
+                    # terminal, not for orphan reconcile, which could trust a
+                    # previous run's log in this reused directory.
+                    logger.warning("failed to prepare queued TTV fit %s", key, exc_info=True)
+                    store.release_slot("ttv_fit", key)
+                    store.save(type_="ttv_fit", inst="_", date="_", target=target, state="error", returncode=-1, elapsed=0, started_at=entry["started_at"], error_desc=f"Failed to prepare run: {exc}", run_id=run_seg, run_name=run_name)
+                    continue
                 cmd = [
-                    *_harmonic_prefix(),
+                    *harmonic,
                     "-i", str(input_dir / "data.csv"),
                     "-c", str(input_dir / "config.ini"),
                     "-o", str(rdir),

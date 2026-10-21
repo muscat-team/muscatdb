@@ -1863,6 +1863,22 @@ def _query_target_planets_nasa(target: str) -> dict:
     return results
 
 
+# Epoch (Julian year) of the ra/dec in both NExScI catalog CSVs: they are
+# Gaia DR2 positions, not propagated to J2000. Verified on LHS 3844 (1.4"/yr):
+# the catalog position matches SIMBAD's J2000 position + proper motion at
+# 2015.5 to 0.00", and is 12.4" from it at 2000.
+CATALOG_EPOCH = 2015.5
+# SIMBAD's basic ra/dec are ICRS at epoch J2000.
+SIMBAD_EPOCH = 2000.0
+
+
+def _catalog_astrometry(pmra, pmdec) -> dict:
+    """Epoch and proper motion (mas/yr, pmra including cos dec) of a catalog
+    position. A CSV downloaded before the proper-motion columns were added
+    yields None proper motion, so the position is still used at its epoch."""
+    return {"epoch": CATALOG_EPOCH, "pmra": _safe_float(pmra), "pmdec": _safe_float(pmdec)}
+
+
 def _query_target_coordinates(target: str) -> dict | None:
     target_clean = target.strip().upper()
     cache_key = "coords_" + target_clean
@@ -1881,17 +1897,21 @@ def _query_target_coordinates(target: str) -> dict | None:
         dec = _safe_float(row.get("dec_x"))
         if ra is None or dec is None:
             return None
-        return {"ra": ra, "dec": dec, "source": "nasa"}
+        return {"ra": ra, "dec": dec, "source": "nasa", **_catalog_astrometry(row.get("sy_pmra"), row.get("sy_pmdec"))}
 
     def _coords_from_toi_row(row: dict) -> dict | None:
         ra = _safe_float(row.get("ra_deg"))
         dec = _safe_float(row.get("dec_deg"))
-        if ra is None or dec is None:
-            ra = _safe_float(row.get("RA"))
-            dec = _safe_float(row.get("Dec"))
+        if ra is not None and dec is not None:
+            return {
+                "ra": ra, "dec": dec, "source": "toi",
+                **_catalog_astrometry(row.get("pm ra (mas/yr)"), row.get("pm dec (mas/yr)")),
+            }
+        ra = _safe_float(row.get("RA"))
+        dec = _safe_float(row.get("Dec"))
         if ra is None or dec is None:
             return None
-        return {"ra": ra, "dec": dec, "source": "toi"}
+        return {"ra": ra, "dec": dec, "source": "toi", "epoch": None, "pmra": None, "pmdec": None}
 
     try:
         csv_path = pathlib.Path(HERE).parent.parent / "data" / "nexsci_pscomppars.csv"
@@ -1951,6 +1971,20 @@ def _resolve_archive_coords(target: str) -> tuple[float, float, str] | None:
     falls back to SIMBAD name resolution. Returns None when the name cannot be
     resolved by any source. Both results are cached.
     """
+    resolved = resolve_target_astrometry(target)
+    if resolved is None:
+        return None
+    return resolved["ra"], resolved["dec"], resolved["source"]
+
+
+def resolve_target_astrometry(target: str) -> dict | None:
+    """``_resolve_archive_coords`` with the position's epoch and proper motion.
+
+    Returns ``{"ra", "dec", "source", "epoch", "pmra", "pmdec"}``: epoch is a
+    Julian year (CATALOG_EPOCH for nasa/toi, SIMBAD_EPOCH for simbad) and the
+    proper motions are mas/yr with pmra including cos(dec), or None when the
+    source has none (SIMBAD's name resolver returns a position only).
+    """
     # The name as given first, then (for an LCO key-project decoration such as
     # "TIC 434398831.11 (TOI 32.11)") each half, so a host listed under only
     # one of its designations still resolves.
@@ -1958,13 +1992,24 @@ def _resolve_archive_coords(target: str) -> tuple[float, float, str] | None:
     for name in dict.fromkeys([target, *candidates]):
         coords = _query_target_coordinates(name)
         if coords is not None:
-            return float(coords["ra"]), float(coords["dec"]), str(coords.get("source") or "catalog")
+            return {
+                "ra": float(coords["ra"]), "dec": float(coords["dec"]),
+                "source": str(coords.get("source") or "catalog"),
+                "epoch": coords.get("epoch"), "pmra": coords.get("pmra"), "pmdec": coords.get("pmdec"),
+            }
 
     cache_key = "simbad_" + target.strip().upper()
     cached = _CATALOG_CACHE.get(cache_key, _CACHE_MISS)
-    if cached is not _CACHE_MISS:
-        return cached
+    if cached is _CACHE_MISS:
+        cached = _simbad_coords(target, candidates)
+        _CATALOG_CACHE[cache_key] = cached
+    if cached is None:
+        return None
+    ra, dec, source = cached
+    return {"ra": ra, "dec": dec, "source": source, "epoch": SIMBAD_EPOCH, "pmra": None, "pmdec": None}
 
+
+def _simbad_coords(target: str, candidates: list[str]) -> tuple[float, float, str] | None:
     # Sesame/SIMBAD rejects an LCO-decorated compound name outright -- parens
     # aren't valid identifier syntax -- and unlike a bare TIC ID, a TOI
     # candidate suffix (".NN") also fails resolution (verified empirically:
@@ -1981,9 +2026,7 @@ def _resolve_archive_coords(target: str) -> tuple[float, float, str] | None:
         radec = exp_calc.resolve_target_coords(simbad_name)
         if radec:
             break
-    result = (float(radec[0]), float(radec[1]), "simbad") if radec else None
-    _CATALOG_CACHE[cache_key] = result
-    return result
+    return (float(radec[0]), float(radec[1]), "simbad") if radec else None
 
 
 def _query_target_planets_toi(target: str) -> dict:

@@ -346,6 +346,20 @@ uv run --with 'psycopg[binary,pool]>=3.2' pytest tests/test_job_store_postgres.p
 
 Do not run it against the database a live instance is using.
 
+### Control-plane backup
+
+`deploy/nightly.sh run` ends with `muscat-db backup-control-plane` when the checkout has a `.web-env` (production's does; it supplies `MUSCAT_POSTGRES_DSN` for `muscatdb_prod`). It runs after `build-db`, so a Postgres outage alerts on Slack without holding up the catalog rebuild. The dump is `pg_dump --format=custom`, read back with `pg_restore --list` before it replaces anything, and written as `<dbname>.nightly-<stamp>.dump` beside the `muscat.db` snapshots, under the same `MUSCAT_DB_BACKUP_DIR` and `MUSCAT_DB_BACKUP_KEEP` (default 2). The password reaches `pg_dump` through `PGPASSWORD`, never its command line. Log: `logs/pg-backup.log`.
+
+Restore, with every worker and the `:8001` web app stopped (they hold connections and would write mid-restore):
+
+```bash
+.venv/bin/python deploy/workers.py --profile prod down
+source ~/.config/muscatdb/pg.env
+pg_restore --clean --if-exists --dbname "${MUSCAT_POSTGRES_DSN%/*}/muscatdb_prod" ~/temp/muscatdb_prod.nightly-<stamp>.dump
+```
+
+Jobs that ran after the dump was taken are missing from the restored `jobs` table; their run directories on NFS are untouched.
+
 ### Verification record (2026-10-10, ut2)
 
 - Server: PostgreSQL 18.6, role `muscatdb`, schema initialised by `PostgresJobStore` (`jobs`, `job_concurrency_slots`).
@@ -465,7 +479,7 @@ Findings:
 Starting the three ut5 workers at the same moment made two of them fail their first connection with `DeadlockDetected` in `_ensure_pg_jobs_schema` (`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS …` from several processes). They survived: the store is created lazily and the next pass succeeded, and all three held a `LISTEN` connection afterwards. What was skipped was the one-time "resolve stale `cancelling` rows" at startup (logged as `could not resolve stale 'cancelling' job rows`), and the photometry worker also logged one failed reconciliation pass.
 
 - [x] Worked around: `workers.py up` starts one host's workers one at a time (`stagger_s`).
-- [ ] Not fixed: serialize `_ensure_pg_jobs_schema` with an advisory lock (the pattern `claim_slot` already uses). It will recur on a coordinated restart of several hosts or of the web app and workers together.
+- [x] Fixed (#51 step B): `_ensure_pg_jobs_schema` takes a transaction-scoped advisory lock first, so concurrent sessions queue instead of deadlocking. Cause: `CREATE INDEX IF NOT EXISTS` takes a SHARE lock on `jobs` and the `ALTER TABLE` after it needs ACCESS EXCLUSIVE, so two sessions each held the lock the other was upgrading past. `tests/test_job_store_postgres.py::TestSchemaEnsureConcurrency` reproduces it (six sessions, a missing column each round) and fails with `DeadlockDetected` without the lock. `stagger_s` is no longer needed for this, but is harmless.
 
 ### Not covered yet
 
@@ -478,14 +492,80 @@ Starting the three ut5 workers at the same moment made two of them fail their fi
 - [ ] Move the running tmux workers on ut3 and ut5 to the systemd units (`workers.py down`, then `up`), and `loginctl enable-linger` on both (currently `Linger=no`, so units would stop at the last logout). The unit was smoke-tested on ut5 with one extra `ttv_fit` worker; the existing workers were not migrated.
 - [ ] Merge muscat-team/muscatdb#218 and restart the dev server: until then a full run queued after a test run on the same key can be overwritten, and `/jobs` re-run of an unnamed run forks a row.
 - [ ] Reboot test of the units (needs linger).
-- [ ] Fix the concurrent schema-check deadlock (see the section above).
+- [x] Fix the concurrent schema-check deadlock (see the section above).
 - [ ] Real host routing: today it is the `MUSCAT_WORKER_MAX_SLOTS=0` workaround, not a queue that targets a host.
 - [ ] Cancelling a job that runs on another host.
-- [ ] Backups: `muscat.db` has a daily backup, the Postgres control plane has none.
+- [x] Backups: the control plane is dumped nightly (#51 step C, see *Control-plane backup* below).
 - [ ] Decide whether SQLite job history should be migrated or left behind.
 - [ ] Switch production (`:8001`) and the test deploy (`:8003`) only after the above and a release.
 
 ---
+
+## Database integrity failure
+
+The nightly `build-db` copies `muscat.db` with the SQLite backup API, runs
+`PRAGMA integrity_check` on the copy, and refuses to rebuild over a file that
+fails (#182). A refusal exits non-zero, so `nightly.sh` posts a Slack alert with
+the step name and the end of `logs/build-db.log`.
+
+### Read the reason first
+
+`logs/build-db.log` names the first problems and the kept copy:
+
+- **Only `Page N: never used` lines** are unreferenced pages. Usually they are
+  leaked accounting, but a subtree that lost its parent pointer is reported the
+  same way and its rows are gone. The rebuild regenerates `frames`, `summaries`
+  and `targets` only; the app-owned tables (users, access, groups, jobs, LCO
+  requests) are copied forward as they are. So the build carries on, Slack gets
+  an alert, the snapshot is marked (`<snapshot>.leaked-pages`), and the newest
+  clean snapshot is kept however many leaked ones follow it. A leaked copy with
+  fewer rows in any app-owned table than that clean snapshot is refused as
+  damage. After an alert, compare the app tables against the clean snapshot
+  and restore from it if rows are missing.
+- **Anything else** is damage. The copy is kept as
+  `muscat.db.nightly-<stamp>.sqlite.INTEGRITY-FAILED` in `$MUSCAT_DB_BACKUP_DIR`
+  (default `~/temp`). Nothing was changed, but no rebuild will run until the file
+  is sound.
+
+### A slow run is not a hung run
+
+The copy and the check each read the whole file, and the log records both times
+(`copy N s, check N s`) and warns when they total more than 30 minutes. On
+2026-10-20 they took 3 h 11 min, because the controller's weekly consistency
+check and patrol read (scheduled for 12:00; `storcli64 /c0 show cc`, `show pr`)
+were running on the same array. The `.part` file stays at 0 bytes until the copy
+commits. Do not kill the job: the verdict arrives at the end.
+
+### Restore from a verified snapshot
+
+1. Find the newest `muscat.db.nightly-*.sqlite` that passes, checking it
+   read-only (about 90 minutes on a busy disk):
+   `python3 -c "import sqlite3,sys; c=sqlite3.connect('file:'+sys.argv[1]+'?immutable=1',uri=True); print(c.execute('PRAGMA integrity_check').fetchall())" <snapshot>`
+2. List what the damaged file holds that the snapshot lacks. `frames`, `summaries`
+   and `targets` are rebuilt by `build-db`; compare the app-owned tables (jobs,
+   chat, LCO requests, users, notes) row by row, read-only, and save the
+   difference. A table the damaged file cannot read is lost.
+3. Stop `nightly.sh` and the servers (they run in tmux panes; save each server's
+   command, working directory and environment from `/proc/<pid>/` first so it
+   can be restarted as it was). Confirm nothing holds `muscat.db` open.
+4. Move `muscat.db`, `-wal` and `-shm` to `muscat.db.CORRUPTED-<date>*`. Never
+   delete them.
+5. Copy the verified snapshot to `muscat.db`, `chmod 644`, and `cmp` it against the
+   snapshot (only SQLite header bytes 19, 20, 28 and 96 may differ once a
+   connection has switched it to WAL).
+6. Start the servers, insert the saved rows (`INSERT OR IGNORE`), run `muscat-db
+   build-db`, then `muscat-db backfill-products --dry-run`, which must report 0
+   records if the product records are intact.
+
+### Cause
+
+Unknown. Corruption was found on 2026-09-11, 2026-10-11 (leaked pages, repaired
+with `VACUUM INTO`) and 2026-10-19 (`lco_monitor_leases` unreadable, restored
+from the 2026-10-19 00:30 snapshot). The RAID 6 array was `Optimal` on
+2026-10-20, its CacheVault healthy, with no drive, media or power events logged
+since boot, so a hardware fault is not indicated. Look for what interrupts a
+write: a killed process, a long-running writer during a backup, or several
+servers on one file.
 
 ## Shared filesystem
 

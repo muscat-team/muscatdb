@@ -1276,7 +1276,7 @@ def test_jobs_rerun_restores_persisted_run_identity(mock_db, monkeypatch):
     key = get_persisted_jobs()[0]["key"]
     captured = {}
 
-    def fake_start_run(inst, date, target, options, test_run, user_name=None):
+    def fake_start_run(inst, date, target, options, test_run, user_name=None, **kw):
         captured.update(
             inst=inst,
             date=date,
@@ -1335,7 +1335,7 @@ def test_jobs_rerun_of_unnamed_run_keeps_its_run_id(mock_db, monkeypatch):
     assert row["run_name"] == run_id  # the display fallback the bug fed back in
     captured = {}
 
-    def fake_start_run(inst, date, target, options, test_run, user_name=None):
+    def fake_start_run(inst, date, target, options, test_run, user_name=None, **kw):
         captured["options"] = options
         return {"ok": True, "key": "rerun-key"}
 
@@ -3626,7 +3626,7 @@ def test_ttv_fit_command_endpoint(monkeypatch):
 def test_ttv_fit_start_uses_authenticated_user(monkeypatch):
     captured = {}
 
-    def fake_start(target, options, user_name):
+    def fake_start(target, options, user_name, **kw):
         captured.update(target=target, options=options, user_name=user_name)
         return {"ok": True}
 

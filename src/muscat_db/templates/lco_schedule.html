@@ -1182,6 +1182,19 @@
       .then(function (info) { if (info.ok) { lastTargetInfo = info; lastInfoTarget = target; } return info; });
   }
 
+  var catalogAstrometry = null;
+
+  // Epoch (Julian year) and proper motion (mas/yr) of the catalog position, for
+  // the LCO target, while sch-coords still holds that position. The catalogs
+  // are Gaia DR2 at 2015.5; without them LCO treats the position as J2000.
+  function coordsAstrometry() {
+    var a = catalogAstrometry;
+    if (!a || a.epoch == null || (val('sch-coords') || '').trim() !== a.text) return {};
+    var out = { epoch: a.epoch };
+    if (a.pmra != null && a.pmdec != null) { out.pmra = a.pmra; out.pmdec = a.pmdec; }
+    return out;
+  }
+
   function populateCoordinates(info, opts) {
     opts = opts || {};
     var coords = info && info.coordinates;
@@ -1192,10 +1205,14 @@
       if (val('sch-coords') && !fieldSources['sch-coords']) setFieldSource('sch-coords', 'manual');
       throw new Error('Coordinates not found for ' + (info && info.target ? info.target : 'that target'));
     }
+    var text = coords.ra.toFixed(5) + ', ' + coords.dec.toFixed(5);
+    // Epoch and proper motion travel with the catalog position only; buildParams
+    // drops them once the field no longer holds exactly this text (a manual edit).
+    catalogAstrometry = { text: text, epoch: coords.epoch, pmra: coords.pmra, pmdec: coords.pmdec };
     if (opts.isInitialLoad && val('sch-coords')) {
       return;
     }
-    setVal('sch-coords', coords.ra.toFixed(5) + ', ' + coords.dec.toFixed(5));
+    setVal('sch-coords', text);
     setFieldSource('sch-coords', String(coords.source || 'catalog').toUpperCase());
     updateGenWindowsButtonState();
     saveOptions();
@@ -2893,6 +2910,7 @@
       guiding_config: val('sch-guiding-config'),
       defocus: num('sch-defocus')
     };
+    Object.assign(p, coordsAstrometry());
     if (kind === 'muscat' || kind === 'muscat3' || kind === 'muscat4') {
       p.exposure_times = {};
       ['g', 'r', 'i', 'z'].forEach(function (b) { var v = num('sch-exp-' + b); if (v !== null) p.exposure_times[b] = v; });
