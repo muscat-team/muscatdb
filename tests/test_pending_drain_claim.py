@@ -1,11 +1,13 @@
-"""The pending-queue drain loops hand the queued row's owner to ``claim_slot``.
+"""The pending-queue drain loops hand the queued row to ``claim_slot``.
 
 Each pipeline's ``sync_jobs`` drains ``pending`` rows by claiming a durable
 slot first. The claim must carry the row owner's running cap (issue #265), or
-a user's queued jobs bypass the cap the moment they leave the queue. The
-store-level behavior lives in tests/_job_store_contract.py; these tests pin the
-call sites, which a refactor of a drain loop could otherwise drop without any
-other test noticing.
+a user's queued jobs bypass the cap the moment they leave the queue. It must
+also carry the row's own key as ``pending_key`` (issue #51), so the claim and
+the row's move from pending to running are one step and a row another worker
+already took is not launched a second time. The store-level behavior lives in
+tests/_job_store_contract.py; these tests pin the call sites, which a refactor
+of a drain loop could otherwise drop without any other test noticing.
 
 The job store is a real SQLite store wrapped in a spy that records each
 ``claim_slot`` call. Engine launches are stubbed at ``subprocess.Popen``.
@@ -43,15 +45,29 @@ class _FakeProc:
 
 
 class _ClaimSpy:
-    """Delegates to the real store and records every ``claim_slot`` call."""
+    """Delegates to the real store and records every ``claim_slot`` call.
+
+    With ``finish_after_snapshot`` set, ``pending()`` returns its rows and then
+    marks them ``done``, the way a row looks to a drain whose snapshot is stale
+    because another worker has already launched and finished it.
+    """
 
     def __init__(self, store):
         self._store = store
         self.claims: list[dict] = []
+        self.finish_after_snapshot = False
 
     def claim_slot(self, pipeline, holder_key, max_slots, **kwargs):
         self.claims.append(kwargs)
         return self._store.claim_slot(pipeline, holder_key, max_slots, **kwargs)
+
+    def pending(self, type_):
+        rows = self._store.pending(type_)
+        if self.finish_after_snapshot:
+            with database.get_conn(database.db_path()) as conn:
+                conn.executemany("UPDATE jobs SET state = 'done' WHERE key = ?", [(r["key"],) for r in rows])
+                conn.commit()
+        return rows
 
     def __getattr__(self, name):
         return getattr(self._store, name)
@@ -98,6 +114,10 @@ def _spy(monkeypatch, module) -> _ClaimSpy:
 
 def _pending_keys(type_: str) -> list[str]:
     return [r["key"] for r in get_job_store().pending(type_)]
+
+
+def _states(type_: str) -> list[str]:
+    return [j["state"] for j in database.get_persisted_jobs() if j["type"] == type_]
 
 
 def _close(registry: dict) -> None:
@@ -173,17 +193,30 @@ def ttv_drain(tmp_path, monkeypatch, jobs_db, launched):
 
 
 _DRAINS = [
-    pytest.param("phot_drain", phot.sync_jobs, id="photometry"),
-    pytest.param("fit_drain", fit.sync_jobs, id="transit_fit"),
-    pytest.param("ttv_drain", ttv.sync_jobs, id="ttv_fit"),
+    pytest.param("phot_drain", phot.sync_jobs, "photometry", id="photometry"),
+    pytest.param("fit_drain", fit.sync_jobs, "transit_fit", id="transit_fit"),
+    pytest.param("ttv_drain", ttv.sync_jobs, "ttv_fit", id="ttv_fit"),
 ]
 
 
-@pytest.mark.parametrize(("drain", "sync"), _DRAINS)
-def test_drain_claims_with_the_row_owners_caps(drain, sync, request, launched):
+@pytest.mark.parametrize(("drain", "sync", "type_"), _DRAINS)
+def test_drain_claims_with_the_row_owners_caps_and_the_rows_key(drain, sync, type_, request, launched):
     spy = request.getfixturevalue(drain)
+    [row_key] = _pending_keys(type_)
 
     sync()
 
-    assert spy.claims == [{"user_name": USER, "max_user_slots": 2}]
+    assert spy.claims == [{"user_name": USER, "max_user_slots": 2, "pending_key": row_key}]
     assert len(launched) == 1
+
+
+@pytest.mark.parametrize(("drain", "sync", "type_"), _DRAINS)
+def test_drain_does_not_launch_a_row_that_is_no_longer_pending(drain, sync, type_, request, launched):
+    spy = request.getfixturevalue(drain)
+    spy.finish_after_snapshot = True
+
+    sync()
+
+    assert len(spy.claims) == 1
+    assert launched == []
+    assert _states(type_) == ["done"]
