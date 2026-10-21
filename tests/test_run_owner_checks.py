@@ -353,6 +353,16 @@ def test_a_new_run_name_stays_open_to_anyone_who_can_see_the_night(lax, route):
     assert resp.status_code != 403
 
 
+@_LAUNCH
+def test_launch_over_an_unowned_run_is_refused_to_a_user_in_no_group(lax, route):
+    _own_all("")
+    rdir = LAUNCHES[route][1]()
+    before = _tree(rdir)
+
+    assert _launch(lax, route, "bob")[0].status_code == 403
+    assert _tree(rdir) == before
+
+
 @pytest.mark.parametrize("kind", ["photometry", "transit_fit", "ttv_fit"])
 def test_rerun_of_another_users_job_is_refused(lax, kind):
     _own_all("alice")
