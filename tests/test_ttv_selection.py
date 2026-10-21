@@ -138,7 +138,7 @@ def started(monkeypatch):
     """Capture what /api/ttv-fit/start hands to the fit launcher."""
     captured = {}
     monkeypatch.setattr("muscat_db.web.ttv.start_ttv_fit",
-                        lambda target, options, user: captured.update(options=options) or {"ok": True})
+                        lambda target, options, user, **kw: captured.update(options=options) or {"ok": True})
     monkeypatch.setattr("muscat_db.web._transit_fit_available", lambda: (lambda *a: True))
     monkeypatch.setattr("muscat_db.web._run_hidden", lambda *a: False)
     monkeypatch.setattr("muscat_db.web._get_run_fitted_params",

@@ -3,6 +3,7 @@ run the harmonic TTV pipeline, poll logs, and return outputs/plots.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 import datetime
 import json
 import logging
@@ -475,6 +476,7 @@ def start_ttv_fit(
     target: str,
     options: dict,
     user_name: str | None = None,
+    authorize_run: Callable[[str], None] | None = None,
 ) -> dict:
     if not (target or "").strip():
         return {"ok": False, "error": "target is required"}
@@ -482,6 +484,11 @@ def start_ttv_fit(
         _target_dir_name(target)
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
+
+    # Refuse a launch over a run the caller may not replace before anything else,
+    # so the answer does not depend on whether the options are valid.
+    if authorize_run is not None:
+        authorize_run(((options or {}).get("run_name") or "").strip())
 
     err = validate_ttv_options(options)
     if err:
@@ -845,8 +852,10 @@ def delete_ttv_fit(target: str, run_name: str = "") -> dict:
         try:
             shutil.rmtree(rdir)
             removed += 1
-        except OSError:
-            pass
+        except OSError as exc:
+            logger.warning("could not delete TTV run %s", rdir, exc_info=True)
+            return {"ok": False, "delete_failed": True,
+                    "error": f"could not delete the run: {exc.strerror or exc}"}
     job_key = ttv_job_key(target, run_name)
     db_key = f"ttv_fit:{job_key}"
     get_job_store().delete(db_key)
