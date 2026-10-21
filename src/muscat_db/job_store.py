@@ -229,6 +229,7 @@ class JobConcurrency(Protocol):
         *,
         user_name: str | None = None,
         max_user_slots: int | None = None,
+        pending_key: str | None = None,
     ) -> bool:
         """Atomically claim one of *max_slots* concurrency slots for
         *pipeline* under *holder_key* (the pipeline's own job key, unprefixed).
@@ -236,6 +237,18 @@ class JobConcurrency(Protocol):
         *holder_key* is already claimed (by this or another caller) or all
         slots are taken. Never silently double-claims the same key, so two
         processes racing to launch the same job never both proceed.
+
+        *pending_key* is for the pending-drain loops (issue #51 step A): the
+        full ``jobs`` key of the row being drained. In the same transaction as
+        the slot insert, that row moves from ``pending`` to ``running``,
+        stamped with this process's :func:`current_owner`,
+        :func:`current_instance_id` and a fresh heartbeat. If the row is no
+        longer ``pending`` (another drainer won it, or a stale ``pending()``
+        snapshot outlived it), the slot is rolled back and this returns False.
+        Without it, a slot claimed but not yet backed by a ``running`` row is
+        freed by any process's :meth:`reconcile_slots`, and a second drainer
+        can then win the same row. The key is passed, never derived from
+        *holder_key*: ttv_fit's slot key and row key differ in shape.
 
         When ``MUSCAT_WORKER_MAX_SLOTS`` is set, also enforces a second,
         orthogonal cap: total slots held by :func:`current_host` across every
@@ -283,6 +296,15 @@ def _requested_cancels(active_rows: list[dict], type_: str, instance_id: str) ->
         ):
             out.append(row)
     return out
+
+
+# claim_slot's pending_key step, shared by both backends; {p} is the driver's
+# placeholder. The state = 'pending' guard is the whole point: 0 rows means
+# the row was already taken, so the caller rolls the slot back.
+_START_PENDING_SQL = (
+    "UPDATE jobs SET state = 'running', owner = {p}, instance_id = {p}, heartbeat_at = {p} "
+    "WHERE key = {p} AND state = 'pending'"
+)
 
 
 class DatabaseJobStore(JobRepository, JobQueue, JobConcurrency):
@@ -463,13 +485,7 @@ class DatabaseJobStore(JobRepository, JobQueue, JobConcurrency):
             logger.debug("failed to signal work for pipeline=%s", type_, exc_info=True)
 
     def pending(self, type_: str) -> list[dict]:
-        rows = [
-            j
-            for j in database.get_persisted_jobs()
-            if j.get("type") == type_ and j.get("state") == "pending"
-        ]
-        rows.sort(key=lambda j: j.get("started_at") or 0)
-        return rows
+        return database.get_pending_persisted_jobs(type_)
 
     def claim_slot(
         self,
@@ -479,6 +495,7 @@ class DatabaseJobStore(JobRepository, JobQueue, JobConcurrency):
         *,
         user_name: str | None = None,
         max_user_slots: int | None = None,
+        pending_key: str | None = None,
     ) -> bool:
         # A single INSERT ... SELECT ... WHERE statement is one atomic write:
         # SQLite serializes writers even in WAL mode, so the capacity checks
@@ -516,8 +533,22 @@ class DatabaseJobStore(JobRepository, JobQueue, JobConcurrency):
                 f"SELECT {', '.join('?' for _ in columns)} WHERE {' AND '.join(predicates)}",
                 (*values, *predicate_values),
             )
+            claimed = cur.rowcount > 0
+            if claimed and pending_key is not None:
+                # Same write transaction as the INSERT above (the implicit
+                # BEGIN it opened holds the write lock), so no other writer
+                # can move the row in between.
+                started = conn.execute(
+                    _START_PENDING_SQL.format(p="?"),
+                    (current_owner(), current_instance_id(), time.time(), pending_key),
+                ).rowcount > 0
+                if not started:
+                    conn.rollback()
+                    return False
             conn.commit()
-        return cur.rowcount > 0
+        if claimed and pending_key is not None:
+            database.clear_all_caches()
+        return claimed
 
     def release_slot(self, pipeline: str, holder_key: str) -> None:
         try:
@@ -643,11 +674,27 @@ _PG_JOB_CONCURRENCY_SLOTS_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
 ]
 
 
+# Single-argument (bigint) advisory key for _ensure_pg_jobs_schema. claim_slot
+# also uses the one-argument form, keyed on hashtext(pipeline), an int4 that
+# cannot reach this value, so the two never contend.
+_PG_SCHEMA_LOCK_KEY = 0x6D75_7363_6174_5F31  # "muscat_1"
+
+
 def _ensure_pg_jobs_schema(conn) -> None:
     """Create the control-plane tables if absent, then add any `jobs` /
     `job_concurrency_slots` column a pre-existing table predates (see
     _PG_JOBS_COLUMN_MIGRATIONS / _PG_JOB_CONCURRENCY_SLOTS_COLUMN_MIGRATIONS
-    above)."""
+    above).
+
+    Every process that constructs a PostgresJobStore runs this, so a
+    coordinated restart (the web app and several worker hosts at once) runs
+    it concurrently. ``CREATE INDEX IF NOT EXISTS`` holds a SHARE lock on
+    ``jobs`` even when the index exists, and the ``ALTER TABLE`` after it
+    needs ACCESS EXCLUSIVE (``IF NOT EXISTS`` does not avoid it), so two
+    sessions each wait for the other to drop its SHARE lock: the
+    ``DeadlockDetected`` of 2026-10-10. The transaction-scoped advisory lock
+    queues the sessions instead; it is released at the caller's COMMIT."""
+    conn.execute("SELECT pg_advisory_xact_lock(%s)", (_PG_SCHEMA_LOCK_KEY,))
     conn.execute(_PG_SCHEMA)
     for col, col_type in _PG_JOBS_COLUMN_MIGRATIONS:
         conn.execute(f"ALTER TABLE jobs ADD COLUMN IF NOT EXISTS {col} {col_type}")
@@ -928,9 +975,17 @@ class PostgresJobStore(JobRepository, JobQueue, JobConcurrency):
             logger.debug("failed to signal work for pipeline=%s", type_, exc_info=True)
 
     def pending(self, type_: str) -> list[dict]:
-        rows = [j for j in self.all() if j.get("type") == type_ and j.get("state") == "pending"]
-        rows.sort(key=lambda j: j.get("started_at") or 0)
-        return rows
+        # Filtered in SQL (issue #51 step D): every drain pass of every
+        # worker unit calls this, and the job history only grows.
+        with self._pool.connection() as conn:
+            cur = conn.execute(
+                "SELECT * FROM jobs WHERE state = 'pending' AND type = %s "
+                "ORDER BY started_at, key",
+                (type_,),
+            )
+            columns = [d.name for d in cur.description]
+            rows = cur.fetchall()
+        return _pg_rows_to_dicts(columns, rows)
 
     def _signal_work(self, type_: str) -> None:
         if not _NOTIFY_ENABLED:
@@ -1018,6 +1073,7 @@ class PostgresJobStore(JobRepository, JobQueue, JobConcurrency):
         *,
         user_name: str | None = None,
         max_user_slots: int | None = None,
+        pending_key: str | None = None,
     ) -> bool:
         with self._pool.connection() as conn:
             # Unlike SQLite (whole-database writer serialization even in WAL
@@ -1080,7 +1136,20 @@ class PostgresJobStore(JobRepository, JobQueue, JobConcurrency):
                 "ON CONFLICT (pipeline, holder_key) DO NOTHING",
                 (*values, *predicate_values),
             )
-            return cur.rowcount > 0
+            claimed = cur.rowcount > 0
+            if claimed and pending_key is not None:
+                # Same transaction as the INSERT. Under READ COMMITTED a
+                # concurrent UPDATE of this row blocks here and then re-checks
+                # state = 'pending' against the committed value, so only one
+                # transaction can move it.
+                started = conn.execute(
+                    _START_PENDING_SQL.format(p="%s"),
+                    (current_owner(), current_instance_id(), time.time(), pending_key),
+                ).rowcount > 0
+                if not started:
+                    conn.rollback()
+                    return False
+            return claimed
 
     def release_slot(self, pipeline: str, holder_key: str) -> None:
         try:

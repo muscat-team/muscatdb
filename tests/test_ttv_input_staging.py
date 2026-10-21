@@ -85,6 +85,7 @@ def test_sync_jobs_queue_drain_stages_inputs_like_start_ttv_fit(tmp_path, monkey
     monkeypatch.setattr(ttv_fit.subprocess, "Popen", _fake_popen)
 
     entry = {
+        "key": "ttv_fit:_/_/TOI-123/r1",
         "target": "TOI-123",
         "run_name": "r1",
         "started_at": 0.0,
@@ -161,6 +162,7 @@ def test_sync_jobs_queue_drain_applies_core_pinning_when_configured(tmp_path, mo
     monkeypatch.setattr(ttv_fit.subprocess, "Popen", _fake_popen)
 
     entry = {
+        "key": "ttv_fit:_/_/TOI-123/r1",
         "target": "TOI-123",
         "run_name": "r1",
         "started_at": 0.0,
@@ -199,6 +201,88 @@ def test_sync_jobs_queue_drain_applies_core_pinning_when_configured(tmp_path, mo
         assert captured["env"]["OMP_NUM_THREADS"] == "6"
         assert captured["env"]["MKL_NUM_THREADS"] == "6"
         assert captured["env"]["OPENBLAS_NUM_THREADS"] == "6"
+    finally:
+        for job in fake_jobs.values():
+            job.logf.close()
+
+
+def test_queue_drain_prep_failure_after_claim_errors_the_row_and_keeps_draining(tmp_path, monkeypatch):
+    """Issue #51 step A: the claim moves the row to running, so a prep failure
+    after it must release the slot and leave the row terminal, not escape
+    sync_jobs and leave a running row for orphan reconcile to judge from a
+    reused run directory's old log. The next queued job still launches."""
+    monkeypatch.setenv("MUSCAT_TTV_DIR", str(tmp_path))
+    monkeypatch.setattr(ttv_fit, "_harmonic_prefix", lambda: ["harmonic"])
+    monkeypatch.setattr(ttv_fit, "_harmonic_version", lambda: "0.0.0")
+    fake_jobs: dict = {}
+    monkeypatch.setattr(ttv_fit, "_TTV_JOBS", fake_jobs)
+
+    class _Proc:
+        pid = 1234
+
+        def poll(self):
+            return None
+
+    launched = []
+    monkeypatch.setattr(ttv_fit.subprocess, "Popen", lambda cmd, **_k: launched.append(cmd) or _Proc())
+
+    real_write = ttv_fit.write_ttv_inputs
+
+    def _write(rdir, *args, **kwargs):
+        if "BAD" in str(rdir):
+            raise OSError("disk full")
+        return real_write(rdir, *args, **kwargs)
+
+    monkeypatch.setattr(ttv_fit, "write_ttv_inputs", _write)
+
+    def _entry(target):
+        return {
+            "key": f"ttv_fit:_/_/{target}/r1",
+            "target": target,
+            "run_name": "r1",
+            "started_at": 0.0,
+            "params": json.dumps({"options": {
+                "csv_content": "planet,epoch,tc,tc_unc\n",
+                "ini_content": "[INIT]\n",
+                "run_name": "r1",
+            }}),
+        }
+
+    saves: list[dict] = []
+    released: list[str] = []
+
+    class _FakeStore:
+        def all(self):
+            return []
+
+        def reconcile_slots(self, pipeline):
+            return 0
+
+        def count_claimed(self, pipeline):
+            return 0
+
+        def pending(self, pipeline):
+            return [_entry("BAD"), _entry("GOOD")]
+
+        def claim_slot(self, pipeline, holder_key, max_slots, **_kwargs):
+            return True
+
+        def release_slot(self, pipeline, holder_key):
+            released.append(holder_key)
+
+        def save(self, **kwargs):
+            saves.append(kwargs)
+
+    monkeypatch.setattr(ttv_fit, "get_job_store", lambda: _FakeStore())
+
+    try:
+        ttv_fit.sync_jobs()
+
+        bad = [s for s in saves if s["target"] == "BAD"]
+        assert [s["state"] for s in bad] == ["error"]
+        assert "disk full" in bad[0]["error_desc"]
+        assert released == [ttv_fit.ttv_job_key("BAD", "r1")]
+        assert len(launched) == 1
     finally:
         for job in fake_jobs.values():
             job.logf.close()

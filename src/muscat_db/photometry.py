@@ -2613,10 +2613,11 @@ def sync_jobs() -> None:
                 if candidate_key in _JOBS:
                     store.save(type_="photometry", inst=entry["inst"], date=entry["date"], target=entry["target"], state="error", returncode=-1, elapsed=0, started_at=entry["started_at"], error_desc="Duplicate entry", run_id=run_id, run_name=entry.get("run_name", ""))
                     continue
-                # Atomic: at most one process/caller ever wins this claim for a
-                # given key, so two workers draining the same pending row can
-                # never both launch it.
-                if not store.claim_slot("photometry", candidate_key, _MAX_FULL_JOBS, **claim_caps(entry.get("user_name"))):
+                # Atomic: the slot and this row's pending -> running move are one
+                # transaction, so two workers draining the same pending row can
+                # never both launch it, even if a reconcile_slots pass elsewhere
+                # frees the slot before the save(state="running") below.
+                if not store.claim_slot("photometry", candidate_key, _MAX_FULL_JOBS, **claim_caps(entry.get("user_name")), pending_key=entry["key"]):
                     continue
                 try:
                     p = json.loads(entry.get("params") or "{}")
@@ -2634,17 +2635,26 @@ def sync_jobs() -> None:
                 mode = p.get("mode", opts.get("mode", "")) if inst in MULTISITE_MODES else ""
                 run_name = p.get("run_name", opts.get("run_name", ""))
                 key = job_key(inst, date, target, run_id)
-                cmd = build_command(inst, date, target, opts, test_run=test_run, run_id=run_id)
                 try:
                     rdir = run_output_dir(inst, date, target, run_id)
                 except ValueError as exc:
                     store.release_slot("photometry", candidate_key)
                     store.save(type_="photometry", inst=inst, date=date, target=target, state="error", returncode=-1, elapsed=0, started_at=entry["started_at"], error_desc=str(exc), run_id=run_id, run_name=run_name)
                     continue
-                rdir.mkdir(parents=True, exist_ok=True)
                 run_type = "test" if test_run else "full"
-                _write_run_meta(rdir, inst=inst, date=date, target=target, run_id=run_id, site=site, telescope=telescope, mode=mode, run_name=run_name, run_type=run_type)
-                _write_run_product(rdir, inst=inst, date=date, target=target, opts=opts, test_run=test_run, user_name=entry.get("user_name"), site=site, telescope=telescope, mode=mode, run_name=run_name)
+                try:
+                    cmd = build_command(inst, date, target, opts, test_run=test_run, run_id=run_id)
+                    rdir.mkdir(parents=True, exist_ok=True)
+                    _write_run_meta(rdir, inst=inst, date=date, target=target, run_id=run_id, site=site, telescope=telescope, mode=mode, run_name=run_name, run_type=run_type)
+                    _write_run_product(rdir, inst=inst, date=date, target=target, opts=opts, test_run=test_run, user_name=entry.get("user_name"), site=site, telescope=telescope, mode=mode, run_name=run_name)
+                except Exception as exc:
+                    # The claim already moved the row to running: leave it
+                    # terminal, not for orphan reconcile, which could trust a
+                    # previous run's log in this reused directory.
+                    logger.warning("failed to prepare queued photometry run %s", key, exc_info=True)
+                    store.release_slot("photometry", candidate_key)
+                    store.save(type_="photometry", inst=inst, date=date, target=target, state="error", returncode=-1, elapsed=0, started_at=entry["started_at"], error_desc=f"Failed to prepare run: {exc}", run_id=run_id, run_name=run_name)
+                    continue
                 pending_log_path = _run_log_path(rdir, inst, date, target, run_id)
                 try:
                     logf = open(pending_log_path, "w")

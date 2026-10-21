@@ -46,6 +46,7 @@ def tree(tmp_path):
         bin_dir / "uv",
         f'echo "$3" >> "{calls}"\n'
         '[ "$3" = "build-db" ] && [ -n "${LEAK:-}" ] && echo "WARNING INTEGRITY-LEAK: muscat.db"\n'
+        f'[ "$3" = "backup-control-plane" ] && echo "dsn=${{MUSCAT_POSTGRES_DSN:-}}" >> "{calls}"\n'
         '[ "$3" = "${FAIL_CMD:-}" ] && { echo "boom from $3" ; exit "${FAIL_CODE:-3}"; }\n'
         'exit 0\n',
     )
@@ -134,6 +135,42 @@ def test_message_with_quotes_is_posted_as_valid_json(tree):
 
     assert result.returncode == 1
     assert 'say \\"hi\\"' in _read(tree["posts"])
+
+
+def _write_web_env(tree) -> None:
+    (tree["root"] / ".web-env").write_text(
+        "export MUSCAT_POSTGRES_DSN=postgresql://u@localhost:5432/muscatdb_prod\n"
+    )
+
+
+def test_control_plane_is_backed_up_last_with_the_web_env_dsn(tree):
+    _write_web_env(tree)
+
+    result = _run(tree, "run")
+
+    assert result.returncode == 0
+    assert _read(tree["calls"]).split() == [
+        "catalogs", "scan-yesterday", "build-db", "backup-control-plane",
+        "dsn=postgresql://u@localhost:5432/muscatdb_prod",
+    ]
+    assert _read(tree["posts"]) == ""
+
+
+def test_no_web_env_means_no_control_plane_backup(tree):
+    result = _run(tree, "run")
+
+    assert result.returncode == 0
+    assert "backup-control-plane" not in _read(tree["calls"])
+
+
+def test_failed_control_plane_backup_alerts_after_the_build(tree):
+    _write_web_env(tree)
+
+    result = _run(tree, "run", FAIL_CMD="backup-control-plane", FAIL_CODE="1")
+
+    assert result.returncode == 1
+    assert "build-db" in _read(tree["calls"]).split()
+    assert "backup-control-plane failed (exit 1)" in _read(tree["posts"])
 
 
 def test_check_mode_alerts_when_build_status_reports_stale(tree):

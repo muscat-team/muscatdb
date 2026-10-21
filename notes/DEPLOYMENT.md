@@ -346,6 +346,20 @@ uv run --with 'psycopg[binary,pool]>=3.2' pytest tests/test_job_store_postgres.p
 
 Do not run it against the database a live instance is using.
 
+### Control-plane backup
+
+`deploy/nightly.sh run` ends with `muscat-db backup-control-plane` when the checkout has a `.web-env` (production's does; it supplies `MUSCAT_POSTGRES_DSN` for `muscatdb_prod`). It runs after `build-db`, so a Postgres outage alerts on Slack without holding up the catalog rebuild. The dump is `pg_dump --format=custom`, read back with `pg_restore --list` before it replaces anything, and written as `<dbname>.nightly-<stamp>.dump` beside the `muscat.db` snapshots, under the same `MUSCAT_DB_BACKUP_DIR` and `MUSCAT_DB_BACKUP_KEEP` (default 2). The password reaches `pg_dump` through `PGPASSWORD`, never its command line. Log: `logs/pg-backup.log`.
+
+Restore, with every worker and the `:8001` web app stopped (they hold connections and would write mid-restore):
+
+```bash
+.venv/bin/python deploy/workers.py --profile prod down
+source ~/.config/muscatdb/pg.env
+pg_restore --clean --if-exists --dbname "${MUSCAT_POSTGRES_DSN%/*}/muscatdb_prod" ~/temp/muscatdb_prod.nightly-<stamp>.dump
+```
+
+Jobs that ran after the dump was taken are missing from the restored `jobs` table; their run directories on NFS are untouched.
+
 ### Verification record (2026-10-10, ut2)
 
 - Server: PostgreSQL 18.6, role `muscatdb`, schema initialised by `PostgresJobStore` (`jobs`, `job_concurrency_slots`).
@@ -465,7 +479,7 @@ Findings:
 Starting the three ut5 workers at the same moment made two of them fail their first connection with `DeadlockDetected` in `_ensure_pg_jobs_schema` (`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS …` from several processes). They survived: the store is created lazily and the next pass succeeded, and all three held a `LISTEN` connection afterwards. What was skipped was the one-time "resolve stale `cancelling` rows" at startup (logged as `could not resolve stale 'cancelling' job rows`), and the photometry worker also logged one failed reconciliation pass.
 
 - [x] Worked around: `workers.py up` starts one host's workers one at a time (`stagger_s`).
-- [ ] Not fixed: serialize `_ensure_pg_jobs_schema` with an advisory lock (the pattern `claim_slot` already uses). It will recur on a coordinated restart of several hosts or of the web app and workers together.
+- [x] Fixed (#51 step B): `_ensure_pg_jobs_schema` takes a transaction-scoped advisory lock first, so concurrent sessions queue instead of deadlocking. Cause: `CREATE INDEX IF NOT EXISTS` takes a SHARE lock on `jobs` and the `ALTER TABLE` after it needs ACCESS EXCLUSIVE, so two sessions each held the lock the other was upgrading past. `tests/test_job_store_postgres.py::TestSchemaEnsureConcurrency` reproduces it (six sessions, a missing column each round) and fails with `DeadlockDetected` without the lock. `stagger_s` is no longer needed for this, but is harmless.
 
 ### Not covered yet
 
@@ -478,10 +492,10 @@ Starting the three ut5 workers at the same moment made two of them fail their fi
 - [ ] Move the running tmux workers on ut3 and ut5 to the systemd units (`workers.py down`, then `up`), and `loginctl enable-linger` on both (currently `Linger=no`, so units would stop at the last logout). The unit was smoke-tested on ut5 with one extra `ttv_fit` worker; the existing workers were not migrated.
 - [ ] Merge muscat-team/muscatdb#218 and restart the dev server: until then a full run queued after a test run on the same key can be overwritten, and `/jobs` re-run of an unnamed run forks a row.
 - [ ] Reboot test of the units (needs linger).
-- [ ] Fix the concurrent schema-check deadlock (see the section above).
+- [x] Fix the concurrent schema-check deadlock (see the section above).
 - [ ] Real host routing: today it is the `MUSCAT_WORKER_MAX_SLOTS=0` workaround, not a queue that targets a host.
 - [ ] Cancelling a job that runs on another host.
-- [ ] Backups: `muscat.db` has a daily backup, the Postgres control plane has none.
+- [x] Backups: the control plane is dumped nightly (#51 step C, see *Control-plane backup* below).
 - [ ] Decide whether SQLite job history should be migrated or left behind.
 - [ ] Switch production (`:8001`) and the test deploy (`:8003`) only after the above and a release.
 
