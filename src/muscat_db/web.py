@@ -3437,6 +3437,32 @@ def transit_fit_delete(payload: dict = Body(...)):
     return JSONResponse(result)
 
 
+# Types the transit-fit page links to or offers for download. FileResponse would
+# otherwise guess a type from the extension, so an .html or .svg the engine
+# wrote into a run directory would render on the app's own origin. Text-like
+# types are served as text/plain; configuration links are inspection views, and
+# the explicit download links stay separate.
+_TRANSIT_FILE_TYPES = {
+    ".png": "image/png",
+    ".gif": "image/gif",
+    ".csv": "text/csv; charset=utf-8",
+    ".log": "text/plain; charset=utf-8",
+    ".txt": "text/plain; charset=utf-8",
+    ".yaml": "text/plain; charset=utf-8",
+    ".yml": "text/plain; charset=utf-8",
+    ".npz": "application/octet-stream",
+}
+
+
+def _transit_file_media(path: pathlib.Path) -> tuple[str, bool]:
+    """``(media_type, as_attachment)`` for a transit-fit output file: the
+    allow-listed type for known extensions, an attachment download for the rest."""
+    known = _TRANSIT_FILE_TYPES.get(path.suffix.lower())
+    if known is None:
+        return "application/octet-stream", True
+    return known, False
+
+
 def _serve_transit_file(inst: str, date: str, target: str, name: str, run_id: str | None):
     if inst not in INSTRUMENTS or not phot.valid_date(date):
         raise HTTPException(404, "invalid parameters")
@@ -3461,13 +3487,14 @@ def _serve_transit_file(inst: str, date: str, target: str, name: str, run_id: st
         path = rdir / name
     if not path.is_file():
         raise HTTPException(404, "file not found")
-    # Configuration links are inspection views.  Explicit download links remain
-    # separate, so force a browser-renderable type instead of application/yaml.
-    media_type = "text/plain; charset=utf-8" if name in {"fit.yaml", "sys.yaml"} else None
-    return FileResponse(
-        str(path), media_type=media_type,
-        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
-    )
+    media_type, attachment = _transit_file_media(path)
+    headers = {
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        "X-Content-Type-Options": "nosniff",
+    }
+    if attachment:
+        headers["Content-Disposition"] = "attachment"
+    return FileResponse(str(path), media_type=media_type, headers=headers)
 
 
 @transit_fit_router.get("/file/{inst}/{date}/{target}/run/{run_id}/{name}")
@@ -3550,8 +3577,10 @@ def _create_zip_response(files_to_zip: list[tuple[pathlib.Path, str]], archive_n
             part_path.unlink(missing_ok=True)
     except HTTPException:
         raise
-    except Exception as exc:
-        raise HTTPException(500, f"failed to create zip archive: {exc}")
+    except Exception:
+        # The exception text can carry absolute server paths; keep it in the log.
+        logger.exception("failed to create zip archive %s", archive_name)
+        raise HTTPException(500, "failed to create zip archive")
     finally:
         _ZIP_BUILD_SLOTS.release()
 
