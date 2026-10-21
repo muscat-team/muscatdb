@@ -336,6 +336,26 @@ def object_hidden(
     return bool(total) and not visible
 
 
+def sql_object_visible(object_column: str, denied: frozenset[str]) -> tuple[str, list[str]]:
+    """``(clause, params)`` keeping rows whose *object_column* is not hidden.
+
+    The SQL form of :func:`object_hidden` (without the night narrowing), for
+    filtering inside a query so a ``LIMIT`` counts only visible rows. An object
+    with no observations stays visible, as there. *object_column* is a trusted,
+    table-qualified identifier, never user input.
+    """
+    if not denied:
+        return "1", []
+    # Aliased so a scoped viewer's target grants address summaries, not the
+    # outer table (which may share column names such as ``instrument``).
+    clause, params = sql_not_denied(denied, "s.proposal_id")
+    return (
+        f"(NOT EXISTS (SELECT 1 FROM summaries s WHERE s.object = {object_column})"
+        f" OR EXISTS (SELECT 1 FROM summaries s WHERE s.object = {object_column} AND {clause}))",
+        params,
+    )
+
+
 # ── Admin writes (CLI only) ─────────────────────────────────────────────
 
 

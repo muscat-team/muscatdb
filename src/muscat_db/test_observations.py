@@ -21,7 +21,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
-from muscat_db.database import connect, db_path
+from muscat_db.access import sql_object_visible
+from muscat_db.database import _apply_schema, connect, db_path
 
 logger = logging.getLogger(__name__)
 
@@ -80,17 +81,6 @@ PROTECTED_PLAN_KEYS = frozenset({
 # Per-configuration fields the draft may edit. Pointing, PA, focus and FOV stay
 # as planned: they are what the guards above checked.
 EDITABLE_CONFIG_KEYS = frozenset({"exposure_times", "exposure_time", "repeats"})
-
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS test_observations (
- id TEXT PRIMARY KEY, target TEXT NOT NULL, instrument TEXT NOT NULL, site TEXT NOT NULL,
- transit_json TEXT NOT NULL DEFAULT '{}', plan_json TEXT NOT NULL, result_json TEXT NOT NULL DEFAULT '{}',
- request_ids_json TEXT NOT NULL DEFAULT '[]', payload_hash TEXT NOT NULL DEFAULT '',
- state TEXT NOT NULL DEFAULT 'draft', analysis_version TEXT NOT NULL,
- recommendation_json TEXT NOT NULL DEFAULT '{}', failure_detail TEXT NOT NULL DEFAULT '',
- created_at TEXT NOT NULL, updated_at TEXT NOT NULL, created_by TEXT NOT NULL DEFAULT ''
-);
-"""
 
 
 class TestObservationError(ValueError):
@@ -403,11 +393,9 @@ def request_configurations(plan: dict, base: dict) -> list[dict]:
 def _connect(path=None):
     conn = connect(path or db_path())
     conn.row_factory = sqlite3.Row
-    conn.executescript(SCHEMA)
-    columns = {row["name"] for row in conn.execute("PRAGMA table_info(test_observations)")}
-    if "created_by" not in columns:
-        # Tables created before ownership was recorded; their rows stay ownerless.
-        conn.execute("ALTER TABLE test_observations ADD COLUMN created_by TEXT NOT NULL DEFAULT ''")
+    # The table is defined only in database.SCHEMA: build_db rebuilds from it
+    # and restores just the columns it has, so a second definition here drifts.
+    _apply_schema(conn)
     return conn
 
 
@@ -439,10 +427,14 @@ def get_record(identifier: str, path=None) -> dict:
     return _row_to_record(row)
 
 
-def list_records(*, target: str | None = None, limit: int = 20, path=None) -> list[dict]:
-    query, args = "SELECT * FROM test_observations", []
+def list_records(*, target: str | None = None, limit: int = 20, denied: frozenset[str] = frozenset(),
+                 path=None) -> list[dict]:
+    """Newest records first, leaving out those on targets hidden by *denied*.
+    The filter runs before ``LIMIT`` so hidden records never use up the page."""
+    visible, args = sql_object_visible("test_observations.target", denied)
+    query = f"SELECT * FROM test_observations WHERE {visible}"
     if target:
-        query += " WHERE target=?"
+        query += " AND target=?"
         args.append(target)
     query += " ORDER BY created_at DESC LIMIT ?"
     args.append(max(1, min(int(limit), 200)))

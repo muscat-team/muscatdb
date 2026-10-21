@@ -4,8 +4,10 @@ from pathlib import Path
 
 import pytest
 
-from muscat_db import lco, test_observations as subject
-from muscat_db.database import _apply_schema, connect
+from muscat_db import database, lco, test_observations as subject
+from muscat_db.access import object_hidden
+from muscat_db.access_groups import Grant
+from muscat_db.database import ScopedDenied, _apply_schema, connect
 
 NOW = dt.datetime(2026, 10, 21, 0, 0, tzinfo=dt.timezone.utc)
 
@@ -268,6 +270,84 @@ def test_record_round_trip_with_result_and_recommendation(db):
     assert updated["recommendation"] == {"fov_index": 0}
     assert [r["id"] for r in subject.list_records(target="WASP-12", path=db)] == [created["id"]]
     assert subject.list_records(target="other", path=db) == []
+
+
+def test_created_by_survives_the_nightly_rebuild(db, tmp_path, monkeypatch):
+    # build_db recreates the image from database.SCHEMA and restores only the
+    # columns that table has; an owner dropped there makes every test anonymous.
+    monkeypatch.setattr(database, "OBSLOG_BASE", str(tmp_path / "no-obslog"))
+    record = subject.create_record(subject.generate_plan(_payload()), db, created_by="bob")
+    database.build_db(str(db))
+    assert subject.get_record(record["id"], db)["created_by"] == "bob"
+
+
+def _summary(path, target: str, proposal: str):
+    with connect(path) as conn:
+        conn.execute("INSERT INTO summaries (instrument, obsdate, ccd, object, proposal_id) VALUES (?,?,?,?,?)",
+                     ("muscat3", "260101", "g", target, proposal))
+        conn.commit()
+
+
+def _record_on(path, target: str) -> dict:
+    return subject.create_record({**subject.generate_plan(_payload()), "target": target}, path)
+
+
+def test_list_limit_counts_only_records_the_viewer_may_see(db):
+    _summary(db, "OPENTGT", "")
+    _summary(db, "HIDDENTGT", "SECRET")
+    visible = _record_on(db, "OPENTGT")
+    for _ in range(3):  # newer than the visible one, so a LIMIT before filtering drops it
+        _record_on(db, "HIDDENTGT")
+    listed = subject.list_records(limit=1, denied=frozenset({"SECRET"}), path=db)
+    assert [r["id"] for r in listed] == [visible["id"]]
+
+
+def test_list_filter_agrees_with_object_hidden(db):
+    _summary(db, "OPENTGT", "")
+    _summary(db, "HIDDENTGT", "SECRET")
+    _summary(db, "MIXEDTGT", "SECRET")
+    _summary(db, "MIXEDTGT", "")
+    denied = frozenset({"SECRET"})
+    for target in ("OPENTGT", "HIDDENTGT", "MIXEDTGT", "UNOBSERVED"):
+        _record_on(db, target)
+    listed = {r["target"] for r in subject.list_records(denied=denied, path=db)}
+    expected = {t for t in ("OPENTGT", "HIDDENTGT", "MIXEDTGT", "UNOBSERVED")
+                if not object_hidden(str(db), t, denied)}
+    assert listed == expected == {"OPENTGT", "MIXEDTGT", "UNOBSERVED"}
+
+
+def test_list_filter_agrees_with_object_hidden_for_a_scoped_viewer(db):
+    # A target grant reaches summaries columns (instrument, object) through the
+    # subquery, not the test_observations columns of the same name.
+    _summary(db, "OPENTGT", "OPENPROP")
+    _summary(db, "HIDDENTGT", "SECRET")
+    _summary(db, "GRANTEDTGT", "SECRET")
+    grant = Grant(instrument="muscat3", target="GRANTEDTGT", objects=frozenset({"GRANTEDTGT"}))
+    denied = ScopedDenied({"SECRET", ""}, {"OPENPROP"}, (grant,))
+    targets = ("OPENTGT", "HIDDENTGT", "GRANTEDTGT", "UNOBSERVED")
+    for target in targets:
+        _record_on(db, target)
+    listed = {r["target"] for r in subject.list_records(denied=denied, path=db)}
+    expected = {t for t in targets if not object_hidden(str(db), t, denied)}
+    assert listed == expected == {"OPENTGT", "GRANTEDTGT", "UNOBSERVED"}
+
+
+def test_table_from_before_ownership_gains_created_by(tmp_path):
+    path = tmp_path / "legacy.sqlite"
+    with connect(path) as conn:
+        conn.execute("CREATE TABLE test_observations (id TEXT PRIMARY KEY, target TEXT NOT NULL, "
+                     "instrument TEXT NOT NULL, site TEXT NOT NULL, transit_json TEXT NOT NULL DEFAULT '{}', "
+                     "plan_json TEXT NOT NULL, result_json TEXT NOT NULL DEFAULT '{}', "
+                     "request_ids_json TEXT NOT NULL DEFAULT '[]', payload_hash TEXT NOT NULL DEFAULT '', "
+                     "state TEXT NOT NULL DEFAULT 'draft', analysis_version TEXT NOT NULL, "
+                     "recommendation_json TEXT NOT NULL DEFAULT '{}', failure_detail TEXT NOT NULL DEFAULT '', "
+                     "created_at TEXT NOT NULL, updated_at TEXT NOT NULL)")
+        conn.execute("INSERT INTO test_observations (id, target, instrument, site, plan_json, analysis_version, "
+                     "created_at, updated_at) VALUES ('old', 'T', 'muscat3', '', '{}', 'v', 'a', 'a')")
+        conn.commit()
+    assert subject.get_record("old", path)["created_by"] == ""
+    created = subject.create_record(subject.generate_plan(_payload()), path, created_by="bob")
+    assert created["created_by"] == "bob"
 
 
 def _never_analyze(record, frames):

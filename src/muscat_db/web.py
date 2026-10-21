@@ -5369,9 +5369,8 @@ def api_lco_test_submit(observation_id: str, request: Request, payload: dict = B
 def api_lco_test_list(target: str | None = None, limit: int = 20):
     """Recent test observations, newest first, optionally for one target.
     Tests on targets the viewer may not see are left out."""
-    denied = _viewer_denied()
-    records = test_observations.list_records(target=target or None, limit=limit)
-    return JSONResponse({"ok": True, "records": [r for r in records if not _test_hidden(r, denied)]})
+    records = test_observations.list_records(target=target or None, limit=limit, denied=_viewer_denied())
+    return JSONResponse({"ok": True, "records": records})
 
 
 @lco_router.get("/test-observations/{observation_id}", response_class=JSONResponse)
