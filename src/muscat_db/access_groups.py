@@ -1,11 +1,12 @@
-"""Allow-only, group-based data visibility (issue #228, rollout step 1).
+"""Allow-only, group-based data visibility (issue #228).
 
-This module holds the group/grant model and its evaluator. Nothing in the web
-app reads it yet: the request paths still use the #144 blocklist helpers in
-:mod:`muscat_db.access`. Step 1 only has to prove that the new model, seeded
-from the blocklist, would give every viewer exactly what they get today --
-:func:`parity` is that proof, and the seeding is idempotent so it can be run
-against production before any call site is switched.
+This module holds the group/grant model and its evaluator. Step 1 proved that
+the model, seeded from the #144/#202 blocklist, gives every viewer what the
+blocklist does (:func:`parity`). Step 2 made it authoritative: once the
+``everyone`` group exists (:func:`is_active`),
+:func:`muscat_db.access.denied_proposal_ids_for` builds each viewer's denied
+set from their grants, so every call site of the blocklist helpers reads the
+groups. Before that, the blocklist still decides.
 
 Model (design: issue #228):
 
@@ -69,6 +70,16 @@ class Grant:
     date_from: str | None = None
     date_to: str | None = None
     objects: frozenset[str] | None = None
+
+    @property
+    def is_proposal_only(self) -> bool:
+        """A plain ``proposal_id`` grant, with no other field narrowing it."""
+        return self.proposal_id is not None and (
+            self.instrument is None
+            and self.target is None
+            and self.date_from is None
+            and self.date_to is None
+        )
 
     def matches(
         self, instrument: str, obsdate: str, obj: str | None, proposal_id: str | None
@@ -162,6 +173,21 @@ class Access:
 
 def _missing_table(exc: sqlite3.OperationalError) -> bool:
     return "no such table" in str(exc)
+
+
+def is_active(conn: sqlite3.Connection) -> bool:
+    """Whether the group model decides visibility (rollout step 2).
+
+    It does once ``access groups-seed`` has created the ``everyone`` group.
+    Before that, a database has no grants at all, and reading it allow-only
+    would hide everything from every non-admin, so the blocklist still decides.
+    """
+    try:
+        return conn.execute("SELECT 1 FROM groups WHERE name = ?", (EVERYONE,)).fetchone() is not None
+    except sqlite3.OperationalError as exc:
+        if _missing_table(exc):
+            return False
+        raise
 
 
 def _group_names_for(conn: sqlite3.Connection, user: str | None, is_admin: bool) -> frozenset[str]:
@@ -326,6 +352,34 @@ def add_member(conn: sqlite3.Connection, group: str, username: str, added_by: st
     return cur.rowcount > 0
 
 
+def remove_proposal_grant(conn: sqlite3.Connection, group: str, proposal_id: str) -> int:
+    """Delete *group*'s plain ``proposal_id`` grant (no other field set),
+    matched case-insensitively. Narrower grants on the proposal are kept.
+    Returns the count."""
+    cur = conn.execute(
+        "DELETE FROM group_grants WHERE groupname = ? AND proposal_id = ? COLLATE NOCASE "
+        "AND instrument IS NULL AND target IS NULL AND date_from IS NULL AND date_to IS NULL",
+        (group, proposal_id),
+    )
+    return cur.rowcount
+
+
+def set_excluded(conn: sqlite3.Connection, group: str, username: str, excluded: bool) -> bool:
+    """Add or remove *username*'s exclusion from *group*. Returns whether a
+    row changed."""
+    if excluded:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO group_exclusions (groupname, username) VALUES (?, ?)",
+            (group, username),
+        )
+    else:
+        cur = conn.execute(
+            "DELETE FROM group_exclusions WHERE groupname = ? AND username = ?",
+            (group, username),
+        )
+    return cur.rowcount > 0
+
+
 def add_grant(
     conn: sqlite3.Connection,
     group: str,
@@ -468,9 +522,12 @@ def seed_from_blocklist(db_path: str, dry_run: bool = False) -> SeedReport:
 
 def parity(db_path: str, normalize: Callable[[str], str] | None = None) -> list[dict]:
     """Every (viewer, night, object, proposal) where the group model disagrees
-    with the blocklist the web uses today. Empty means switching call sites
-    would change nothing. Viewers are every user known to ``users`` or
-    ``user_proposal_access``, plus the anonymous viewer."""
+    with the blocklist. Viewers are every user known to ``users`` or
+    ``user_proposal_access``, plus the anonymous viewer.
+
+    The groups decide once seeded, and the blocklist CLI writes both, so the
+    expected mismatch is a proposal ingested after the seed: visible under the
+    blocklist, hidden under the groups until someone grants it."""
     from muscat_db import access
 
     with get_conn(db_path) as conn:
@@ -486,7 +543,7 @@ def parity(db_path: str, normalize: Callable[[str], str] | None = None) -> list[
                 raise
     mismatches: list[dict] = []
     for user in sorted(users, key=lambda u: (u is not None, u or "")):
-        denied = access.denied_proposal_ids_for(db_path, user, normalize)
+        denied = access.blocklist_denied_proposal_ids_for(db_path, user, normalize)
         grants = load_access(db_path, user, normalize)
         for inst, date, obj, pid in keys:
             old = not access.is_denied(pid, denied, instrument=inst, obsdate=date, obj=obj)
