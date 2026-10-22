@@ -395,16 +395,19 @@ def add_member(conn: sqlite3.Connection, group: str, username: str, added_by: st
     return cur.rowcount > 0
 
 
-def remove_proposal_grant(conn: sqlite3.Connection, group: str, proposal_id: str) -> int:
-    """Delete *group*'s plain ``proposal_id`` grant (no other field set),
+def remove_proposal_grant(
+    conn: sqlite3.Connection, group: str, proposal_id: str, revoked_by: str = ""
+) -> int:
+    """Revoke *group*'s plain ``proposal_id`` grant (no other field set),
     matched case-insensitively. Narrower grants on the proposal are kept.
     Returns the count."""
-    cur = conn.execute(
-        "DELETE FROM group_grants WHERE groupname = ? AND proposal_id = ? COLLATE NOCASE "
+    return _archive_grants(
+        conn,
+        "groupname = ? AND proposal_id = ? COLLATE NOCASE "
         "AND instrument IS NULL AND target IS NULL AND date_from IS NULL AND date_to IS NULL",
         (group, proposal_id),
+        revoked_by,
     )
-    return cur.rowcount
 
 
 def set_excluded(conn: sqlite3.Connection, group: str, username: str, excluded: bool) -> bool:

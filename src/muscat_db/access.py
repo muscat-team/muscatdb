@@ -446,7 +446,7 @@ def set_scoped(db_path: str, username: str, scoped: bool = True) -> bool:
     return changed or excluded
 
 
-def restrict(db_path: str, proposal_id: str, description: str = "") -> bool:
+def restrict(db_path: str, proposal_id: str, description: str = "", revoked_by: str = "") -> bool:
     """Opt *proposal_id* into restriction. Returns False if it already was
     (the description is then updated in place)."""
     with get_conn(db_path) as conn:
@@ -465,7 +465,9 @@ def restrict(db_path: str, proposal_id: str, description: str = "") -> bool:
                 (proposal_id, description),
             )
         if access_groups.is_active(conn):
-            access_groups.remove_proposal_grant(conn, access_groups.EVERYONE, proposal_id)
+            access_groups.remove_proposal_grant(
+                conn, access_groups.EVERYONE, proposal_id, revoked_by
+            )
         conn.commit()
     return not existed
 
@@ -515,7 +517,7 @@ def grant(db_path: str, username: str, proposal_id: str, granted_by: str) -> boo
     return cur.rowcount > 0 or added
 
 
-def revoke(db_path: str, username: str, proposal_id: str) -> bool:
+def revoke(db_path: str, username: str, proposal_id: str, revoked_by: str = "") -> bool:
     with get_conn(db_path) as conn:
         _ensure_schema(conn)
         cur = conn.execute(
@@ -525,7 +527,7 @@ def revoke(db_path: str, username: str, proposal_id: str) -> bool:
         removed = 0
         if access_groups.is_active(conn):
             removed = access_groups.remove_proposal_grant(
-                conn, access_groups.user_group(username), proposal_id
+                conn, access_groups.user_group(username), proposal_id, revoked_by
             )
         conn.commit()
     return cur.rowcount > 0 or removed > 0

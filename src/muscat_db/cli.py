@@ -1374,6 +1374,9 @@ def _warn_restriction_gaps(db: str, proposal_id: str) -> None:
 def access_restrict(
     proposal_id: str = typer.Argument(..., help="LCO proposal id, e.g. KEY2026B-001"),
     description: str = typer.Option("", "--description", "-d", help="Free-text note"),
+    revoked_by: str = typer.Option(
+        None, "--by", help="Recorded as the revoking admin (default: your OS user)"
+    ),
 ):
     """Hide a proposal's observations from everyone without a grant."""
     from muscat_db import access
@@ -1392,7 +1395,7 @@ def access_restrict(
         )
     else:
         proposal_id = observed
-    created = access.restrict(db, proposal_id, description)
+    created = access.restrict(db, proposal_id, description, revoked_by or getpass.getuser())
     verb = "restricted" if created else "already restricted; description updated"
     console.print(f"[green]{proposal_id} {verb}[/]")
     _warn_restriction_gaps(db, proposal_id)
@@ -1459,12 +1462,17 @@ def access_grant(
 def access_revoke(
     username: str = typer.Argument(..., help="nginx username"),
     proposal_id: str = typer.Argument(..., help="LCO proposal id"),
+    revoked_by: str = typer.Option(
+        None, "--by", help="Recorded as the revoking admin (default: your OS user)"
+    ),
 ):
     """Remove a user's grant."""
     from muscat_db import access
     from muscat_db.database import db_path
 
-    if not access.revoke(db_path(), username, proposal_id.strip()):
+    if not access.revoke(
+        db_path(), username, proposal_id.strip(), revoked_by or getpass.getuser()
+    ):
         console.print(f"[yellow]{username} had no grant for {proposal_id}[/]")
         raise typer.Exit(1)
     console.print(f"[green]{username} revoked from {proposal_id}[/]")

@@ -246,6 +246,29 @@ def test_revoke_target_keeps_history_too(db):
         ).fetchall() == [("TOI-6109", "user:alice")]
 
 
+def _revoked_proposal_grants(db):
+    with sqlite3.connect(db) as conn:
+        return conn.execute(
+            "SELECT groupname, proposal_id, revoked_by FROM group_grants_revoked"
+        ).fetchall()
+
+
+def test_restrict_keeps_the_everyone_grant_in_history(db):
+    access_groups.seed_from_blocklist(db)
+    result = CliRunner().invoke(cli_app, ["access", "restrict", "CON-002", "--by", "john"])
+    assert result.exit_code == 0, result.output
+    assert _revoked_proposal_grants(db) == [("everyone", "CON-002", "john")]
+
+
+def test_revoke_keeps_the_user_grant_in_history(db):
+    access_groups.seed_from_blocklist(db)
+    runner = CliRunner()
+    runner.invoke(cli_app, ["access", "grant", "alice", "CON-002", "--by", "jerome"])
+    result = runner.invoke(cli_app, ["access", "revoke", "alice", "CON-002", "--by", "john"])
+    assert result.exit_code == 0, result.output
+    assert _revoked_proposal_grants(db) == [("user:alice", "CON-002", "john")]
+
+
 def test_revoked_grants_survive_a_rebuild():
     assert "group_grants_revoked" in _APP_OWNED_TABLES
 
