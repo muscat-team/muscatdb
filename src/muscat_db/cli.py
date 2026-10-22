@@ -1394,14 +1394,20 @@ def access_restrict(
 def access_unrestrict(
     proposal_id: str = typer.Argument(..., help="LCO proposal id"),
 ):
-    """Make a proposal's observations visible to everyone again (grants are kept)."""
+    """Make a proposal's observations visible to everyone (grants are kept).
+
+    Once the access groups are seeded this is also how a newly ingested
+    proposal is shared: until then it is hidden from every non-admin."""
     from muscat_db import access
     from muscat_db.database import db_path
 
-    if not access.unrestrict(db_path(), proposal_id.strip()):
-        console.print(f"[yellow]{proposal_id} was not restricted[/]")
+    db = db_path()
+    proposal_id = proposal_id.strip()
+    proposal_id = access.observed_spelling(db, proposal_id) or proposal_id
+    if not access.unrestrict(db, proposal_id, getpass.getuser()):
+        console.print(f"[yellow]{proposal_id} is already visible to everyone[/]")
         raise typer.Exit(1)
-    console.print(f"[green]{proposal_id} unrestricted[/]")
+    console.print(f"[green]{proposal_id} is visible to everyone[/]")
 
 
 @access_app.command("grant")
@@ -1413,8 +1419,8 @@ def access_grant(
     ),
 ):
     """Let a user see a restricted proposal's observations."""
-    from muscat_db import access
-    from muscat_db.database import db_path
+    from muscat_db import access, access_groups
+    from muscat_db.database import db_path, get_conn
 
     db = db_path()
     proposal_id = proposal_id.strip()
@@ -1424,7 +1430,13 @@ def access_grant(
             "htpasswd add`, or has never logged in). Granting anyway.[/]"
         )
     restricted = {r["proposal_id"].upper() for r in access.list_restrictions(db)}
-    if proposal_id.upper() not in restricted and not access.is_scoped(db, username):
+    with get_conn(db) as conn:
+        groups_active = access_groups.is_active(conn)
+    if (
+        not groups_active
+        and proposal_id.upper() not in restricted
+        and not access.is_scoped(db, username)
+    ):
         console.print(
             f"[yellow]{proposal_id} is not restricted, so this grant has no effect "
             "until it is.[/]"
@@ -1604,16 +1616,33 @@ def access_list(
 @access_app.command("groups-seed")
 def access_groups_seed(
     dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be added, write nothing"),
+    force: bool = typer.Option(
+        False, "--force", help="Seed again although the groups already decide visibility"
+    ),
 ) -> None:
     """Express the proposal blocklist as allow-only groups and grants (#228).
 
-    Idempotent and additive. Nothing reads these tables yet, so this changes no
-    visibility; run `access groups-check` afterwards to confirm parity.
+    The first run switches visibility onto the groups without changing what
+    anyone sees; run `access groups-check` afterwards to confirm parity. After
+    that the groups are allow-only, and seeding again would grant `everyone`
+    every proposal ingested since, so it needs --force. Share one new proposal
+    with `access unrestrict <PROPOSAL>` instead.
     """
     from muscat_db import access_groups
-    from muscat_db.database import db_path
+    from muscat_db.database import db_path, get_conn
 
-    report = access_groups.seed_from_blocklist(db_path(), dry_run=dry_run)
+    db = db_path()
+    with get_conn(db) as conn:
+        active = access_groups.is_active(conn)
+    if active and not dry_run and not force:
+        console.print(
+            "[red]Groups are already seeded and decide visibility. Seeding again would "
+            "grant `everyone` every proposal ingested since.[/]\n"
+            "Share one proposal with `muscat-db access unrestrict <PROPOSAL>`, preview with "
+            "--dry-run, or pass --force to reseed."
+        )
+        raise typer.Exit(1)
+    report = access_groups.seed_from_blocklist(db, dry_run=dry_run)
     verb = "Would add" if dry_run else "Added"
     console.print(
         f"{verb}: {report.groups} group(s), {len(report.everyone_grants)} `everyone` grant(s), "

@@ -43,7 +43,7 @@ uv run muscat-db htpasswd promote <user>
 
 # Restrict an LCO proposal's observations and grant users access (issue #144)
 uv run muscat-db access restrict <proposal_id> [--description "..."]
-uv run muscat-db access unrestrict <proposal_id>
+uv run muscat-db access unrestrict <proposal_id>   # also shares a newly ingested proposal (groups are allow-only)
 uv run muscat-db access grant <user> <proposal_id>
 uv run muscat-db access revoke <user> <proposal_id>
 uv run muscat-db access explain <user> [--target <name>]   # read-only: what <user> sees, per proposal
@@ -194,8 +194,14 @@ record(s)`. Transit fits found on disk take their light curves from `fit.yaml`; 
 unreadable `fit.yaml` or a missing light curve leaves the fit undetermined.
 
 `groups-check` compares what the group model and the blocklist let every viewer
-see; run it again after any `access restrict`, `grant` or `scope` change while both
-models exist.
+see. Since #228 step 2 the groups decide on a seeded database and are allow-only:
+a proposal ingested after the seed is hidden from every non-admin until an admin
+runs `access unrestrict <proposal_id>` (everyone) or `access grant <user>
+<proposal_id>` (one user). `restrict`, `unrestrict`, `grant`, `revoke` and `scope`
+write both models, so `groups-check` stays at exit 0 except for such new
+proposals, which it lists. Its nonzero exit is then a to-do list, not a fault.
+Do not rerun `groups-seed` to share them: it would grant `everyone` every new
+proposal at once, so it refuses on a seeded database without `--force`.
 
 The files under `/etc/nginx/sites-available/` are root-owned copies, not links to
 `deploy/`. A change to `deploy/nginx*.conf` does not reach nginx on a deploy: diff

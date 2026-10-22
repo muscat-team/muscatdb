@@ -109,6 +109,45 @@ def denied_proposal_ids_for(
 ) -> frozenset[str]:
     """Proposal ids (upper-cased) this viewer may not see.
 
+    Once the database is seeded with groups (issue #228, rollout step 2) the
+    viewer's grants decide, allow-only (:func:`_group_denied`); before that the
+    #144/#202 blocklist does (:func:`blocklist_denied_proposal_ids_for`).
+    Either way the result feeds the same helpers (:func:`is_denied`,
+    :func:`muscat_db.database.sql_not_denied`, :class:`NightVisibility`).
+    """
+    with get_conn(db_path) as conn:
+        active = access_groups.is_active(conn)
+    if active:
+        return _group_denied(db_path, username, normalize)
+    return blocklist_denied_proposal_ids_for(db_path, username, normalize)
+
+
+def _group_denied(
+    db_path: str,
+    username: str | None,
+    normalize: Callable[[str], str] | None,
+) -> frozenset[str]:
+    """The viewer's grants as a :class:`ScopedDenied`: plain proposal grants
+    are its allowlist, every narrower grant (instrument, target, date) one of
+    its rules. A proposal nobody granted, including one ingested after the
+    seed, is therefore hidden. Admins are denied nothing."""
+    grants = access_groups.load_access(db_path, username, normalize)
+    if grants.is_admin:
+        return frozenset()
+    allowed = frozenset(g.proposal_id.upper() for g in grants.grants if g.is_proposal_only)
+    rules = tuple(g for g in grants.grants if not g.is_proposal_only)
+    with get_conn(db_path) as conn:
+        denied = (_observed_ids(conn) | _restricted_ids(conn) | {""}) - allowed
+    return ScopedDenied(denied, allowed, rules)
+
+
+def blocklist_denied_proposal_ids_for(
+    db_path: str,
+    username: str | None,
+    normalize: Callable[[str], str] | None = None,
+) -> frozenset[str]:
+    """The #144/#202 blocklist's answer to :func:`denied_proposal_ids_for`.
+
     Empty when nothing is restricted or the viewer is an admin. A scoped
     viewer (``users.scoped``, issue #202) is denied everything that is not on
     their allowlist, including frames with no PROPID, and gets a
@@ -395,13 +434,16 @@ def set_scoped(db_path: str, username: str, scoped: bool = True) -> bool:
         before = conn.execute(
             "SELECT scoped FROM users WHERE username = ?", (username,)
         ).fetchone()[0]
-        if bool(before) == scoped:
-            return False
-        conn.execute(
-            "UPDATE users SET scoped = ? WHERE username = ?", (1 if scoped else 0, username)
+        excluded = access_groups.is_active(conn) and access_groups.set_excluded(
+            conn, access_groups.EVERYONE, username, scoped
         )
+        changed = bool(before) != scoped
+        if changed:
+            conn.execute(
+                "UPDATE users SET scoped = ? WHERE username = ?", (1 if scoped else 0, username)
+            )
         conn.commit()
-    return True
+    return changed or excluded
 
 
 def restrict(db_path: str, proposal_id: str, description: str = "") -> bool:
@@ -422,19 +464,34 @@ def restrict(db_path: str, proposal_id: str, description: str = "") -> bool:
                 "INSERT INTO restricted_proposals (proposal_id, description) VALUES (?, ?)",
                 (proposal_id, description),
             )
+        if access_groups.is_active(conn):
+            access_groups.remove_proposal_grant(conn, access_groups.EVERYONE, proposal_id)
         conn.commit()
     return not existed
 
 
-def unrestrict(db_path: str, proposal_id: str) -> bool:
-    """Lift a restriction. Grants are kept so re-restricting restores them."""
+def unrestrict(db_path: str, proposal_id: str, granted_by: str = "") -> bool:
+    """Make *proposal_id* visible to everyone. Grants are kept so
+    re-restricting restores them.
+
+    On a seeded database this also grants it to ``everyone``, which is how a
+    proposal ingested after the seed is shared: the groups are allow-only, so
+    it was hidden without ever having been restricted. Returns False when
+    neither model changed."""
     with get_conn(db_path) as conn:
         _ensure_schema(conn)
         cur = conn.execute(
             "DELETE FROM restricted_proposals WHERE proposal_id = ?", (proposal_id,)
         )
+        granted = access_groups.is_active(conn) and access_groups.add_grant(
+            conn,
+            access_groups.EVERYONE,
+            proposal_id=proposal_id,
+            note="access unrestrict",
+            granted_by=granted_by,
+        )
         conn.commit()
-    return cur.rowcount > 0
+    return cur.rowcount > 0 or granted
 
 
 def grant(db_path: str, username: str, proposal_id: str, granted_by: str) -> bool:
@@ -446,8 +503,16 @@ def grant(db_path: str, username: str, proposal_id: str, granted_by: str) -> boo
             "VALUES (?, ?, ?)",
             (username, proposal_id, granted_by),
         )
+        added = False
+        if access_groups.is_active(conn):
+            group = access_groups.user_group(username)
+            access_groups.ensure_group(conn, group, f"direct grants for {username}", builtin=True)
+            access_groups.add_member(conn, group, username, granted_by)
+            added = access_groups.add_grant(
+                conn, group, proposal_id=proposal_id, note="access grant", granted_by=granted_by
+            )
         conn.commit()
-    return cur.rowcount > 0
+    return cur.rowcount > 0 or added
 
 
 def revoke(db_path: str, username: str, proposal_id: str) -> bool:
@@ -457,8 +522,13 @@ def revoke(db_path: str, username: str, proposal_id: str) -> bool:
             "DELETE FROM user_proposal_access WHERE username = ? AND proposal_id = ?",
             (username, proposal_id),
         )
+        removed = 0
+        if access_groups.is_active(conn):
+            removed = access_groups.remove_proposal_grant(
+                conn, access_groups.user_group(username), proposal_id
+            )
         conn.commit()
-    return cur.rowcount > 0
+    return cur.rowcount > 0 or removed > 0
 
 
 def user_exists(db_path: str, username: str) -> bool:
