@@ -3,13 +3,20 @@
 (function () {
   window.io = function () {
     var handlers = {};
+    var sent = [];
+    window.__chatTransport = {
+      sent: sent,
+      receive: function (event, data) {
+        (handlers[event] || []).slice().forEach(function (fn) { fn(data); });
+      },
+    };
     var socket = {
       connected: false,
       id: null,
       on: function (ev, fn) { (handlers[ev] = handlers[ev] || []).push(fn); return socket; },
       once: function (ev, fn) { return socket.on(ev, fn); },
       off: function (ev) { delete handlers[ev]; return socket; },
-      emit: function () { return socket; },
+      emit: function (event, data) { sent.push({event: event, data: data}); return socket; },
       connect: function () { return socket; },
       disconnect: function () { return socket; },
       close: function () { return socket; },

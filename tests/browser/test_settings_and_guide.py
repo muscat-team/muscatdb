@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import re
+
+from playwright.sync_api import expect
 import pytest
 
 
@@ -96,3 +99,94 @@ def test_guide_diagrams_render_and_follow_the_theme(page):
         page.click("#theme-toggle")
     _diagrams_rendered(page)
     assert page.evaluate("window.__mermaidConfig.theme") == "dark"
+
+
+@pytest.mark.parametrize(('prefix', 'title'), [('lco', 'LCO API Token'), ('ads', 'ADS API Token')])
+def test_saved_token_status_survives_reload_without_exposing_the_secret(page, prefix, title):
+    page.goto('/settings')
+    _open_section(page, title)
+    page.fill(f'#{prefix}-token', 'browser-secret-value')
+    page.click(f'#save-{prefix}-token')
+    expect(page.locator(f'#{prefix}-token-msg')).to_have_text('Saved.')
+    page.reload()
+    _open_section(page, title)
+    expect(page.locator(f'#{prefix}-token-status')).to_contain_text('user token: saved')
+    expect(page.locator(f'#{prefix}-token')).to_have_value('')
+    assert 'browser-secret-value' not in page.content()
+
+
+def test_eso_success_saves_encrypted_credentials_then_clears_them(page, live_server, monkeypatch):
+    from muscat_db import web
+    import httpx
+    original = web.http_client.get_async_client
+    class ESOClient:
+        async def get(self, url, **kwargs):
+            assert url == web._ESO_TOKEN_URL
+            assert kwargs['params']['username'] == 'browser-observer'
+            return httpx.Response(200, json={'id_token': 'fixture-identity-token'})
+    monkeypatch.setattr(web.http_client, 'get_async_client', lambda: ESOClient())
+    page.goto('/settings')
+    _open_section(page, 'ESO Archive Credentials')
+    page.fill('#eso-username', 'browser-observer')
+    page.fill('#eso-password', 'browser-password')
+    page.click('#test-eso-credentials')
+    expect(page.locator('#eso-credentials-status')).to_contain_text('user credentials: saved')
+    assert 'browser-password' not in live_server.sql("SELECT settings FROM users WHERE username = 'admin'")[0][0]
+    monkeypatch.setattr(web.http_client, 'get_async_client', original)
+    page.reload()
+    _open_section(page, 'ESO Archive Credentials')
+    expect(page.locator('#eso-credentials-status')).to_contain_text('user credentials: saved')
+    expect(page.locator('#eso-password')).to_have_value('')
+    page.click('#clear-eso-credentials')
+    expect(page.locator('#eso-credentials-status')).to_contain_text('user credentials: not saved')
+    page.reload()
+    _open_section(page, 'ESO Archive Credentials')
+    expect(page.locator('#eso-credentials-status')).to_contain_text('user credentials: not saved')
+
+
+def test_google_sheet_columns_mapping_save_reload_and_clear(page, monkeypatch):
+    from muscat_db import web
+    columns = ['Star', 'Center', 'Cycle', 'Days', 'Hours', 'Error']
+    calls = []
+    def tab_columns(url, tab):
+        calls.append((url, tab))
+        return columns
+    monkeypatch.setattr(web.gsheet_ephemeris, 'tab_columns', tab_columns)
+    page.goto('/settings')
+    _open_section(page, 'Ephemeris Google Sheet')
+    page.fill('#ephem-sheet-url', 'https://docs.google.com/spreadsheets/d/browser_fixture_sheet/edit')
+    page.fill('#ephem-sheet-ephem-tab', 'planets')
+    page.fill('#ephem-sheet-tc-tab', 'timings')
+    page.click('#load-ephem-sheet-columns')
+    expect(page.locator('#ephem-sheet-cols-msg')).to_contain_text('6 ephemeris / 6 transit-center columns')
+    ephem = '#ephem-sheet-ephem-cols'
+    tc = '#ephem-sheet-tc-cols'
+    for key, value in {'target': 'Star', 't0': 'Center', 'period': 'Days', 'duration': 'Hours'}.items():
+        page.select_option(f'{ephem} select[data-col-field="{key}"]', value)
+    for key, value in {'target': 'Star', 'epoch': 'Cycle', 'tc': 'Center', 'tc_unc': 'Error'}.items():
+        page.select_option(f'{tc} select[data-col-field="{key}"]', value)
+    page.click('#save-ephem-sheet')
+    expect(page.locator('#ephem-sheet-status')).to_contain_text('sheet: saved')
+    assert {tab for _, tab in calls} == {'planets', 'timings'}
+    page.reload()
+    _open_section(page, 'Ephemeris Google Sheet')
+    expect(page.locator('#ephem-sheet-status')).to_contain_text('sheet: saved')
+    expect(page.locator(f'{ephem} select[data-col-field="period"]')).to_have_value('Days')
+    expect(page.locator(f'{tc} select[data-col-field="tc_unc"]')).to_have_value('Error')
+    expect(page.locator('#ephem-sheet-url')).to_have_value('')
+    page.click('#clear-ephem-sheet')
+    expect(page.locator('#ephem-sheet-status')).to_contain_text('sheet: not saved')
+    page.reload()
+    _open_section(page, 'Ephemeris Google Sheet')
+    expect(page.locator('#ephem-sheet-status')).to_contain_text('sheet: not saved')
+
+
+def test_google_sheet_rejects_invalid_url_and_recovers(page):
+    page.problems.allowed += ['HTTP 400: POST /api/settings/ephem-sheet', 'status of 400']
+    page.goto('/settings')
+    _open_section(page, 'Ephemeris Google Sheet')
+    page.fill('#ephem-sheet-url', 'https://example.org/private')
+    page.click('#save-ephem-sheet')
+    expect(page.locator('#ephem-sheet-msg')).to_have_class(re.compile('err'))
+    expect(page.locator('#save-ephem-sheet')).to_be_enabled()
+    expect(page.locator('#ephem-sheet-status')).to_contain_text('sheet: not saved')

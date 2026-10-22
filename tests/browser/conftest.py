@@ -4,7 +4,9 @@ Each test module gets its own server: :func:`live_server` builds an isolated
 tree (database, raw-data/prose/timer/TTV/LCO dirs, catalog CSVs), points the
 app at it through the same env vars production uses, and runs uvicorn on a
 loopback port in a background thread. Module scope keeps the network guard and
-env changes from leaking into the rest of the suite.
+env changes from leaking into the rest of the suite. The fixture database is
+restored from its startup snapshot before each test so edits never leak between
+tests.
 
 Nothing leaves the machine:
 
@@ -200,6 +202,9 @@ class LiveServer:
         self.url = url
         self.root = root
         self.db = db
+        self.snapshot = root / "baseline.sqlite"
+        with sqlite3.connect(db) as source, sqlite3.connect(self.snapshot) as target:
+            source.backup(target)
 
     def sql(self, query: str, params=()):
         with sqlite3.connect(self.db) as conn:
@@ -386,12 +391,42 @@ def page(browser, live_server):
     )
     problems = Problems(live_server.url)
     context.route(lambda url: not url.startswith(live_server.url), _route_external(problems))
+    context.on("page", lambda opened: _watch(opened, problems))
     pg = context.new_page()
     pg.set_default_timeout(10_000)
-    _watch(pg, problems)
     pg.problems = problems
     yield pg
     context.close()
     bad = problems.unexpected()
     if bad:
         pytest.fail("browser problems on the page:\n  " + "\n  ".join(bad), pytrace=False)
+
+
+@pytest.fixture(autouse=True)
+def _restore_browser_database(live_server):
+    """Each interaction starts from the same seed, independent of test order."""
+    with sqlite3.connect(live_server.snapshot) as source, sqlite3.connect(live_server.db) as target:
+        source.backup(target)
+
+
+@pytest.fixture
+def log_stream(page):
+    """Control only the SSE transport; real page status handlers consume its events."""
+    page.add_init_script("""
+      window.__logStreams = [];
+      class FixtureEventSource {
+        static CLOSED = 2;
+        constructor(url) { this.url = url; this.readyState = 1; window.__logStreams.push(this); }
+        close() { this.readyState = 2; }
+      }
+      window.EventSource = FixtureEventSource;
+    """)
+
+    def send(state, log, **extra):
+        page.wait_for_function("window.__logStreams.some(s => s.readyState !== 2)")
+        page.evaluate("""payload => {
+          const stream = window.__logStreams.filter(s => s.readyState !== 2).at(-1);
+          stream.onmessage({data: JSON.stringify(payload)});
+        }""", {"state": state, "log": log, "elapsed": 12, "returncode": None, **extra})
+
+    return send
