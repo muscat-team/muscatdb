@@ -42,7 +42,7 @@ jobs:
         run: uv sync --dev
       - name: Download catalog CSVs
         run: bash scripts/download_catalogs.sh
-      # Headless Chromium for the browser tests (tests/*_browser.py). They skip
+      # Headless Chromium for the browser tests (tests/browser/ and tests/*_browser.py). They skip
       # without it locally; MUSCAT_REQUIRE_BROWSER=1 below makes a missing or
       # broken install fail here instead of silently dropping that coverage.
       - name: Install Playwright Chromium
@@ -100,7 +100,7 @@ jobs:
         run: uv sync --dev
       - name: Download catalog CSVs
         run: bash scripts/download_catalogs.sh
-      # Headless Chromium for the browser tests (tests/*_browser.py). They skip
+      # Headless Chromium for the browser tests (tests/browser/ and tests/*_browser.py). They skip
       # without it locally; MUSCAT_REQUIRE_BROWSER=1 below makes a missing or
       # broken install fail here instead of silently dropping that coverage.
       - name: Install Playwright Chromium

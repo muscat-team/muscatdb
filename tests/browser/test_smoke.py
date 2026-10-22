@@ -53,4 +53,3 @@ def test_page_loads_cleanly(page, path, title, text):
     assert title.lower() in page.title().lower()
     if text:
         assert text.lower() in page.locator("body").inner_text().lower()
-

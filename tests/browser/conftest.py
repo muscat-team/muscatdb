@@ -41,7 +41,10 @@ from pathlib import Path
 
 import pytest
 
-sync_api = pytest.importorskip("playwright.sync_api")
+if os.environ.get("MUSCAT_REQUIRE_BROWSER") == "1":
+    import playwright.sync_api as sync_api
+else:
+    sync_api = pytest.importorskip("playwright.sync_api")
 
 from tests.browser import seed  # noqa: E402
 
