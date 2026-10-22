@@ -83,6 +83,25 @@ _WEB_CACHE_ATTRS = (
 )
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _offline_iers():
+    """Use astropy's bundled IERS-A table instead of downloading one.
+
+    Time-scale conversions with a location (e.g. TDB to UTC in
+    ``transit_obs.bjd_tdb_to_jd_utc``) need UT1, which astropy's ``IERS_Auto``
+    fetches from datacenter.iers.org or the USNO mirror once the bundled table
+    is over ``auto_max_age`` (30) days old. Both can be unreachable from CI
+    runners, and the fetch then raises after long timeouts. Disabling the
+    download and the age check keeps the suite offline and stops it rotting as
+    the pinned ``astropy-iers-data`` ages; the predictive UT1 error this allows
+    is far below what any test asserts.
+    """
+    from astropy.utils import iers
+
+    with iers.conf.set_temp("auto_download", False), iers.conf.set_temp("auto_max_age", None):
+        yield
+
+
 @pytest.fixture(autouse=True)
 def _isolate_proxy_auth_config(monkeypatch):
     """Keep tests independent of an installed production proxy secret."""
