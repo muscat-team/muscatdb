@@ -1296,11 +1296,11 @@ def sync_jobs() -> None:
             k = f"ttv_fit:{j.inst}/{j.date}/{j.target.replace(' ', '')}"
             return f"{k}/{j.run_id}" if j.run_id else k
 
-        # Drop finished jobs a newer queued run has replaced (same key) so their
-        # terminal state is not written over the pending row below.
+        # Drop finished jobs a newer run has replaced (same key: queued, launched
+        # elsewhere, or finished) so their terminal state is not written over it.
         for key in list(_TTV_JOBS.keys()):
             stale = _TTV_JOBS[key]
-            if jobs.superseded_by_queued_row(db_by_key.get(_db_key(stale)), stale.started_at, stale.proc):
+            if jobs.superseded_by_newer_row(db_by_key.get(_db_key(stale)), stale.started_at, stale.proc):
                 try:
                     stale.logf.close()
                 except OSError:

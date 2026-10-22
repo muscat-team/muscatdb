@@ -394,17 +394,19 @@ def apply_cancel_requests(store, type_: str, instance_id: str, cancel_row) -> No
             _logger.exception("could not apply cancel request for %s", row.get("key"))
 
 
-def superseded_by_queued_row(row: dict | None, started_at: float | None, proc) -> bool:
-    """True when a finished in-memory job has been replaced by a newer queued row.
+def superseded_by_newer_row(row: dict | None, started_at: float | None, proc) -> bool:
+    """True when a finished in-memory job has been replaced by a newer run's row.
 
     A test run and a full run share one job key, and the registry keeps a
-    finished job so its page can keep showing the log. Enqueueing the next run
-    under that key writes a ``pending`` row with a later ``started_at``; syncing
-    the stale registry entry would then persist its terminal state over the
-    queued row and the worker would never see it. A process that is still alive
+    finished job so its page can keep showing the log. Any later run under that
+    key -- queued here, launched by another process, or already finished --
+    writes the row with a later ``started_at``; syncing the stale registry entry
+    would then persist its terminal state over it. With several processes
+    holding stale entries for one key, each rewrites the row on every pass and
+    it flips between their states indefinitely. A process that is still alive
     is never superseded -- ``start_run``'s overwrite/reuse paths own that case.
     """
-    if row is None or row.get("state") != "pending":
+    if row is None:
         return False
     if proc is not None and proc.poll() is None:
         return False

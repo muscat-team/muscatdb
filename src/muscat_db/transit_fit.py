@@ -2377,12 +2377,12 @@ def sync_jobs() -> None:
         running_keys = {j["key"] for j in db_jobs if j["state"] == "running" and j["type"] == "transit_fit"}
         db_by_key = {j["key"]: j for j in db_jobs}
 
-        # Drop finished jobs a newer queued run has replaced (same key) so their
-        # terminal state is not written over the pending row below.
+        # Drop finished jobs a newer run has replaced (same key: queued, launched
+        # elsewhere, or finished) so their terminal state is not written over it.
         for key in list(_FIT_JOBS.keys()):
             stale = _FIT_JOBS[key]
             stale_key = f"transit_fit:{fit_job_key(stale.inst, stale.date, stale.target, stale.run_id)}"
-            if jobs.superseded_by_queued_row(db_by_key.get(stale_key), stale.started_at, stale.proc):
+            if jobs.superseded_by_newer_row(db_by_key.get(stale_key), stale.started_at, stale.proc):
                 try:
                     stale.logf.close()
                 except OSError:
