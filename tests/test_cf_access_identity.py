@@ -99,7 +99,7 @@ def test_unknown_email_gets_403_but_healthz_stays_open(db):
     c = _client()
     r = c.get("/whoami", headers=_headers("stranger@univ.edu"))
     assert r.status_code == 403
-    assert r.json()["error"] == "account not provisioned"
+    assert "no MuSCAT-DB account" in r.json()["error"]
     assert c.get("/healthz", headers=_headers("stranger@univ.edu")).status_code == 200
 
 

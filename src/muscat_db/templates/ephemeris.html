@@ -3762,13 +3762,12 @@
           logEl.style.display = 'block';
           logEl.textContent = 'Launching TTV fitting run…';
           localStorage.setItem(JOB_KEY, JSON.stringify({ target: target, run_name: runNameVal }));
-          return fetch('/api/ttv-fit/start', {
+          return MuscatFetch.fetchJson('/api/ttv-fit/start', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ target: target, options: options })
           });
         })
-        .then(response => response ? response.json() : null)
         .then(res => {
           if (!res) return;
           const logEl = document.getElementById('run-log');

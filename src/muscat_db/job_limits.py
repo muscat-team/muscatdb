@@ -150,7 +150,8 @@ def queued_limit_message(user_name: str, cap: int) -> str:
     """The text a refused enqueue carries back to the caller (HTTP 429)."""
     return (
         f"{user_name} already has {cap} queued job(s), the per-user limit; "
-        "wait for one to start or cancel one"
+        "wait for one to start or cancel one on the Jobs page, "
+        "or ask an admin to raise your limit"
     )
 
 

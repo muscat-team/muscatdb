@@ -2506,10 +2506,10 @@
     logEl.textContent = 'Launching transit fitting run…';
     MuscatStorage.remove(logKey());
 
-    fetch('/api/transit-fit/run', {
+    MuscatFetch.fetchJson('/api/transit-fit/run', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ inst: inst, date: date, target: target, test_run: !!testRun, options: collectOptions(), selected_csvs: getSelectedCsvs() })
-    }).then(function (r) { return r.json(); }).then(function (res) {
+    }).then(function (res) {
       if (!res.ok) {
         clearJob();
         setRunning(false);

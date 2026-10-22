@@ -1647,8 +1647,8 @@ def start_fit(
                 )
             except JobLimitExceeded as exc:
                 return limit_refusal(exc)
-            except Exception:
-                return {"ok": False, "error": "database not writable"}
+            except Exception as exc:
+                return {"ok": False, "error": jobs.server_fault("The job could not be queued because the job database is not writable", exc)}
             return {"ok": True, "key": key, "queued": True, "run_id": run_id}
 
     # Working directory
@@ -1699,7 +1699,7 @@ def start_fit(
             get_job_store().release_slot("transit_fit", key)
         logf.write(f"\nfailed to launch fitting: {exc}\n")
         logf.close()
-        return {"ok": False, "error": f"failed to launch fitting: {exc}"}
+        return {"ok": False, "error": jobs.server_fault("The server could not start the transit fit", exc)}
 
     with _FIT_LOCK:
         _FIT_JOBS[key] = TransitFitJob(
@@ -2435,7 +2435,7 @@ def sync_jobs() -> None:
 
             error_desc = ""
             if persist_state == "error":
-                error_desc = _get_error_desc(job.log_path)
+                error_desc = _get_error_desc(job.log_path, persist_rc)
             elif persist_state == "cancelled":
                 error_desc = "Cancelled by user"
 

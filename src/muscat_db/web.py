@@ -55,6 +55,13 @@ import nh3
 from collections.abc import AsyncIterator, Callable
 
 from fastapi import Body, FastAPI, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exception_handlers import (
+    http_exception_handler as fastapi_http_exception_handler,
+    request_validation_exception_handler as fastapi_validation_exception_handler,
+)
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import (
     FileResponse,
@@ -87,6 +94,8 @@ from muscat_db.auth import (
     PROXY_SECRET_HEADER,
     authentication_required as _authentication_required,
     resolve_forwarded_identity,
+    unauthenticated_message,
+    unprovisioned_message,
     request_user as _request_user,
     settings_auth_error as _settings_auth_error,
     is_same_origin as _is_same_origin,
@@ -453,6 +462,43 @@ def _sse_response(generator: AsyncIterator[bytes]) -> StreamingResponse:
         },
     )
 
+# API errors in the shape the pages read. FastAPI answers an HTTPException with
+# ``{"detail": ...}`` and a malformed body with a list of pydantic errors, but
+# the templates read ``res.error``, so a refusal raised that way showed only a
+# generic fallback ("Error: failed to start"). ``detail`` stays for any client
+# that reads it; HTML pages keep FastAPI's default handling.
+def _is_api_request(request: Request) -> bool:
+    return request.url.path.startswith("/api/")
+
+
+@app.exception_handler(StarletteHTTPException)
+async def _api_http_exception_handler(request: Request, exc: StarletteHTTPException):
+    if not _is_api_request(request) or not isinstance(exc.detail, str):
+        return await fastapi_http_exception_handler(request, exc)
+    return JSONResponse(
+        {"ok": False, "error": exc.detail, "detail": exc.detail},
+        status_code=exc.status_code, headers=getattr(exc, "headers", None),
+    )
+
+
+def _describe_validation_errors(errors: list) -> str:
+    parts = []
+    for err in errors:
+        loc = [str(p) for p in err.get("loc", ()) if p not in ("body", "query", "path")]
+        parts.append(f"{'.'.join(loc) or 'request'}: {err.get('msg', 'invalid value')}")
+    return "invalid request (" + "; ".join(parts) + ")" if parts else "invalid request"
+
+
+@app.exception_handler(RequestValidationError)
+async def _api_validation_exception_handler(request: Request, exc: RequestValidationError):
+    if not _is_api_request(request):
+        return await fastapi_validation_exception_handler(request, exc)
+    errors = jsonable_encoder(exc.errors())
+    return JSONResponse(
+        {"ok": False, "error": _describe_validation_errors(errors), "detail": errors}, status_code=422,
+    )
+
+
 # Middleware: extract the authenticated user from the nginx reverse proxy.
 # The trust rule (only honor X-Forwarded-User from a loopback proxy peer) lives
 # in muscat_db.auth so the companion-app gateway applies it identically.
@@ -493,11 +539,11 @@ async def _nginx_auth_middleware(request: Request, call_next):
             # than fall through as anonymous, and never auto-provision (#50).
             logger.warning("rejecting unmapped Access identity %r", forwarded)
             return JSONResponse(
-                {"ok": False, "error": "account not provisioned"}, status_code=403
+                {"ok": False, "error": unprovisioned_message(forwarded)}, status_code=403
             )
         if _authentication_required() and protected and not user:
             return JSONResponse(
-                {"ok": False, "error": "authentication required"},
+                {"ok": False, "error": unauthenticated_message(forwarded)},
                 status_code=401,
             )
         if (
@@ -766,11 +812,20 @@ def _viewer_may_modify_run(level: str, inst: str, date: str, target: str, run_id
     return run_ownership.may_modify_run(_db_path(), user, _jobs_user_is_admin(user), owner)
 
 
-def _require_may_modify_run(level: str, inst: str, date: str, target: str, run_id: str = "") -> None:
+def _require_may_modify_run(
+    level: str, inst: str, date: str, target: str, run_id: str = "",
+    *, action: str = "change", offer_new_run: bool = False,
+) -> None:
     """403 a delete or cancel of a run the viewer neither owns nor shares a
-    group with the owner of. Call after the run is known to be visible."""
+    group with the owner of. Call after the run is known to be visible. The
+    message says who the viewer was taken to be and whose run it is; see
+    :func:`muscat_db.run_ownership.refusal_message`."""
     if not _viewer_may_modify_run(level, inst, date, target, run_id):
-        raise HTTPException(403, "only the run's owner, an admin, or someone in the owner's group may change it")
+        user = _CURRENT_USER.get()
+        raise HTTPException(403, run_ownership.refusal_message(
+            user, run_ownership.viewer_groups(_db_path(), user),
+            run_ownership.run_owner(level, inst, date, target, run_id), action, offer_new_run,
+        ))
 
 
 def _run_id_taken(level: str, inst: str, date: str, target: str, run_id: str = "") -> bool:
@@ -793,7 +848,7 @@ def _require_may_replace_run(level: str, inst: str, date: str, target: str, run_
     change (issue #272). A run id nobody has used yet stays open to everyone who
     can see the night, so starting a new run needs no ownership."""
     if _run_id_taken(level, inst, date, target, run_id):
-        _require_may_modify_run(level, inst, date, target, run_id)
+        _require_may_modify_run(level, inst, date, target, run_id, action="overwrite", offer_new_run=True)
 
 
 def _replace_guard(level: str, inst: str, date: str, target: str) -> Callable[[str], None]:
@@ -3466,7 +3521,7 @@ def transit_fit_cancel(payload: dict = Body(...)):
     target = (payload.get("target") or "").strip()
     run_id = (payload.get("run_id") or payload.get("run") or "").strip()
     _require_visible_run("transit_fit", inst, date, target, run_id)
-    _require_may_modify_run("transit_fit", inst, date, target, run_id)
+    _require_may_modify_run("transit_fit", inst, date, target, run_id, action="cancel")
     result = fit.cancel_fit(inst, date, target, run_id=run_id)
     if not result.get("ok"):
         return JSONResponse(result, status_code=400)
@@ -3486,7 +3541,7 @@ def transit_fit_delete(payload: dict = Body(...)):
     if not (target or "").strip():
         return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
     _require_visible_run("transit_fit", inst, date, target, run_id)
-    _require_may_modify_run("transit_fit", inst, date, target, run_id)
+    _require_may_modify_run("transit_fit", inst, date, target, run_id, action="delete")
     result = fit.delete_fit(inst, date, target, run_id=run_id)
     return JSONResponse(result, status_code=500 if result.get("delete_failed") else 200)
 
@@ -7526,7 +7581,7 @@ def photometry_postprocess(payload: phot_api.PostprocessRequest):
         return phot_api.response(phot_api.PostprocessResponse, {"ok": False, "error": "a run is required"}, status_code=400)
     _require_visible_run("photometry", inst, date, target, run)
     if payload.get("apply", False):  # a dry run only reads the run
-        _require_may_modify_run("photometry", inst, date, target, run)
+        _require_may_modify_run("photometry", inst, date, target, run, action="post-process")
     result = postproc.postprocess(
         inst,
         date,
@@ -7562,7 +7617,7 @@ def photometry_postprocess_restore(payload: phot_api.RestoreRequest):
     if not run:
         return phot_api.response(phot_api.RestoreResponse, {"ok": False, "error": "a run is required"}, status_code=400)
     _require_visible_run("photometry", inst, date, target, run)
-    _require_may_modify_run("photometry", inst, date, target, run)
+    _require_may_modify_run("photometry", inst, date, target, run, action="restore")
     result = postproc.restore_clip(inst, date, target, run)
     if not result.get("ok"):
         return phot_api.response(phot_api.RestoreResponse, result, status_code=400)
@@ -7672,7 +7727,7 @@ def photometry_cancel(payload: phot_api.CancelRequest):
     target = (payload.get("target") or "").strip()
     run_id = (payload.get("run_id") or payload.get("run") or "").strip()
     _require_visible_run("photometry", inst, date, target, run_id)
-    _require_may_modify_run("photometry", inst, date, target, run_id)
+    _require_may_modify_run("photometry", inst, date, target, run_id, action="cancel")
     result = phot.cancel_run(inst, date, target, run_id=run_id)
     if not result.get("ok"):
         return phot_api.response(phot_api.ActionResponse, result, status_code=400)
@@ -7694,7 +7749,7 @@ def photometry_delete(payload: phot_api.CancelRequest):
         return phot_api.response(phot_api.ActionResponse, {"ok": False, "error": "target is required"}, status_code=400)
     run_id = (payload.get("run_id") or payload.get("run") or "").strip()
     _require_visible_run("photometry", inst, date, target, run_id)
-    _require_may_modify_run("photometry", inst, date, target, run_id)
+    _require_may_modify_run("photometry", inst, date, target, run_id, action="delete")
     result = phot.delete_reduction(inst, date, target, run_id=run_id)
     return phot_api.response(phot_api.ActionResponse, result)
 
@@ -8046,7 +8101,7 @@ def api_cancel_ttv_fit(payload: dict = Body(...)):
     if not target:
         return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
     _require_visible_ttv_run(target, run_name)
-    _require_may_modify_run("ttv_fit", "", "", target, run_name)
+    _require_may_modify_run("ttv_fit", "", "", target, run_name, action="cancel")
     res = ttv.cancel_ttv_fit(target, run_name)
     return JSONResponse(res)
 
@@ -8058,7 +8113,7 @@ def api_delete_ttv_fit(payload: dict = Body(...)):
     if not target:
         return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
     _require_visible_ttv_run(target, run_name)
-    _require_may_modify_run("ttv_fit", "", "", target, run_name)
+    _require_may_modify_run("ttv_fit", "", "", target, run_name, action="delete")
     res = ttv.delete_ttv_fit(target, run_name)
     return JSONResponse(res, status_code=500 if res.get("delete_failed") else 200)
 

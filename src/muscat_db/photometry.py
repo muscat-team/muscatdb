@@ -1914,7 +1914,7 @@ def start_run(
             except JobLimitExceeded as exc:
                 return limit_refusal(exc)
             except sqlite3.OperationalError as exc:
-                return {"ok": False, "error": f"database not writable: {exc}"}
+                return {"ok": False, "error": jobs.server_fault("The job could not be recorded because the job database is not writable", exc)}
             return {"ok": True, "key": key, "queued": True, "run_id": run_id}
 
         try:
@@ -1928,7 +1928,7 @@ def start_run(
             if not ok:
                 if claimed_slot:
                     get_job_store().release_slot("photometry", key)
-                return {"ok": False, "error": delete_error or "failed to delete previous reduction products"}
+                return {"ok": False, "error": jobs.server_fault("The previous reduction products could not be deleted before the re-run", delete_error)}
             if removed:
                 logger.info(f"start_run: deleted {removed} previous product(s) for {key} before overwrite run")
         rdir.mkdir(parents=True, exist_ok=True)
@@ -1963,7 +1963,7 @@ def start_run(
                 get_job_store().release_slot("photometry", key)
             logf.write(f"\nfailed to launch pipeline: {exc}\n")
             logf.close()
-            return {"ok": False, "error": f"failed to launch pipeline: {exc}"}
+            return {"ok": False, "error": jobs.server_fault("The server could not start the photometry pipeline", exc)}
         _JOBS[key] = Job(
             key=key, inst=inst, date=date, target=target,
             cmd=cmd, proc=proc, logf=logf, log_path=log_path,
@@ -2002,7 +2002,7 @@ def start_run(
             except OSError:
                 pass
             _JOBS.pop(key, None)
-            return {"ok": False, "error": f"database not writable: {exc}"}
+            return {"ok": False, "error": jobs.server_fault("The job could not be recorded because the job database is not writable", exc)}
     return {"ok": True, "key": key, "run_id": run_id}
 
 
@@ -2166,7 +2166,7 @@ def _persisted_status(inst: str, date: str, target: str, run_id: str = "") -> di
             lp = log_path(inst, date, target, run_id)
             error_desc = entry.get("error_desc") or ""
             if state == "error" and not error_desc and lp:
-                error_desc = _get_error_desc(lp)
+                error_desc = _get_error_desc(lp, entry.get("returncode"))
             elif state == "cancelled" and not error_desc:
                 error_desc = "Cancelled by user"
             return {
@@ -2218,7 +2218,7 @@ def job_status(inst: str, date: str, target: str, run_id: str = "") -> dict:
         elapsed = job.elapsed if job.state not in ("running", "cancelling") and job.elapsed is not None else round(time.time() - job.started_at)
     error_desc = ""
     if state == "error" and job_log:
-        error_desc = _get_error_desc(job_log)
+        error_desc = _get_error_desc(job_log, rc)
     elif state == "cancelled":
         error_desc = "Cancelled by user"
     return {
@@ -2335,26 +2335,49 @@ def cancel_run(inst: str, date: str, target: str, run_id: str = "") -> dict:
     return {"ok": True, "key": key}
 
 
-def _get_error_desc(log_path: Path) -> str:
+_ERROR_DESC_MAX = 200
+
+
+def _clip_error(text: str) -> str:
+    if len(text) <= _ERROR_DESC_MAX:
+        return text
+    return text[:_ERROR_DESC_MAX] + "… (see the log for the full message)"
+
+
+def _get_error_desc(log_path: Path, returncode: int | None = None) -> str:
+    """A failed job's ``error_desc``: the last error line of its log, led by
+    how the process died when a signal killed it. A process killed for memory
+    stops mid-stream, so its last logged error is usually an older, unrelated
+    one; without the signal the description would blame that instead."""
+    exit_text = jobs.describe_exit(returncode)
     if not log_path.is_file():
-        return "Unknown error"
+        return (
+            f"{exit_text or 'The job failed'} and left no log, so the cause is unknown; "
+            "please contact an admin if this keeps happening."
+        )
     try:
         with open(log_path, errors="replace") as f:
             lines = [line.strip() for line in f if line.strip()]
-        if not lines:
-            return "Empty log file"
-        for line in reversed(lines):
-            if "Error" in line or "ERROR" in line or "Exception" in line or "failed" in line:
-                # Remove ANSI escape codes
-                clean = re.sub(r'\x1b\[[0-9;]*m', '', line)
-                if " - ERROR: " in clean:
-                    clean = clean.split(" - ERROR: ")[1]
-                elif " - WARNING: " in clean:
-                    clean = clean.split(" - WARNING: ")[1]
-                return clean[:100]
-        return re.sub(r'\x1b\[[0-9;]*m', '', lines[-1])[:100]
-    except Exception:
-        return "Failed to parse log"
+    except OSError as exc:
+        return f"{exit_text or 'The job failed'}, and its log could not be read ({exc})."
+    if not lines:
+        return (
+            f"{exit_text or 'The job failed'} before writing any output; the engine "
+            "probably could not start. Please contact an admin."
+        )
+    died = f"{exit_text}. " if jobs.exit_signal(returncode) is not None else ""
+    for line in reversed(lines):
+        if "Error" in line or "ERROR" in line or "Exception" in line or "failed" in line:
+            # Remove ANSI escape codes
+            clean = re.sub(r'\x1b\[[0-9;]*m', '', line)
+            if " - ERROR: " in clean:
+                clean = clean.split(" - ERROR: ")[1]
+            elif " - WARNING: " in clean:
+                clean = clean.split(" - WARNING: ")[1]
+            return died + ("Last error in the log: " if died else "") + _clip_error(clean)
+    last = _clip_error(re.sub(r'\x1b\[[0-9;]*m', '', lines[-1]))
+    lead = f"{exit_text}. " if exit_text else "The job failed. "
+    return f"{lead}There is no error line in the log; its last line was: {last}"
 
 
 def _detect_process_running(rdir: Path) -> bool:
@@ -2388,7 +2411,7 @@ def sync_jobs() -> None:
                 type_="photometry", inst=job.inst, date=job.date, target=job.target,
                 state="error", returncode=-1,
                 elapsed=round(now - job.started_at), started_at=job.started_at,
-                error_desc=f"watchdog: {reason}", run_type=job.run_type,
+                error_desc=jobs.watchdog_desc(reason), run_type=job.run_type,
                 run_id=job.run_id,
             )
             _JOBS.pop(key, None)
@@ -2455,9 +2478,9 @@ def sync_jobs() -> None:
             if persist_state == "done" and _log_has_partial_failure(job.log_path):
                 persist_state = "error"
                 job.state = "error"
-                error_desc = _get_error_desc(job.log_path)
+                error_desc = _get_error_desc(job.log_path, persist_rc)
             elif persist_state == "error":
-                error_desc = _get_error_desc(job.log_path)
+                error_desc = _get_error_desc(job.log_path, persist_rc)
             elif persist_state == "cancelled":
                 error_desc = "Cancelled by user"
 

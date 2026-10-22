@@ -69,6 +69,65 @@ def _explicit_groups(db_path: str, user: str) -> frozenset[str]:
     return frozenset(n for n in names if n not in (EVERYONE, ADMIN) and not n.startswith(USER_PREFIX))
 
 
+def viewer_groups(db_path: str, viewer: str | None) -> frozenset[str]:
+    """The explicit groups that count for :func:`may_modify_run`."""
+    viewer = (viewer or "").strip()
+    return _explicit_groups(db_path, viewer) if viewer else frozenset()
+
+
+def _and_list(names: list[str]) -> str:
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def refusal_message(
+    viewer: str | None, groups: frozenset[str], owner: str, action: str, offer_new_run: bool
+) -> str:
+    """Why :func:`may_modify_run` refused *viewer*, and what they can do.
+
+    It names who the viewer was taken to be, the groups that counted and the
+    run's owner, so a refusal on a server reached without the authenticating
+    proxy (no identity at all) does not read like a missing group membership.
+    *action* is the verb refused ("overwrite", "cancel"); *offer_new_run* adds
+    the way round for a launch, which a new run name always has.
+    """
+    viewer = (viewer or "").strip()
+    owner = (owner or "").strip()
+    if owner.casefold() == _ANONYMOUS:
+        owner = ""
+    new_run = " To start a separate run instead, choose a new run name." if offer_new_run else ""
+    contact = " Please contact an admin if this is a mistake."
+    if not viewer:
+        whose = f"This run belongs to {owner}." if owner else "This run has no recorded owner."
+        return (
+            f"You are not logged in, so you may only {action} runs that have no owner. {whose} "
+            f"Open the site through the address that asks you to log in, not the server's port "
+            f"directly, to {action} it.{new_run}"
+        )
+    if groups:
+        names = sorted(groups)
+        who = f"You are logged in as {viewer} under the {_and_list(names)} group{'s' if len(names) > 1 else ''}."
+        if not owner:
+            # Unreachable through may_modify_run (a group member may change an
+            # unowned run) but kept total so a caller never gets a blank reason.
+            return f"{who} You do not have permission to {action} this run.{new_run}{contact}"
+        theirs = "that group" if len(names) == 1 else "any of those groups"
+        return (
+            f"{who} This run belongs to {owner}, who is not in {theirs}. "
+            f"You do not have permission to {action} it.{new_run}{contact}"
+        )
+    who = f"You are logged in as {viewer}, who is not in any group."
+    if not owner:
+        return (
+            f"{who} This run has no recorded owner, so only an admin or a member of a group "
+            f"may {action} it. You do not have permission to {action} it; "
+            f"ask an admin to add you to a group.{new_run}"
+        )
+    return (
+        f"{who} This run belongs to {owner}, so only {owner}, an admin, or someone in a group "
+        f"with {owner} may {action} it. You do not have permission to {action} it.{new_run}{contact}"
+    )
+
+
 def may_modify_run(db_path: str, viewer: str | None, is_admin: bool, owner: str) -> bool:
     """Whether *viewer* may delete or cancel a run owned by *owner* (``""`` if
     unowned). The caller has already checked that the viewer may see the run."""

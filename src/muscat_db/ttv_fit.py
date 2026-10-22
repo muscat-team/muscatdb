@@ -534,8 +534,8 @@ def start_ttv_fit(
                 )
             except JobLimitExceeded as exc:
                 return limit_refusal(exc)
-            except Exception:
-                return {"ok": False, "error": "database not writable"}
+            except Exception as exc:
+                return {"ok": False, "error": jobs.server_fault("The job could not be queued because the job database is not writable", exc)}
             return {"ok": True, "key": key, "queued": True}
 
     rdir = ttv_output_dir(target, run_name)
@@ -617,7 +617,7 @@ def start_ttv_fit(
         get_job_store().release_slot("ttv_fit", key)
         logf.write(f"\nfailed to launch harmonic: {exc}\n")
         logf.close()
-        return {"ok": False, "error": f"failed to launch harmonic: {exc}"}
+        return {"ok": False, "error": jobs.server_fault("The server could not start the TTV fit (harmonic)", exc)}
 
     with _TTV_LOCK:
         _TTV_JOBS[key] = TTVFitJob(
@@ -1340,7 +1340,7 @@ def sync_jobs() -> None:
 
             error_desc = ""
             if persist_state == "error":
-                error_desc = _get_error_desc(job.log_path)
+                error_desc = _get_error_desc(job.log_path, persist_rc)
             elif persist_state == "cancelled":
                 error_desc = "Cancelled by user"
 
