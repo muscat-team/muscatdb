@@ -5,13 +5,15 @@ highlighted, whether "Clear filter" shows, which sections are displayed), so
 they are exercised in a real browser rather than by pulling functions out for
 node. The page is rendered with the app's Jinja env from synthetic jobs; static
 files come from the package and the live poll gets an empty response, so only
-the chip logic runs. Skips when Playwright or its Chromium is not installed.
+the chip logic runs. Skips when Playwright or its Chromium is not installed,
+unless MUSCAT_REQUIRE_BROWSER=1, which turns a missing browser into a failure.
 """
 
 from __future__ import annotations
 
 import json
 import mimetypes
+import os
 import time
 from pathlib import Path
 
@@ -81,6 +83,10 @@ def browser():
         try:
             b = p.chromium.launch()
         except sync_api.Error as exc:
+            # CI sets this once it installs Chromium, so a broken install fails
+            # the run instead of quietly skipping the only browser coverage.
+            if os.environ.get("MUSCAT_REQUIRE_BROWSER") == "1":
+                raise
             pytest.skip(f"Playwright Chromium unavailable: {exc}")
         yield b
         b.close()
