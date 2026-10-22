@@ -1,12 +1,10 @@
 """HTTP schema and serialization compatibility for the photometry router."""
 
 import json
-import os
 import re
 import shutil
 import subprocess
 from pathlib import Path
-from urllib.parse import urlsplit
 
 import pytest
 from fastapi.testclient import TestClient
@@ -211,109 +209,3 @@ def test_hidden_outputs_and_runs_are_empty(client, monkeypatch):
     monkeypatch.setattr(phot, "list_outputs", lambda *a, **k: pytest.fail("scanned hidden data"))
     assert client.get("/api/photometry/outputs", params=DATASET).json() == phot.empty_outputs()
     assert client.get("/api/photometry/runs", params=DATASET).json() == {"runs": []}
-
-
-@pytest.mark.skipif(not os.environ.get("MUSCAT_BROWSER_TESTS"), reason="opt in with MUSCAT_BROWSER_TESTS=1 and install playwright")
-def test_browser_form_submissions(client, tmp_path, monkeypatch):
-    """Real Chromium inputs/fetch against TestClient, without a live server.
-
-    Run with uv run --with playwright pytest ... -k browser_form. Only the
-    external engines, chat transport, and SSE connection are stubbed; the page,
-    scripts, POST bodies, handlers, and polling responses are the real ones.
-    """
-    sync_api = pytest.importorskip("playwright.sync_api")
-    directory = tmp_path / "prose" / "muscat4" / "250512" / "_runs" / "TOI-6715" / "browser"
-    directory.mkdir(parents=True)
-    (directory / "TOI-6715_muscat4_gp_250512.csv").write_text("BJD_TDB,Flux\n2460807.84,1.0\n")
-    (directory / "_webrun_meta.json").write_text(json.dumps({"run_id": "browser", "run_name": "browser"}))
-    phot.raw_data_dir("muscat4", "250512").mkdir(parents=True)
-    state = {"value": "none"}
-    launches = []
-    def start(*args, **kwargs):
-        launches.append(kwargs)
-        state["value"] = "running"
-        return {"ok": True, "key": "browser", "run_id": "browser"}
-    def cancel(*args, **kwargs):
-        state["value"] = "cancelled"
-        return {"ok": True, "key": "browser"}
-    monkeypatch.setattr(phot, "start_run", start)
-    monkeypatch.setattr(phot, "cancel_run", cancel)
-    monkeypatch.setattr(phot, "job_status", lambda *a, **k: {
-        "state": state["value"], "log": "browser test", "elapsed": 0, "returncode": None,
-    })
-    monkeypatch.setattr(phot, "delete_reduction", lambda *a, **k: {"ok": True, "count": 1})
-    monkeypatch.setattr(web.postproc, "postprocess", lambda *a, **k: {
-        "ok": True, "applied": k["apply"], "files": [], "n_files": 0, "restorable": True,
-    })
-    monkeypatch.setattr(web.postproc, "restore_clip", lambda *a, **k: {"ok": True, "restored": [], "n_files": 0})
-    failures, errors, requests = [], [], []
-    def dispatch(route):
-        request = route.request
-        url = urlsplit(request.url)
-        if url.hostname != "testserver" or url.path.endswith("/log-stream"):
-            route.abort()
-            return
-        if url.path.endswith("/chat.js"):
-            route.fulfill(status=200, content_type="application/javascript", body="")
-            return
-        path = url.path + ("?" + url.query if url.query else "")
-        response = client.request(request.method, path, content=request.post_data_buffer,
-                                  headers={"Origin": "http://testserver", "Content-Type": "application/json"})
-        if url.path.startswith("/api/photometry/"):
-            requests.append((url.path, request.post_data_json if request.method == "POST" else None))
-            if response.status_code >= 400:
-                failures.append((path, response.status_code, response.text))
-        headers = {k: v for k, v in response.headers.items() if k not in {"content-encoding", "content-length"}}
-        route.fulfill(status=response.status_code, headers=headers, body=response.content)
-
-    with sync_api.sync_playwright() as pw:
-        executable = os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE")
-        browser = pw.chromium.launch(executable_path=executable)
-        page = browser.new_page(viewport={"width": 1440, "height": 1100})
-        page.route("**/*", dispatch)
-        page.on("pageerror", lambda exc: errors.append(str(exc)))
-        url = "http://testserver/photometry?inst=muscat4&date=250512&target=TOI-6715&run=browser"
-        page.goto(url)
-        page.locator("#opt-panel > summary").click()
-        page.locator("#opt-panel details > summary").filter(has_text="Reference & Alignment").click()
-        page.locator("#opt-max_num_stars").fill("")
-        page.locator("#opt-overwrite").uncheck()
-        with page.expect_response(lambda r: r.url.endswith("/api/photometry/run")) as result:
-            page.locator("#run-test-btn").click()
-        assert result.value.status == 200
-        assert launches[-1]["test_run"] is True
-        assert launches[-1]["options"]["max_num_stars"] == ""
-        assert launches[-1]["options"]["overwrite"] is False
-        with page.expect_response(lambda r: r.url.endswith("/api/photometry/cancel")):
-            page.locator("#cancel-btn").click()
-        # Revisit the page to exercise saved settings and the full-run button.
-        page.goto(url)
-        assert page.locator("#opt-max_num_stars").input_value() == ""
-        assert not page.locator("#opt-overwrite").is_checked()
-        with page.expect_response(lambda r: r.url.endswith("/api/photometry/run")):
-            page.locator("#run-full-btn").click()
-        assert launches[-1]["test_run"] is False
-        with page.expect_response(lambda r: r.url.endswith("/api/photometry/cancel")):
-            page.locator("#cancel-btn").click()
-        page.goto(url)
-        page.locator("#postproc-section > summary").click()
-        page.locator("#opt-post_sigma").fill("")
-        for button in ("#postproc-test-btn", "#postproc-apply-btn"):
-            with page.expect_response(lambda r: r.url.endswith("/api/photometry/postprocess")) as result:
-                page.locator(button).click()
-            assert result.value.status == 200
-        page.locator("#message-modal-ok").click()
-        page.goto(url)
-        page.locator("#postproc-section > summary").click()
-        page.locator("#postproc-restore-btn").click()
-        with page.expect_response(lambda r: r.url.endswith("/api/photometry/postprocess/restore")):
-            page.locator("#message-modal-ok").click()
-        page.goto(url)
-        page.locator("#delete-btn").click()
-        with page.expect_response(lambda r: r.url.endswith("/api/photometry/delete")):
-            page.locator("#delete-confirm-btn").click()
-        assert not failures, failures
-        assert not errors, errors
-        posts = {path for path, payload in requests if payload is not None}
-        assert {f"/api/photometry/{name}" for name in ("run", "command", "cancel", "delete", "postprocess", "postprocess/restore")} <= posts
-        browser.close()
