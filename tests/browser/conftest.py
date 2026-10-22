@@ -295,8 +295,9 @@ def _proxy_secret_for_live_server(monkeypatch):
 # ── browser ──────────────────────────────────────────────────────────────────
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def browser():
+    """Release Playwright's loop before later unit tests call asyncio.run()."""
     with sync_api.sync_playwright() as p:
         try:
             b = p.chromium.launch()
