@@ -234,7 +234,6 @@ def test_jobs_status_elapsed_uses_latest_rerun_started_at(mock_db, monkeypatch):
         elapsed=0,
         started_at=2000.0,
     )
-    monkeypatch.setattr("muscat_db.web._last_running", set())
     monkeypatch.setattr("muscat_db.web.time.time", lambda: 2030.0)
 
     response = TestClient(app).get("/api/jobs/status")
@@ -409,7 +408,6 @@ def test_jobs_status_includes_lco_archive_download(mock_db, monkeypatch):
 
 
 def test_jobs_status_returns_terminal_lco_archive_even_if_baseline_missed(mock_db, monkeypatch):
-    monkeypatch.setattr("muscat_db.web._last_running", set())
     monkeypatch.setattr(
         "muscat_db.lco.archive_download_jobs",
         lambda: [{

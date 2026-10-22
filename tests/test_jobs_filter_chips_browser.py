@@ -21,7 +21,10 @@ import pytest
 
 from muscat_db import web
 
-sync_api = pytest.importorskip("playwright.sync_api")
+if os.environ.get("MUSCAT_REQUIRE_BROWSER") == "1":
+    from playwright import sync_api
+else:
+    sync_api = pytest.importorskip("playwright.sync_api")
 
 STATIC = Path(web.__file__).parent / "static"
 STATES = ("running", "pending", "done", "error", "cancelled")
@@ -167,3 +170,81 @@ def test_archive_section_says_nothing_tracked_when_it_has_no_jobs(browser, chip)
         assert page.locator('tr.empty-job-row[data-empty-for="lco_archive_download"]').is_visible()
     finally:
         page.context.close()
+
+
+def test_clear_filter_clears_search_and_search_alone_shows_clear(page):
+    page.fill('#job-search', 'PHOT-DONE')
+    assert page.locator('#clear-filter').is_visible()
+    page.click('#clear-filter')
+    assert page.input_value('#job-search') == ''
+    assert page.locator('#clear-filter').is_hidden()
+    assert page.locator('#search-status').inner_text() == '5 jobs'
+
+
+def test_cached_page_restore_applies_empty_saved_filters(page):
+    page.fill('#job-search', 'PHOT')
+    page.click('#type-summary [data-type="photometry"]')
+    page.click('#inst-summary [data-inst="muscat3"]')
+    page.click('#time-summary [data-time="recent"]')
+    page.click('#jobs-summary [data-status="running"]')
+    page.evaluate("""() => {
+        ['activeStatus', 'search', 'typeFilter', 'instFilter', 'recentFilter']
+          .forEach(k => localStorage.setItem('jobs:' + k, ''));
+        window.dispatchEvent(new PageTransitionEvent('pageshow', {persisted: true}));
+    }""")
+    assert _active_chips(page) == set()
+    assert page.input_value('#job-search') == ''
+    assert page.locator('#search-status').inner_text() == '5 jobs'
+
+
+def test_cached_page_restore_reads_all_dimensions_before_saving(page):
+    page.evaluate("""() => {
+        localStorage.setItem('jobs:activeStatus', 'done');
+        localStorage.setItem('jobs:search', 'FIT');
+        localStorage.setItem('jobs:typeFilter', 'transit_fit');
+        localStorage.setItem('jobs:instFilter', 'muscat4');
+        localStorage.setItem('jobs:recentFilter', 'recent');
+        window.dispatchEvent(new PageTransitionEvent('pageshow', {persisted: true}));
+    }""")
+    assert _active_chips(page) == {'done', 'transit_fit', 'muscat4', 'recent'}
+    assert page.input_value('#job-search') == 'FIT'
+    assert page.locator('#search-status').inner_text() == '1 / 5 matching'
+
+
+def test_sort_restore_is_per_table(browser):
+    jobs = _jobs() + [_job('ttv_fit', 'done', '', 'TTV-DONE', time.time())]
+    page = _open(browser, jobs)
+    try:
+        page.click('table[data-job-type="photometry"] th[data-sort-attr="startedAt"]')
+        page.wait_for_function("!!localStorage.getItem('jobs:sort:photometry') || !!localStorage.getItem('jobs:sort')")
+        page.reload()
+        sync_api.expect(page.locator('table[data-job-type="photometry"] th[data-sort-attr="startedAt"]')).to_have_attribute('data-sort-dir', 'asc')
+        assert page.locator('table[data-job-type="ttv_fit"] th[data-sort-dir]').count() == 0
+        assert page.locator('table[data-job-type="lco_archive_download"] th[data-sort-dir]').count() == 0
+    finally:
+        page.context.close()
+
+
+def test_poll_watches_displayed_live_jobs(page):
+    with page.expect_request(lambda r: '/api/jobs/status' in r.url) as request:
+        page.wait_for_timeout(3100)
+    assert request.value.method == 'POST'
+    assert request.value.post_data_json['watch'] == ['photometry:muscat3/261020/PHOT-RUN/r1']
+
+
+def test_live_completion_stops_elapsed_updates(page):
+    row = page.locator('.job-row[data-key="photometry:muscat3/261020/PHOT-RUN/r1"]')
+    page.route('**/api/jobs/status*', lambda route: route.fulfill(
+        content_type='application/json',
+        body=json.dumps({'running': [], 'finished': {
+            'photometry:muscat3/261020/PHOT-RUN/r1': {
+                'state': 'done', 'elapsed': 42, 'type': 'photometry',
+            }
+        }}),
+    ))
+    sync_api.expect(row).to_have_attribute('data-status', 'done', timeout=6000)
+    assert row.locator('.status-badge').inner_text() == 'Done'
+    elapsed = row.locator('.elapsed-cell').inner_text()
+    page.wait_for_timeout(1100)
+    assert row.locator('.elapsed-cell').inner_text() == elapsed
+    assert row.locator('[data-job-action="rerun"]').is_visible()

@@ -14,6 +14,7 @@ import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from typing import Annotated
 
 import socketio
 
@@ -54,7 +55,7 @@ import markdown
 import nh3
 from collections.abc import AsyncIterator, Callable
 
-from fastapi import Body, FastAPI, HTTPException, Request
+from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exception_handlers import (
     http_exception_handler as fastapi_http_exception_handler,
@@ -7152,17 +7153,13 @@ def jobs_page():
     return _render("jobs.html", jobs=all_jobs, counts=counts, is_admin=is_admin)
 
 
-_last_running: set[str] = set()
-
 @jobs_router.get("/status", response_class=JSONResponse)
-def jobs_status(active_only: bool = False):
+def jobs_status(active_only: bool = False, watch: Annotated[list[str] | None, Query()] = None):
     if active_only:
         # Lightweight path for the site-wide loading indicator. Reports only
         # indexed durable rows plus live archive jobs. It deliberately does not
-        # reconcile pipelines, load terminal history, or touch `_last_running`
-        # baseline — that diff belongs to the full Jobs-page poll, and letting
-        # a second site-wide poller mutate it would steal `finished`
-        # transitions from the Jobs page.
+        # reconcile pipelines or load terminal history. Completion updates
+        # belong to the full Jobs-page poll.
         rows = [
             _adapt_persisted_lco_archive_row(persisted)
             if persisted.get("type") == "lco_archive_download"
@@ -7188,10 +7185,10 @@ def jobs_status(active_only: bool = False):
     if orphan_fits:
         all_jobs.extend(orphan_fits)
 
-    global _last_running
-    current_running = {j["key"] for j in all_jobs if j["state"] in ("running", "cancelling", "pending")}
-    # _last_running is shared by every viewer's poll, so it tracks all jobs;
-    # only what this viewer is shown is narrowed (issue #144).
+    # Each viewer supplies its live row keys. Repeated polls (and different
+    # server workers) can then return the same completion independently, without
+    # sending the entire terminal history on every poll. Visibility still wins.
+    watched_keys = set(watch or [])
     all_jobs = _visible_jobs(all_jobs)
     finished = {}
     for j in all_jobs:
@@ -7199,7 +7196,7 @@ def jobs_status(active_only: bool = False):
             j.get("type") == "lco_archive_download"
             and j.get("state") in {"done", "error", "cancelled"}
         )
-        if (j["key"] in _last_running and j["key"] not in current_running) or is_terminal_lco_archive:
+        if (j["key"] in watched_keys and j.get("state") in _JOB_TERMINAL_STATES) or is_terminal_lco_archive:
             finished[j["key"]] = {
                 "key": j["key"],
                 "type": j.get("type", ""),
@@ -7221,7 +7218,6 @@ def jobs_status(active_only: bool = False):
                 "obslog_url": j.get("obslog_url", ""),
                 "photometry_url": j.get("photometry_url", ""),
             }
-    _last_running = current_running
     running = [
         {
             "key": j["key"],
@@ -7252,6 +7248,12 @@ def jobs_status(active_only: bool = False):
         if s in counts:
             counts[s] += 1
     return {"running": running, "counts": counts, "finished": finished}
+
+
+@jobs_router.post("/status", response_class=JSONResponse)
+def jobs_watched_status(watch: Annotated[list[str], Body(embed=True)]):
+    """Poll a page's watched jobs without URL limits for large pending queues."""
+    return jobs_status(watch=watch)
 
 
 @jobs_router.get("/log/{type_}/{inst}/{date}/{target}")
