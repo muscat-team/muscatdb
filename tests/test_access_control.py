@@ -967,3 +967,47 @@ def test_groups_parity_covers_target_grants(db):
     # the check would report a mismatch for it, so this fails if detail is lost.
     nights = {(m["instrument"], m["obsdate"]) for m in access_groups.parity(db)}
     assert ("muscat3", "260201") not in nights
+
+
+# --- LCO test observations ---------------------------------------------------
+
+def _test_record(db: str, target: str, created_by: str = "") -> str:
+    from muscat_db import test_observations
+
+    record = test_observations.create_record({"kind": "muscat3", "target": target}, db, created_by=created_by)
+    return record["id"]
+
+
+def test_scoped_viewer_neither_lists_nor_fetches_a_test_on_a_hidden_target(client, db):
+    hidden = _test_record(db, "HIDDENTGT")
+    visible = _test_record(db, "OPENTGT")
+    _set_admin(db, "root")
+
+    listed = client.get("/api/lco/test-observations", headers=_headers("alice")).json()["records"]
+    assert [r["id"] for r in listed] == [visible]
+    by_target = client.get("/api/lco/test-observations?target=HIDDENTGT", headers=_headers("alice")).json()
+    assert by_target["records"] == []
+    response = client.get(f"/api/lco/test-observations/{hidden}", headers=_headers("alice"))
+    assert response.status_code == 404
+    # Same answer as an id that never existed.
+    assert response.json() == client.get("/api/lco/test-observations/no-such-id", headers=_headers("alice")).json()
+    assert client.post(f"/api/lco/test-observations/{hidden}/analyze", headers=_headers("alice")).status_code == 404
+    assert client.post(f"/api/lco/test-observations/{hidden}/ipp", json={}, headers=_headers("alice")).status_code == 404
+
+    admin = client.get("/api/lco/test-observations", headers=_headers("root")).json()["records"]
+    assert {r["id"] for r in admin} == {hidden, visible}
+    assert client.get(f"/api/lco/test-observations/{hidden}", headers=_headers("root")).status_code == 200
+
+
+def test_only_the_creator_or_an_admin_may_reanalyze_a_test(client, db):
+    record = _test_record(db, "OPENTGT", created_by="bob")
+    _set_admin(db, "root")
+    url = f"/api/lco/test-observations/{record}/analyze"
+
+    assert client.post(url, headers=_headers("alice")).status_code == 403
+    # The creator and an admin get past the ownership check; the draft then
+    # cannot be re-analyzed, which is the state check's 400.
+    for user in ("bob", "root"):
+        response = client.post(url, headers=_headers(user))
+        assert response.status_code == 400, user
+        assert "cannot re-analyze" in response.json()["error"]

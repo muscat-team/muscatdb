@@ -226,7 +226,8 @@ CREATE TABLE IF NOT EXISTS test_observations (
     recommendation_json TEXT NOT NULL DEFAULT '{}',
     failure_detail      TEXT NOT NULL DEFAULT '',
     created_at          TEXT NOT NULL,
-    updated_at          TEXT NOT NULL
+    updated_at          TEXT NOT NULL,
+    created_by          TEXT NOT NULL DEFAULT ''
 );
 
 -- Every child Request accepted by LCO through the scheduler is monitored until
@@ -461,6 +462,9 @@ _MIGRATIONS = [
     # (job_limits.site_defaults); 0 means unlimited.
     "ALTER TABLE users ADD COLUMN max_running_jobs INTEGER",
     "ALTER TABLE users ADD COLUMN max_queued_jobs INTEGER",
+    # PR #280: who created a test observation, for its ownership check. Rows
+    # from before it stay ownerless ('' reads as the anonymous local user).
+    "ALTER TABLE test_observations ADD COLUMN created_by TEXT NOT NULL DEFAULT ''",
 ]
 
 

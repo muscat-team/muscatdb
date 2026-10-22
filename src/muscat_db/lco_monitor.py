@@ -719,9 +719,20 @@ class ObservationMonitor:
             try:
                 if _acquire_lease(self.path, self.owner, now):
                     process_due(path=self.path, now=now)
+                    self._advance_test_observations()
             except Exception:
                 logger.exception("LCO observation monitor loop failed")
             self._stop.wait(_LOOP_S)
+
+    def _advance_test_observations(self) -> None:
+        # Test observations follow the requests monitored above; a failure there
+        # must not stall monitoring of every other request.
+        from muscat_db import test_observations
+
+        try:
+            test_observations.advance(path=self.path)
+        except Exception:
+            logger.exception("test observation lifecycle step failed")
 
     def _heartbeat(self) -> None:
         interval = max(10.0, _LEASE_S / 3.0)

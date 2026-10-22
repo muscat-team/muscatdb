@@ -103,7 +103,7 @@ from muscat_db import fov as fov_opt
 from muscat_db import ephemeris_math
 from muscat_db import ephemeris_import
 from muscat_db import gsheet_ephemeris
-from muscat_db import test_observations
+from muscat_db import test_analysis, test_observations
 from muscat_db import lco_monitor
 from muscat_db import http_client
 from muscat_db import chat
@@ -5200,16 +5200,52 @@ def _submitted_request_ids(result: dict) -> list[int]:
     return ids
 
 
+def _test_saturation_model(kind: str, ra, dec, focus_mm: float, filter_name: str | None) -> tuple[dict, list[str]]:
+    """Predicted target peak rate and full well per plan band, for the plan's saturation pre-check.
+
+    One Pan-STARRS/SkyMapper lookup per plan. Without magnitudes the pre-check
+    is skipped and the plan says so, rather than guessing.
+    """
+    from muscat_db import exposure
+
+    try:
+        mags, _source, _approx = exposure.lookup_magnitudes_with_fallback(float(ra), float(dec))
+    except Exception as exc:  # noqa: BLE001 - reported in the plan
+        logger.warning("target magnitude lookup failed during test plan: %s", exc)
+        mags = None
+    if not mags:
+        return {}, ["no catalog griz magnitudes for the target; saturation pre-check skipped"]
+    if kind in test_observations.SINGLE_FILTER_KINDS:
+        bands = {filter_name or "rp": test_analysis._calculator_band(kind, filter_name or "rp")}
+    else:
+        bands = dict(test_analysis.MUSCAT_BAND_CODES)
+    model, missing = {}, []
+    for key, code in bands.items():
+        if not code or code not in mags:
+            missing.append(key)
+            continue
+        peak = exposure.calc_peak(kind, code, float(mags[code]), focus_mm, 1.0)
+        model[key] = {"rate": float(peak["peak_electrons"]), "level": exposure._full_well_gain(kind, code)[0]}
+    warnings = [f"no magnitude for band(s) {', '.join(missing)}; saturation pre-check skipped there"] if missing else []
+    return model, warnings
+
+
 @lco_router.post("/test-observations/plan", response_class=JSONResponse)
-def api_lco_test_plan(payload: dict = Body(...)):
-    """Generate and persist a deterministic, observer-reviewable test plan."""
+def api_lco_test_plan(request: Request, payload: dict = Body(...)):
+    """Generate and persist a deterministic, observer-reviewable test plan.
+
+    Two FOVs are tested, both at PA 0: the optimizer's pointing and the
+    target-centred one. The test window never overlaps the selected science
+    windows (``test_window_mode``: ``today`` or ``lead``).
+    """
     try:
         if not payload.get("fov_candidates"):
             try:
+                # pa_step_deg=180 restricts the search to PA 0: rotation is not allowed.
                 result = fov_opt.optimize(
                     payload.get("kind"), target=payload.get("target_name") or "",
                     ra=payload.get("ra"), dec=payload.get("dec"),
-                    sinistro_mode=payload.get("readout_mode"),
+                    sinistro_mode=payload.get("readout_mode"), pa_step_deg=180.0,
                 )
             except Exception as exc:
                 # Surface as JSON; an unhandled error would reach the browser as an HTML 500.
@@ -5219,46 +5255,86 @@ def api_lco_test_plan(payload: dict = Body(...)):
                 raise test_observations.TestObservationError(result.error or "FOV optimization failed")
             best = result.to_dict()
             payload["fov_candidates"] = [
-                {"center_ra": best["center_ra"], "center_dec": best["center_dec"], "pa_deg": best["pa_deg"],
-                 "comparisons": best.get("comps", []), "edge_margin_arcsec": best.get("margin_arcsec")},
+                {"center_ra": best["center_ra"], "center_dec": best["center_dec"], "pa_deg": 0,
+                 "comparisons": best.get("comps", []), "edge_margin_arcsec": best.get("margin_arcsec"),
+                 "label": "optimized"},
                 {"center_ra": best["ra"], "center_dec": best["dec"], "pa_deg": 0,
                  "comparisons": best.get("brightest_in_field", []), "edge_margin_arcsec": best.get("margin_arcsec"),
-                 "fallback_reason": "target-centered conservative pointing"},
+                 "label": "target-centred"},
             ]
             payload.setdefault("provenance", {})["fov_optimizer"] = {
                 "catalog": best.get("catalog"), "fov_arcsec": best.get("fov_arcsec"),
                 "margin_arcsec": best.get("margin_arcsec"), "software": test_observations.ANALYSIS_VERSION,
             }
+        payload["science_windows"] = payload.get("windows") or []
+        if "saturation_model" not in payload:
+            model, warnings = _test_saturation_model(
+                str(payload.get("kind") or ""), payload.get("ra"), payload.get("dec"),
+                float(payload.get("defocus_mm") or 0.0), payload.get("filter"),
+            )
+            payload["saturation_model"] = model
+            payload["plan_warnings"] = [*(payload.get("plan_warnings") or []), *warnings]
         plan = test_observations.generate_plan(payload)
-        record = test_observations.create_record(plan)
+        record = test_observations.create_record(plan, created_by=_request_user(request) or "")
         return JSONResponse({"ok": True, "record": record})
     except test_observations.TestObservationError as exc:
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
 
 
-def _test_request(record: dict, params: dict, plan_override: dict | None = None) -> dict:
-    # The editable draft may carry small tweaks to the displayed plan; overlay
-    # them on the stored plan (which still holds the guarded internal keys).
-    plan = record["plan"] if not plan_override else {**record["plan"], **plan_override}
+def _test_hidden(record: dict, denied: frozenset[str] | None = None) -> bool:
+    """Whether a test observation is on a target the viewer may not see (#144).
+    The record carries no proposal, so its target decides, as on /target."""
+    denied = _viewer_denied() if denied is None else denied
+    return _object_hidden(_db_path(), str(record.get("target") or ""), denied)
+
+
+def _visible_test_record(observation_id: str) -> dict:
+    """The record, or KeyError when it does not exist or the viewer may not see
+    it, so a hidden test answers exactly like a missing one."""
+    record = test_observations.get_record(observation_id)
+    if _test_hidden(record):
+        raise KeyError(observation_id)
+    return record
+
+
+def _may_modify_test(record: dict, user: str | None) -> bool:
+    """The creator or an admin, with the Jobs page's convention that a record
+    without an owner belongs to the ``anonymous`` (local) user."""
+    if _jobs_user_is_admin(user):
+        return True
+    owner = (record.get("created_by") or "anonymous").strip() or "anonymous"
+    return owner == ((user or "anonymous").strip() or "anonymous")
+
+
+def _test_request(record: dict, params: dict, plan_override: dict | None = None) -> tuple[dict, dict]:
+    """(request group, merged plan). The editable draft may carry small tweaks
+    to the displayed plan; overlay them on the stored plan (which still holds
+    the guarded internal keys)."""
+    plan = test_observations.merge_plan_override(record["plan"], plan_override)
     base = {**params, "kind": plan["kind"]}
     base["name"] = str(base.get("name") or f"TEST {plan.get('target') or record['id']}")
     if not base["name"].upper().startswith("TEST"):
         base["name"] = "TEST " + base["name"]
+    # The test runs only in its own window, never in the science windows the
+    # form still carries.
+    base["windows"] = [test_observations.request_window(plan)]
     configs = test_observations.request_configurations(plan, base)
-    return lco.build_requestgroup(plan["kind"], base, configurations=configs)
+    return lco.build_requestgroup(plan["kind"], base, configurations=configs), plan
 
 
 @lco_router.post("/test-observations/{observation_id}/ipp", response_class=JSONResponse)
 def api_lco_test_ipp(observation_id: str, request: Request, payload: dict = Body(...)):
     try:
-        record = test_observations.get_record(observation_id)
-        rg = _test_request(record, payload, payload.get("plan_override"))
+        record = _visible_test_record(observation_id)
+        rg, _plan = _test_request(record, payload, payload.get("plan_override"))
         ipp = lco.max_allowable_ipp(rg, _request_user(request))
         digest = lco.payload_hash(rg)
         record = test_observations.update_record(observation_id, state="validated", payload_hash=digest)
         return JSONResponse({"ok": True, "payload": rg, "payload_hash": digest, "ipp": ipp, "record": record})
     except KeyError:
         return JSONResponse({"ok": False, "error": "test observation not found"}, status_code=404)
+    except test_observations.TestObservationError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
     except lco.LcoError as exc:
         return _lco_error_response(exc)
 
@@ -5268,29 +5344,59 @@ def api_lco_test_submit(observation_id: str, request: Request, payload: dict = B
     if not payload.get("confirm"):
         return JSONResponse({"ok": False, "error": "submission requires explicit confirm"}, status_code=400)
     try:
-        record = test_observations.get_record(observation_id)
-        rg = _test_request(record, payload, payload.get("plan_override"))
+        record = _visible_test_record(observation_id)
+        rg, plan = _test_request(record, payload, payload.get("plan_override"))
         digest = lco.payload_hash(rg)
         if not payload.get("dry_run_hash") or payload["dry_run_hash"] != digest or record["payload_hash"] != digest:
             return JSONResponse({"ok": False, "error": "no matching test-observation dry-run; run the dry-run again"}, status_code=409)
         result = lco.submit_requestgroup(rg, _request_user(request))
         ids = _submitted_request_ids(result)
-        record = test_observations.update_record(observation_id, state="submitted", request_ids=ids)
+        # Store the plan as submitted: the analysis matches frames against its
+        # exposure times, so draft edits must not be lost here.
+        record = test_observations.update_record(observation_id, state="submitted", request_ids=ids, plan=plan)
         params = {**payload, "kind": record["plan"]["kind"], "target_name": record["plan"].get("target") or ""}
         monitoring = _record_lco_submission(result, rg, params, _request_user(request))
         return JSONResponse({"ok": True, "result": result, "record": record, "monitoring": monitoring})
     except KeyError:
         return JSONResponse({"ok": False, "error": "test observation not found"}, status_code=404)
+    except test_observations.TestObservationError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
     except lco.LcoError as exc:
         return _lco_error_response(exc)
+
+
+@lco_router.get("/test-observations", response_class=JSONResponse)
+def api_lco_test_list(target: str | None = None, limit: int = 20):
+    """Recent test observations, newest first, optionally for one target.
+    Tests on targets the viewer may not see are left out."""
+    records = test_observations.list_records(target=target or None, limit=limit, denied=_viewer_denied())
+    return JSONResponse({"ok": True, "records": records})
 
 
 @lco_router.get("/test-observations/{observation_id}", response_class=JSONResponse)
 def api_lco_test_status(observation_id: str):
     try:
-        return JSONResponse({"ok": True, "record": test_observations.get_record(observation_id)})
+        return JSONResponse({"ok": True, "record": _visible_test_record(observation_id)})
     except KeyError:
         return JSONResponse({"ok": False, "error": "test observation not found"}, status_code=404)
+
+
+@lco_router.post("/test-observations/{observation_id}/analyze", response_class=JSONResponse)
+def api_lco_test_analyze(observation_id: str, request: Request):
+    """Re-run the analysis of a finished test on its ingested frames.
+
+    It overwrites the stored result, so only the test's creator or an admin
+    may run it.
+    """
+    try:
+        record = _visible_test_record(observation_id)
+        if not _may_modify_test(record, _request_user(request)):
+            return JSONResponse({"ok": False, "error": "only the test's creator or an admin may re-analyze it"}, status_code=403)
+        return JSONResponse({"ok": True, "record": test_observations.reanalyze(observation_id)})
+    except KeyError:
+        return JSONResponse({"ok": False, "error": "test observation not found"}, status_code=404)
+    except test_observations.TestObservationError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
 
 
 @lco_router.post("/submit", response_class=JSONResponse)
