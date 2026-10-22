@@ -660,11 +660,18 @@ def terminate_pg(proc: subprocess.Popen) -> None:
 # a terminal state (guarded by ``_notified_job_keys``). The chat feature
 # registers a listener at startup to post a system message; kept here so the
 # pipelines stay decoupled from the web/chat layer (no import cycle).
+#
+# A job key names inst/date/target/run, so re-running the same run reuses it;
+# the dedup key therefore also carries the run's ``started_at``, otherwise every
+# re-run after the first would finish silently until the server restarts.
 # ---------------------------------------------------------------------------
 
 _logger = logging.getLogger(__name__)
 _JOB_FINISHED_HOOKS: list = []
-_notified_job_keys: set[str] = set()
+# Insertion-ordered so the oldest entries can be evicted; a finished run is
+# only ever re-fired by the next few sync passes, so a bounded window suffices.
+_notified_job_keys: dict[tuple[str, float | None], None] = {}
+_NOTIFIED_MAX = 5000
 _hook_lock = threading.Lock()
 
 
@@ -676,13 +683,18 @@ def register_job_finished_hook(fn) -> None:
 
 
 def fire_job_finished(job_key: str, **info) -> None:
-    """Invoke all registered hooks once per ``job_key``. Safe to call on every
-    sync pass: repeat calls for an already-notified key are ignored. Hook
-    exceptions are logged, never propagated into the job lifecycle."""
+    """Invoke all registered hooks once per run (``job_key`` + ``started_at``).
+    Safe to call on every sync pass: repeat calls for an already-notified run
+    are ignored. Hook exceptions are logged, never propagated into the job
+    lifecycle."""
+    started_at = info.get("started_at")
+    dedup = (job_key, float(started_at) if started_at is not None else None)
     with _hook_lock:
-        if job_key in _notified_job_keys:
+        if dedup in _notified_job_keys:
             return
-        _notified_job_keys.add(job_key)
+        _notified_job_keys[dedup] = None
+        while len(_notified_job_keys) > _NOTIFIED_MAX:
+            del _notified_job_keys[next(iter(_notified_job_keys))]
         hooks = list(_JOB_FINISHED_HOOKS)
     for fn in hooks:
         try:

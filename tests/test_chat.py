@@ -4,6 +4,7 @@ import asyncio
 import time
 
 import pytest
+import socketio
 
 from muscat_db import chat
 from muscat_db.database import (
@@ -171,7 +172,7 @@ def test_connect_refuses_anonymous_when_auth_required(monkeypatch):
 
     monkeypatch.setattr(chat.db, "get_recent_chat_messages", must_not_read_history)
     env = {"asgi.scope": {"client": ("127.0.0.1", 5)}}  # no forwarded user
-    with pytest.raises(ConnectionRefusedError):
+    with pytest.raises(socketio.exceptions.ConnectionRefusedError, match="authentication required"):
         asyncio.run(chat.connect("sid-anon", env))
 
 
@@ -225,8 +226,72 @@ def test_on_job_finished_persists_system_message(chat_db, monkeypatch):
     assert msgs[0]["kind"] == "system"
     assert "TOI-1234" in msgs[0]["text"]
     assert "finished" in msgs[0]["text"]
-    assert "/target?name=TOI-1234" in msgs[0]["text"]
+    assert "/photometry?inst=muscat3&date=2026-07-18&target=TOI-1234" in msgs[0]["text"]
     assert "localhost" not in msgs[0]["text"]
+
+
+def _job_finished_text(**info) -> str:
+    chat.on_job_finished(job_key=info.pop("job_key", "k"), **info)
+    return get_recent_chat_messages(days=7)[-1]["text"]
+
+
+def test_job_finished_links_transit_fit_run_page(chat_db, monkeypatch):
+    monkeypatch.setattr(chat, "_LOOP", None)
+    text = _job_finished_text(
+        type_="transit_fit", target="TOI 1234", inst="muscat2",
+        date="2026-07-18", state="error", run_id="r1",
+    )
+    assert text == (
+        "Transit fit for TOI 1234 (muscat2 2026-07-18) failed "
+        "/transit-fit?inst=muscat2&date=2026-07-18&target=TOI1234&run=r1"
+    )
+
+
+def test_archive_job_finished_links_archive_page_not_a_fake_target(chat_db, monkeypatch):
+    """Regression: an archive download linked /target?name=LCO%20archive."""
+    monkeypatch.setattr(chat, "_LOOP", None)
+    text = _job_finished_text(type_="archive", state="done")
+    assert text == "LCO archive download finished /lco/archive"
+
+
+def test_archive_job_finished_prefers_its_photometry_link(chat_db, monkeypatch):
+    monkeypatch.setattr(chat, "_LOOP", None)
+    text = _job_finished_text(
+        type_="archive", target="TOI-1234", inst="sinistro", date="2026-07-18",
+        state="done", link="/photometry?inst=sinistro&date=2026-07-18&target=TOI-1234",
+    )
+    assert text == (
+        "LCO archive download for TOI-1234 (sinistro 2026-07-18) finished "
+        "/photometry?inst=sinistro&date=2026-07-18&target=TOI-1234"
+    )
+
+
+def test_job_finished_explicit_owner_skips_jobs_table_lookup(chat_db, sio_harness, monkeypatch):
+    monkeypatch.setattr(chat, "_valid_loop", lambda: object())
+    monkeypatch.setattr(chat, "_job_user_name", lambda _key: None)
+    monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", lambda coro, _loop: asyncio.run(coro))
+    chat.on_job_finished(job_key="lco_archive_download:x", type_="archive", state="done", owner="andrew")
+    assert [kw.get("room") for _e, _p, kw in sio_harness.emits] == ["user:andrew"]
+
+
+def test_archive_notify_reports_frames_owner_and_no_placeholders(monkeypatch):
+    from muscat_db import jobs, lco
+
+    fired = {}
+    monkeypatch.setattr(jobs, "fire_job_finished", lambda **kw: fired.update(kw))
+    monkeypatch.setattr(
+        lco, "frame_destination",
+        lambda f: ("sinistro", "2026-07-18", lco.Path("/x/sinistro/2026-07-18/f.fits")),
+    )
+    lco._notify_archive_download_finished({
+        "job_id": "abc", "state": "done", "user_name": "andrew",
+        "frames": [{"OBJECT": "TOI-1234"}], "frames_total": 1, "results": [],
+        "photometry_url": "", "started_at": 0.0,
+    })
+    assert fired["target"] == "TOI-1234"
+    assert (fired["inst"], fired["date"]) == ("sinistro", "2026-07-18")
+    assert fired["owner"] == "andrew"
+    assert fired["link"] == ""
 
 
 def test_set_event_loop_and_valid_loop():
@@ -508,7 +573,10 @@ def test_successful_edit_and_delete_broadcast(sio_harness, monkeypatch):
     import asyncio
 
     _as_user(monkeypatch, "alice")
-    monkeypatch.setattr(chat.db, "edit_chat_message", lambda mid, u, t: {"id": mid, "text": t})
+    monkeypatch.setattr(chat.db, "get_chat_message", lambda mid: None)
+    monkeypatch.setattr(
+        chat.db, "edit_chat_message", lambda mid, u, t, mentions=None: {"id": mid, "text": t}
+    )
     monkeypatch.setattr(chat.db, "delete_chat_message", lambda mid, u: True)
     asyncio.run(chat.edit_message("sid-1", {"id": 3, "text": "fixed"}))
     asyncio.run(chat.delete_message("sid-1", {"id": 3}))
@@ -667,3 +735,66 @@ def test_ownerless_job_finished_is_public_only_and_hidden_from_scoped_history(
     scoped = get_recent_chat_messages(days=7, user="andrew", addressed_only=True)
     assert all("HIDDENTGT" not in m["text"] for m in scoped)
     assert any("HIDDENTGT" in m["text"] for m in get_recent_chat_messages(days=7))
+
+
+# --------------------------------------------------------------------------
+# Job-finished dedup, /me edit/delete, mentions refreshed on edit
+# --------------------------------------------------------------------------
+@pytest.fixture
+def fresh_hooks(monkeypatch):
+    from muscat_db import jobs
+
+    calls = []
+    monkeypatch.setattr(jobs, "_notified_job_keys", {})
+    monkeypatch.setattr(jobs, "_JOB_FINISHED_HOOKS", [lambda **kw: calls.append(kw["state"])])
+    return jobs, calls
+
+
+def test_rerun_of_the_same_run_notifies_again(fresh_hooks):
+    """Regression: the dedup key was the job key alone, so a re-run of the same
+    inst/date/target/run finished silently until the server restarted."""
+    jobs, calls = fresh_hooks
+    key = "photometry:muscat3/2026-07-18/TOI-1234/default"
+    jobs.fire_job_finished(key, state="done", started_at=100.0)
+    jobs.fire_job_finished(key, state="done", started_at=100.0)  # next sync pass
+    jobs.fire_job_finished(key, state="error", started_at=200.0)  # the re-run
+    assert calls == ["done", "error"]
+
+
+def test_notified_run_memory_is_bounded(fresh_hooks, monkeypatch):
+    jobs, calls = fresh_hooks
+    monkeypatch.setattr(jobs, "_NOTIFIED_MAX", 3)
+    for i in range(5):
+        jobs.fire_job_finished(f"k{i}", state="done", started_at=float(i))
+    assert len(jobs._notified_job_keys) == 3
+    assert len(calls) == 5
+
+
+def test_me_actions_are_editable_and_deletable_by_their_author(chat_db):
+    m = save_chat_message("alice", "is observing", kind="action")
+    assert edit_chat_message(m["id"], "bob", "x") is None
+    updated = edit_chat_message(m["id"], "alice", "is reducing")
+    assert updated["text"] == "is reducing" and updated["edited"] and updated["kind"] == "action"
+    assert delete_chat_message(m["id"], "bob") is False
+    assert delete_chat_message(m["id"], "alice") is True
+
+
+def test_edit_replaces_stored_mentions(chat_db):
+    m = save_chat_message("alice", "hi @bob", mentions=["bob"], kind="user")
+    updated = edit_chat_message(m["id"], "alice", "hi @carol", mentions=["carol"])
+    assert updated["mentions"] == ["carol"]
+    assert get_recent_chat_messages(days=7)[-1]["mentions"] == ["carol"]
+
+
+def test_edit_nudges_only_newly_mentioned_users(chat_db, sio_harness, monkeypatch):
+    _as_user(monkeypatch, "alice")
+    monkeypatch.setattr(
+        chat, "_known_users_map", lambda: {"alice": "alice", "bob": "bob", "carol": "carol"}
+    )
+    monkeypatch.setattr(chat, "_user_is_scoped", lambda _u: False)
+    m = save_chat_message("alice", "hi @bob", mentions=["bob"], kind="user")
+    asyncio.run(chat.edit_message("sid-1", {"id": m["id"], "text": "hi @bob @carol @alice"}))
+    mention_rooms = [kw.get("room") for e, _p, kw in sio_harness.emits if e == "mention"]
+    assert mention_rooms == ["user:carol"]
+    edited = [p for e, p, _kw in sio_harness.emits if e == "message_edited"]
+    assert edited and edited[0]["mentions"] == ["alice", "bob", "carol"]

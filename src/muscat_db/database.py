@@ -3095,17 +3095,41 @@ def get_recent_chat_messages(
         return [_chat_row_to_dict(r, reactions) for r in rows]
 
 
-def edit_chat_message(msg_id: int, user_name: str, new_text: str) -> dict | None:
+# Message kinds an author may edit or delete: ordinary messages and /me lines.
+# System (job-finished) messages have no human author.
+_AUTHOR_EDITABLE_KINDS = ("user", "action")
+
+
+def get_chat_message(msg_id: int) -> dict | None:
+    """Return one persisted message (with reactions), or ``None``."""
+    path = db_path()
+    with get_conn(path, row_factory=sqlite3.Row) as conn:
+        _ensure_chat_schema(conn, path)
+        row = conn.execute("SELECT * FROM chat_messages WHERE id = ?", (msg_id,)).fetchone()
+        if row is None:
+            return None
+        return _chat_row_to_dict(row, _reactions_by_message(conn, [msg_id]))
+
+
+def edit_chat_message(
+    msg_id: int, user_name: str, new_text: str, mentions: list[str] | None = None
+) -> dict | None:
     """Edit a message in place. Author-only: returns the updated message, or
-    ``None`` if the message does not exist or ``user_name`` is not its author."""
+    ``None`` if the message does not exist or ``user_name`` is not its author.
+    ``mentions`` (when given) replaces the stored mention list, so an @name
+    added or removed by the edit is reflected in highlighting."""
     path = db_path()
     edited_at = time.time()
     with get_conn(path, row_factory=sqlite3.Row) as conn:
         _ensure_chat_schema(conn, path)
+        sets, params = ["text = ?", "edited_at = ?"], [new_text, edited_at]
+        if mentions is not None:
+            sets.append("mentions = ?")
+            params.append(json.dumps(sorted(set(mentions)), ensure_ascii=True))
         cur = conn.execute(
-            "UPDATE chat_messages SET text = ?, edited_at = ? "
-            "WHERE id = ? AND user_name = ? AND kind = 'user'",
-            (new_text, edited_at, msg_id, user_name),
+            f"UPDATE chat_messages SET {', '.join(sets)} "
+            "WHERE id = ? AND user_name = ? AND kind IN (?, ?)",
+            (*params, msg_id, user_name, *_AUTHOR_EDITABLE_KINDS),
         )
         conn.commit()
         if cur.rowcount == 0:
@@ -3122,8 +3146,8 @@ def delete_chat_message(msg_id: int, user_name: str) -> bool:
     with get_conn(path) as conn:
         _ensure_chat_schema(conn, path)
         cur = conn.execute(
-            "DELETE FROM chat_messages WHERE id = ? AND user_name = ? AND kind = 'user'",
-            (msg_id, user_name),
+            "DELETE FROM chat_messages WHERE id = ? AND user_name = ? AND kind IN (?, ?)",
+            (msg_id, user_name, *_AUTHOR_EDITABLE_KINDS),
         )
         if cur.rowcount:
             conn.execute("DELETE FROM chat_reactions WHERE message_id = ?", (msg_id,))

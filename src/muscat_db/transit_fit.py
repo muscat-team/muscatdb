@@ -2462,7 +2462,7 @@ def sync_jobs() -> None:
                 jobs.fire_job_finished(
                     job_key=db_key, type_="transit_fit", target=job.target,
                     inst=job.inst, date=job.date, state=persist_state,
-                    run_id=job.run_id,
+                    run_id=job.run_id, started_at=job.started_at,
                 )
 
         for db_key in running_keys:

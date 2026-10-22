@@ -34,6 +34,10 @@ from .auth import (
 )
 from . import database as db
 from .web import sio
+# python-socketio forwards the reason to the client only for its own refusal
+# class; the builtin ConnectionRefusedError reaches the browser as a generic
+# "Connection refused by server".
+from socketio.exceptions import ConnectionRefusedError as SocketRefusedError
 
 logger = logging.getLogger(__name__)
 
@@ -212,7 +216,7 @@ async def connect(sid, environ):
     user, identity = _resolve_identity(environ)
     if identity == UNKNOWN_EMAIL:
         logger.warning("rejected chat connection %s: unmapped Access identity", sid)
-        raise ConnectionRefusedError("account not provisioned")
+        raise SocketRefusedError("account not provisioned")
     # Fail closed exactly like the HTTP middleware. socket.io is mounted as an
     # ASGI wrapper *in front of* the app, so /socket.io never passes through
     # that middleware: without this, a peer bypassing nginx (straight to the
@@ -220,7 +224,7 @@ async def connect(sid, environ):
     # "Anonymous", even with MUSCAT_REQUIRE_AUTH set.
     if user is None and authentication_required():
         logger.warning("rejected unauthenticated chat connection %s", sid)
-        raise ConnectionRefusedError("authentication required")
+        raise SocketRefusedError("authentication required")
     scoped = _user_is_scoped(user)
     await sio.save_session(sid, {"user": user, "scoped": scoped})
     _users_by_sid[sid] = user
@@ -375,11 +379,19 @@ async def edit_message(sid, data):
     text = text.strip()[:_MAX_TEXT_LEN]
     if not text:
         return
-    updated = db.edit_chat_message(msg_id, user, text)
+    before = db.get_chat_message(msg_id)
+    mentions = _parse_mentions(text)
+    updated = db.edit_chat_message(msg_id, user, text, mentions=mentions)
     if updated is None:
         await sio.emit("chat_error", {"error": "not allowed to edit that message"}, to=sid)
         return
     await sio.emit("message_edited", updated, room=_PUBLIC_ROOM)
+    # Nudge only names the edit added; anyone already mentioned was notified
+    # when the message was first sent.
+    already = set((before or {}).get("mentions") or [])
+    payload = {**updated, "sid": sid}
+    for name in _unscoped(m for m in mentions if m not in already and m != user):
+        await sio.emit("mention", {"from": user, "message": payload}, room=f"user:{name}")
 
 
 @sio.on("delete_message")
@@ -594,6 +606,32 @@ def _job_user_name(job_key: str) -> str | None:
         return None
 
 
+_JOB_LABELS = {
+    "photometry": "Photometry",
+    "transit_fit": "Transit fit",
+    "archive": "LCO archive download",
+}
+# Result page each job type links to; the page itself offers "To Target".
+_JOB_RESULT_PATHS = {"photometry": "/photometry", "transit_fit": "/transit-fit"}
+_ARCHIVE_PAGE = "/lco/archive"
+
+
+def _job_result_link(
+    type_: str, target: str, inst: str, date: str, run_id: str, link: str
+) -> str:
+    """Relative URL of the page showing this job's outcome, or ""."""
+    if type_ == "archive":
+        return link if link.startswith("/") else _ARCHIVE_PAGE
+    path = _JOB_RESULT_PATHS.get(type_)
+    if not path or not (inst and date and target):
+        return f"/target?name={urllib.parse.quote(target)}" if target else ""
+    # Both pages canonicalize the target with spaces removed (307 otherwise).
+    query = {"inst": inst, "date": date, "target": target.replace(" ", "")}
+    if run_id:
+        query["run"] = run_id
+    return f"{path}?{urllib.parse.urlencode(query)}"
+
+
 def on_job_finished(
     job_key: str,
     type_: str = "",
@@ -601,23 +639,26 @@ def on_job_finished(
     inst: str = "",
     date: str = "",
     state: str = "",
+    run_id: str = "",
+    owner: str = "",
+    link: str = "",
     **_,
 ) -> None:
     """jobs.fire_job_finished hook (runs in the job-sync thread). Persists a
-    system message scoped to the job's owner and schedules its delivery."""
-    label = {
-        "photometry": "Photometry",
-        "transit_fit": "Transit fit",
-        "archive": "LCO download",
-    }.get(type_, type_ or "Job")
+    system message scoped to the job's owner and schedules its delivery.
+
+    ``owner`` overrides the jobs-table lookup for jobs not persisted under
+    ``job_key`` (LCO archive downloads); ``link`` is an archive job's own
+    result URL (its photometry page once the dataset is ingested)."""
+    label = _JOB_LABELS.get(type_, type_ or "Job")
     verb = {"done": "finished", "error": "failed", "cancelled": "was cancelled"}.get(state, state)
     where = " ".join(p for p in (inst, date) if p)
-    target_link = f"/target?name={urllib.parse.quote(target)}" if target else ""
     parts = [f"{label} for {target}" if target else label, f"({where})" if where else "", verb]
     text = " ".join(p for p in parts if p)
-    if target_link:
-        text += f" {target_link}"
-    owner = _job_user_name(job_key)
+    result_link = _job_result_link(type_, target, inst, date, run_id or "", link or "")
+    if result_link:
+        text += f" {result_link}"
+    owner = owner or _job_user_name(job_key)
     try:
         msg = db.save_chat_message("system", text, kind="system", visible_to=owner)
     except Exception:
