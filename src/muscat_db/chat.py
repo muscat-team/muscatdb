@@ -242,12 +242,23 @@ async def connect(sid, environ):
     # Backfill recent history to this client only (never persisted here).
     # When the user is authenticated, scoped messages (e.g. job-finished
     # notifications) are included only for their owner.
+    until = time.time()
+    since = until - db.CHAT_BACKFILL_DAYS * 86400
+    payload = {"messages": []}
     try:
-        history = db.get_recent_chat_messages(user=user, addressed_only=scoped)
+        # Read one extra row to distinguish a complete window from truncation.
+        history = db.get_recent_chat_messages(
+            user=user, addressed_only=scoped, limit=501, since=since, until=until,
+        )
+        window = {"since": since, "until": until}
+        if len(history) > 500:
+            history = history[-500:]
+            window.update(since=history[0]["ts"], first_id=history[0]["id"])
+        payload = {"messages": history, "window": window}
     except Exception:
         logger.exception("failed to load chat history")
-        history = []
-    await sio.emit("history", {"messages": history}, to=sid)
+        # No authoritative window on failure: the client must keep its view.
+    await sio.emit("history", payload, to=sid)
     await _broadcast_presence()
 
 
@@ -259,6 +270,7 @@ async def disconnect(sid):
     # signed-in user's context is keyed by name (shared across tabs) and kept
     # until the idle-gap TTL expires, so a reload doesn't wipe their thread.
     _agent_ctx.pop(f"sid:{sid}", None)
+    await _cancel_agent_requests(f"sid:{sid}")
     _agent_locks.pop(f"sid:{sid}", None)
     await _broadcast_presence()
 
@@ -473,6 +485,26 @@ _agent_ctx: dict[str, tuple[float, deque]] = {}
 # One in-flight exchange per conversation: a second question from the same user
 # waits for the first, so its context includes the first answer.
 _agent_locks: dict[str, asyncio.Lock] = {}
+# Accepted requests, including those waiting for their conversation lock.
+_agent_requests: dict[str, set[asyncio.Task]] = {}
+
+
+def _forget_agent_request(key: str, task: asyncio.Task) -> None:
+    requests = _agent_requests.get(key)
+    if requests is not None:
+        requests.discard(task)
+        if not requests:
+            _agent_requests.pop(key, None)
+
+
+async def _cancel_agent_requests(key: str) -> None:
+    tasks = list(_agent_requests.pop(key, ()))
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        # Wait for capacity reservations to be released before accepting a
+        # fresh question after reset. Cancelled answers cannot restore context.
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def _ctx_key(user: str | None, sid: str) -> str:
@@ -520,6 +552,11 @@ def _spawn_agent(sid: str, user: str | None, question: str) -> None:
     task = asyncio.create_task(_run_agent(sid, user, question))
     _agent_tasks.add(task)
     task.add_done_callback(_agent_tasks.discard)
+    if question and not chat_agent.is_reset_command(question):
+        # Register immediately: reset may arrive before this task first runs.
+        key = _ctx_key(user, sid)
+        _agent_requests.setdefault(key, set()).add(task)
+        task.add_done_callback(lambda done: _forget_agent_request(key, done))
 
 
 def _private_agent_payload(text: str) -> dict:
@@ -566,25 +603,29 @@ async def _run_agent(sid: str, user: str | None, question: str) -> None:
         return
     if chat_agent.is_reset_command(question):  # "@bot /reset": clear context, no model call
         _agent_ctx_clear(key)
+        await _cancel_agent_requests(key)
         await sio.emit(
             "message",
             _private_agent_payload("🧹 Cleared our conversation context. Starting fresh."),
             **target,
         )
         return
+    # Reserve before waiting: queued exchanges count against capacity too.
+    if not chat_agent.reserve():
+        await sio.emit(
+            "message",
+            _private_agent_payload(
+                "I'm still answering an earlier question — give me a moment and ask again."
+            ),
+            **target,
+        )
+        return
+    task = asyncio.current_task()
+    _agent_requests.setdefault(key, set()).add(task)
     heartbeat = asyncio.create_task(_typing_heartbeat(target))
     try:
         lock = _agent_locks.setdefault(key, asyncio.Lock())
         async with lock:
-            if not chat_agent.reserve():  # model already at capacity
-                await sio.emit(
-                    "message",
-                    _private_agent_payload(
-                        "I'm still answering an earlier question — give me a moment and ask again."
-                    ),
-                    **target,
-                )
-                return
             try:
                 reply = await chat_agent.answer(question, _agent_ctx_get(key))
                 _agent_ctx_add(
@@ -602,10 +643,11 @@ async def _run_agent(sid: str, user: str | None, question: str) -> None:
                     ),
                     **target,
                 )
-            finally:
-                chat_agent.release()
     finally:
+        chat_agent.release()
+        _forget_agent_request(key, task)
         heartbeat.cancel()
+        await asyncio.gather(heartbeat, return_exceptions=True)
         await sio.emit("typing", {"user": chat_agent.DISPLAY_NAME, "typing": False}, **target)
 
 

@@ -759,14 +759,17 @@ document.addEventListener("DOMContentLoaded", () => {
     // and render only messages that are new. A local /clear hides everything
     // up to that moment, so history from before it stays hidden.
     let clearedBefore = 0;
-    const syncHistory = (messages) => {
+    const syncHistory = (messages, window) => {
         const incoming = messages.filter((m) => m && typeof m.text === "string" && !(m.ts <= clearedBefore));
         const ids = new Set(incoming.map((m) => m.id));
-        if (incoming.length) {
-            const oldest = Math.min(...incoming.map((m) => m.ts || 0));
+        if (window && Number.isFinite(window.since) && Number.isFinite(window.until)) {
             els.forEach((entry, id) => {
-                // Only what falls inside the backfill window can be judged deleted.
-                if (!ids.has(id) && (entry.data.ts || 0) >= oldest) {
+                const ts = entry.data.ts;
+                // Preserve messages outside the queried snapshot, including
+                // newer live arrivals and rows omitted by the history limit.
+                const inWindow = ts >= window.since && ts <= window.until &&
+                    !(ts === window.since && window.first_id != null && id < window.first_id);
+                if (!ids.has(id) && inWindow) {
                     entry.el.remove();
                     els.delete(id);
                 }
@@ -784,7 +787,7 @@ document.addEventListener("DOMContentLoaded", () => {
         scrollToBottom();
     };
 
-    socket.on("history", (d) => syncHistory(d && Array.isArray(d.messages) ? d.messages : []));
+    socket.on("history", (d) => syncHistory(d && Array.isArray(d.messages) ? d.messages : [], d && d.window));
     socket.on("message", (data) => {
         if (!data || typeof data.text !== "string") return;
         renderMessage(data);

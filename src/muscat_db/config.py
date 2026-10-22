@@ -251,7 +251,7 @@ ENV_VARS: tuple[EnvVar, ...] = (
         "Ollama model tag the chat assistant runs.",
     ),
     EnvVar("MUSCAT_OLLAMA_TIMEOUT_S", "120", "Per-request generation timeout for the chat assistant (seconds)"),
-    EnvVar("MUSCAT_OLLAMA_MAX_CONCURRENT", "2", "Concurrent chat-assistant requests before callers get a 'busy' note"),
+    EnvVar("MUSCAT_OLLAMA_MAX_CONCURRENT", "2", "Active + queued chat-assistant requests before callers get a 'busy' note"),
     EnvVar("MUSCAT_OLLAMA_NUM_CTX", "8192", "Context window (tokens) requested from ollama; caps prompt+history+reply"),
     EnvVar("MUSCAT_AGENT_HISTORY_TTL_S", "900", "Idle-gap auto-clear: drop @bot history older than this (seconds; 0 disables)"),
 

@@ -15,7 +15,7 @@ and ``.env.example``):
                                   (default ``http://muscat-ut4.c.u-tokyo.ac.jp:11434``)
 - ``MUSCAT_OLLAMA_MODEL``         model tag to run (default ``gemma4:latest``)
 - ``MUSCAT_OLLAMA_TIMEOUT_S``     per-request generation timeout (default ``120``)
-- ``MUSCAT_OLLAMA_MAX_CONCURRENT``in-flight requests before callers get "busy"
+- ``MUSCAT_OLLAMA_MAX_CONCURRENT``active + queued requests before callers get "busy"
                                   (default ``2``)
 
 When a question is about a specific pipeline stage, the matching external repo's
@@ -74,7 +74,7 @@ _DEFAULT_MAX_CONCURRENT = 2
 # truncated, so we request an explicit, larger window (gemma4 supports 128k).
 _DEFAULT_NUM_CTX = 8192
 
-# In-flight request accounting. Single-worker deployment on one event loop, so a
+# Active + queued request accounting. Single-worker deployment on one event loop, so a
 # plain counter is race-free without locking (see chat.py's presence dicts).
 _inflight = 0
 
@@ -134,8 +134,8 @@ def is_reset_command(question: str) -> bool:
 
 # ----- concurrency guard ---------------------------------------------------
 def reserve() -> bool:
-    """Claim an in-flight slot. Returns False (without claiming) when the model
-    is already at capacity, so the caller can tell the user to try again."""
+    """Claim a slot before waiting or generating. Returns False (without
+    claiming) at capacity, so the caller can tell the user to try again."""
     global _inflight
     if _inflight >= max_concurrent():
         return False

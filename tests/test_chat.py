@@ -55,6 +55,21 @@ def test_backfill_window_excludes_old_messages(chat_db):
     assert texts == ["recent"]
 
 
+@pytest.mark.parametrize("user,scoped,expected", [
+    (None, False, ["public"]),
+    ("alice", False, ["public", "private"]),
+    ("alice", True, ["private"]),
+])
+def test_history_uses_explicit_snapshot_bounds(chat_db, user, scoped, expected):
+    save_chat_message("bob", "old", created_at=99)
+    save_chat_message("bob", "public", created_at=100)
+    save_chat_message("system", "private", created_at=200, visible_to="alice")
+    save_chat_message("system", "other owner", created_at=150, visible_to="carol")
+    save_chat_message("bob", "newer than snapshot", created_at=201)
+    messages = get_recent_chat_messages(user=user, addressed_only=scoped, since=100, until=200)
+    assert [m["text"] for m in messages] == expected
+
+
 def test_edit_is_author_only(chat_db):
     m = save_chat_message("alice", "typo", kind="user")
     assert edit_chat_message(m["id"], "mallory", "hacked") is None
@@ -189,7 +204,7 @@ def test_connect_allows_anonymous_when_auth_not_required(monkeypatch):
     monkeypatch.delenv("MUSCAT_REQUIRE_AUTH", raising=False)
     monkeypatch.delenv("MUSCAT_PROXY_SECRET", raising=False)
     monkeypatch.setenv("MUSCAT_PROXY_SECRET_FILE", "/nonexistent-secret")
-    monkeypatch.setattr(chat.db, "get_recent_chat_messages", lambda: [])
+    monkeypatch.setattr(chat.db, "get_recent_chat_messages", lambda **kw: [])
 
     emitted = []
     monkeypatch.setattr(chat.sio, "save_session", _async_noop)
@@ -212,6 +227,43 @@ def _record_async(sink, event, *args, **kwargs):
         return None
 
     return _done()
+
+
+@pytest.mark.parametrize("count", [0, 2, 500, 501, None])
+def test_connect_describes_authoritative_history_window(monkeypatch, count):
+    monkeypatch.setattr(chat, "_LOOP", None)
+    monkeypatch.setattr(chat, "_users_by_sid", {})
+    monkeypatch.setattr(chat, "_resolve_identity", lambda env: ("alice", "trusted"))
+    monkeypatch.setattr(chat, "_user_is_scoped", lambda user: False)
+    rows = [{"id": i, "ts": time.time() - 30, "text": str(i)} for i in range(1, (count or 0) + 1)]
+    query = {}
+
+    def read(**kwargs):
+        query.update(kwargs)
+        if count is None:
+            raise OSError("history unavailable")
+        return rows
+
+    emitted = []
+    monkeypatch.setattr(chat.db, "get_recent_chat_messages", read)
+    monkeypatch.setattr(chat.sio, "save_session", _async_noop)
+    monkeypatch.setattr(chat.sio, "enter_room", _async_noop)
+    monkeypatch.setattr(chat.sio, "emit", lambda *a, **kw: _record_async(emitted, *a, **kw))
+    asyncio.run(chat.connect("sid-history", {}))
+    payload = next(args[0] for event, args, _ in emitted if event == "history")
+    if count is None:
+        assert payload == {"messages": []}  # failed reads cannot imply deletion
+        return
+    assert query["limit"] == 501
+    assert query["user"] == "alice"
+    assert payload["messages"] == rows[-500:]
+    assert payload["window"]["until"] == query["until"]
+    if count > 500:
+        assert payload["window"]["since"] == rows[1]["ts"]
+        assert payload["window"]["first_id"] == rows[1]["id"]
+    else:
+        assert payload["window"]["since"] == query["since"]
+        assert "first_id" not in payload["window"]
 
 
 # --------------------------------------------------------------------------
@@ -318,11 +370,123 @@ def test_set_event_loop_and_valid_loop():
 # @bot: private, per-user, in-memory conversation context
 # --------------------------------------------------------------------------
 @pytest.fixture(autouse=True)
-def _clear_agent_ctx():
+def _clear_agent_ctx(monkeypatch):
     """The @bot context lives in a module global; isolate each test."""
     chat._agent_ctx.clear()
+    monkeypatch.setattr(chat, "_agent_locks", {})
+    monkeypatch.setattr(chat, "_agent_requests", {})
     yield
     chat._agent_ctx.clear()
+
+
+def test_bot_reset_cancels_running_and_queued_exchanges(sio_harness, monkeypatch):
+    monkeypatch.setattr(chat, "_agent_locks", {})
+    monkeypatch.setenv("MUSCAT_OLLAMA_MAX_CONCURRENT", "2")
+    monkeypatch.setattr(chat.chat_agent, "_inflight", 0)
+    calls = []
+
+    async def run():
+        started, finish = asyncio.Event(), asyncio.Event()
+
+        async def answer(question, history):
+            calls.append((question, history))
+            if question == "old":
+                started.set()
+                await finish.wait()
+            return f"answer:{question}"
+
+        monkeypatch.setattr(chat.chat_agent, "answer", answer)
+        chat._spawn_agent("sid-1", "alice", "old")
+        await started.wait()
+        chat._spawn_agent("sid-2", "alice", "queued")
+        await asyncio.sleep(0)
+        await chat._run_agent("sid-1", "alice", "/reset")
+        chat._spawn_agent("sid-1", "alice", "fresh")
+        finish.set()
+        await asyncio.gather(*list(chat._agent_tasks), return_exceptions=True)
+
+    asyncio.run(run())
+    assert calls == [("old", []), ("fresh", [])]
+    replies = [p["text"] for e, p, _ in sio_harness.emits if e == "message"]
+    assert "answer:old" not in replies
+    assert "answer:queued" not in replies
+    assert "answer:fresh" in replies
+    assert chat.chat_agent._inflight == 0
+    assert chat._agent_requests == {}
+
+
+def test_bot_capacity_bounds_running_and_waiting_requests(sio_harness, monkeypatch):
+    monkeypatch.setattr(chat, "_agent_locks", {})
+    monkeypatch.setenv("MUSCAT_OLLAMA_MAX_CONCURRENT", "2")
+    monkeypatch.setattr(chat.chat_agent, "_inflight", 0)
+    calls = []
+
+    async def run():
+        started, finish = asyncio.Event(), asyncio.Event()
+
+        async def answer(question, history):
+            calls.append(question)
+            if question == "first":
+                started.set()
+                await finish.wait()
+            return question
+
+        monkeypatch.setattr(chat.chat_agent, "answer", answer)
+        chat._spawn_agent("sid-1", "alice", "first")
+        await started.wait()
+        for question in ("second", "third", "fourth"):
+            chat._spawn_agent("sid-1", "alice", question)
+        await asyncio.sleep(0)
+        finish.set()
+        await asyncio.gather(*list(chat._agent_tasks))
+
+    asyncio.run(run())
+    assert calls == ["first", "second"]
+    assert chat.chat_agent._inflight == 0
+    assert sum("earlier question" in p["text"] for e, p, _ in sio_harness.emits if e == "message") == 2
+
+
+def test_bot_reset_cancels_questions_before_they_start(sio_harness, monkeypatch):
+    calls = []
+
+    async def answer(question, history):
+        calls.append(question)
+        return question
+
+    monkeypatch.setattr(chat.chat_agent, "answer", answer)
+
+    async def run():
+        chat._spawn_agent("sid-1", "alice", "old")
+        await chat._run_agent("sid-1", "alice", "/reset")
+        await asyncio.gather(*list(chat._agent_tasks), return_exceptions=True)
+
+    asyncio.run(run())
+    assert calls == []
+    assert chat._agent_requests == {}
+
+
+def test_anonymous_disconnect_cancels_bot_requests(sio_harness, monkeypatch):
+    monkeypatch.setenv("MUSCAT_OLLAMA_MAX_CONCURRENT", "2")
+    monkeypatch.setattr(chat.chat_agent, "_inflight", 0)
+
+    async def run():
+        started = asyncio.Event()
+
+        async def answer(question, history):
+            started.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(chat.chat_agent, "answer", answer)
+        chat._spawn_agent("sid-anon", None, "old")
+        await started.wait()
+        chat._spawn_agent("sid-anon", None, "queued")
+        await asyncio.sleep(0)
+        await chat.disconnect("sid-anon")
+
+    asyncio.run(run())
+    assert chat.chat_agent._inflight == 0
+    assert chat._agent_requests == {}
+    assert chat._ctx_key(None, "sid-anon") not in chat._agent_ctx
 
 
 def test_agent_ctx_roundtrips_user_and_assistant_turns():
@@ -979,3 +1143,49 @@ def test_me_line_mention_highlight_follows_render_and_edits():
         "afterRemoval": False,
         "afterAddition": True,
     }
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+@pytest.mark.parametrize("survivors", [[], [2]])
+def test_reconnect_removes_deleted_oldest_messages(survivors):
+    script = _CHAT_JS_HARNESS.split("const base =")[0] + r"""
+const base = { kind: "user", user: "bob", reactions: [], mentions: [] };
+const messages = [1, 2].map(id => ({...base, id, ts: ts - 30 + id, text: "message" + id}));
+SOCKET.h.history({messages});
+const survivors = JSON.parse(process.env.SURVIVORS);
+SOCKET.h.history({messages: messages.filter(m => survivors.includes(m.id)),
+                  window: {since: ts - 100, until: ts}});
+process.stdout.write(JSON.stringify(chatMessages.children.map(el => el.querySelector(".message-text").textContent)));
+"""
+    proc = subprocess.run(
+        [shutil.which("node"), "-e", script],
+        env={**os.environ, "CHAT_JS": str(_CHAT_JS), "SURVIVORS": json.dumps(survivors)},
+        capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == [f"message{i}" for i in survivors]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_reconnect_preserves_messages_outside_snapshot_and_failed_reads():
+    script = _CHAT_JS_HARNESS.split("const base =")[0] + r"""
+const base = { kind: "user", user: "bob", reactions: [], mentions: [] };
+const times = [ts - 100, ts - 50, ts - 50, ts - 25, ts + 10];
+const messages = times.map((t, i) => ({...base, id: i + 1, ts: t, text: "message" + (i + 1)}));
+SOCKET.h.history({messages});
+// The omitted message at the boundary shares a timestamp with the oldest
+// returned row. Its lower id places it outside this truncated snapshot.
+SOCKET.h.history({messages: [messages[2]], window: {since: ts - 50, until: ts, first_id: 3}});
+const texts = () => chatMessages.children.map(el => el.querySelector(".message-text").textContent);
+const afterSnapshot = texts();
+SOCKET.h.history({messages: []}); // a failed read has no authoritative window
+process.stdout.write(JSON.stringify({afterSnapshot, afterFailure: texts()}));
+"""
+    proc = subprocess.run(
+        [shutil.which("node"), "-e", script],
+        env={**os.environ, "CHAT_JS": str(_CHAT_JS)},
+        capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    expected = ["message1", "message2", "message3", "message5"]
+    assert json.loads(proc.stdout) == {"afterSnapshot": expected, "afterFailure": expected}
