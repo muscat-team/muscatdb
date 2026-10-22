@@ -248,6 +248,56 @@ class FinalizeConfig:
     success_marker: str | None = None
 
 
+def server_fault(what: str, cause: object = None) -> str:
+    """Launch-failure text for a fault the user cannot fix from the page (the
+    engine would not start, the job database refused a write), so a refusal
+    over their own settings and a broken server do not read alike."""
+    reason = f" ({cause})" if cause else ""
+    return f"{what}{reason}. This is not a problem with your settings; please contact an admin."
+
+
+# Signals a pipeline process actually dies of, worded for the Jobs page.
+_SIGNAL_DEATHS = {
+    9: "was killed (SIGKILL), most often because the server ran out of memory",
+    7: "crashed with a bus error (SIGBUS)",
+    11: "crashed with a segmentation fault (SIGSEGV)",
+    6: "aborted (SIGABRT)",
+    15: "was terminated (SIGTERM)",
+}
+
+
+def exit_signal(returncode: int | None) -> int | None:
+    """The signal a process died of: ``-N`` from ``Popen``, or ``128+N`` from a
+    shell wrapper. ``CANCELLED_RC`` is our own marker, not a signal."""
+    if returncode is None or returncode == CANCELLED_RC:
+        return None
+    if returncode < 0:
+        return -returncode
+    if 128 < returncode < 160:
+        return returncode - 128
+    return None
+
+
+def describe_exit(returncode: int | None) -> str:
+    """A return code in plain words, or ``""`` for success, unknown, or a cancel."""
+    if returncode in (None, 0, CANCELLED_RC):
+        return ""
+    sig = exit_signal(returncode)
+    if sig is None:
+        return f"The process exited with code {returncode}"
+    if sig in _SIGNAL_DEATHS:
+        return f"The process {_SIGNAL_DEATHS[sig]}"
+    return f"The process was stopped by signal {sig}"
+
+
+def watchdog_desc(reason: str) -> str:
+    """``error_desc`` for a run the watchdog killed (hung, or past the cap)."""
+    return (
+        f"watchdog: {reason}. The run was stopped so its slot could be freed; check the "
+        "log for where it stalled, then re-run it or contact an admin."
+    )
+
+
 def tail(path: Path, n: int = 200) -> str:
     """Return the last *n* lines of a log file, or ``""`` if unreadable/absent."""
     if not path.is_file():

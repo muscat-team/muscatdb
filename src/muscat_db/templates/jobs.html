@@ -881,12 +881,12 @@
   window.reRunJob = function(btn, key) {
     btn.disabled = true;
     btn.innerText = 'Launching…';
-    fetch('/api/jobs/rerun', {
+    MuscatFetch.fetchJson('/api/jobs/rerun', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ key: key })
     })
-    .then(function(r) { if (!r.ok) return r.json().then(function(e) { throw new Error(e.error || 'Failed'); }); return r.json(); })
+    .then(function(res) { if (!res.ok) throw new Error(res.error || 'The server refused the re-run without giving a reason.'); })
     .then(function() {
       var row = rowByKey(key);
       if (row) {
