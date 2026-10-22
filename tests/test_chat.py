@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+import shutil
+import subprocess
 import time
+from pathlib import Path
 
 import pytest
 import socketio
@@ -118,6 +123,7 @@ def test_parse_mentions_resolves_known_and_skips_reserved(monkeypatch):
         "_known_cache",
         {"ts": time.time() + 9999, "map": {"alice": "alice", "bob": "Bob"}},
     )
+    monkeypatch.setattr(chat, "_user_is_scoped", lambda _u: False)
     found = chat._parse_mentions("hey @alice and @Bob, ignore @here @test @nobody")
     assert found == ["alice", "Bob"]  # canonical casing, reserved/unknown dropped
 
@@ -798,3 +804,178 @@ def test_edit_nudges_only_newly_mentioned_users(chat_db, sio_harness, monkeypatc
     assert mention_rooms == ["user:carol"]
     edited = [p for e, p, _kw in sio_harness.emits if e == "message_edited"]
     assert edited and edited[0]["mentions"] == ["alice", "bob", "carol"]
+
+
+# --------------------------------------------------------------------------
+# Regressions: sender self-nudge, @bot without a captured loop, @bot context
+# ordering, and scoped usernames in stored mentions.
+# --------------------------------------------------------------------------
+def test_message_does_not_nudge_the_sender(sio_harness, monkeypatch):
+    _as_user(monkeypatch, "alice")
+    monkeypatch.setattr(chat, "_known_users_map", lambda: {"alice": "alice", "bob": "bob"})
+    monkeypatch.setattr(chat, "_user_is_scoped", lambda _u: False)
+    monkeypatch.setattr(
+        chat.db, "save_chat_message", lambda user, text, **k: {"id": 1, "user": user, "text": text}
+    )
+    asyncio.run(chat.message("sid-1", {"text": "@alice @bob look"}))
+    asyncio.run(chat.message("sid-1", {"text": "/me waves at @alice"}))
+    rooms = [kw.get("room") for e, _p, kw in sio_harness.emits if e == "mention"]
+    assert rooms == ["user:bob"]
+
+
+def test_bot_question_answers_without_a_captured_event_loop(sio_harness, monkeypatch):
+    """A @bot question must be answered whenever the handler runs; the loop is
+    the handler's own running loop, not a global captured earlier."""
+    _as_user(monkeypatch, "alice")
+    monkeypatch.setattr(chat, "_LOOP", None)
+    monkeypatch.setattr(chat.chat_agent, "reserve", lambda: True)
+    monkeypatch.setattr(chat.chat_agent, "release", lambda: None)
+
+    async def fake_answer(question, history):
+        return f"answer to {question}"
+
+    monkeypatch.setattr(chat.chat_agent, "answer", fake_answer)
+
+    async def run():
+        await chat.message("sid-1", {"text": "@bot what is photometry"})
+        await asyncio.gather(*list(chat._agent_tasks))
+
+    asyncio.run(run())
+    texts = [p["text"] for e, p, _kw in sio_harness.emits if e == "message" and p.get("kind") == "agent"]
+    assert texts == ["answer to what is photometry"]
+
+
+def test_concurrent_bot_questions_see_each_others_turns_in_order(sio_harness, monkeypatch):
+    """Two questions from one user must not both start from the same context:
+    the second one waits and is answered with the first exchange in history."""
+    monkeypatch.setattr(chat.chat_agent, "reserve", lambda: True)
+    monkeypatch.setattr(chat.chat_agent, "release", lambda: None)
+    calls = []
+
+    async def fake_answer(question, history):
+        calls.append((question, len(history)))
+        await asyncio.sleep(0.01)
+        return f"re:{question}"
+
+    monkeypatch.setattr(chat.chat_agent, "answer", fake_answer)
+
+    async def run():
+        await asyncio.gather(
+            chat._run_agent("sid-1", "alice", "first"),
+            chat._run_agent("sid-2", "alice", "second"),
+        )
+
+    asyncio.run(run())
+    assert calls == [("first", 0), ("second", 2)]
+
+
+def test_scoped_usernames_are_not_stored_as_mentions(monkeypatch):
+    monkeypatch.setattr(
+        chat, "_known_cache", {"ts": time.time() + 9999, "map": {"alice": "alice", "andrew": "andrew"}}
+    )
+    monkeypatch.setattr(chat, "_user_is_scoped", lambda name: name == "andrew")
+    assert chat._parse_mentions("@andrew and @alice") == ["alice"]
+
+
+_CHAT_JS = Path(__file__).resolve().parents[1] / "src" / "muscat_db" / "static" / "js" / "chat.js"
+
+# Runs the real chat.js against a minimal DOM stub and reports whether a /me
+# line addressed to alice carries the mention highlight through render and edit.
+_CHAT_JS_HARNESS = r"""
+const fs = require("fs");
+const src = fs.readFileSync(process.env.CHAT_JS, "utf8");
+class Text { constructor(t) { this.nodeType = 3; this.textContent = String(t); this.parentNode = null; } }
+class El {
+  constructor(tag = "div") {
+    this.tagName = tag.toUpperCase(); this.id = ""; this.children = []; this.parentNode = null;
+    this.dataset = {}; this.style = {}; this.value = ""; this.classes = new Set();
+    const self = this;
+    this.classList = {
+      add: (...c) => c.forEach((x) => self.classes.add(x)),
+      remove: (...c) => c.forEach((x) => self.classes.delete(x)),
+      toggle: (c, f) => { const on = f === undefined ? !self.classes.has(c) : !!f; on ? self.classes.add(c) : self.classes.delete(c); return on; },
+      contains: (c) => self.classes.has(c),
+    };
+  }
+  get className() { return [...this.classes].join(" "); }
+  set className(v) { this.classes = new Set(String(v).split(/\s+/).filter(Boolean)); }
+  get textContent() { return this.children.map((c) => c.textContent).join(""); }
+  set textContent(v) { this.children = []; if (String(v) !== "") this.children.push(new Text(v)); }
+  appendChild(c) { c.parentNode = this; this.children.push(c); return c; }
+  append(...nodes) { nodes.forEach((n) => this.appendChild(typeof n === "string" ? new Text(n) : n)); }
+  remove() { if (this.parentNode) this.parentNode.children = this.parentNode.children.filter((c) => c !== this); }
+  replaceWith(n) { const p = this.parentNode; if (!p) return; p.children[p.children.indexOf(this)] = n; n.parentNode = p; this.parentNode = null; }
+  querySelectorAll(sel) {
+    const last = sel.split(",")[0].trim().split(/\s+/).pop();
+    const m = last.match(/\.([\w-]+)$/);
+    const out = [];
+    if (!m) return out;
+    const walk = (n) => { for (const c of n.children) { if (c instanceof El) { if (c.classes.has(m[1])) out.push(c); walk(c); } } };
+    walk(this);
+    return out;
+  }
+  querySelector(sel) { return this.querySelectorAll(sel)[0] || null; }
+  setAttribute() {} getAttribute() { return null; } addEventListener() {} removeEventListener() {}
+  focus() {} blur() {} setSelectionRange() {} contains() { return false; }
+}
+const byId = {};
+const el = (id, cls = "") => { const e = new El(); e.id = id; e.classes = new Set(cls.split(" ").filter(Boolean)); byId[id] = e; return e; };
+el("chat-window"); byId["chat-window"].dataset.currentUser = "alice";
+el("chat-messages"); el("message-input"); el("send-button"); el("chat-header");
+el("chat-status-dot"); el("chat-online"); el("chat-unread"); el("chat-typing"); el("chat-autocomplete", "hidden");
+el("minimize-chat");
+const listeners = {};
+const document = {
+  addEventListener(ev, fn) { (listeners[ev] = listeners[ev] || []).push(fn); },
+  removeEventListener() {},
+  getElementById(id) { return byId[id] || null; },
+  createElement(t) { return new El(t); },
+  createTextNode(t) { return new Text(t); },
+  querySelector() { return null; },
+  body: new El("body"), documentElement: new El("html"), title: "", hasFocus() { return true; },
+};
+const window = {
+  location: { href: "http://x/", origin: "http://x" }, innerWidth: 1024,
+  addEventListener() {}, localStorage: { getItem: () => null, setItem() {} },
+};
+let SOCKET = null;
+const io = () => { SOCKET = { active: true, h: {}, on(ev, fn) { this.h[ev] = fn; }, emit() {} }; return SOCKET; };
+const ctx = {
+  document, window, io, console,
+  fetch: () => Promise.resolve({ ok: false }),
+  localStorage: window.localStorage,
+  setTimeout: () => 0, clearTimeout() {}, setInterval: () => 0, clearInterval() {},
+};
+new Function(...Object.keys(ctx), src)(...Object.values(ctx));
+listeners.DOMContentLoaded.forEach((f) => f());
+
+const chatMessages = byId["chat-messages"];
+const last = () => chatMessages.children[chatMessages.children.length - 1];
+const ts = Date.now() / 1000;
+const base = { id: 7, kind: "action", user: "bob", ts, reactions: [], edited: false };
+const out = {};
+SOCKET.h.history({ messages: [{ ...base, text: "waves at @alice", mentions: ["alice"] }] });
+out.rendered = last().classes.has("mention-me");
+SOCKET.h.message_edited({ ...base, text: "waves at nobody", mentions: [], edited: true });
+out.afterRemoval = last().classes.has("mention-me");
+SOCKET.h.message_edited({ ...base, text: "waves at @alice", mentions: ["alice"], edited: true });
+out.afterAddition = last().classes.has("mention-me");
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_me_line_mention_highlight_follows_render_and_edits():
+    """A /me line that names you is highlighted like a message, and the highlight
+    tracks edits that add or remove the mention."""
+    proc = subprocess.run(
+        [shutil.which("node"), "-e", _CHAT_JS_HARNESS],
+        env={**os.environ, "CHAT_JS": str(_CHAT_JS)},
+        capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {
+        "rendered": True,
+        "afterRemoval": False,
+        "afterAddition": True,
+    }

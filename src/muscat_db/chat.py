@@ -150,7 +150,9 @@ def _known_users_map() -> dict[str, str]:
 
 
 def _parse_mentions(text: str) -> list[str]:
-    """Canonical usernames @-mentioned in text (reserved tokens excluded)."""
+    """Canonical usernames @-mentioned in text that may see the shared room
+    (reserved tokens excluded). Scoped viewers are dropped here, so the stored
+    mention list, its highlighting, and the nudges all agree."""
     known = _known_users_map()
     found: list[str] = []
     for raw in _MENTION_RE.findall(text):
@@ -160,7 +162,12 @@ def _parse_mentions(text: str) -> list[str]:
         canon = known.get(low)
         if canon and canon not in found:
             found.append(canon)
-    return found
+    return _unscoped(found)
+
+
+def _nudge_targets(names, sender: str | None) -> list[str]:
+    """Users to notify about a message: never the sender, never a scoped viewer."""
+    return _unscoped(n for n in names if n != sender)
 
 
 def _rate_ok(sid: str) -> bool:
@@ -252,6 +259,7 @@ async def disconnect(sid):
     # signed-in user's context is keyed by name (shared across tabs) and kept
     # until the idle-gap TTL expires, so a reload doesn't wipe their thread.
     _agent_ctx.pop(f"sid:{sid}", None)
+    _agent_locks.pop(f"sid:{sid}", None)
     await _broadcast_presence()
 
 
@@ -342,7 +350,7 @@ async def message(sid, data):
             return
         payload = {**msg, "sid": sid}
         await sio.emit("message", payload, room=_PUBLIC_ROOM)
-        for name in _unscoped(mentions):
+        for name in _nudge_targets(mentions, user):
             await sio.emit("mention", {"from": display, "message": payload}, room=f"user:{name}")
         return
 
@@ -357,7 +365,7 @@ async def message(sid, data):
     payload = {**msg, "sid": sid}
     await sio.emit("message", payload, room=_PUBLIC_ROOM)
     # Nudge each mentioned user (on any page/tab) so they notice.
-    for name in _unscoped(mentions):
+    for name in _nudge_targets(mentions, user):
         await sio.emit("mention", {"from": display, "message": payload}, room=f"user:{name}")
     # @all / @everyone / @channel → ping every other online teammate too.
     if _BROADCAST_MENTION_RE.search(text):
@@ -390,7 +398,7 @@ async def edit_message(sid, data):
     # when the message was first sent.
     already = set((before or {}).get("mentions") or [])
     payload = {**updated, "sid": sid}
-    for name in _unscoped(m for m in mentions if m not in already and m != user):
+    for name in _nudge_targets((m for m in mentions if m not in already), user):
         await sio.emit("mention", {"from": user, "message": payload}, room=f"user:{name}")
 
 
@@ -462,6 +470,9 @@ _agent_tasks: set[asyncio.Task] = set()
 # (the nginx user, or the socket id for anonymous sessions). Each value is a
 # ``(last_activity_ts, deque-of-turns)`` pair; the deque caps its own length.
 _agent_ctx: dict[str, tuple[float, deque]] = {}
+# One in-flight exchange per conversation: a second question from the same user
+# waits for the first, so its context includes the first answer.
+_agent_locks: dict[str, asyncio.Lock] = {}
 
 
 def _ctx_key(user: str | None, sid: str) -> str:
@@ -504,9 +515,8 @@ def _agent_ctx_clear(key: str) -> None:
 
 def _spawn_agent(sid: str, user: str | None, question: str) -> None:
     """Answer in the background so the message handler returns at once (the model
-    call can take many seconds)."""
-    if _valid_loop() is None:  # no running loop captured yet; nothing to schedule onto
-        return
+    call can take many seconds). Called from a socket.io handler, so there is
+    always a running loop to schedule onto."""
     task = asyncio.create_task(_run_agent(sid, user, question))
     _agent_tasks.add(task)
     task.add_done_callback(_agent_tasks.discard)
@@ -562,36 +572,40 @@ async def _run_agent(sid: str, user: str | None, question: str) -> None:
             **target,
         )
         return
-    if not chat_agent.reserve():  # model already at capacity
-        await sio.emit(
-            "message",
-            _private_agent_payload(
-                "I'm still answering an earlier question — give me a moment and ask again."
-            ),
-            **target,
-        )
-        return
     heartbeat = asyncio.create_task(_typing_heartbeat(target))
     try:
-        reply = await chat_agent.answer(question, _agent_ctx_get(key))
-        _agent_ctx_add(
-            key,
-            {"role": "user", "content": f"{_display(user)}: {question}"},
-            {"role": "assistant", "content": reply},
-        )
-        await sio.emit("message", _private_agent_payload(reply), **target)
-    except Exception as e:
-        logger.warning("chat agent request failed: %s", e, exc_info=True)
-        await sio.emit(
-            "message",
-            _private_agent_payload(
-                "⚠️ Sorry, I couldn't reach the model right now. Please try again shortly."
-            ),
-            **target,
-        )
+        lock = _agent_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            if not chat_agent.reserve():  # model already at capacity
+                await sio.emit(
+                    "message",
+                    _private_agent_payload(
+                        "I'm still answering an earlier question — give me a moment and ask again."
+                    ),
+                    **target,
+                )
+                return
+            try:
+                reply = await chat_agent.answer(question, _agent_ctx_get(key))
+                _agent_ctx_add(
+                    key,
+                    {"role": "user", "content": f"{_display(user)}: {question}"},
+                    {"role": "assistant", "content": reply},
+                )
+                await sio.emit("message", _private_agent_payload(reply), **target)
+            except Exception as e:
+                logger.warning("chat agent request failed: %s", e, exc_info=True)
+                await sio.emit(
+                    "message",
+                    _private_agent_payload(
+                        "⚠️ Sorry, I couldn't reach the model right now. Please try again shortly."
+                    ),
+                    **target,
+                )
+            finally:
+                chat_agent.release()
     finally:
         heartbeat.cancel()
-        chat_agent.release()
         await sio.emit("typing", {"user": chat_agent.DISPLAY_NAME, "typing": False}, **target)
 
 

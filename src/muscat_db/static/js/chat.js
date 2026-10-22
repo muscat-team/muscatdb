@@ -468,6 +468,9 @@ document.addEventListener("DOMContentLoaded", () => {
         if (data.kind === "action") {
             const act = document.createElement("div");
             act.className = "message action " + (isMine(data) ? "me" : "them");
+            if (currentUser && (data.mentions || []).some((n) => n.toLowerCase() === currentUser.toLowerCase())) {
+                act.classList.add("mention-me");
+            }
             const row = document.createElement("div");
             row.className = "message-row";
             const body = document.createElement("div");
@@ -744,7 +747,7 @@ document.addEventListener("DOMContentLoaded", () => {
         if (textEl) { textEl.textContent = ""; renderText(textEl, data.text); }
         const edited = entry.el.querySelector(".edited");
         if (edited) edited.style.display = "";
-        if (currentUser && entry.data.kind === "user") {
+        if (currentUser && (entry.data.kind === "user" || entry.data.kind === "action")) {
             entry.el.classList.toggle("mention-me",
                 (entry.data.mentions || []).some((n) => n.toLowerCase() === currentUser.toLowerCase()));
         }
