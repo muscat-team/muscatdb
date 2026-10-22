@@ -382,7 +382,7 @@
     document.querySelectorAll('#time-summary .job-count').forEach(function(e) { e.classList.remove('active'); });
     if (activeRecent === 'recent') { activeRecent = ''; }
     else { activeRecent = 'recent'; el.classList.add('active'); }
-    applyFilters(); reconcileSectionsForFilter(); saveFilters();
+    applyFilters(); reconcileSectionsForFilter(); showClearFilter(); saveFilters();
   };
 
   // ── Type filter (badges) ──────────────────────────────────────────────────
@@ -390,7 +390,7 @@
     document.querySelectorAll('#type-summary .job-count').forEach(function(e) { e.classList.remove('active'); });
     if (activeType === type) { activeType = ''; }
     else { activeType = type; el.classList.add('active'); }
-    applyFilters(); reconcileSectionsForFilter(); saveFilters();
+    applyFilters(); reconcileSectionsForFilter(); showClearFilter(); saveFilters();
   };
 
   // ── Instrument filter (badges) ────────────────────────────────────────────
@@ -398,7 +398,7 @@
     document.querySelectorAll('#inst-summary .job-count').forEach(function(e) { e.classList.remove('active'); });
     if (activeInst === inst) { activeInst = ''; }
     else { activeInst = inst; el.classList.add('active'); }
-    applyFilters(); reconcileSectionsForFilter(); saveFilters();
+    applyFilters(); reconcileSectionsForFilter(); showClearFilter(); saveFilters();
   };
 
   // Populate instrument badges from rows
@@ -513,7 +513,10 @@
         section.style.display = 'none';
         return;
       }
-      section.style.display = (anyVisible || alwaysVisible) ? '' : 'none';
+      // An always-visible section shows its "nothing tracked" row only when it
+      // really has no jobs; when a filter is merely hiding them, that row would
+      // be false, so the section hides like the others.
+      section.style.display = (anyVisible || (alwaysVisible && rows.length === 0)) ? '' : 'none';
     });
   }
 
@@ -679,10 +682,10 @@
   window.toggleStatus = function(el, status) {
     if (activeStatus === status) {
       activeStatus = null;
-      document.querySelectorAll('.job-count').forEach(function(e) { e.classList.remove('active'); });
+      document.querySelectorAll('#jobs-summary .job-count').forEach(function(e) { e.classList.remove('active'); });
     } else {
       activeStatus = status;
-      document.querySelectorAll('.job-count').forEach(function(e) { e.classList.remove('active'); });
+      document.querySelectorAll('#jobs-summary .job-count').forEach(function(e) { e.classList.remove('active'); });
       el.classList.add('active');
     }
     applyFilters(); reconcileSectionsForFilter(); showClearFilter(); saveFilters();
