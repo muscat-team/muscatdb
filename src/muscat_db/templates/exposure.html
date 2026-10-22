@@ -218,13 +218,13 @@
   <div class="exp-form">
     {# ---- Calibration status ---- #}
     <div class="exp-section">
-      <h3>Calibration Status <span class="help-icon" data-help="🟢 Green: Database-calibrated coefficients. 🟠 Orange: Using empirical defaults.">?</span></h3>
+      <h3>Calibration Status <span class="help-icon" data-help="🟢 Green: calibrated in this database (archive fit, or coefficients for muscat/muscat2). 🟠 Orange: built-in values — an archive fit shipped with muscat-db for LCO instruments, or MuSCAT3-scaled coefficients for muscat/muscat2.">?</span></h3>
       <div class="calib-row">
         {% for name in instruments %}
           {% set c = calibrations.get(name, {}) %}
           <span class="calib-badge {% if c and c.n_bands > 0 %}calib-ok{% else %}calib-none{% endif %}">
             <span class="cb-dot"></span>{{ name }}
-            {% if c and c.n_bands > 0 %}· {{ c.n_bands }} bands{% else %}· empirical{% endif %}
+            {% if c and c.n_bands > 0 %}· {{ c.n_bands }} bands{% elif c and c.model == 'archive' %}· built-in fit{% else %}· empirical{% endif %}
           </span>
         {% endfor %}
       </div>
@@ -289,6 +289,10 @@
         <div class="range-field">
           <div class="rf-top"><label for="airmass">Airmass</label><span class="rf-val" id="airmass-val">1.10</span></div>
           <input type="range" id="airmass" value="1.1" min="1" max="3" step="0.05">
+        </div>
+        <div class="exp-field">
+          <label for="seeing">Seeing (arcsec) <span class="help-icon" data-help="Expected in-focus FWHM. Blank uses the instrument's good seeing from the archive (16th percentile), which gives the highest peak and so the safest exposure. Not used for muscat/muscat2.">?</span></label>
+          <input type="number" id="seeing" min="0.3" max="10" step="0.1" placeholder="auto">
         </div>
         <div class="exp-field">
           <label for="sat-frac">Saturation limit</label>
@@ -378,30 +382,39 @@
 <details class="exp-section exp-explain">
   <summary>How are exposure time and peak counts calculated?</summary>
   <div class="exp-explain-body">
-    <h4>1. The core relationship</h4>
-    <p>Peak pixel count scales with flux (which falls off exponentially with magnitude) and linearly with exposure time. Empirically, for MuSCAT3:</p>
-    <div class="formula">log10(peak_ADU) = coef &minus; 0.4 &times; mag_eff + log10(exptime / 60)</div>
-    <p>where <code>coef</code> is a per-band, per-focus calibration constant (the peak ADU a mag=0 star would produce in a 60s exposure at airmass 1.1) and <code>mag_eff</code> is the target's magnitude corrected for airmass (step 3). Solving this the other way gives the exposure needed to reach a target peak:</p>
-    <div class="formula">exptime = target_ADU &times; 60 / 10<sup>(coef &minus; 0.4 &times; mag_eff)</sup></div>
-    <p>"Calculate exposure times" uses the second form (solves for exptime given a target ADU); "Calculate peak counts" uses the first form (solves for peak ADU given a fixed exptime).</p>
+    <h4>1. The model</h4>
+    <p>For the BANZAI-reduced LCO instruments (MuSCAT3, MuSCAT4, Sinistro, QHY600, SBIG) the peak pixel of a star is its total flux times the fraction of that flux landing in the brightest pixel:</p>
+    <div class="formula">peak (e⁻/s) = 10<sup>&minus;0.4 &times; (mag + k &times; (airmass &minus; 1) &minus; ZP)</sup> &times; A / FWHM_pix²</div>
+    <div class="formula">FWHM² = seeing² + (c &times; defocus)²</div>
+    <p>Exposure time follows by dividing the target peak (a fraction of the saturation level) by this rate. "Calculate peak counts" multiplies it by the exposure time instead.</p>
 
-    <h4>2. Where <code>coef</code> comes from</h4>
-    <p>For MuSCAT3, <code>coef</code> is calibrated directly from real science frames already in the database: for each usable frame, the peak pixel value is measured (99.9th percentile above the background median &mdash; robust against cosmic rays and hot pixels), the target's magnitude in that band is looked up from Pan-STARRS DR1 or SkyMapper DR2, and the formula above is solved for <code>coef</code>. Results are averaged per (band, focus) bin and stored in the database, then interpolated between the calibrated focus points for any focus you select. Instruments without their own frame-based calibration (shown as <span style="color:#f59e0b;">empirical</span> in the status badges above) fall back to the MuSCAT3 coefficients, scaled by relative telescope aperture, pixel scale, and gain &mdash; a rough estimate until enough frames accumulate for a direct calibration.</p>
+    <h4>2. Where the numbers come from</h4>
+    <p>Every BANZAI e91 frame records its own photometric zeropoint (<code>L1ZP</code>), image FWHM (<code>L1FWHM</code>), saturation level (<code>MAXLIN</code>) and a catalog of every detected star. Calibration samples up to 800 archive frames per instrument and fits, per band and readout mode:</p>
+    <ul>
+      <li><code>ZP</code>: the 84th percentile of the zeropoint corrected to zenith &mdash; a good-transparency night, so a clear night never gives a brighter star than predicted;</li>
+      <li><code>A</code>: the peak-to-flux ratio of bright unsaturated stars times FWHM² (about 0.9&ndash;1.0 in focus; defocused donuts have their own value);</li>
+      <li><code>c</code>: how fast the image grows with defocus. The saturation estimate uses a narrow-donut slope (16th percentile), never wider than the typical image;</li>
+      <li>the saturation level: the lowest <code>MAXLIN</code> seen in the last year, since cameras of one instrument differ (QHY600 units span 42,000&ndash;47,400 e⁻) and Sinistro's 2&times;2-binned mode saturates near twice the unbinned level;</li>
+      <li>the default seeing: the 16th percentile of in-focus FWHM. Enter your own seeing to override it.</li>
+    </ul>
+    <p>Until an instrument is calibrated in this database, a fit made from the muscat-db archive in October 2026 is used. SBIG frames carry no zeropoint, so its zeropoints are LCO's own exposure-time-calculator values. Checked against frames held out of the fit, the model predicts the measured in-focus peak with a median error within 0.1 dex and a 16the model predicts the measured in-focus peak to within about &plusmn;0.15 dex (median within 0.1 dex) for every LCO instrument.ndash;84% spread within about the model predicts the measured in-focus peak to within about &plusmn;0.15 dex (median within 0.1 dex) for every LCO instrument.plusmn;0.2 dex for every LCO instrument with zeropoints in its headers.</p>
 
-    <h4>3. Airmass and focus corrections</h4>
-    <p>Atmospheric extinction dims a target as airmass increases, at a band-dependent rate <code>k</code> (mag per airmass; e.g. 0.15 for <em>g</em>, 0.09 for <em>r</em>, tabulated per band). This is folded into an effective magnitude:</p>
-    <div class="formula">mag_eff = mag + k &times; (airmass &minus; 1.1)</div>
-    <p>Defocusing the telescope spreads a star's light over more pixels, lowering its peak count for the same total flux &mdash; and also grows its FWHM. Both effects are captured by calibrating <code>coef</code> and FWHM at seven focus offsets (0&ndash;6mm) and interpolating between them for whatever focus you set.</p>
+    <h4>3. Airmass and focus</h4>
+    <p>Extinction <code>k</code> (mag per airmass; 0.15 for <em>g</em>, 0.09 for <em>r</em>, ...) dims the star as airmass grows. Defocus widens the image by <code>c</code> arcsec per mm, lowering the peak as 1/FWHM². Where the archive holds no defocused frames (QHY600), defocus is assumed not to lower the peak, which errs toward a shorter, safe exposure.</p>
 
     <h4>4. Narrowband filters</h4>
-    <p>Narrowband filters (g_narrow, r_narrow, i_narrow, z_narrow, Na_D) reuse their broadband parent's magnitude and coefficient, offset by <code>log10(narrow bandwidth / broadband bandwidth)</code> &mdash; a ~10&ndash;100&times; narrower bandpass lets through proportionally fewer photons, so the same star produces a much lower peak count.</p>
+    <p>A narrowband filter without its own fit uses its broadband parent, fainter by <code>2.5 &times; log10(narrow bandwidth / broadband bandwidth)</code> mag.</p>
 
     <h4>5. Saturation and the recommended exposure</h4>
-    <p>Peak ADU is converted to electrons via the instrument's gain and compared against its full-well capacity to get the <strong>% of full well</strong> shown per band (green/orange/red below 70%/100%). In "Calculate exposure times" mode, each band's target ADU is set from the chosen saturation limit (50/80/100% of full well, or a custom ADU), and the <strong>recommended exposure</strong> is the <em>minimum</em> exposure time across all requested bands &mdash; whichever band saturates first sets the ceiling for every other band, since MuSCAT instruments expose all bands simultaneously.</p>
+    <p>The peak is compared with the saturation level of the chosen band and readout mode to get the <strong>% of full well</strong> (green/orange/red below 70%/100%). The <strong>recommended exposure</strong> is the minimum across all requested bands and stars, since MuSCAT exposes every band and every star in the field at once.</p>
+
+    <h4>6. muscat and muscat2</h4>
+    <p>These raw-frame instruments carry no zeropoint, so they keep the older coefficient model: <code>log10(peak) = coef &minus; 0.4 &times; mag_eff + log10(exptime / 60)</code>, calibrated from frames in this database where available, otherwise the MuSCAT3 table scaled by aperture and pixel area. That fallback has not been validated against measured peaks.</p>
   </div>
 </details>
 
 <script id="inst-params-data" type="application/json">{{ inst_params | tojson }}</script>
+<script id="model-summary-data" type="application/json">{{ model_summary | tojson }}</script>
 {% endblock %}
 
 {% block scripts %}
@@ -449,6 +462,10 @@
 
   var INST_PARAMS = {};
   try { INST_PARAMS = JSON.parse(document.getElementById('inst-params-data').textContent || '{}'); } catch (e) {}
+  // Archive-calibrated model per instrument: {mode: {band: {level, seeing_good, pixscale, source}}}.
+  var MODEL_SUMMARY = {};
+  try { MODEL_SUMMARY = JSON.parse(document.getElementById('model-summary-data').textContent || '{}'); } catch (e) {}
+  var seeingInput = document.getElementById('seeing');
 
   // Resolved comparison stars handed off from the FOV page:
   // [{label, sepArcsec, gmag, mags: {band: mag} | null, source, isApprox}]
@@ -510,7 +527,7 @@
       magInputs.forEach(function (inp) { if (inp.value !== '') mags[inp.dataset.band] = inp.value; });
       localStorage.setItem(STORE_KEY, JSON.stringify({
         inst: selInst.value, confmode: selConfmode.value, target: targetName.value, mags: mags,
-        focus: focusMm.value, airmass: airmass.value, satFrac: satFrac.value, customAdu: customAdu.value,
+        focus: focusMm.value, airmass: airmass.value, seeing: seeingInput.value, satFrac: satFrac.value, customAdu: customAdu.value,
         showNarrow: showNarrow.checked, comps: currentComps,
         coeffView: coeffView, coeffParameter: coeffParameter
       }));
@@ -526,6 +543,7 @@
     if (s.mags) magInputs.forEach(function (inp) { if (s.mags[inp.dataset.band] !== undefined) { inp.value = s.mags[inp.dataset.band]; markFilled(inp); } });
     if (s.focus !== undefined) focusMm.value = s.focus;
     if (s.airmass !== undefined) airmass.value = s.airmass;
+    if (s.seeing !== undefined) seeingInput.value = s.seeing;
     if (s.satFrac) { satFrac.value = s.satFrac; customAduField.style.display = s.satFrac === 'custom' ? '' : 'none'; }
     if (s.customAdu) customAdu.value = s.customAdu;
     if (s.showNarrow !== undefined) showNarrow.checked = s.showNarrow;
@@ -550,7 +568,8 @@
   }
 
   selInst.addEventListener('change', function () { updateConfmodeVisibility(); saveState(); });
-  selConfmode.addEventListener('change', saveState);
+  selConfmode.addEventListener('change', function () { saveState(); renderInstParams(selInst.value); });
+  seeingInput.addEventListener('input', saveState);
   targetName.addEventListener('input', saveState);
   showNarrow.addEventListener('change', function () {
     saveState();
@@ -728,6 +747,7 @@
     if (CONFMODES_BY_INST[inst]) {
       payload.confmode = selConfmode.value || CONFMODES_BY_INST[inst][0][0];
     }
+    if (seeingInput.value !== '') payload.seeing = parseFloat(seeingInput.value);
     if (mode === 'exptime') {
       if (satFrac.value === 'custom') payload.target_adu = parseFloat(customAdu.value);
       else payload.sat_frac = parseFloat(satFrac.value);
@@ -953,7 +973,21 @@
     if (!inst) { instParams.innerHTML = '<p>Select an instrument to see its parameters.</p>'; return; }
     var p = INST_PARAMS[inst];
     var html = '';
-    if (p) {
+    var modes = MODEL_SUMMARY[inst];
+    var modeKey = CONFMODES_BY_INST[inst] ? (selConfmode.value || CONFMODES_BY_INST[inst][0][0]) : '';
+    var bandModels = modes && (modes[modeKey] || modes[Object.keys(modes)[0]]);
+    if (p && bandModels) {
+      var first = bandModels[Object.keys(bandModels)[0]];
+      html += '<div class="chip-row">' +
+        Object.keys(bandModels).map(function (b) {
+          return chip('Saturation (' + b + ')', Number(bandModels[b].level).toLocaleString() + ' e⁻');
+        }).join('') +
+        chip('Pixel scale', first.pixscale + '"/px') +
+        chip('Good seeing', first.seeing_good + '"') +
+        chip('Aperture', p.aperture_m + ' m') +
+        chip('Model', first.source === 'archive' ? 'archive fit (this DB)' : first.source === 'lco-etc' ? 'LCO ETC zeropoints' : 'built-in archive fit') +
+        '</div>';
+    } else if (p) {
       var fwChips = (typeof p.full_well === 'object' && p.full_well !== null)
         ? Object.keys(p.full_well).map(function (b) {
             return chip('Full well (' + b + ')', Number(p.full_well[b]).toLocaleString() + ' e⁻');
@@ -968,7 +1002,8 @@
     }
     instParams.innerHTML = html + '<div id="coeff-slot" class="msg dim">Loading calibration…</div>';
 
-    fetch('/api/exposure/coeffs/' + inst).then(function (r) { return r.json(); }).then(function (data) {
+    var coeffUrl = '/api/exposure/coeffs/' + inst + (CONFMODES_BY_INST[inst] ? '?confmode=' + encodeURIComponent(selConfmode.value || CONFMODES_BY_INST[inst][0][0]) : '');
+    fetch(coeffUrl).then(function (r) { return r.json(); }).then(function (data) {
       var slot = document.getElementById('coeff-slot');
       if (!slot) return;
       if (!data.ok) { slot.textContent = ''; return; }

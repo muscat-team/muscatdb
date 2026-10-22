@@ -337,6 +337,20 @@ def build_status_cmd(
     console.print(f"[green]{db} was last built {hours:.1f} h ago[/]", soft_wrap=True)
 
 
+@app.command(name="backup-control-plane", cls=_Cmd)
+def backup_control_plane_cmd():
+    """pg_dump the Postgres control plane (MUSCAT_POSTGRES_DSN) next to the
+    muscat.db snapshots; exit 1 on failure (issue #51 step C)."""
+    from muscat_db import pg_backup
+
+    try:
+        dest = pg_backup.dump_control_plane()
+    except pg_backup.ControlPlaneBackupError as exc:
+        console.print(f"[red]Control-plane backup failed: {exc}[/]", soft_wrap=True)
+        raise typer.Exit(1)
+    console.print(f"[green]Control-plane backup written to {dest}[/]", soft_wrap=True)
+
+
 @app.command(name="scan-failures", cls=_Cmd)
 def scan_failures_cmd():
     """List obslog scans that failed and have not since succeeded."""

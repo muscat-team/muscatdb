@@ -136,6 +136,7 @@ from muscat_db.catalog import (
     _query_target_planets_toi,
     _resolve_all_aliases,
     _resolve_archive_coords,
+    resolve_target_astrometry,
     resolve_lco_key_project_name,
     _target_tic_id,
     _toi_db_membership,
@@ -366,6 +367,8 @@ photometry_router = APIRouter(prefix="/api/photometry", tags=["photometry"])
 transit_fit_router = APIRouter(prefix="/api/transit-fit", tags=["transit-fit"])
 ttv_fit_router = APIRouter(prefix="/api/ttv-fit", tags=["ttv-fit"])
 exposure_router = APIRouter(prefix="/api/exposure", tags=["exposure"])
+# Upper bound accepted for the exposure calculator's seeing input (arcsec).
+_MAX_SEEING_ARCSEC = 10.0
 jobs_router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 target_router = APIRouter(prefix="/api/targets", tags=["targets"])
 tags_router = APIRouter(prefix="/api/tags", tags=["tags"])
@@ -3714,6 +3717,7 @@ def exposure_page(inst: str = "", target: str = ""):
         sel_target=target,
         calibrations=calibrations,
         inst_params=exp_calc.INSTRUMENT_PARAMS,
+        model_summary={name: exp_calc.model_summary(name) for name in INSTRUMENTS},
     )
 
 
@@ -3742,6 +3746,18 @@ def exposure_calculate(payload: dict = Body(...)):
 
     if not mags:
         return JSONResponse({"ok": False, "error": "No magnitudes provided"}, status_code=400)
+    seeing = payload.get("seeing")
+    if seeing not in (None, ""):
+        try:
+            seeing = float(seeing)
+        except (TypeError, ValueError):
+            seeing = math.nan
+        if not (0 < seeing <= _MAX_SEEING_ARCSEC):
+            return JSONResponse(
+                {"ok": False, "error": f"Seeing must be between 0 and {_MAX_SEEING_ARCSEC:g} arcsec"}, status_code=400
+            )
+    else:
+        seeing = None
 
     extra_sources = None
     raw_extra_sources = payload.get("extra_sources")
@@ -3760,18 +3776,22 @@ def exposure_calculate(payload: dict = Body(...)):
             label = entry.get("label")
             extra_sources.append({"label": str(label) if label else None, "mags": cleaned_mags})
 
-    result = exp_calc.calc_all_bands(
-        instrument=inst,
-        mags=mags,
-        focus_mm=focus_mm,
-        airmass=airmass,
-        sat_frac=sat_frac,
-        mode=mode,
-        exptime=exptime,
-        target_adu=target_adu,
-        confmode=confmode,
-        extra_sources=extra_sources,
-    )
+    try:
+        result = exp_calc.calc_all_bands(
+            instrument=inst,
+            mags=mags,
+            focus_mm=focus_mm,
+            airmass=airmass,
+            sat_frac=sat_frac,
+            mode=mode,
+            exptime=exptime,
+            target_adu=target_adu,
+            confmode=confmode,
+            extra_sources=extra_sources,
+            seeing=seeing,
+        )
+    except exp_calc.UncalibratedBandError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
     return JSONResponse({"ok": True, **result})
 
 
@@ -3911,9 +3931,11 @@ def exposure_status():
 
 
 @exposure_router.get("/coeffs/{instrument}", response_class=JSONResponse)
-def exposure_coeffs(instrument: str):
+def exposure_coeffs(instrument: str, confmode: str | None = None):
     if instrument not in INSTRUMENTS:
         return JSONResponse({"ok": False, "error": "Invalid instrument"}, status_code=400)
+    if instrument in exp_calc.exposure_model.MODEL_INSTRUMENTS:
+        return JSONResponse({"ok": True, "instrument": instrument, "coeffs": exp_calc.model_coeff_rows(instrument, confmode)})
     coeffs = exp_calc.load_coeffs(instrument)
     # Convert to serializable format
     rows = []
@@ -6226,15 +6248,14 @@ def _target_coordinates(target: str) -> dict | None:
     SIMBAD.
 
     The ephemeris catalogs (NASA/TOI) are consulted first via
-    ``_resolve_archive_coords``; when the target is in neither, it falls back to
-    SIMBAD name resolution (both cached), so a catalog-less target still gets
+    ``resolve_target_astrometry``; when the target is in neither, it falls back
+    to SIMBAD name resolution (both cached), so a catalog-less target still gets
     coordinates instead of an empty RA/Dec field. Returns ``{"ra", "dec",
-    "source"}`` (source one of nasa/toi/simbad) or None when unresolved."""
-    resolved = _resolve_archive_coords(target)
-    if resolved is None:
-        return None
-    ra, dec, source = resolved
-    return {"ra": ra, "dec": dec, "source": source}
+    "source", "epoch", "pmra", "pmdec"}`` (source one of nasa/toi/simbad;
+    epoch a Julian year; proper motion mas/yr, None when unknown) or None when
+    unresolved. The epoch matters: the catalogs are Gaia DR2 at 2015.5, so a
+    high proper-motion star is arcseconds away from its catalog position."""
+    return resolve_target_astrometry(target)
 
 
 @ephemeris_router.get("/target-info", response_class=JSONResponse)

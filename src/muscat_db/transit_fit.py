@@ -2618,23 +2618,33 @@ def sync_jobs() -> None:
                     run_name=run_name,
                 )
                     continue
-                # Atomic: at most one process/caller ever wins this claim for a
-                # given key, so two workers draining the same pending row can
-                # never both launch it.
-                if not store.claim_slot("transit_fit", key, _MAX_FULL_JOBS, **claim_caps(entry.get("user_name"))):
+                # Atomic: the slot and this row's pending -> running move are one
+                # transaction, so two workers draining the same pending row can
+                # never both launch it, even if a reconcile_slots pass elsewhere
+                # frees the slot before the save(state="running") below.
+                if not store.claim_slot("transit_fit", key, _MAX_FULL_JOBS, **claim_caps(entry.get("user_name")), pending_key=entry["key"]):
                     continue
-                rdir.mkdir(parents=True, exist_ok=True)
-                csvs = get_csv_lightcurves(inst, date, target)
-                if selected_csvs is not None:
-                    selected = set(str(p) for p in selected_csvs)
-                    csvs = [c for c in csvs if str(c) in selected]
-                narrowband_aliases = _write_fit_inputs(
-                    rdir, inst, date, target, csvs, opts,
-                    site=site, telescope=telescope, mode=mode, run_name=run_name, run_id=run_id,
-                    run_type=run_type)
-                _write_fit_product(rdir, inst, date, target, csvs, opts, test_run, entry.get("user_name"))
-                _fit_outputs_cache.clear()
-                cmd = _fit_command(rdir, run_type)
+                try:
+                    rdir.mkdir(parents=True, exist_ok=True)
+                    csvs = get_csv_lightcurves(inst, date, target)
+                    if selected_csvs is not None:
+                        selected = set(str(p) for p in selected_csvs)
+                        csvs = [c for c in csvs if str(c) in selected]
+                    narrowband_aliases = _write_fit_inputs(
+                        rdir, inst, date, target, csvs, opts,
+                        site=site, telescope=telescope, mode=mode, run_name=run_name, run_id=run_id,
+                        run_type=run_type)
+                    _write_fit_product(rdir, inst, date, target, csvs, opts, test_run, entry.get("user_name"))
+                    _fit_outputs_cache.clear()
+                    cmd = _fit_command(rdir, run_type)
+                except Exception as exc:
+                    # The claim already moved the row to running: leave it
+                    # terminal, not for orphan reconcile, which could trust a
+                    # previous run's log in this reused directory.
+                    logger.warning("failed to prepare queued transit fit %s", key, exc_info=True)
+                    store.release_slot("transit_fit", key)
+                    store.save(type_="transit_fit", inst=inst, date=date, target=target, run_id=run_id, state="error", returncode=-1, elapsed=0, started_at=entry["started_at"], error_desc=f"Failed to prepare run: {exc}", run_name=run_name)
+                    continue
                 log_path = rdir / "timer-fit.log"
                 try:
                     logf = open(log_path, "w")
