@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from playwright.sync_api import expect
 import pytest
+
 
 URL = "/target?name=TOI-1000"
 ROWS = "#datasets-table tbody tr"
@@ -102,3 +104,58 @@ def test_archive_section_settles_offline_with_a_reason(page, section):
 def test_exofop_section_reports_an_unreachable_exofop(page):
     text = _open_section(page, "exofop-obslog-details")
     assert "No ExoFOP time-series entries reported" not in text
+
+
+def test_photometry_link_opens_the_selected_night(page):
+    page.goto(URL)
+    page.locator(f'{ROWS}[data-date="261001"] a[title="photometry"]').click()
+    page.wait_for_url('**/photometry?**')
+    from urllib.parse import parse_qs, urlsplit
+    query = parse_qs(urlsplit(page.url).query)
+    assert query['inst'] == ['muscat3'] and query['date'] == ['261001']
+    assert query['target'] == ['TOI-1000']
+
+
+def test_dataset_sort_and_numeric_filters_combine(page):
+    page.goto(URL)
+    header = page.locator('#datasets-table th[data-sort-attr="date"]')
+    header.click()
+    first = _visible_dates(page)
+    header.click()
+    assert _visible_dates(page) == list(reversed(first))
+    page.fill('#dataset-search', 'sinistro')
+    assert _visible_dates(page) == ['261003']
+    page.fill('tr.filter-row input[data-col="frames"]', '>1')
+    assert _visible_dates(page) == []
+    page.fill('#dataset-search', '')
+    assert _visible_dates(page) == ['261001']
+
+
+def test_note_can_be_edited_and_cancelled_without_losing_saved_text(page, live_server):
+    page.goto(URL)
+    cell = page.locator(f'{ROWS}[data-date="261001"] .note-cell')
+    for text in ('first note', 'corrected note'):
+        cell.click()
+        cell.locator('textarea').fill(text)
+        with page.expect_response(lambda r: r.url.endswith('/note') and r.request.method == 'PUT'):
+            cell.locator('button.save').click()
+        expect(cell.locator('.note-text')).to_have_text(text)
+    cell.click()
+    cell.locator('textarea').fill('discarded')
+    cell.get_by_role('button', name='Cancel', exact=True).click()
+    expect(cell.locator('.note-text')).to_have_text('corrected note')
+    page.reload()
+    expect(cell.locator('.note-text')).to_have_text('corrected note')
+
+
+def test_ads_success_renders_papers_as_text_and_safe_links(page):
+    page.route('**/api/ads/config', lambda r: r.fulfill(json={'token_configured': True}))
+    page.route('**/api/targets/publications**', lambda r: r.fulfill(json={'ok': True, 'papers': [
+        {'title': ['<b>A transit study</b>'], 'bibcode': '2026Test', 'author': ['A. Observer'], 'year': '2026'},
+    ]}))
+    page.goto(URL)
+    page.locator('#ads-details > summary').click()
+    page.click('#ads-search-btn')
+    expect(page.locator('#ads-results-list')).to_contain_text('<b>A transit study</b>')
+    assert page.locator('#ads-results-list b').count() == 0
+    expect(page.locator('#ads-results-list a').first).to_have_attribute('href', 'https://ui.adsabs.harvard.edu/abs/2026Test/abstract')

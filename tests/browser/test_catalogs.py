@@ -7,6 +7,9 @@ across groups; the state lives in the URL hash so it survives a reload.
 
 from __future__ import annotations
 
+from playwright.sync_api import expect
+import pytest
+
 
 def _rows(page, tbody: str) -> list[str]:
     return page.eval_on_selector_all(
@@ -99,3 +102,41 @@ def test_nexsci_search_and_reload(page):
     page.wait_for_function("location.hash.includes('Transit')")
     page.reload()
     assert "active" in page.get_attribute('.nx-chip[data-group="method"][data-key="Transit"]', "class")
+
+
+@pytest.mark.parametrize(('url', 'prefix', 'tbody'), [('/toi', 'toi', '#toi-tbody'), ('/nexsci', 'nx', '#nx-tbody')])
+def test_catalog_sort_changes_multiple_rows_and_target_link_navigates(page, url, prefix, tbody):
+    page.goto(url)
+    expect(page.locator(f'{tbody} tr').first).to_be_visible()
+    header = page.locator(f'{tbody}').locator('xpath=ancestor::table/thead/tr[1]/th').filter(has_text='Period').first
+    header.click()
+    first = _rows(page, tbody)
+    assert len(first) >= 3
+    header.click()
+    assert _rows(page, tbody) == list(reversed(first))
+    if prefix == 'toi':
+        link = page.locator(f'{tbody} a[href*="exofop.ipac.caltech.edu"]').first
+        assert 'target.php?id=' in link.get_attribute('href')
+    else:
+        link = page.locator(f'{tbody} a[href^="/target?"]').first
+        with page.context.expect_page() as popup:
+            link.click()
+        popup.value.wait_for_load_state()
+        assert '/target?name=' in popup.value.url
+
+
+@pytest.mark.parametrize('url', ['/toi', '/nexsci'])
+def test_catalog_axis_and_log_controls_are_restored_from_url(page, url):
+    page.goto(url)
+    expect(page.locator('#plot-x')).to_be_visible()
+    for axis in ('x', 'y'):
+        select = page.locator(f'#plot-{axis}')
+        values = select.locator('option').evaluate_all('os => os.map(o => o.value)')
+        chosen = next(v for v in values if v != select.input_value())
+        select.select_option(chosen)
+        page.locator(f'#plot-log{axis}').check()
+    saved = {axis: page.input_value(f'#plot-{axis}') for axis in ('x', 'y')}
+    page.reload()
+    for axis in ('x', 'y'):
+        expect(page.locator(f'#plot-{axis}')).to_have_value(saved[axis])
+        expect(page.locator(f'#plot-log{axis}')).to_be_checked()

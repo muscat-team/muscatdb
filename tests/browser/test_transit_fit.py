@@ -8,10 +8,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from playwright.sync_api import expect
 import pytest
 
 from tests.browser.helpers import reveal
 from tests.browser.seed import FIT_RUN_ID
+
 
 DATASET = "inst=muscat3&date=261001&target=TOI-1000"
 URL = f"/transit-fit?{DATASET}"
@@ -184,3 +186,193 @@ def test_delete_fit_after_confirmation(page, fitter):
     with page.expect_response("**/api/transit-fit/delete"):
         page.click("#delete-confirm-btn")
     assert fitter["delete"][-1]["run_id"] == FIT_RUN_ID
+
+
+def _ready_to_fit(page):
+    page.goto(URL)
+    page.wait_for_load_state('networkidle')
+    _query_toi_catalog(page)
+    _complete_priors(page)
+
+
+def test_full_run_cancel_and_terminal_log(page, fitter, log_stream):
+    _ready_to_fit(page)
+    if page.locator('#run-mode-select').count():
+        reveal(page, '#run-mode-select')
+        page.select_option('#run-mode-select', 'new')
+    with page.expect_response('**/api/transit-fit/run') as response:
+        page.click('#run-fit-btn')
+    assert response.value.ok
+    assert fitter['start'][-1]['test_run'] is False
+    log_stream('pending', '')
+    expect(page.locator('#run-log')).to_contain_text('Queued')
+    log_stream('running', 'sampling chain 1')
+    expect(page.locator('#run-log')).to_contain_text('sampling chain 1')
+    with page.expect_response('**/api/transit-fit/cancel'):
+        page.click('#cancel-btn')
+    assert fitter['cancel'][-1]['run_id'] == FIT_RUN_ID
+    log_stream('cancelled', 'last sampler output')
+    expect(page.locator('#run-log')).to_contain_text('last sampler output')
+    expect(page.locator('#run-log')).to_contain_text('cancelled')
+    expect(page.locator('#run-fit-btn')).to_be_enabled()
+
+
+def test_log_probability_uses_selected_curves_and_recovers_after_failure(page, monkeypatch):
+    from muscat_db import transit_fit
+    calls = []
+    def compute(*args, **kwargs):
+        calls.append(kwargs)
+        return {'ok': True, 'logp': -123.456, 'text': 'logP= -123.456'}
+    monkeypatch.setattr(transit_fit, 'compute_logp', compute)
+    _ready_to_fit(page)
+    page.locator('.csv-checkbox').nth(1).uncheck()
+    page.click('#calc-logp-btn')
+    expect(page.locator('#logp-result')).to_have_text('logP= -123.456')
+    assert [Path(c).name for c in calls[-1]['selected_csvs']] == CSVS[:1]
+    page.problems.allowed += ['HTTP 400: POST /api/transit-fit/logp', 'status of 400']
+    monkeypatch.setattr(transit_fit, 'compute_logp', lambda *a, **k: {'ok': False, 'error': 'invalid model'})
+    page.click('#calc-logp-btn')
+    expect(page.locator('#opt-error')).to_contain_text('invalid model')
+    expect(page.locator('#calc-logp-btn')).to_be_enabled()
+
+
+def test_added_planet_can_be_removed_and_other_priors_are_preserved(page):
+    _ready_to_fit(page)
+    period = page.input_value('#planet-period-planet-card-0')
+    reveal(page, '#add-planet-btn')
+    page.click('#add-planet-btn')
+    expect(page.locator('.planet-card')).to_have_count(2)
+    page.locator('.planet-card').nth(1).locator('.planet-remove-btn').click()
+    expect(page.locator('.planet-card')).to_have_count(1)
+    expect(page.locator('#planet-period-planet-card-0')).to_have_value(period)
+
+
+def test_no_selected_curves_cannot_start_a_fit(page):
+    _ready_to_fit(page)
+    page.problems.allowed += ['HTTP 400: POST /api/transit-fit/run', 'status of 400']
+    page.click('#deselect-all-csvs')
+    with page.expect_response('**/api/transit-fit/run') as response:
+        page.click('#run-test-btn')
+    assert response.value.status == 400
+    expect(page.locator('#run-log')).to_contain_text('No lightcurves selected')
+    expect(page.locator('#run-test-btn')).to_be_enabled()
+
+
+def test_query_failure_preserves_entered_priors_and_allows_retry(page):
+    _ready_to_fit(page)
+    period = page.input_value('#planet-period-planet-card-0')
+    page.route('**/api/transit-fit/query-archive**', lambda r: r.fulfill(json={'ok': False, 'error': 'catalog unavailable'}))
+    page.click('#archive-query-btn')
+    expect(page.locator('#message-modal-text')).to_contain_text('catalog unavailable')
+    page.click('#message-modal-ok')
+    expect(page.locator('#planet-period-planet-card-0')).to_have_value(period)
+    expect(page.locator('#archive-query-btn')).to_be_enabled()
+
+
+def test_failed_launch_reenables_run_buttons(page):
+    _ready_to_fit(page)
+    page.route('**/api/transit-fit/run', lambda r: r.fulfill(json={'ok': False, 'error': 'worker unavailable'}))
+    page.click('#run-test-btn')
+    expect(page.locator('#run-log')).to_contain_text('worker unavailable')
+    expect(page.locator('#run-test-btn')).to_be_enabled()
+    expect(page.locator('#run-fit-btn')).to_be_enabled()
+
+
+def test_delete_fit_can_be_cancelled(page, fitter):
+    page.goto(URL)
+    page.click('#delete-btn')
+    page.click('#delete-cancel-btn')
+    expect(page.locator('#delete-confirm-overlay')).not_to_be_visible()
+    assert fitter['delete'] == []
+
+
+def test_missing_lightcurves_links_back_to_photometry(page):
+    page.goto('/transit-fit?inst=sinistro&date=261003&target=TOI-1000')
+    expect(page.get_by_role('heading', name='No Photometry CSVs Found')).to_be_visible()
+    page.get_by_role('link', name='Go to Photometry Page').click()
+    page.wait_for_url('**/photometry?**')
+
+
+def test_multiple_planets_submit_distinct_priors_and_restore_after_reload(page, fitter):
+    _ready_to_fit(page)
+    reveal(page, '#add-planet-btn')
+    page.click('#add-planet-btn')
+    second = page.locator('.planet-card').nth(1)
+    for selector, value in {
+        '.planet-period': '4.34,0.001', '.planet-dur': '3,0.1',
+        '.planet-t0': '2461314.87,0.001', '.planet-b': '0,1', '.planet-ror': '0.02,0.1',
+    }.items():
+        control = second.locator(selector)
+        control.fill(value)
+        control.press('Tab')
+    with page.expect_response('**/api/transit-fit/run'):
+        page.click('#run-test-btn')
+    options = fitter['start'][-1]['options']
+    assert options['planets'] == 'b,c'
+    assert float(options['period_b']) == pytest.approx(2.17)
+    assert float(options['period_c']) == pytest.approx(4.34)
+    page.reload()
+    expect(page.locator('.planet-card')).to_have_count(2)
+    expect(page.locator('.planet-card').nth(1).locator('.planet-period')).to_have_value('4.34,0.001')
+
+
+def test_download_all_outputs_contains_the_fit_and_summary(page):
+    import zipfile
+    page.goto(URL)
+    with page.expect_download() as download:
+        page.get_by_role('link', name='Download all output', exact=False).click()
+    with zipfile.ZipFile(download.value.path()) as archive:
+        names = archive.namelist()
+        summary = next(n for n in names if n.endswith('summary.csv'))
+        assert any(n.endswith('fit.png') for n in names)
+        assert 't0[0],2461314.86,0.0004' in archive.read(summary).decode()
+
+
+
+def test_sampler_and_detrending_options_persist_and_reach_the_fitter(page, fitter):
+    _ready_to_fit(page)
+    flags = {
+        'spline': True, 'clip': True, 'chunk_offset': True,
+        'add_bias': True, 'quadratic': True, 'include_mean': False,
+        'plot_midtransit': False, 'plot_ingress_egress': False,
+    }
+    for key, checked in flags.items():
+        reveal(page, '#opt-' + key)
+        page.locator('#opt-' + key).set_checked(checked)
+    values = {
+        'tune': '600', 'draws': '800', 'chains': '2', 'cores': '2',
+        'spline_knots': '10', 'clip_nsig': '4', 'chunk_thresh': '0.5',
+        'trim_beg': '1', 'trim_end': '2',
+    }
+    for key, value in values.items():
+        reveal(page, '#opt-' + key)
+        page.fill('#opt-' + key, value)
+    page.goto('/jobs')
+    page.goto(URL)
+    for key, value in values.items():
+        expect(page.locator('#opt-' + key)).to_have_value(value)
+    for key, checked in flags.items():
+        assert page.is_checked('#opt-' + key) == checked
+    with page.expect_response('**/api/transit-fit/run'):
+        page.click('#run-test-btn')
+    options = fitter['start'][-1]['options']
+    assert {key: options[key] for key in values} == values
+    assert {key: options[key] for key in flags} == {key: str(value).lower() for key, value in flags.items()}
+
+
+def test_run_selector_loads_the_selected_fit_results(page, live_server):
+    import shutil
+    import yaml
+    parent = live_server.root / 'timer/muscat3/261001/TOI-1000'
+    extra = parent / 'fit-extra'
+    shutil.copytree(parent / FIT_RUN_ID, extra)
+    (extra / 'meta.yaml').write_text(yaml.safe_dump({'run_id': 'fit-extra', 'run_name': 'another fit', 'mode': 'full', 'site': 'ogg'}))
+    (extra / 'out/summary.csv').write_text('parameter,mean,std\nt0[0],2461314.87,0.0005\n')
+    try:
+        page.goto(URL)
+        page.locator('a.site-chip', has_text='another fit').click()
+        page.wait_for_url('**run=fit-extra')
+        expect(page.locator('body')).to_contain_text('2461314.87')
+        assert 'fit-extra' in page.locator('img[src*="/fit.png"]').first.get_attribute('src')
+    finally:
+        shutil.rmtree(extra)
