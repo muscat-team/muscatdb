@@ -44,7 +44,7 @@ from pathlib import Path
 
 from muscat_db import jobs, database
 from muscat_db.job_store import current_instance_id, current_owner, get_job_store
-from muscat_db.job_limits import JobLimitExceeded, claim_caps, enqueue_caps, limit_refusal
+from muscat_db.job_limits import JobLimitExceeded, claim_caps, claim_caps_for_row, enqueue_caps, limit_refusal, params_with_running_cap
 from muscat_db.ref_time import is_valid_ref_time
 from muscat_db.instruments import INSTRUMENTS
 from muscat_db.cache import register_cache
@@ -369,6 +369,43 @@ def prose_version() -> str:
     return _PROSE_VERSION
 
 
+def _lookup_frames_inputs(inst: str, date: str, target: str) -> tuple[list[dict] | None, str | None]:
+    """A run's frame inputs, read from the catalog (``product_record.frames_inputs``)."""
+    from muscat_db import product_record
+
+    db = database.db_path()
+    return product_record.frames_inputs(db, inst, date, target, product_record.target_normalizer(db))
+
+
+def frames_inputs_param(inst: str, date: str, target: str) -> dict | None:
+    """The frame inputs a queued row carries to whichever worker launches it.
+
+    Computed where the row is queued (the web process on ut2, which has the
+    catalog on local disk), so the worker never opens the catalog (#298).
+    ``None`` when the lookup fails; the worker then leaves the record for
+    ``backfill-products`` instead of guessing.
+    """
+    try:
+        inputs, note = _lookup_frames_inputs(inst, date, target)
+    except Exception:  # a provenance lookup must never fail a launch
+        logger.warning("could not look up frame inputs for %s/%s/%s", inst, date, target, exc_info=True)
+        return None
+    return {"inputs": inputs, "note": note}
+
+
+def _frames_from_params(params: dict) -> dict | None:
+    """The ``frames_inputs`` a queued row carries, or ``None`` if absent or malformed."""
+    frames = params.get("frames_inputs")
+    if not isinstance(frames, dict):
+        return None
+    inputs, note = frames.get("inputs"), frames.get("note")
+    if inputs is not None and not (isinstance(inputs, list) and all(isinstance(i, dict) for i in inputs)):
+        return None
+    if note is not None and not isinstance(note, str):
+        return None
+    return {"inputs": inputs, "note": note}
+
+
 def _write_run_product(
     rdir: Path,
     *,
@@ -382,15 +419,31 @@ def _write_run_product(
     telescope: str,
     mode: str,
     run_name: str,
+    frames: dict | None = None,
 ) -> None:
-    """Record a photometry run's inputs, settings, versions and author (#208)."""
+    """Record a photometry run's inputs, settings, versions and author (#208).
+
+    *frames* is the ``{"inputs", "note"}`` pair a queued row carries (see
+    :func:`frames_inputs_param`). Without it the inputs are looked up in the
+    catalog, unless this process may not open it (a worker on a shared control
+    plane, #298): the record is then left unwritten, because ``muscat-db
+    backfill-products`` fills an absent record from the catalog but never
+    rewrites one that says its inputs are undetermined.
+    """
     from muscat_db import __version__
     from muscat_db import product_record
 
-    db = database.db_path()
-    inputs, note = product_record.frames_inputs(
-        db, inst, date, target, product_record.target_normalizer(db)
-    )
+    if frames is not None:
+        inputs, note = frames["inputs"], frames["note"]
+    elif database.catalog_allowed():
+        inputs, note = _lookup_frames_inputs(inst, date, target)
+    else:
+        logger.warning(
+            "photometry run %s/%s/%s was queued without its frame inputs and this "
+            "worker cannot read the catalog; leaving its product record for "
+            "`muscat-db backfill-products`", inst, date, target,
+        )
+        return
     tool_versions = {"muscat_db": __version__, "prose": prose_version()}
     if os.environ.get("MUSCAT_PROSE_FROZEN_CONFIG") == "1":
         from muscat_db._prose_launcher import snapshot_bytes, SNAPSHOT_SHA256
@@ -1890,6 +1943,15 @@ def start_run(
                 "error": "full runs are disabled on this instance (MUSCAT_MAX_FULL_JOBS=0); run a test instead",
             }
 
+        # The row carries its frame inputs, looked up here on the catalog's own
+        # host, so a worker that launches or relaunches it never opens the
+        # catalog (#298).
+        frames = frames_inputs_param(inst, date, target)
+        run_params = {"test_run": test_run, "options": opts, "run_id": run_id, "site": site, "telescope": telescope, "mode": mode, "run_name": run_name}
+        if frames is not None:
+            run_params["frames_inputs"] = frames
+        run_params_json = json.dumps(run_params, separators=(",", ":"))
+
         # Claim a cross-process concurrency slot for full jobs (test jobs are
         # capped above instead). Not yet claimed here just means queue below.
         claimed_slot = False
@@ -1905,7 +1967,7 @@ def start_run(
                     inst=inst, date=date, target=target,
                     started_at=time.time(),
                     run_type=run_type,
-                    params=json.dumps({"test_run": test_run, "options": opts, "run_id": run_id, "site": site, "telescope": telescope, "mode": mode, "run_name": run_name}, separators=(",", ":")),
+                    params=params_with_running_cap(run_params_json, user_name),
                     run_id=run_id,
                     run_name=run_name,
                     user_name=user_name,
@@ -1934,7 +1996,7 @@ def start_run(
         rdir.mkdir(parents=True, exist_ok=True)
 
         _write_run_meta(rdir, inst=inst, date=date, target=target, run_id=run_id, site=site, telescope=telescope, mode=mode, run_name=run_name, run_type=run_type)
-        _write_run_product(rdir, inst=inst, date=date, target=target, opts=opts, test_run=test_run, user_name=user_name, site=site, telescope=telescope, mode=mode, run_name=run_name)
+        _write_run_product(rdir, inst=inst, date=date, target=target, opts=opts, test_run=test_run, user_name=user_name, site=site, telescope=telescope, mode=mode, run_name=run_name, frames=frames)
         cmd = build_command(inst, date, target, opts, test_run=test_run, run_id=run_id)
         log_path = _run_log_path(rdir, inst, date, target, run_id)
         logf = open(log_path, "w")
@@ -1981,7 +2043,7 @@ def start_run(
                 elapsed=0,
                 started_at=_JOBS[key].started_at,
                 run_type=run_type,
-                params=json.dumps({"test_run": test_run, "options": opts, "run_id": run_id, "site": site, "telescope": telescope, "mode": mode, "run_name": run_name}, separators=(",", ":")),
+                params=run_params_json,
                 run_id=run_id,
                 run_name=run_name,
                 user_name=user_name,
@@ -2640,7 +2702,7 @@ def sync_jobs() -> None:
                 # transaction, so two workers draining the same pending row can
                 # never both launch it, even if a reconcile_slots pass elsewhere
                 # frees the slot before the save(state="running") below.
-                if not store.claim_slot("photometry", candidate_key, _MAX_FULL_JOBS, **claim_caps(entry.get("user_name")), pending_key=entry["key"]):
+                if not store.claim_slot("photometry", candidate_key, _MAX_FULL_JOBS, **claim_caps_for_row(entry), pending_key=entry["key"]):
                     continue
                 try:
                     p = json.loads(entry.get("params") or "{}")
@@ -2669,7 +2731,7 @@ def sync_jobs() -> None:
                     cmd = build_command(inst, date, target, opts, test_run=test_run, run_id=run_id)
                     rdir.mkdir(parents=True, exist_ok=True)
                     _write_run_meta(rdir, inst=inst, date=date, target=target, run_id=run_id, site=site, telescope=telescope, mode=mode, run_name=run_name, run_type=run_type)
-                    _write_run_product(rdir, inst=inst, date=date, target=target, opts=opts, test_run=test_run, user_name=entry.get("user_name"), site=site, telescope=telescope, mode=mode, run_name=run_name)
+                    _write_run_product(rdir, inst=inst, date=date, target=target, opts=opts, test_run=test_run, user_name=entry.get("user_name"), site=site, telescope=telescope, mode=mode, run_name=run_name, frames=_frames_from_params(p))
                 except Exception as exc:
                     # The claim already moved the row to running: leave it
                     # terminal, not for orphan reconcile, which could trust a

@@ -26,7 +26,7 @@ import yaml
 from muscat_db import jobs, database
 from muscat_db._optimize_helper import DONE_MARKER as _OPTIMIZE_DONE_MARKER
 from muscat_db.job_store import current_instance_id, current_owner, get_job_store
-from muscat_db.job_limits import JobLimitExceeded, claim_caps, enqueue_caps, limit_refusal
+from muscat_db.job_limits import JobLimitExceeded, claim_caps, claim_caps_for_row, enqueue_caps, limit_refusal, params_with_running_cap
 from muscat_db import __meta__, __muscatdb_version__, __version__
 from muscat_db.instruments import INSTRUMENTS
 from muscat_db.photometry import (
@@ -1640,7 +1640,7 @@ def start_fit(
                     inst=inst, date=date, target=target, run_id=run_id,
                     started_at=time.time(),
                     run_type=run_type,
-                    params=params_json,
+                    params=params_with_running_cap(params_json, user_name),
                     run_name=run_name,
                     user_name=user_name,
                     **enqueue_caps(user_name),
@@ -2622,7 +2622,7 @@ def sync_jobs() -> None:
                 # transaction, so two workers draining the same pending row can
                 # never both launch it, even if a reconcile_slots pass elsewhere
                 # frees the slot before the save(state="running") below.
-                if not store.claim_slot("transit_fit", key, _MAX_FULL_JOBS, **claim_caps(entry.get("user_name")), pending_key=entry["key"]):
+                if not store.claim_slot("transit_fit", key, _MAX_FULL_JOBS, **claim_caps_for_row(entry), pending_key=entry["key"]):
                     continue
                 try:
                     rdir.mkdir(parents=True, exist_ok=True)
