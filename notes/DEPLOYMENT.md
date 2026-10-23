@@ -841,6 +841,9 @@ Roll out only after the PR is merged, released and taken by the deploy host:
 5. Restart the production web process in `muscatdbgui`, verify `/healthz`, then run
    one queued job per migrated pipeline and check its log and `_product.json`.
    Pinned engines now record `version+git.<full SHA>` in the existing version fields.
+   Editable (dev checkout) engines record `version+git.<HEAD SHA>.editable`, with
+   `.dirty` appended when tracked files differ from HEAD; a `.editable` version in a
+   production `_product.json` means the pinned env was not selected.
 
 Rollback: stop admitting new work and let active jobs finish, restore the recorded
 web exports and worker `engine_envs` (an operator-local config can select the old
