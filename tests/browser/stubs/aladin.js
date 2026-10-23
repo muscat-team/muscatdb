@@ -7,6 +7,7 @@
       kind: kind,
       add: function () { calls.push({ fn: kind + '.add' }); },
       addFootprints: function () { calls.push({ fn: kind + '.addFootprints' }); },
+      addSources: function (sources) { calls.push({ fn: kind + '.addSources', n: sources.length }); },
       removeAll: function () { calls.push({ fn: kind + '.removeAll' }); },
       show: function () {}, hide: function () {}, isShowing: true,
     };
