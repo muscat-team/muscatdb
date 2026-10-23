@@ -428,6 +428,26 @@ CREATE TABLE IF NOT EXISTS group_grants (
            OR target IS NOT NULL OR date_from IS NOT NULL)
 );
 CREATE INDEX IF NOT EXISTS idx_group_grants_group ON group_grants(groupname);
+
+-- Revoked grants, moved here from group_grants (issue #228, step 4) so the
+-- history of who could see what survives. A separate table rather than a
+-- revoked_at column on group_grants: no reader of the live grants can forget
+-- to filter one out. ``id`` is the grant's own id, which AUTOINCREMENT never
+-- reuses.
+CREATE TABLE IF NOT EXISTS group_grants_revoked (
+    id          INTEGER PRIMARY KEY,
+    groupname   TEXT NOT NULL COLLATE NOCASE,
+    proposal_id TEXT COLLATE NOCASE,
+    instrument  TEXT COLLATE NOCASE,
+    target      TEXT,
+    date_from   TEXT,
+    date_to     TEXT,
+    note        TEXT NOT NULL DEFAULT '',
+    granted_by  TEXT NOT NULL DEFAULT '',
+    granted_at  TEXT NOT NULL DEFAULT '',
+    revoked_by  TEXT NOT NULL DEFAULT '',
+    revoked_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 # Idempotent schema migrations for columns added after initial deployment.
@@ -927,6 +947,7 @@ _APP_OWNED_TABLES = (
     "group_members",
     "group_exclusions",
     "group_grants",
+    "group_grants_revoked",
 )
 
 
@@ -950,6 +971,25 @@ def _restore_table(conn: sqlite3.Connection, table: str, rows: list[dict]) -> No
             f"INSERT OR REPLACE INTO {table} ({','.join(cols)}) VALUES ({placeholders})",
             tuple(row[c] for c in cols),
         )
+
+
+def _restore_sequences(conn: sqlite3.Connection, sequences: list[dict]) -> None:
+    """Keep app-owned AUTOINCREMENT IDs above every previously issued ID.
+
+    Restoring rows only advances SQLite's sequence to the largest surviving
+    ID. Deleted or archived IDs must not become available again after a build.
+    sqlite_sequence has no unique constraint on name, so update before insert.
+    """
+    for row in sequences:
+        cur = conn.execute(
+            "UPDATE sqlite_sequence SET seq = MAX(seq, ?) WHERE name = ?",
+            (row["seq"], row["name"]),
+        )
+        if cur.rowcount == 0:
+            conn.execute(
+                "INSERT INTO sqlite_sequence (name, seq) VALUES (?, ?)",
+                (row["name"], row["seq"]),
+            )
 
 
 def _page_size(db_path: str) -> int:
@@ -998,6 +1038,13 @@ def _read_app_owned_tables(db_path: str) -> dict[str, list[dict]]:
                     continue
                 rows = old_conn.execute(f"SELECT * FROM {table}").fetchall()
                 preserved[table] = [dict(r) for r in rows]
+            # Read sequence counters in the same snapshot as their rows. The
+            # ingest tables are rebuilt, so preserve only app-owned counters.
+            if "sqlite_sequence" in existing:
+                preserved["sqlite_sequence"] = [
+                    dict(r) for r in old_conn.execute("SELECT name, seq FROM sqlite_sequence")
+                    if r["name"] in _APP_OWNED_TABLES
+                ]
         finally:
             old_conn.rollback()
     return preserved
@@ -1153,6 +1200,7 @@ def build_db(db_path: str, progress=None) -> int:
         preserved = _read_app_owned_tables(db_path)
         for table in _APP_OWNED_TABLES:
             _restore_table(conn, table, preserved.get(table) or [])
+        _restore_sequences(conn, preserved.get("sqlite_sequence") or [])
         conn.commit()
         conn.close()
 
