@@ -1167,7 +1167,8 @@
           .then(res => {
             const ct = res.headers.get('content-type') || '';
             if (!ct.includes('json')) {
-              return res.text().then(body => { throw new Error(body.slice(0, 200)); });
+              // A proxy error page (e.g. nginx 504) is HTML; show its status, not its markup.
+              throw new Error('HTTP ' + res.status + (res.statusText ? ' ' + res.statusText : ''));
             }
             return res.json().then(data => ({ ok: res.ok, data: data }));
           })

@@ -118,6 +118,7 @@ from muscat_db import http_client
 from muscat_db import chat
 from muscat_db.catalog import (
     _adql_literal,
+    _angular_sep_arcsec,
     _ads_token_for_request,
     _catalog_source_cache_key,
     _db_mtime,
@@ -1448,6 +1449,54 @@ def api_target_lamost_rv(name: str = ""):
 # ESO Science Archive TAP constants
 _ESO_TOKEN_URL = "https://www.eso.org/sso/oidc/token"
 _ESO_TAP_URL = "https://archive.eso.org/tap_obs/sync"
+_ESO_CONE_RADIUS_DEG = 1.0 / 60.0
+# nginx's default proxy_read_timeout is 60 s; past it the browser gets an HTML
+# 504 instead of our JSON. Bound the entire lookup, including alias/coordinate
+# resolution: HTTPX's per-operation timeouts are not wall-clock deadlines.
+_ESO_TOTAL_TIMEOUT_S = 55.0
+_ESO_TOKEN_TIMEOUT_S = 8.0
+_ESO_NAME_TIMEOUT_S = 20.0
+_ESO_CONE_TIMEOUT_S = 12.0
+
+
+def _eso_cone_box_where(ra_deg: float, dec_deg: float, radius_deg: float) -> str:
+    """ADQL WHERE clause for an s_ra/s_dec bounding box enclosing a cone.
+
+    ESO's ObsCore answers s_ra/s_dec range filters from an index in ~1 s, while
+    CONTAINS(POINT('ICRS', s_ra, s_dec), CIRCLE(...)) is not index-backed and
+    routinely exceeds 120 s. The box over-selects its corners, so callers trim
+    rows to the true circle afterwards.
+    """
+    dec_lo = max(dec_deg - radius_deg, -90.0)
+    dec_hi = min(dec_deg + radius_deg, 90.0)
+    dec_clause = f"s_dec BETWEEN {dec_lo:.6f} AND {dec_hi:.6f}"
+    # RA half-width grows as 1/cos(dec); use the box edge nearest the pole.
+    cos_edge = math.cos(math.radians(max(abs(dec_lo), abs(dec_hi))))
+    if cos_edge <= 0.0 or radius_deg / cos_edge >= 180.0:
+        return dec_clause
+    half_width = radius_deg / cos_edge
+    ra_lo, ra_hi = ra_deg - half_width, ra_deg + half_width
+    if ra_lo < 0.0:
+        ra_clause = f"(s_ra >= {ra_lo + 360.0:.6f} OR s_ra <= {ra_hi:.6f})"
+    elif ra_hi >= 360.0:
+        ra_clause = f"(s_ra >= {ra_lo:.6f} OR s_ra <= {ra_hi - 360.0:.6f})"
+    else:
+        ra_clause = f"s_ra BETWEEN {ra_lo:.6f} AND {ra_hi:.6f}"
+    return f"{ra_clause} AND {dec_clause}"
+
+
+def _rows_within_radius(rows: list[dict], ra_deg: float, dec_deg: float, radius_deg: float) -> list[dict]:
+    """Keep TAP rows whose s_ra/s_dec lie within radius_deg of (ra_deg, dec_deg)."""
+    limit_arcsec = radius_deg * 3600.0
+    kept = []
+    for row in rows:
+        try:
+            sep = _angular_sep_arcsec(ra_deg, dec_deg, float(row["s_ra"]), float(row["s_dec"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if sep <= limit_arcsec:
+            kept.append(row)
+    return kept
 
 # LAMOST DR11 TAP constants
 _LAMOST_TAP_URL = "https://www.lamost.org/dr11/v2.0/voservice/tap"
@@ -1456,6 +1505,18 @@ _LAMOST_ARCHIVE_TABLE = "public.med_combined"
 
 @target_router.get("/eso-archive", response_class=JSONResponse)
 async def api_target_eso_archive(name: str = "", request: Request = None):
+    """Return ESO archive results or a JSON timeout before nginx's deadline."""
+    try:
+        async with asyncio.timeout(_ESO_TOTAL_TIMEOUT_S):
+            return await _query_eso_archive(name, request)
+    except TimeoutError:
+        return JSONResponse(
+            {"ok": False, "error": "ESO archive lookup timed out; please try again later."},
+            status_code=504,
+        )
+
+
+async def _query_eso_archive(name: str, request: Request | None):
     """Query ESO Science Archive TAP for observations of the given target.
 
     Strategy:
@@ -1470,12 +1531,12 @@ async def api_target_eso_archive(name: str = "", request: Request = None):
         return JSONResponse({"ok": False, "error": "Target name is required"}, status_code=400)
 
     # Resolve credentials: per-user > global env fallback > anonymous
-    user = _request_user(request) if request else None
+    user = await asyncio.to_thread(_request_user, request) if request else None
     eso_username: str | None = None
     eso_password: str | None = None
     if user:
         try:
-            eso_username, eso_password = get_user_eso_credentials(user)
+            eso_username, eso_password = await asyncio.to_thread(get_user_eso_credentials, user)
         except UserSettingsError:
             pass
     if not (eso_username and eso_password):
@@ -1496,7 +1557,7 @@ async def api_target_eso_archive(name: str = "", request: Request = None):
                     "username": eso_username,
                     "password": eso_password,
                 },
-                timeout=15.0,
+                timeout=_ESO_TOKEN_TIMEOUT_S,
             )
             if tok_resp.status_code == 200:
                 tok_data = tok_resp.json()
@@ -1566,7 +1627,7 @@ async def api_target_eso_archive(name: str = "", request: Request = None):
     rows: list = []
     query_method = "name"
     try:
-        name_data = await _tap_query(adql_name, timeout=30.0)
+        name_data = await _tap_query(adql_name, timeout=_ESO_NAME_TIMEOUT_S)
         columns, rows = _parse_tap(name_data)
     except httpx.HTTPStatusError as exc:
         eso_msg = ""
@@ -1589,10 +1650,10 @@ async def api_target_eso_archive(name: str = "", request: Request = None):
         )
 
     # --- Step 2: coordinate cone-search, only when the name query found nothing ---
-    # Lazy on purpose: the spatial CONTAINS() query is far more expensive on ESO's
-    # side than the name query, so we do not issue it on every page load (AGENTS.md:
-    # do not overload external databases). Retry once on timeout with a generous
-    # timeout, and surface a warning instead of silently implying "no observations".
+    # Keep the fallback lazy to avoid unnecessary ESO queries. The indexed box
+    # narrows the spatial work; DISTANCE filters corners before TOP 200, so
+    # newer off-circle rows cannot hide older observations inside the cone.
+    # Retry once on an HTTP timeout, within the whole-lookup deadline.
     cone_warning = ""
     if not rows:
         try:
@@ -1602,18 +1663,19 @@ async def api_target_eso_archive(name: str = "", request: Request = None):
             resolved = None
         if resolved:
             ra_deg, dec_deg, coord_source = resolved
-            radius_deg = 1.0 / 60.0  # 1 arcmin
+            radius_deg = _ESO_CONE_RADIUS_DEG
             adql_cone = (
                 _SELECT
-                + "WHERE CONTAINS("
-                + "POINT('ICRS', s_ra, s_dec), "
-                + f"CIRCLE('ICRS', {ra_deg}, {dec_deg}, {radius_deg})"
-                + ") = 1 ORDER BY t_min DESC"
+                + f"WHERE {_eso_cone_box_where(ra_deg, dec_deg, radius_deg)} "
+                + "AND DISTANCE(POINT('ICRS', s_ra, s_dec), "
+                + f"POINT('ICRS', {ra_deg}, {dec_deg})) <= {radius_deg} "
+                + "ORDER BY t_min DESC"
             )
             for attempt in range(2):
                 try:
-                    cone_data = await _tap_query(adql_cone, timeout=120.0)
-                    columns, rows = _parse_tap(cone_data)
+                    cone_data = await _tap_query(adql_cone, timeout=_ESO_CONE_TIMEOUT_S)
+                    columns, box_rows = _parse_tap(cone_data)
+                    rows = _rows_within_radius(box_rows, ra_deg, dec_deg, radius_deg)
                     if rows:
                         query_method = f"cone ({coord_source}, 1 arcmin)"
                     cone_warning = ""
