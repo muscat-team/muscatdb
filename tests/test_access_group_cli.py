@@ -305,3 +305,42 @@ def test_explain_flags_a_grant_that_matches_nothing(db):
     assert [g["target"] for g in dead] == ["NO-SUCH-TARGET"]
     result = CliRunner().invoke(cli_app, ["access", "explain", "alice"])
     assert "NO-SUCH-TARGET" in _text(result) and "matches no observation" in _text(result)
+
+
+@pytest.mark.parametrize("revoke_all", [False, True])
+def test_rebuilt_database_does_not_reuse_revoked_grant_ids(db, monkeypatch, revoke_all):
+    from muscat_db import database
+
+    # Exercise the actual nightly rebuild without scanning the host's obslogs.
+    monkeypatch.setattr(database, "_discover_csv_jobs", lambda: [])
+    assert _run("create", "team").exit_code == 0
+    for target in ("first", "second"):
+        result = _run("grant", "team", "--target", target)
+        assert result.exit_code == 0, result.output
+    ids = _grant_ids(db, "team")
+    revoked = ids if revoke_all else ids[-1:]
+    for grant_id in revoked:
+        result = _run("revoke", str(grant_id), "--by", "first-admin")
+        assert result.exit_code == 0, result.output
+
+    database.build_db(db)
+    result = _run("grant", "team", "--target", "third")
+    assert result.exit_code == 0, result.output
+    new_id = max(_grant_ids(db, "team"))
+    assert new_id > max(ids), "a rebuilt database reused a revoked grant ID"
+    result = _run("revoke", str(new_id), "--by", "second-admin")
+    assert result.exit_code == 0, result.output
+
+    # A second rebuild must preserve both the audit history and the sequence,
+    # including when no live grants remain to set AUTOINCREMENT's floor.
+    database.build_db(db)
+    result = _run("grant", "team", "--target", "fourth")
+    assert result.exit_code == 0, result.output
+    assert max(_grant_ids(db, "team")) > new_id
+    with sqlite3.connect(db) as conn:
+        history = conn.execute(
+            "SELECT id, revoked_by FROM group_grants_revoked ORDER BY id"
+        ).fetchall()
+    assert history == [(grant_id, "first-admin") for grant_id in revoked] + [
+        (new_id, "second-admin")
+    ]

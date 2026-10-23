@@ -973,6 +973,25 @@ def _restore_table(conn: sqlite3.Connection, table: str, rows: list[dict]) -> No
         )
 
 
+def _restore_sequences(conn: sqlite3.Connection, sequences: list[dict]) -> None:
+    """Keep app-owned AUTOINCREMENT IDs above every previously issued ID.
+
+    Restoring rows only advances SQLite's sequence to the largest surviving
+    ID. Deleted or archived IDs must not become available again after a build.
+    sqlite_sequence has no unique constraint on name, so update before insert.
+    """
+    for row in sequences:
+        cur = conn.execute(
+            "UPDATE sqlite_sequence SET seq = MAX(seq, ?) WHERE name = ?",
+            (row["seq"], row["name"]),
+        )
+        if cur.rowcount == 0:
+            conn.execute(
+                "INSERT INTO sqlite_sequence (name, seq) VALUES (?, ?)",
+                (row["name"], row["seq"]),
+            )
+
+
 def _page_size(db_path: str) -> int:
     """Page size of the existing database at *db_path*, or SQLite's default."""
     if not os.path.exists(db_path):
@@ -1019,6 +1038,13 @@ def _read_app_owned_tables(db_path: str) -> dict[str, list[dict]]:
                     continue
                 rows = old_conn.execute(f"SELECT * FROM {table}").fetchall()
                 preserved[table] = [dict(r) for r in rows]
+            # Read sequence counters in the same snapshot as their rows. The
+            # ingest tables are rebuilt, so preserve only app-owned counters.
+            if "sqlite_sequence" in existing:
+                preserved["sqlite_sequence"] = [
+                    dict(r) for r in old_conn.execute("SELECT name, seq FROM sqlite_sequence")
+                    if r["name"] in _APP_OWNED_TABLES
+                ]
         finally:
             old_conn.rollback()
     return preserved
@@ -1174,6 +1200,7 @@ def build_db(db_path: str, progress=None) -> int:
         preserved = _read_app_owned_tables(db_path)
         for table in _APP_OWNED_TABLES:
             _restore_table(conn, table, preserved.get(table) or [])
+        _restore_sequences(conn, preserved.get("sqlite_sequence") or [])
         conn.commit()
         conn.close()
 
