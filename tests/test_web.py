@@ -860,9 +860,112 @@ def test_eso_archive_total_timeout_fits_inside_nginx_proxy_timeout(monkeypatch):
     r = TestClient(app).get("/api/targets/eso-archive?name=TOI5169")
 
     assert r.headers["content-type"].startswith("application/json")
-    # token + name + cone attempt(s); their worst-case sum is the endpoint's ceiling.
+    # Per-operation caps remain useful, but the outer deadline is the ceiling.
     assert sum(kw["timeout"] for kw in fake.kwargs) < 60.0
+    assert 0 < web._ESO_TOTAL_TIMEOUT_S < 60.0
     assert "timed out" in r.json().get("warning", "")
+
+
+def test_eso_archive_applies_circle_before_result_limit(monkeypatch):
+    import httpx
+    from muscat_db import catalog, http_client, web
+
+    # A service with 200 newer box-corner rows and one older in-circle row.
+    # Execute its generated SELECT against SQLite, translating only TAP's TOP
+    # syntax and geometry primitives, so filter/limit order is exercised.
+    db = sqlite3.connect(":memory:", check_same_thread=False)
+    db.create_function("POINT", 3, lambda frame, ra, dec: json.dumps([ra, dec]))
+    db.create_function(
+        "DISTANCE", 2,
+        lambda a, b: web._angular_sep_arcsec(*json.loads(a), *json.loads(b)) / 3600,
+    )
+    db.execute("ATTACH DATABASE ':memory:' AS ivoa")
+    db.execute("CREATE TABLE ivoa.ObsCore (target_name, instrument_name, obs_collection, "
+               "dataproduct_type, t_min, t_max, s_fov, proposal_id, obs_release_date, "
+               "obs_id, access_url, s_ra, s_dec)")
+    for i in range(201):
+        corner = i < 200
+        db.execute(
+            "INSERT INTO ivoa.ObsCore (target_name, t_min, s_ra, s_dec) VALUES (?, ?, ?, ?)",
+            ("Corner" if corner else "Inside", 10 if corner else 1,
+             100.015 if corner else 100., .015 if corner else 0.),
+        )
+
+    class QueryClient:
+        async def get(self, url, **kwargs):
+            adql = kwargs["params"]["QUERY"]
+            if "s_ra BETWEEN" not in adql:
+                result = _eso_tap_json_coords([])
+            else:
+                match = re.search(r"SELECT TOP (\d+)", adql)
+                sql = re.sub(r"SELECT TOP \d+", "SELECT", adql)
+                if match:
+                    sql += " LIMIT " + match.group(1)
+                cursor = db.execute(sql)
+                result = {"metadata": [{"name": col[0]} for col in cursor.description],
+                          "data": cursor.fetchall()}
+            return httpx.Response(200, json=result, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(catalog, "_resolve_all_aliases", lambda name: set())
+    monkeypatch.setattr(web, "_resolve_archive_coords", lambda name: (100., 0., "toi"))
+    monkeypatch.setattr(http_client, "get_async_client", QueryClient)
+    try:
+        body = TestClient(app).get("/api/targets/eso-archive?name=NONAME999").json()
+    finally:
+        db.close()
+    assert [row["target_name"] for row in body["rows"]] == ["Inside"]
+
+
+@pytest.mark.parametrize("slow_stage", ["token", "aliases", "name", "coords", "cone"])
+def test_eso_archive_deadline_covers_resolution_and_http(monkeypatch, slow_stage):
+    import asyncio
+    import time
+    import httpx
+    from muscat_db import catalog, http_client, web
+
+    def aliases(name):
+        if slow_stage == "aliases":
+            time.sleep(.15)
+        return set()
+
+    def coords(name):
+        if slow_stage == "coords":
+            time.sleep(.15)
+        return (100., 0., "toi")
+
+    cancelled = []
+    class SlowClient:
+        async def get(self, url, **kwargs):
+            query = kwargs.get("params", {}).get("QUERY", "")
+            stage = "token" if "oidc" in url else ("name" if "target_name LIKE" in query else "cone")
+            if stage == slow_stage:
+                try:
+                    await asyncio.sleep(.15)
+                except asyncio.CancelledError:
+                    cancelled.append(stage)
+                    raise
+            payload = {} if stage == "token" else _eso_tap_json_coords([])
+            return httpx.Response(200, json=payload, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(catalog, "_resolve_all_aliases", aliases)
+    monkeypatch.setattr(web, "_resolve_archive_coords", coords)
+    monkeypatch.setattr(http_client, "get_async_client", SlowClient)
+    # raising=False lets this regression run before the deadline is added.
+    monkeypatch.setattr(web, "_ESO_TOTAL_TIMEOUT_S", .03, raising=False)
+    monkeypatch.setenv("ESO_USERNAME", "test-user")
+    monkeypatch.setenv("ESO_PASSWORD", "test-password")
+
+    async def call():
+        started = time.monotonic()
+        response = await web.api_target_eso_archive(name="NONAME999")
+        return response, time.monotonic() - started
+
+    response, elapsed = asyncio.run(call())
+    assert response.status_code == 504
+    assert "timed out" in json.loads(response.body)["error"].lower()
+    assert elapsed < .12
+    if slow_stage in {"token", "name", "cone"}:
+        assert cancelled == [slow_stage]
 
 
 @pytest.mark.parametrize(

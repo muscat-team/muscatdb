@@ -1451,8 +1451,9 @@ _ESO_TOKEN_URL = "https://www.eso.org/sso/oidc/token"
 _ESO_TAP_URL = "https://archive.eso.org/tap_obs/sync"
 _ESO_CONE_RADIUS_DEG = 1.0 / 60.0
 # nginx's default proxy_read_timeout is 60 s; past it the browser gets an HTML
-# 504 instead of our JSON. Worst case is token + name + 2 cone attempts = 52 s,
-# leaving headroom for alias and coordinate resolution.
+# 504 instead of our JSON. Bound the entire lookup, including alias/coordinate
+# resolution: HTTPX's per-operation timeouts are not wall-clock deadlines.
+_ESO_TOTAL_TIMEOUT_S = 55.0
 _ESO_TOKEN_TIMEOUT_S = 8.0
 _ESO_NAME_TIMEOUT_S = 20.0
 _ESO_CONE_TIMEOUT_S = 12.0
@@ -1504,6 +1505,18 @@ _LAMOST_ARCHIVE_TABLE = "public.med_combined"
 
 @target_router.get("/eso-archive", response_class=JSONResponse)
 async def api_target_eso_archive(name: str = "", request: Request = None):
+    """Return ESO archive results or a JSON timeout before nginx's deadline."""
+    try:
+        async with asyncio.timeout(_ESO_TOTAL_TIMEOUT_S):
+            return await _query_eso_archive(name, request)
+    except TimeoutError:
+        return JSONResponse(
+            {"ok": False, "error": "ESO archive lookup timed out; please try again later."},
+            status_code=504,
+        )
+
+
+async def _query_eso_archive(name: str, request: Request | None):
     """Query ESO Science Archive TAP for observations of the given target.
 
     Strategy:
@@ -1518,12 +1531,12 @@ async def api_target_eso_archive(name: str = "", request: Request = None):
         return JSONResponse({"ok": False, "error": "Target name is required"}, status_code=400)
 
     # Resolve credentials: per-user > global env fallback > anonymous
-    user = _request_user(request) if request else None
+    user = await asyncio.to_thread(_request_user, request) if request else None
     eso_username: str | None = None
     eso_password: str | None = None
     if user:
         try:
-            eso_username, eso_password = get_user_eso_credentials(user)
+            eso_username, eso_password = await asyncio.to_thread(get_user_eso_credentials, user)
         except UserSettingsError:
             pass
     if not (eso_username and eso_password):
@@ -1637,10 +1650,10 @@ async def api_target_eso_archive(name: str = "", request: Request = None):
         )
 
     # --- Step 2: coordinate cone-search, only when the name query found nothing ---
-    # Lazy on purpose: the spatial CONTAINS() query is far more expensive on ESO's
-    # side than the name query, so we do not issue it on every page load (AGENTS.md:
-    # do not overload external databases). Retry once on timeout with a generous
-    # timeout, and surface a warning instead of silently implying "no observations".
+    # Keep the fallback lazy to avoid unnecessary ESO queries. The indexed box
+    # narrows the spatial work; DISTANCE filters corners before TOP 200, so
+    # newer off-circle rows cannot hide older observations inside the cone.
+    # Retry once on an HTTP timeout, within the whole-lookup deadline.
     cone_warning = ""
     if not rows:
         try:
@@ -1654,6 +1667,8 @@ async def api_target_eso_archive(name: str = "", request: Request = None):
             adql_cone = (
                 _SELECT
                 + f"WHERE {_eso_cone_box_where(ra_deg, dec_deg, radius_deg)} "
+                + "AND DISTANCE(POINT('ICRS', s_ra, s_dec), "
+                + f"POINT('ICRS', {ra_deg}, {dec_deg})) <= {radius_deg} "
                 + "ORDER BY t_min DESC"
             )
             for attempt in range(2):
