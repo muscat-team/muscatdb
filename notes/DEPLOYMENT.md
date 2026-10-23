@@ -735,12 +735,12 @@ The current pins are:
 
 | Engine | Repository | Commit | Candidate environment |
 |---|---|---|---|
-| prose2 | `jpdeleon/prose2` | `8c3b0aa7779e7a6c5ecfafaa7889c447ac81b17d` | `prose-prod-8c3b0aa7` |
+| prose2 | `jpdeleon/prose2` | `3daed56b8b4bf23b6cf3a19f8f17d898b8c15785` (v3.4.0) | `prose-prod-3daed56b` |
 | timer | `john-livingston/timer` | `b8428258c9b62266532173af4abd7fbafee6dcef` | `timer-prod-b8428258` |
 | harmonic | `jpdeleon/harmonic` (fork of `john-livingston/harmonic`) | `f616614568f7655858da29fbc46fb9edfdb022ee` | `harmonic-prod-f6166145` |
 
 The 2026-10-18 audit below covered prose2 `6029ea87` and timer. prose2
-`8c3b0aa7` adds jpdeleon/prose2#16 (read-only configuration loading) and
+v3.4.0 (`3daed56b`) adds jpdeleon/prose2#16 (read-only configuration loading) and
 leaves telescope definitions unchanged; `harmonic-prod-f6166145` is new. Both
 need `install` and `verify`, and the dependency records below, before rollout.
 

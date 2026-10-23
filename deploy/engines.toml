@@ -4,10 +4,10 @@
 # than changing one while workers may still be using it.
 [engines.prose]
 repository = "https://github.com/jpdeleon/prose2"
-# Includes jpdeleon/prose2#16 (read-only PROSE_CONFIG_FILE loading), which
-# replaces muscat-db's import adapter.
-commit = "8c3b0aa7779e7a6c5ecfafaa7889c447ac81b17d"
-environment = "prose-prod-8c3b0aa7"
+# Release v3.4.0. Includes jpdeleon/prose2#16 (read-only PROSE_CONFIG_FILE
+# loading), which replaces muscat-db's import adapter.
+commit = "3daed56b8b4bf23b6cf3a19f8f17d898b8c15785"
+environment = "prose-prod-3daed56b"
 source_environment = "prose"
 module = "prose"
 # Captured at 6029ea87; telescope definitions are unchanged through this pin.
