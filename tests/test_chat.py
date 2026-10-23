@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+import shutil
+import subprocess
 import time
+from pathlib import Path
 
 import pytest
+import socketio
 
 from muscat_db import chat
 from muscat_db.database import (
@@ -47,6 +53,21 @@ def test_backfill_window_excludes_old_messages(chat_db):
     save_chat_message("alice", "recent", created_at=time.time() - 1 * 86400)
     texts = [m["text"] for m in get_recent_chat_messages(days=7)]
     assert texts == ["recent"]
+
+
+@pytest.mark.parametrize("user,scoped,expected", [
+    (None, False, ["public"]),
+    ("alice", False, ["public", "private"]),
+    ("alice", True, ["private"]),
+])
+def test_history_uses_explicit_snapshot_bounds(chat_db, user, scoped, expected):
+    save_chat_message("bob", "old", created_at=99)
+    save_chat_message("bob", "public", created_at=100)
+    save_chat_message("system", "private", created_at=200, visible_to="alice")
+    save_chat_message("system", "other owner", created_at=150, visible_to="carol")
+    save_chat_message("bob", "newer than snapshot", created_at=201)
+    messages = get_recent_chat_messages(user=user, addressed_only=scoped, since=100, until=200)
+    assert [m["text"] for m in messages] == expected
 
 
 def test_edit_is_author_only(chat_db):
@@ -117,6 +138,7 @@ def test_parse_mentions_resolves_known_and_skips_reserved(monkeypatch):
         "_known_cache",
         {"ts": time.time() + 9999, "map": {"alice": "alice", "bob": "Bob"}},
     )
+    monkeypatch.setattr(chat, "_user_is_scoped", lambda _u: False)
     found = chat._parse_mentions("hey @alice and @Bob, ignore @here @test @nobody")
     assert found == ["alice", "Bob"]  # canonical casing, reserved/unknown dropped
 
@@ -171,7 +193,7 @@ def test_connect_refuses_anonymous_when_auth_required(monkeypatch):
 
     monkeypatch.setattr(chat.db, "get_recent_chat_messages", must_not_read_history)
     env = {"asgi.scope": {"client": ("127.0.0.1", 5)}}  # no forwarded user
-    with pytest.raises(ConnectionRefusedError):
+    with pytest.raises(socketio.exceptions.ConnectionRefusedError, match="authentication required"):
         asyncio.run(chat.connect("sid-anon", env))
 
 
@@ -182,7 +204,7 @@ def test_connect_allows_anonymous_when_auth_not_required(monkeypatch):
     monkeypatch.delenv("MUSCAT_REQUIRE_AUTH", raising=False)
     monkeypatch.delenv("MUSCAT_PROXY_SECRET", raising=False)
     monkeypatch.setenv("MUSCAT_PROXY_SECRET_FILE", "/nonexistent-secret")
-    monkeypatch.setattr(chat.db, "get_recent_chat_messages", lambda: [])
+    monkeypatch.setattr(chat.db, "get_recent_chat_messages", lambda **kw: [])
 
     emitted = []
     monkeypatch.setattr(chat.sio, "save_session", _async_noop)
@@ -207,6 +229,43 @@ def _record_async(sink, event, *args, **kwargs):
     return _done()
 
 
+@pytest.mark.parametrize("count", [0, 2, 500, 501, None])
+def test_connect_describes_authoritative_history_window(monkeypatch, count):
+    monkeypatch.setattr(chat, "_LOOP", None)
+    monkeypatch.setattr(chat, "_users_by_sid", {})
+    monkeypatch.setattr(chat, "_resolve_identity", lambda env: ("alice", "trusted"))
+    monkeypatch.setattr(chat, "_user_is_scoped", lambda user: False)
+    rows = [{"id": i, "ts": time.time() - 30, "text": str(i)} for i in range(1, (count or 0) + 1)]
+    query = {}
+
+    def read(**kwargs):
+        query.update(kwargs)
+        if count is None:
+            raise OSError("history unavailable")
+        return rows
+
+    emitted = []
+    monkeypatch.setattr(chat.db, "get_recent_chat_messages", read)
+    monkeypatch.setattr(chat.sio, "save_session", _async_noop)
+    monkeypatch.setattr(chat.sio, "enter_room", _async_noop)
+    monkeypatch.setattr(chat.sio, "emit", lambda *a, **kw: _record_async(emitted, *a, **kw))
+    asyncio.run(chat.connect("sid-history", {}))
+    payload = next(args[0] for event, args, _ in emitted if event == "history")
+    if count is None:
+        assert payload == {"messages": []}  # failed reads cannot imply deletion
+        return
+    assert query["limit"] == 501
+    assert query["user"] == "alice"
+    assert payload["messages"] == rows[-500:]
+    assert payload["window"]["until"] == query["until"]
+    if count > 500:
+        assert payload["window"]["since"] == rows[1]["ts"]
+        assert payload["window"]["first_id"] == rows[1]["id"]
+    else:
+        assert payload["window"]["since"] == query["since"]
+        assert "first_id" not in payload["window"]
+
+
 # --------------------------------------------------------------------------
 # Job-finished system message hook
 # --------------------------------------------------------------------------
@@ -225,8 +284,72 @@ def test_on_job_finished_persists_system_message(chat_db, monkeypatch):
     assert msgs[0]["kind"] == "system"
     assert "TOI-1234" in msgs[0]["text"]
     assert "finished" in msgs[0]["text"]
-    assert "/target?name=TOI-1234" in msgs[0]["text"]
+    assert "/photometry?inst=muscat3&date=2026-07-18&target=TOI-1234" in msgs[0]["text"]
     assert "localhost" not in msgs[0]["text"]
+
+
+def _job_finished_text(**info) -> str:
+    chat.on_job_finished(job_key=info.pop("job_key", "k"), **info)
+    return get_recent_chat_messages(days=7)[-1]["text"]
+
+
+def test_job_finished_links_transit_fit_run_page(chat_db, monkeypatch):
+    monkeypatch.setattr(chat, "_LOOP", None)
+    text = _job_finished_text(
+        type_="transit_fit", target="TOI 1234", inst="muscat2",
+        date="2026-07-18", state="error", run_id="r1",
+    )
+    assert text == (
+        "Transit fit for TOI 1234 (muscat2 2026-07-18) failed "
+        "/transit-fit?inst=muscat2&date=2026-07-18&target=TOI1234&run=r1"
+    )
+
+
+def test_archive_job_finished_links_archive_page_not_a_fake_target(chat_db, monkeypatch):
+    """Regression: an archive download linked /target?name=LCO%20archive."""
+    monkeypatch.setattr(chat, "_LOOP", None)
+    text = _job_finished_text(type_="archive", state="done")
+    assert text == "LCO archive download finished /lco/archive"
+
+
+def test_archive_job_finished_prefers_its_photometry_link(chat_db, monkeypatch):
+    monkeypatch.setattr(chat, "_LOOP", None)
+    text = _job_finished_text(
+        type_="archive", target="TOI-1234", inst="sinistro", date="2026-07-18",
+        state="done", link="/photometry?inst=sinistro&date=2026-07-18&target=TOI-1234",
+    )
+    assert text == (
+        "LCO archive download for TOI-1234 (sinistro 2026-07-18) finished "
+        "/photometry?inst=sinistro&date=2026-07-18&target=TOI-1234"
+    )
+
+
+def test_job_finished_explicit_owner_skips_jobs_table_lookup(chat_db, sio_harness, monkeypatch):
+    monkeypatch.setattr(chat, "_valid_loop", lambda: object())
+    monkeypatch.setattr(chat, "_job_user_name", lambda _key: None)
+    monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", lambda coro, _loop: asyncio.run(coro))
+    chat.on_job_finished(job_key="lco_archive_download:x", type_="archive", state="done", owner="andrew")
+    assert [kw.get("room") for _e, _p, kw in sio_harness.emits] == ["user:andrew"]
+
+
+def test_archive_notify_reports_frames_owner_and_no_placeholders(monkeypatch):
+    from muscat_db import jobs, lco
+
+    fired = {}
+    monkeypatch.setattr(jobs, "fire_job_finished", lambda **kw: fired.update(kw))
+    monkeypatch.setattr(
+        lco, "frame_destination",
+        lambda f: ("sinistro", "2026-07-18", lco.Path("/x/sinistro/2026-07-18/f.fits")),
+    )
+    lco._notify_archive_download_finished({
+        "job_id": "abc", "state": "done", "user_name": "andrew",
+        "frames": [{"OBJECT": "TOI-1234"}], "frames_total": 1, "results": [],
+        "photometry_url": "", "started_at": 0.0,
+    })
+    assert fired["target"] == "TOI-1234"
+    assert (fired["inst"], fired["date"]) == ("sinistro", "2026-07-18")
+    assert fired["owner"] == "andrew"
+    assert fired["link"] == ""
 
 
 def test_set_event_loop_and_valid_loop():
@@ -247,11 +370,123 @@ def test_set_event_loop_and_valid_loop():
 # @bot: private, per-user, in-memory conversation context
 # --------------------------------------------------------------------------
 @pytest.fixture(autouse=True)
-def _clear_agent_ctx():
+def _clear_agent_ctx(monkeypatch):
     """The @bot context lives in a module global; isolate each test."""
     chat._agent_ctx.clear()
+    monkeypatch.setattr(chat, "_agent_locks", {})
+    monkeypatch.setattr(chat, "_agent_requests", {})
     yield
     chat._agent_ctx.clear()
+
+
+def test_bot_reset_cancels_running_and_queued_exchanges(sio_harness, monkeypatch):
+    monkeypatch.setattr(chat, "_agent_locks", {})
+    monkeypatch.setenv("MUSCAT_OLLAMA_MAX_CONCURRENT", "2")
+    monkeypatch.setattr(chat.chat_agent, "_inflight", 0)
+    calls = []
+
+    async def run():
+        started, finish = asyncio.Event(), asyncio.Event()
+
+        async def answer(question, history):
+            calls.append((question, history))
+            if question == "old":
+                started.set()
+                await finish.wait()
+            return f"answer:{question}"
+
+        monkeypatch.setattr(chat.chat_agent, "answer", answer)
+        chat._spawn_agent("sid-1", "alice", "old")
+        await started.wait()
+        chat._spawn_agent("sid-2", "alice", "queued")
+        await asyncio.sleep(0)
+        await chat._run_agent("sid-1", "alice", "/reset")
+        chat._spawn_agent("sid-1", "alice", "fresh")
+        finish.set()
+        await asyncio.gather(*list(chat._agent_tasks), return_exceptions=True)
+
+    asyncio.run(run())
+    assert calls == [("old", []), ("fresh", [])]
+    replies = [p["text"] for e, p, _ in sio_harness.emits if e == "message"]
+    assert "answer:old" not in replies
+    assert "answer:queued" not in replies
+    assert "answer:fresh" in replies
+    assert chat.chat_agent._inflight == 0
+    assert chat._agent_requests == {}
+
+
+def test_bot_capacity_bounds_running_and_waiting_requests(sio_harness, monkeypatch):
+    monkeypatch.setattr(chat, "_agent_locks", {})
+    monkeypatch.setenv("MUSCAT_OLLAMA_MAX_CONCURRENT", "2")
+    monkeypatch.setattr(chat.chat_agent, "_inflight", 0)
+    calls = []
+
+    async def run():
+        started, finish = asyncio.Event(), asyncio.Event()
+
+        async def answer(question, history):
+            calls.append(question)
+            if question == "first":
+                started.set()
+                await finish.wait()
+            return question
+
+        monkeypatch.setattr(chat.chat_agent, "answer", answer)
+        chat._spawn_agent("sid-1", "alice", "first")
+        await started.wait()
+        for question in ("second", "third", "fourth"):
+            chat._spawn_agent("sid-1", "alice", question)
+        await asyncio.sleep(0)
+        finish.set()
+        await asyncio.gather(*list(chat._agent_tasks))
+
+    asyncio.run(run())
+    assert calls == ["first", "second"]
+    assert chat.chat_agent._inflight == 0
+    assert sum("earlier question" in p["text"] for e, p, _ in sio_harness.emits if e == "message") == 2
+
+
+def test_bot_reset_cancels_questions_before_they_start(sio_harness, monkeypatch):
+    calls = []
+
+    async def answer(question, history):
+        calls.append(question)
+        return question
+
+    monkeypatch.setattr(chat.chat_agent, "answer", answer)
+
+    async def run():
+        chat._spawn_agent("sid-1", "alice", "old")
+        await chat._run_agent("sid-1", "alice", "/reset")
+        await asyncio.gather(*list(chat._agent_tasks), return_exceptions=True)
+
+    asyncio.run(run())
+    assert calls == []
+    assert chat._agent_requests == {}
+
+
+def test_anonymous_disconnect_cancels_bot_requests(sio_harness, monkeypatch):
+    monkeypatch.setenv("MUSCAT_OLLAMA_MAX_CONCURRENT", "2")
+    monkeypatch.setattr(chat.chat_agent, "_inflight", 0)
+
+    async def run():
+        started = asyncio.Event()
+
+        async def answer(question, history):
+            started.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(chat.chat_agent, "answer", answer)
+        chat._spawn_agent("sid-anon", None, "old")
+        await started.wait()
+        chat._spawn_agent("sid-anon", None, "queued")
+        await asyncio.sleep(0)
+        await chat.disconnect("sid-anon")
+
+    asyncio.run(run())
+    assert chat.chat_agent._inflight == 0
+    assert chat._agent_requests == {}
+    assert chat._ctx_key(None, "sid-anon") not in chat._agent_ctx
 
 
 def test_agent_ctx_roundtrips_user_and_assistant_turns():
@@ -508,7 +743,10 @@ def test_successful_edit_and_delete_broadcast(sio_harness, monkeypatch):
     import asyncio
 
     _as_user(monkeypatch, "alice")
-    monkeypatch.setattr(chat.db, "edit_chat_message", lambda mid, u, t: {"id": mid, "text": t})
+    monkeypatch.setattr(chat.db, "get_chat_message", lambda mid: None)
+    monkeypatch.setattr(
+        chat.db, "edit_chat_message", lambda mid, u, t, mentions=None: {"id": mid, "text": t}
+    )
     monkeypatch.setattr(chat.db, "delete_chat_message", lambda mid, u: True)
     asyncio.run(chat.edit_message("sid-1", {"id": 3, "text": "fixed"}))
     asyncio.run(chat.delete_message("sid-1", {"id": 3}))
@@ -667,3 +905,287 @@ def test_ownerless_job_finished_is_public_only_and_hidden_from_scoped_history(
     scoped = get_recent_chat_messages(days=7, user="andrew", addressed_only=True)
     assert all("HIDDENTGT" not in m["text"] for m in scoped)
     assert any("HIDDENTGT" in m["text"] for m in get_recent_chat_messages(days=7))
+
+
+# --------------------------------------------------------------------------
+# Job-finished dedup, /me edit/delete, mentions refreshed on edit
+# --------------------------------------------------------------------------
+@pytest.fixture
+def fresh_hooks(monkeypatch):
+    from muscat_db import jobs
+
+    calls = []
+    monkeypatch.setattr(jobs, "_notified_job_keys", {})
+    monkeypatch.setattr(jobs, "_JOB_FINISHED_HOOKS", [lambda **kw: calls.append(kw["state"])])
+    return jobs, calls
+
+
+def test_rerun_of_the_same_run_notifies_again(fresh_hooks):
+    """Regression: the dedup key was the job key alone, so a re-run of the same
+    inst/date/target/run finished silently until the server restarted."""
+    jobs, calls = fresh_hooks
+    key = "photometry:muscat3/2026-07-18/TOI-1234/default"
+    jobs.fire_job_finished(key, state="done", started_at=100.0)
+    jobs.fire_job_finished(key, state="done", started_at=100.0)  # next sync pass
+    jobs.fire_job_finished(key, state="error", started_at=200.0)  # the re-run
+    assert calls == ["done", "error"]
+
+
+def test_notified_run_memory_is_bounded(fresh_hooks, monkeypatch):
+    jobs, calls = fresh_hooks
+    monkeypatch.setattr(jobs, "_NOTIFIED_MAX", 3)
+    for i in range(5):
+        jobs.fire_job_finished(f"k{i}", state="done", started_at=float(i))
+    assert len(jobs._notified_job_keys) == 3
+    assert len(calls) == 5
+
+
+def test_me_actions_are_editable_and_deletable_by_their_author(chat_db):
+    m = save_chat_message("alice", "is observing", kind="action")
+    assert edit_chat_message(m["id"], "bob", "x") is None
+    updated = edit_chat_message(m["id"], "alice", "is reducing")
+    assert updated["text"] == "is reducing" and updated["edited"] and updated["kind"] == "action"
+    assert delete_chat_message(m["id"], "bob") is False
+    assert delete_chat_message(m["id"], "alice") is True
+
+
+def test_edit_replaces_stored_mentions(chat_db):
+    m = save_chat_message("alice", "hi @bob", mentions=["bob"], kind="user")
+    updated = edit_chat_message(m["id"], "alice", "hi @carol", mentions=["carol"])
+    assert updated["mentions"] == ["carol"]
+    assert get_recent_chat_messages(days=7)[-1]["mentions"] == ["carol"]
+
+
+def test_edit_nudges_only_newly_mentioned_users(chat_db, sio_harness, monkeypatch):
+    _as_user(monkeypatch, "alice")
+    monkeypatch.setattr(
+        chat, "_known_users_map", lambda: {"alice": "alice", "bob": "bob", "carol": "carol"}
+    )
+    monkeypatch.setattr(chat, "_user_is_scoped", lambda _u: False)
+    m = save_chat_message("alice", "hi @bob", mentions=["bob"], kind="user")
+    asyncio.run(chat.edit_message("sid-1", {"id": m["id"], "text": "hi @bob @carol @alice"}))
+    mention_rooms = [kw.get("room") for e, _p, kw in sio_harness.emits if e == "mention"]
+    assert mention_rooms == ["user:carol"]
+    edited = [p for e, p, _kw in sio_harness.emits if e == "message_edited"]
+    assert edited and edited[0]["mentions"] == ["alice", "bob", "carol"]
+
+
+# --------------------------------------------------------------------------
+# Regressions: sender self-nudge, @bot without a captured loop, @bot context
+# ordering, and scoped usernames in stored mentions.
+# --------------------------------------------------------------------------
+def test_message_does_not_nudge_the_sender(sio_harness, monkeypatch):
+    _as_user(monkeypatch, "alice")
+    monkeypatch.setattr(chat, "_known_users_map", lambda: {"alice": "alice", "bob": "bob"})
+    monkeypatch.setattr(chat, "_user_is_scoped", lambda _u: False)
+    monkeypatch.setattr(
+        chat.db, "save_chat_message", lambda user, text, **k: {"id": 1, "user": user, "text": text}
+    )
+    asyncio.run(chat.message("sid-1", {"text": "@alice @bob look"}))
+    asyncio.run(chat.message("sid-1", {"text": "/me waves at @alice"}))
+    rooms = [kw.get("room") for e, _p, kw in sio_harness.emits if e == "mention"]
+    assert rooms == ["user:bob"]
+
+
+def test_bot_question_answers_without_a_captured_event_loop(sio_harness, monkeypatch):
+    """A @bot question must be answered whenever the handler runs; the loop is
+    the handler's own running loop, not a global captured earlier."""
+    _as_user(monkeypatch, "alice")
+    monkeypatch.setattr(chat, "_LOOP", None)
+    monkeypatch.setattr(chat.chat_agent, "reserve", lambda: True)
+    monkeypatch.setattr(chat.chat_agent, "release", lambda: None)
+
+    async def fake_answer(question, history):
+        return f"answer to {question}"
+
+    monkeypatch.setattr(chat.chat_agent, "answer", fake_answer)
+
+    async def run():
+        await chat.message("sid-1", {"text": "@bot what is photometry"})
+        await asyncio.gather(*list(chat._agent_tasks))
+
+    asyncio.run(run())
+    texts = [p["text"] for e, p, _kw in sio_harness.emits if e == "message" and p.get("kind") == "agent"]
+    assert texts == ["answer to what is photometry"]
+
+
+def test_concurrent_bot_questions_see_each_others_turns_in_order(sio_harness, monkeypatch):
+    """Two questions from one user must not both start from the same context:
+    the second one waits and is answered with the first exchange in history."""
+    monkeypatch.setattr(chat.chat_agent, "reserve", lambda: True)
+    monkeypatch.setattr(chat.chat_agent, "release", lambda: None)
+    calls = []
+
+    async def fake_answer(question, history):
+        calls.append((question, len(history)))
+        await asyncio.sleep(0.01)
+        return f"re:{question}"
+
+    monkeypatch.setattr(chat.chat_agent, "answer", fake_answer)
+
+    async def run():
+        await asyncio.gather(
+            chat._run_agent("sid-1", "alice", "first"),
+            chat._run_agent("sid-2", "alice", "second"),
+        )
+
+    asyncio.run(run())
+    assert calls == [("first", 0), ("second", 2)]
+
+
+def test_scoped_usernames_are_not_stored_as_mentions(monkeypatch):
+    monkeypatch.setattr(
+        chat, "_known_cache", {"ts": time.time() + 9999, "map": {"alice": "alice", "andrew": "andrew"}}
+    )
+    monkeypatch.setattr(chat, "_user_is_scoped", lambda name: name == "andrew")
+    assert chat._parse_mentions("@andrew and @alice") == ["alice"]
+
+
+_CHAT_JS = Path(__file__).resolve().parents[1] / "src" / "muscat_db" / "static" / "js" / "chat.js"
+
+# Runs the real chat.js against a minimal DOM stub and reports whether a /me
+# line addressed to alice carries the mention highlight through render and edit.
+_CHAT_JS_HARNESS = r"""
+const fs = require("fs");
+const src = fs.readFileSync(process.env.CHAT_JS, "utf8");
+class Text { constructor(t) { this.nodeType = 3; this.textContent = String(t); this.parentNode = null; } }
+class El {
+  constructor(tag = "div") {
+    this.tagName = tag.toUpperCase(); this.id = ""; this.children = []; this.parentNode = null;
+    this.dataset = {}; this.style = {}; this.value = ""; this.classes = new Set();
+    const self = this;
+    this.classList = {
+      add: (...c) => c.forEach((x) => self.classes.add(x)),
+      remove: (...c) => c.forEach((x) => self.classes.delete(x)),
+      toggle: (c, f) => { const on = f === undefined ? !self.classes.has(c) : !!f; on ? self.classes.add(c) : self.classes.delete(c); return on; },
+      contains: (c) => self.classes.has(c),
+    };
+  }
+  get className() { return [...this.classes].join(" "); }
+  set className(v) { this.classes = new Set(String(v).split(/\s+/).filter(Boolean)); }
+  get textContent() { return this.children.map((c) => c.textContent).join(""); }
+  set textContent(v) { this.children = []; if (String(v) !== "") this.children.push(new Text(v)); }
+  appendChild(c) { c.parentNode = this; this.children.push(c); return c; }
+  append(...nodes) { nodes.forEach((n) => this.appendChild(typeof n === "string" ? new Text(n) : n)); }
+  remove() { if (this.parentNode) this.parentNode.children = this.parentNode.children.filter((c) => c !== this); }
+  replaceWith(n) { const p = this.parentNode; if (!p) return; p.children[p.children.indexOf(this)] = n; n.parentNode = p; this.parentNode = null; }
+  querySelectorAll(sel) {
+    const last = sel.split(",")[0].trim().split(/\s+/).pop();
+    const m = last.match(/\.([\w-]+)$/);
+    const out = [];
+    if (!m) return out;
+    const walk = (n) => { for (const c of n.children) { if (c instanceof El) { if (c.classes.has(m[1])) out.push(c); walk(c); } } };
+    walk(this);
+    return out;
+  }
+  querySelector(sel) { return this.querySelectorAll(sel)[0] || null; }
+  setAttribute() {} getAttribute() { return null; } addEventListener() {} removeEventListener() {}
+  focus() {} blur() {} setSelectionRange() {} contains() { return false; }
+}
+const byId = {};
+const el = (id, cls = "") => { const e = new El(); e.id = id; e.classes = new Set(cls.split(" ").filter(Boolean)); byId[id] = e; return e; };
+el("chat-window"); byId["chat-window"].dataset.currentUser = "alice";
+el("chat-messages"); el("message-input"); el("send-button"); el("chat-header");
+el("chat-status-dot"); el("chat-online"); el("chat-unread"); el("chat-typing"); el("chat-autocomplete", "hidden");
+el("minimize-chat");
+const listeners = {};
+const document = {
+  addEventListener(ev, fn) { (listeners[ev] = listeners[ev] || []).push(fn); },
+  removeEventListener() {},
+  getElementById(id) { return byId[id] || null; },
+  createElement(t) { return new El(t); },
+  createTextNode(t) { return new Text(t); },
+  querySelector() { return null; },
+  body: new El("body"), documentElement: new El("html"), title: "", hasFocus() { return true; },
+};
+const window = {
+  location: { href: "http://x/", origin: "http://x" }, innerWidth: 1024,
+  addEventListener() {}, localStorage: { getItem: () => null, setItem() {} },
+};
+let SOCKET = null;
+const io = () => { SOCKET = { active: true, h: {}, on(ev, fn) { this.h[ev] = fn; }, emit() {} }; return SOCKET; };
+const ctx = {
+  document, window, io, console,
+  fetch: () => Promise.resolve({ ok: false }),
+  localStorage: window.localStorage,
+  setTimeout: () => 0, clearTimeout() {}, setInterval: () => 0, clearInterval() {},
+};
+new Function(...Object.keys(ctx), src)(...Object.values(ctx));
+listeners.DOMContentLoaded.forEach((f) => f());
+
+const chatMessages = byId["chat-messages"];
+const last = () => chatMessages.children[chatMessages.children.length - 1];
+const ts = Date.now() / 1000;
+const base = { id: 7, kind: "action", user: "bob", ts, reactions: [], edited: false };
+const out = {};
+SOCKET.h.history({ messages: [{ ...base, text: "waves at @alice", mentions: ["alice"] }] });
+out.rendered = last().classes.has("mention-me");
+SOCKET.h.message_edited({ ...base, text: "waves at nobody", mentions: [], edited: true });
+out.afterRemoval = last().classes.has("mention-me");
+SOCKET.h.message_edited({ ...base, text: "waves at @alice", mentions: ["alice"], edited: true });
+out.afterAddition = last().classes.has("mention-me");
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_me_line_mention_highlight_follows_render_and_edits():
+    """A /me line that names you is highlighted like a message, and the highlight
+    tracks edits that add or remove the mention."""
+    proc = subprocess.run(
+        [shutil.which("node"), "-e", _CHAT_JS_HARNESS],
+        env={**os.environ, "CHAT_JS": str(_CHAT_JS)},
+        capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {
+        "rendered": True,
+        "afterRemoval": False,
+        "afterAddition": True,
+    }
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+@pytest.mark.parametrize("survivors", [[], [2]])
+def test_reconnect_removes_deleted_oldest_messages(survivors):
+    script = _CHAT_JS_HARNESS.split("const base =")[0] + r"""
+const base = { kind: "user", user: "bob", reactions: [], mentions: [] };
+const messages = [1, 2].map(id => ({...base, id, ts: ts - 30 + id, text: "message" + id}));
+SOCKET.h.history({messages});
+const survivors = JSON.parse(process.env.SURVIVORS);
+SOCKET.h.history({messages: messages.filter(m => survivors.includes(m.id)),
+                  window: {since: ts - 100, until: ts}});
+process.stdout.write(JSON.stringify(chatMessages.children.map(el => el.querySelector(".message-text").textContent)));
+"""
+    proc = subprocess.run(
+        [shutil.which("node"), "-e", script],
+        env={**os.environ, "CHAT_JS": str(_CHAT_JS), "SURVIVORS": json.dumps(survivors)},
+        capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == [f"message{i}" for i in survivors]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_reconnect_preserves_messages_outside_snapshot_and_failed_reads():
+    script = _CHAT_JS_HARNESS.split("const base =")[0] + r"""
+const base = { kind: "user", user: "bob", reactions: [], mentions: [] };
+const times = [ts - 100, ts - 50, ts - 50, ts - 25, ts + 10];
+const messages = times.map((t, i) => ({...base, id: i + 1, ts: t, text: "message" + (i + 1)}));
+SOCKET.h.history({messages});
+// The omitted message at the boundary shares a timestamp with the oldest
+// returned row. Its lower id places it outside this truncated snapshot.
+SOCKET.h.history({messages: [messages[2]], window: {since: ts - 50, until: ts, first_id: 3}});
+const texts = () => chatMessages.children.map(el => el.querySelector(".message-text").textContent);
+const afterSnapshot = texts();
+SOCKET.h.history({messages: []}); // a failed read has no authoritative window
+process.stdout.write(JSON.stringify({afterSnapshot, afterFailure: texts()}));
+"""
+    proc = subprocess.run(
+        [shutil.which("node"), "-e", script],
+        env={**os.environ, "CHAT_JS": str(_CHAT_JS)},
+        capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    expected = ["message1", "message2", "message3", "message5"]
+    assert json.loads(proc.stdout) == {"afterSnapshot": expected, "afterFailure": expected}

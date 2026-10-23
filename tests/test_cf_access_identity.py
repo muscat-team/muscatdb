@@ -13,6 +13,7 @@ import asyncio
 import sqlite3
 
 import pytest
+import socketio
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
@@ -118,7 +119,7 @@ def test_chat_refuses_an_unmapped_identity_and_maps_a_known_one(db, monkeypatch)
         }
 
     assert chat._extract_identity(env("andrew.example@univ.edu")) == "andrew"
-    with pytest.raises(ConnectionRefusedError):
+    with pytest.raises(socketio.exceptions.ConnectionRefusedError, match="account not provisioned"):
         asyncio.run(chat.connect("sid-x", env("stranger@univ.edu")))
 
 

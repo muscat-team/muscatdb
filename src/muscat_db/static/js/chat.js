@@ -29,15 +29,15 @@ document.addEventListener("DOMContentLoaded", () => {
     const PRESET_EMOJI = ["👍", "🎉", "👀", "✅", "❤️", "😄"];
     const HERE_TOKEN = /@here\b/gi;
 
-    // URLs | relative target links (/target?name=…) | target names (TOI-1234 / TIC 12345678) | @mentions.
+    // URLs | relative app links (/target?name=…, /photometry?…, /lco/archive) | target names (TOI-1234 / TIC 12345678) | @mentions.
     // Built at runtime so an environment lacking lookbehind falls back instead
     // of a parse error.
     let TOKEN_SRC;
     try {
         new RegExp("(?<!x)");
-        TOKEN_SRC = "(https?://[^\\s]+)|(/target\\?name=[^\\s]+)|(\\bTOI[-\\s]?\\d+(?:\\.\\d+)?\\b|\\bTIC[-\\s]?\\d+\\b)|(?<![\\w@])@([A-Za-z0-9._-]+)";
+        TOKEN_SRC = "(https?://[^\\s]+)|(/(?:target|photometry|transit-fit|lco/archive|jobs)(?:[?#][^\\s]*)?(?![\\w/-]))|(\\bTOI[-\\s]?\\d+(?:\\.\\d+)?\\b|\\bTIC[-\\s]?\\d+\\b)|(?<![\\w@])@([A-Za-z0-9._-]+)";
     } catch (e) {
-        TOKEN_SRC = "(https?://[^\\s]+)|(/target\\?name=[^\\s]+)|(\\bTOI[-\\s]?\\d+(?:\\.\\d+)?\\b|\\bTIC[-\\s]?\\d+\\b)|@([A-Za-z0-9._-]+)";
+        TOKEN_SRC = "(https?://[^\\s]+)|(/(?:target|photometry|transit-fit|lco/archive|jobs)(?:[?#][^\\s]*)?(?![\\w/-]))|(\\bTOI[-\\s]?\\d+(?:\\.\\d+)?\\b|\\bTIC[-\\s]?\\d+\\b)|@([A-Za-z0-9._-]+)";
     }
 
     let isMinimized = false;
@@ -93,9 +93,16 @@ document.addEventListener("DOMContentLoaded", () => {
         return label.length > 64 ? label.slice(0, 61) + "…" : label;
     };
 
+    // History spans several days, so anything not from today carries its date
+    // (and the year once it is from a previous year).
     const formatTime = (ts) => {
         const d = ts ? new Date(ts * 1000) : new Date();
-        return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        const now = new Date();
+        if (d.toDateString() === now.toDateString()) return time;
+        const dateOpts = { month: "short", day: "numeric" };
+        if (d.getFullYear() !== now.getFullYear()) dateOpts.year = "numeric";
+        return d.toLocaleDateString([], dateOpts) + ", " + time;
     };
 
     const makeLink = (href, textContent, title) => {
@@ -108,6 +115,23 @@ document.addEventListener("DOMContentLoaded", () => {
         return a;
     };
 
+    // Sentence punctuation after a URL ("see https://x/y." or "(https://x/y)")
+    // is not part of it. A closing bracket is kept only when the URL itself
+    // opened one, so wiki-style "/Foo_(bar)" links survive.
+    const TRAILING_PUNCT = ".,;:!?'\"";
+    const trimUrl = (url) => {
+        let end = url.length;
+        const count = (ch) => url.slice(0, end).split(ch).length - 1;
+        while (end > 0) {
+            const c = url[end - 1];
+            if (TRAILING_PUNCT.includes(c)) { end--; continue; }
+            if (c === ")" && count(")") > count("(")) { end--; continue; }
+            if (c === "]" && count("]") > count("[")) { end--; continue; }
+            break;
+        }
+        return url.slice(0, end);
+    };
+
     // Render text as safe DOM nodes, linkifying URLs + target names and
     // highlighting @mentions (self-mentions stand out).
     const renderText = (container, text) => {
@@ -115,10 +139,15 @@ document.addEventListener("DOMContentLoaded", () => {
         let last = 0, m;
         while ((m = re.exec(text)) !== null) {
             if (m.index > last) container.appendChild(document.createTextNode(text.slice(last, m.index)));
-            if (m[1]) {
-                container.appendChild(makeLink(m[1], shortenUrl(m[1]), m[1]));
-            } else if (m[2]) {
-                container.appendChild(makeLink(m[2], shortenUrl(m[2]), m[2]));
+            if (m[1] || m[2]) {
+                const url = trimUrl(m[1] || m[2]);
+                if (!url) {  // nothing left but punctuation: plain text
+                    container.appendChild(document.createTextNode(m[0]));
+                } else {
+                    container.appendChild(makeLink(url, shortenUrl(url), url));
+                    // Resume right after the link so trimmed punctuation renders as text.
+                    re.lastIndex = m.index + url.length;
+                }
             } else if (m[3]) {
                 container.appendChild(makeLink("/target?name=" + encodeURIComponent(m[3]), m[3], "Open " + m[3]));
             } else if (m[4] !== undefined) {
@@ -326,24 +355,38 @@ document.addEventListener("DOMContentLoaded", () => {
         }, 0);
     };
 
+    // The element holding a message's editable text: the whole bubble for a
+    // regular message, the span after "✳ who" for a /me line.
+    const textElement = (el) => el.querySelector(".message-text");
+
     const beginEdit = (entry) => {
-        const { el, data } = entry;
-        const body = el.querySelector(".message-body");
+        if (!entry) return;
+        const { el } = entry;
+        const textEl = textElement(el);
+        if (!textEl) return;
         const ta = document.createElement("textarea");
         ta.className = "edit-input";
-        ta.value = data.text;
+        ta.value = entry.data.text;
         ta.rows = 2;
-        body.replaceWith(ta);
+        textEl.replaceWith(ta);
         ta.focus();
         ta.setSelectionRange(ta.value.length, ta.value.length);
+        // Enter/Escape remove the textarea, and removing a focused element
+        // fires blur in Chrome, which would run finish a second time.
+        let finished = false;
         const finish = (commit) => {
+            if (finished) return;
+            finished = true;
             const newText = expandHere(ta.value).trim();
-            const restored = document.createElement("div");
-            restored.className = "message-body";
-            renderText(restored, data.text);
+            // Read entry.data now, not at edit start: an edit/reaction event may
+            // have refreshed it while the textarea was open.
+            const current = entry.data.text;
+            const restored = document.createElement(textEl.tagName);
+            restored.className = textEl.className;
+            renderText(restored, current);
             ta.replaceWith(restored);
-            if (commit && newText && newText !== data.text) {
-                socket.emit("edit_message", { id: data.id, text: newText });
+            if (commit && newText && newText !== current) {
+                socket.emit("edit_message", { id: entry.data.id, text: newText });
             }
         };
         ta.addEventListener("keydown", (e) => {
@@ -353,6 +396,51 @@ document.addEventListener("DOMContentLoaded", () => {
         ta.addEventListener("blur", () => finish(false));
     };
 
+    // Per-message kebab (react/edit/delete). Edit/delete are gated to your own
+    // messages via CSS + the .me class; the server enforces authorship too.
+    const buildMessageActions = (data) => {
+        const actions = document.createElement("div");
+        actions.className = "message-actions";
+
+        const kebab = document.createElement("button");
+        kebab.type = "button"; kebab.className = "act msg-kebab";
+        kebab.title = "More actions"; kebab.setAttribute("aria-label", "Message actions");
+        kebab.textContent = "⋮";
+
+        const menu = document.createElement("div");
+        menu.className = "message-menu hidden";
+
+        const menuItem = (label, cls, onClick) => {
+            const b = document.createElement("button");
+            b.type = "button"; b.className = cls; b.textContent = label;
+            b.addEventListener("click", (e) => { e.stopPropagation(); closeMessageMenu(); onClick(); });
+            return b;
+        };
+        menu.append(
+            menuItem("☺ React", "react", () => openEmojiPicker(actions, data.id)),
+            menuItem("✎ Edit", "edit", () => beginEdit(els.get(data.id))),
+            menuItem("🗑 Delete", "delete", () => {
+                const doDelete = () => socket.emit("delete_message", { id: data.id });
+                if (window.showConfirmModal) {
+                    window.showConfirmModal("Delete message", "Delete this message? This cannot be undone.",
+                        { confirmLabel: "Delete", confirmClass: "btn primary" }).then((ok) => { if (ok) doDelete(); });
+                } else {
+                    doDelete();
+                }
+            }),
+        );
+
+        kebab.addEventListener("click", (e) => {
+            e.stopPropagation();
+            const wasOpen = openMenu === menu;
+            closeMessageMenu();
+            if (!wasOpen) openMessageMenu(kebab, menu);
+        });
+
+        actions.append(kebab, menu);
+        return actions;
+    };
+
     const renderMessage = (data) => {
         if (chatEmpty && chatEmpty.parentNode) chatEmpty.remove();
 
@@ -360,6 +448,7 @@ document.addEventListener("DOMContentLoaded", () => {
         if (data.kind === "system") {
             const sys = document.createElement("div");
             sys.className = "message system";
+            if (data.notice) sys.classList.add("notice");
             const body = document.createElement("div");
             body.className = "message-body";
             renderText(body, data.text);
@@ -374,24 +463,40 @@ document.addEventListener("DOMContentLoaded", () => {
             return;
         }
 
-        // /me actions: a centered, attributed status line ("✳ Alice is …").
+        // /me actions: a centered, attributed status line ("✳ Alice is …"),
+        // editable/deletable by its author like any message.
         if (data.kind === "action") {
             const act = document.createElement("div");
-            act.className = "message action";
+            act.className = "message action " + (isMine(data) ? "me" : "them");
+            if (currentUser && (data.mentions || []).some((n) => n.toLowerCase() === currentUser.toLowerCase())) {
+                act.classList.add("mention-me");
+            }
+            const row = document.createElement("div");
+            row.className = "message-row";
             const body = document.createElement("div");
             body.className = "message-body";
             const who = document.createElement("span");
             who.className = "user";
             who.textContent = isMine(data) ? "You" : (data.user || "Anonymous");
-            body.append("✳ ", who, " ");
-            renderText(body, data.text);
+            const textEl = document.createElement("span");
+            textEl.className = "message-text";
+            renderText(textEl, data.text);
+            const edited = document.createElement("span");
+            edited.className = "edited";
+            edited.textContent = " (edited)";
+            if (!data.edited) edited.style.display = "none";
             const time = document.createElement("span");
             time.className = "time";
             time.textContent = formatTime(data.ts);
-            body.appendChild(time);
-            act.appendChild(body);
+            body.append("✳ ", who, " ", textEl, edited, time);
+            row.appendChild(body);
+            if (data.id != null) row.appendChild(buildMessageActions(data));
+            act.appendChild(row);
             chatMessages.appendChild(act);
-            if (data.id != null) els.set(data.id, { el: act, data });
+            if (data.id != null) {
+                els.set(data.id, { el: act, data });
+                buildReactions(act, data);
+            }
             scrollToBottom();
             return;
         }
@@ -457,53 +562,11 @@ document.addEventListener("DOMContentLoaded", () => {
         const row = document.createElement("div");
         row.className = "message-row";
         const body = document.createElement("div");
-        body.className = "message-body";
+        body.className = "message-body message-text";
         renderText(body, data.text);
         row.appendChild(body);
 
-        // Action kebab (edit/delete gated to own messages via CSS + .me class).
-        if (!data.ephemeral && data.id != null) {
-            const actions = document.createElement("div");
-            actions.className = "message-actions";
-
-            const kebab = document.createElement("button");
-            kebab.type = "button"; kebab.className = "act msg-kebab";
-            kebab.title = "More actions"; kebab.setAttribute("aria-label", "Message actions");
-            kebab.textContent = "⋮";
-
-            const menu = document.createElement("div");
-            menu.className = "message-menu hidden";
-
-            const menuItem = (label, cls, onClick) => {
-                const b = document.createElement("button");
-                b.type = "button"; b.className = cls; b.textContent = label;
-                b.addEventListener("click", (e) => { e.stopPropagation(); closeMessageMenu(); onClick(); });
-                return b;
-            };
-            menu.append(
-                menuItem("☺ React", "react", () => openEmojiPicker(actions, data.id)),
-                menuItem("✎ Edit", "edit", () => beginEdit(els.get(data.id))),
-                menuItem("🗑 Delete", "delete", () => {
-                    const doDelete = () => socket.emit("delete_message", { id: data.id });
-                    if (window.showConfirmModal) {
-                        window.showConfirmModal("Delete message", "Delete this message? This cannot be undone.",
-                            { confirmLabel: "Delete", confirmClass: "btn primary" }).then((ok) => { if (ok) doDelete(); });
-                    } else {
-                        doDelete();
-                    }
-                }),
-            );
-
-            kebab.addEventListener("click", (e) => {
-                e.stopPropagation();
-                const wasOpen = openMenu === menu;
-                closeMessageMenu();
-                if (!wasOpen) openMessageMenu(kebab, menu);
-            });
-
-            actions.append(kebab, menu);
-            row.appendChild(actions);
-        }
+        if (!data.ephemeral && data.id != null) row.appendChild(buildMessageActions(data));
         el.append(meta, row);
         chatMessages.appendChild(el);
         if (data.id != null) els.set(data.id, { el, data });
@@ -518,7 +581,7 @@ document.addEventListener("DOMContentLoaded", () => {
             if (data.kind === "system") return;
             el.classList.toggle("me", isMine(data));
             el.classList.toggle("them", !isMine(data));
-            const userSpan = el.querySelector(".message-meta .user");
+            const userSpan = el.querySelector(".message-meta .user, .message-body > .user");
             if (userSpan) userSpan.textContent = isMine(data) ? "You" : (data.user || "Anonymous");
         });
     };
@@ -553,6 +616,7 @@ document.addEventListener("DOMContentLoaded", () => {
             return true;
         }
         if (/^\/clear\b/i.test(raw)) {
+            clearedBefore = Date.now() / 1000;
             els.clear();
             chatMessages.innerHTML = "";
             renderMessage({
@@ -676,10 +740,54 @@ document.addEventListener("DOMContentLoaded", () => {
     };
 
     // ----- socket events ---------------------------------------------------
-    socket.on("history", (d) => {
-        (d && Array.isArray(d.messages) ? d.messages : []).forEach(renderMessage);
+    // Apply a server-side edit to an already-rendered message.
+    const applyEdit = (entry, data) => {
+        entry.data = { ...entry.data, text: data.text, edited: true, mentions: data.mentions || entry.data.mentions };
+        const textEl = textElement(entry.el);  // absent while its edit box is open
+        if (textEl) { textEl.textContent = ""; renderText(textEl, data.text); }
+        const edited = entry.el.querySelector(".edited");
+        if (edited) edited.style.display = "";
+        if (currentUser && (entry.data.kind === "user" || entry.data.kind === "action")) {
+            entry.el.classList.toggle("mention-me",
+                (entry.data.mentions || []).some((n) => n.toLowerCase() === currentUser.toLowerCase()));
+        }
+    };
+
+    // The server sends history on every (re)connect -- after a server restart
+    // or network drop too -- so reconcile it by id instead of appending: keep
+    // what is shown, catch up on edits/reactions/deletes made while offline,
+    // and render only messages that are new. A local /clear hides everything
+    // up to that moment, so history from before it stays hidden.
+    let clearedBefore = 0;
+    const syncHistory = (messages, window) => {
+        const incoming = messages.filter((m) => m && typeof m.text === "string" && !(m.ts <= clearedBefore));
+        const ids = new Set(incoming.map((m) => m.id));
+        if (window && Number.isFinite(window.since) && Number.isFinite(window.until)) {
+            els.forEach((entry, id) => {
+                const ts = entry.data.ts;
+                // Preserve messages outside the queried snapshot, including
+                // newer live arrivals and rows omitted by the history limit.
+                const inWindow = ts >= window.since && ts <= window.until &&
+                    !(ts === window.since && window.first_id != null && id < window.first_id);
+                if (!ids.has(id) && inWindow) {
+                    entry.el.remove();
+                    els.delete(id);
+                }
+            });
+        }
+        incoming.forEach((m) => {
+            const entry = els.get(m.id);
+            if (!entry) { renderMessage(m); return; }
+            if (m.text !== entry.data.text) applyEdit(entry, m);
+            if (entry.data.kind === "user" || entry.data.kind === "action") {
+                entry.data = { ...entry.data, reactions: m.reactions || [] };
+                buildReactions(entry.el, entry.data);
+            }
+        });
         scrollToBottom();
-    });
+    };
+
+    socket.on("history", (d) => syncHistory(d && Array.isArray(d.messages) ? d.messages : [], d && d.window));
     socket.on("message", (data) => {
         if (!data || typeof data.text !== "string") return;
         renderMessage(data);
@@ -687,12 +795,7 @@ document.addEventListener("DOMContentLoaded", () => {
     });
     socket.on("message_edited", (data) => {
         const entry = els.get(data.id);
-        if (!entry) return;
-        entry.data = { ...entry.data, text: data.text, edited: true };
-        const body = entry.el.querySelector(".message-body");
-        if (body) { body.innerHTML = ""; renderText(body, data.text); }
-        const edited = entry.el.querySelector(".edited");
-        if (edited) edited.style.display = "";
+        if (entry) applyEdit(entry, data);
     });
     socket.on("message_deleted", (data) => {
         const entry = els.get(data.id);
@@ -705,7 +808,12 @@ document.addEventListener("DOMContentLoaded", () => {
         buildReactions(entry.el, entry.data);
     });
     socket.on("mention", () => { bumpUnread(); startTitleFlash(); });
-    socket.on("chat_error", (d) => { if (d && d.error) console.warn("chat:", d.error); });
+    // Server-side refusals (save failed, not your message, shared chat not
+    // available, ...) would otherwise just make the message vanish.
+    const showNotice = (text) => {
+        renderMessage({ kind: "system", notice: true, ts: Date.now() / 1000, text: "⚠️ " + text });
+    };
+    socket.on("chat_error", (d) => { if (d && d.error) showNotice(d.error); });
 
     socket.on("typing", (d) => {
         if (!d || !d.user) return;
@@ -727,6 +835,23 @@ document.addEventListener("DOMContentLoaded", () => {
     };
     socket.on("connect", () => setConnected(true));
     socket.on("disconnect", () => setConnected(false));
+    // A connection the server refuses (account not provisioned, auth required)
+    // never fires connect/disconnect; say why instead of a silent blank status.
+    let lastConnectError = "";
+    socket.on("connect_error", (err) => {
+        setConnected(false);
+        const reason = (err && err.message) || "connection failed";
+        onlineEl.textContent = "unavailable";
+        statusDot.title = "Chat unavailable: " + reason;
+        // Transport errors (e.g. a server restart) are retried automatically
+        // and only shown in the status; a server refusal is final
+        // (socket.active is false), so announce it once in the chat.
+        if (!socket.active && reason !== lastConnectError) {
+            lastConnectError = reason;
+            showNotice("Chat unavailable: " + reason);
+        }
+    });
+    socket.on("connect", () => { lastConnectError = ""; });
     socket.on("presence", (d) => {
         const users = (d && Array.isArray(d.users)) ? d.users : [];
         const n = (d && typeof d.count === "number") ? d.count : users.length;

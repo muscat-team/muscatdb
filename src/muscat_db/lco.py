@@ -1433,16 +1433,22 @@ def _notify_archive_download_finished(job: dict) -> None:
     job_id = job.get("job_id") or ""
     if not job_id:
         return
-    instruments = job.get("instruments") or []
-    obsdates = job.get("obsdates") or []
-    objects = job.get("objects") or []
+    # The raw job only holds frames; objects/instruments/dates are derived
+    # from them by the snapshot (the same values the status API reports).
+    snap = _archive_download_snapshot(job)
+    user = str(job.get("user_name") or "")
     _jobs.fire_job_finished(
         job_key=f"lco_archive_download:{job_id}",
         type_="archive",
-        target=", ".join(objects) if objects else "LCO archive",
-        inst=",".join(instruments) if instruments else "lco",
-        date=",".join(obsdates) if obsdates else "mixed",
+        target=", ".join(snap["objects"]),
+        inst=", ".join(snap["instruments"]),
+        date=", ".join(snap["obsdates"]),
         state=job.get("state") or "done",
+        started_at=job.get("started_at"),
+        # Archive jobs are not persisted under job_key, so the chat hook's
+        # jobs-table owner lookup misses and would broadcast publicly.
+        owner="" if user == "anonymous" else user,
+        link=snap["photometry_url"],
     )
 
 

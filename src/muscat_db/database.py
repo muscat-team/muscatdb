@@ -3105,55 +3105,83 @@ def get_recent_chat_messages(
     limit: int = 500,
     user: str | None = None,
     addressed_only: bool = False,
+    since: float | None = None,
+    until: float | None = None,
 ) -> list[dict]:
     """Return persisted messages from the last ``days`` (oldest first), with
     reactions attached. ``limit`` caps the payload for a very busy window.
     When ``user`` is given, messages with a ``visible_to`` restriction are
     filtered to only those addressed to that user (plus all public messages).
     ``addressed_only`` (a scoped viewer, issue #202) drops the public ones
-    too, leaving only messages addressed to ``user``."""
+    too, leaving only messages addressed to ``user``. Explicit ``since`` and
+    ``until`` bounds let reconnects describe exactly which window was read."""
     path = db_path()
     window_days = CHAT_BACKFILL_DAYS if days is None else days
-    since = time.time() - window_days * 86400
+    until = time.time() if until is None else until
+    since = until - window_days * 86400 if since is None else since
     with get_conn(path, row_factory=sqlite3.Row) as conn:
         _ensure_chat_schema(conn, path)
         if user and addressed_only:
             rows = conn.execute(
-                "SELECT * FROM chat_messages WHERE created_at >= ? "
+                "SELECT * FROM chat_messages WHERE created_at >= ? AND created_at <= ? "
                 "AND visible_to = ? "
-                "ORDER BY created_at DESC LIMIT ?",
-                (since, user, limit),
+                "ORDER BY created_at DESC, id DESC LIMIT ?",
+                (since, until, user, limit),
             ).fetchall()
         elif user:
             rows = conn.execute(
-                "SELECT * FROM chat_messages WHERE created_at >= ? "
+                "SELECT * FROM chat_messages WHERE created_at >= ? AND created_at <= ? "
                 "AND (visible_to IS NULL OR visible_to = ?) "
-                "ORDER BY created_at DESC LIMIT ?",
-                (since, user, limit),
+                "ORDER BY created_at DESC, id DESC LIMIT ?",
+                (since, until, user, limit),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT * FROM chat_messages WHERE created_at >= ? "
+                "SELECT * FROM chat_messages WHERE created_at >= ? AND created_at <= ? "
                 "AND visible_to IS NULL "
-                "ORDER BY created_at DESC LIMIT ?",
-                (since, limit),
+                "ORDER BY created_at DESC, id DESC LIMIT ?",
+                (since, until, limit),
             ).fetchall()
         rows = list(reversed(rows))
         reactions = _reactions_by_message(conn, [r["id"] for r in rows])
         return [_chat_row_to_dict(r, reactions) for r in rows]
 
 
-def edit_chat_message(msg_id: int, user_name: str, new_text: str) -> dict | None:
+# Message kinds an author may edit or delete: ordinary messages and /me lines.
+# System (job-finished) messages have no human author.
+_AUTHOR_EDITABLE_KINDS = ("user", "action")
+
+
+def get_chat_message(msg_id: int) -> dict | None:
+    """Return one persisted message (with reactions), or ``None``."""
+    path = db_path()
+    with get_conn(path, row_factory=sqlite3.Row) as conn:
+        _ensure_chat_schema(conn, path)
+        row = conn.execute("SELECT * FROM chat_messages WHERE id = ?", (msg_id,)).fetchone()
+        if row is None:
+            return None
+        return _chat_row_to_dict(row, _reactions_by_message(conn, [msg_id]))
+
+
+def edit_chat_message(
+    msg_id: int, user_name: str, new_text: str, mentions: list[str] | None = None
+) -> dict | None:
     """Edit a message in place. Author-only: returns the updated message, or
-    ``None`` if the message does not exist or ``user_name`` is not its author."""
+    ``None`` if the message does not exist or ``user_name`` is not its author.
+    ``mentions`` (when given) replaces the stored mention list, so an @name
+    added or removed by the edit is reflected in highlighting."""
     path = db_path()
     edited_at = time.time()
     with get_conn(path, row_factory=sqlite3.Row) as conn:
         _ensure_chat_schema(conn, path)
+        sets, params = ["text = ?", "edited_at = ?"], [new_text, edited_at]
+        if mentions is not None:
+            sets.append("mentions = ?")
+            params.append(json.dumps(sorted(set(mentions)), ensure_ascii=True))
         cur = conn.execute(
-            "UPDATE chat_messages SET text = ?, edited_at = ? "
-            "WHERE id = ? AND user_name = ? AND kind = 'user'",
-            (new_text, edited_at, msg_id, user_name),
+            f"UPDATE chat_messages SET {', '.join(sets)} "
+            "WHERE id = ? AND user_name = ? AND kind IN (?, ?)",
+            (*params, msg_id, user_name, *_AUTHOR_EDITABLE_KINDS),
         )
         conn.commit()
         if cur.rowcount == 0:
@@ -3170,8 +3198,8 @@ def delete_chat_message(msg_id: int, user_name: str) -> bool:
     with get_conn(path) as conn:
         _ensure_chat_schema(conn, path)
         cur = conn.execute(
-            "DELETE FROM chat_messages WHERE id = ? AND user_name = ? AND kind = 'user'",
-            (msg_id, user_name),
+            "DELETE FROM chat_messages WHERE id = ? AND user_name = ? AND kind IN (?, ?)",
+            (msg_id, user_name, *_AUTHOR_EDITABLE_KINDS),
         )
         if cur.rowcount:
             conn.execute("DELETE FROM chat_reactions WHERE message_id = ?", (msg_id,))
