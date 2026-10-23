@@ -698,10 +698,12 @@ class _FakeAsyncClient:
     def __init__(self, behaviours):
         self._behaviours = list(behaviours)
         self.calls = 0
+        self.kwargs = []
 
     async def get(self, url, **kwargs):
         b = self._behaviours[min(self.calls, len(self._behaviours) - 1)]
         self.calls += 1
+        self.kwargs.append(kwargs)
         if isinstance(b, Exception):
             raise b
         return b
@@ -781,7 +783,9 @@ def test_eso_archive_cone_retries_on_timeout(monkeypatch):
     from muscat_db import http_client, web
 
     name_empty = httpx.Response(200, json=_eso_tap_json([]), request=httpx.Request("GET", "https://eso.invalid"))
-    cone_ok = httpx.Response(200, json=_eso_tap_json(["NearbyStar"]), request=httpx.Request("GET", "https://eso.invalid"))
+    cone_ok = httpx.Response(
+        200, json=_eso_tap_json_coords([("NearbyStar", 197.1, 55.0)]), request=httpx.Request("GET", "https://eso.invalid")
+    )
     # name(empty) -> cone(timeout) -> cone(success)
     fake = _FakeAsyncClient([name_empty, httpx.ReadTimeout(""), cone_ok])
     monkeypatch.setattr(http_client, "get_async_client", lambda: fake)
@@ -795,6 +799,95 @@ def test_eso_archive_cone_retries_on_timeout(monkeypatch):
     assert body["total"] == 1
     assert "cone" in body["query_method"]
     assert fake.calls == 3  # name + timed-out cone + retried cone
+
+
+def _eso_tap_json_coords(rows):
+    """ESO TAP JSON envelope with target_name, s_ra, s_dec columns."""
+    return {
+        "metadata": [{"name": "target_name"}, {"name": "s_ra"}, {"name": "s_dec"}],
+        "data": [list(r) for r in rows],
+    }
+
+
+def test_eso_archive_cone_uses_indexed_box_not_contains(monkeypatch):
+    # ESO's ObsCore answers s_ra/s_dec range filters from an index in ~1 s, but
+    # CONTAINS(POINT(s_ra, s_dec), CIRCLE(...)) took >120 s for TOI-5169, so the
+    # endpoint outlived nginx's 60 s proxy timeout and the page showed an HTML 504.
+    import httpx
+    from muscat_db import http_client, web
+
+    req = httpx.Request("GET", "https://eso.invalid")
+    name_empty = httpx.Response(200, json=_eso_tap_json([]), request=req)
+    # One row 2 arcsec away (inside 1 arcmin), one in the box corner (outside the circle).
+    cone_rows = httpx.Response(
+        200,
+        json=_eso_tap_json_coords([
+            ("Near", 154.868917, 6.582766 + 2 / 3600),
+            ("Corner", 154.868917 + 0.0166, 6.582766 + 0.0166),
+        ]),
+        request=req,
+    )
+    fake = _FakeAsyncClient([name_empty, cone_rows])
+    monkeypatch.setattr(http_client, "get_async_client", lambda: fake)
+    monkeypatch.setattr(web, "_resolve_archive_coords", lambda name: (154.868917, 6.582766, "toi"))
+
+    r = TestClient(app).get("/api/targets/eso-archive?name=TOI5169")
+
+    assert r.status_code == 200
+    body = r.json()
+    cone_adql = fake.kwargs[1]["params"]["QUERY"]
+    assert "CONTAINS" not in cone_adql
+    assert "s_ra BETWEEN" in cone_adql and "s_dec BETWEEN" in cone_adql
+    assert [row["target_name"] for row in body["rows"]] == ["Near"]
+    assert body["total"] == 1
+
+
+def test_eso_archive_total_timeout_fits_inside_nginx_proxy_timeout(monkeypatch):
+    # Every ESO call timing out must still end before nginx's default 60 s
+    # proxy_read_timeout, so the browser gets our JSON, never nginx's HTML 504.
+    import httpx
+    from muscat_db import http_client, web
+
+    req = httpx.Request("GET", "https://eso.invalid")
+    name_empty = httpx.Response(200, json=_eso_tap_json([]), request=req)
+    token_no_id = httpx.Response(200, json={}, request=req)
+    fake = _FakeAsyncClient([token_no_id, name_empty, httpx.ReadTimeout(""), httpx.ReadTimeout("")])
+    monkeypatch.setattr(http_client, "get_async_client", lambda: fake)
+    monkeypatch.setattr(web, "_resolve_archive_coords", lambda name: (154.868917, 6.582766, "toi"))
+    monkeypatch.setenv("ESO_USERNAME", "u")
+    monkeypatch.setenv("ESO_PASSWORD", "p")
+
+    r = TestClient(app).get("/api/targets/eso-archive?name=TOI5169")
+
+    assert r.headers["content-type"].startswith("application/json")
+    # token + name + cone attempt(s); their worst-case sum is the endpoint's ceiling.
+    assert sum(kw["timeout"] for kw in fake.kwargs) < 60.0
+    assert "timed out" in r.json().get("warning", "")
+
+
+@pytest.mark.parametrize(
+    "ra, dec, expect",
+    [
+        (154.87, 6.58, ["s_ra BETWEEN"]),
+        (0.005, 10.0, ["s_ra >= 359.", "s_ra <= 0.0"]),  # wraps below 0
+        (359.995, 10.0, ["s_ra >= 359.", "s_ra <= 0.0"]),  # wraps above 360
+    ],
+)
+def test_eso_cone_box_where_handles_ra_wrap(ra, dec, expect):
+    from muscat_db.web import _eso_cone_box_where
+
+    where = _eso_cone_box_where(ra, dec, 1.0 / 60.0)
+    for frag in expect:
+        assert frag in where
+    assert "s_dec BETWEEN" in where
+
+
+def test_eso_cone_box_where_drops_ra_limit_at_pole():
+    from muscat_db.web import _eso_cone_box_where
+
+    where = _eso_cone_box_where(12.0, 89.995, 1.0 / 60.0)
+    assert "s_ra" not in where
+    assert "s_dec BETWEEN 89.978" in where and "AND 90.0" in where
 
 
 def test_ephemeris_targets_are_normalized_unique_names(mock_db):
