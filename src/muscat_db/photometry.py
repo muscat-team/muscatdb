@@ -48,6 +48,7 @@ from muscat_db.job_limits import JobLimitExceeded, claim_caps, enqueue_caps, lim
 from muscat_db.ref_time import is_valid_ref_time
 from muscat_db.instruments import INSTRUMENTS
 from muscat_db.cache import register_cache
+from muscat_db.engine_identity import is_pinned_version, require_selected_env
 from muscat_db.band_utils import DEFAULT_BANDS, NARROW_BANDS, _FILTER_BAND_ALIAS, bands_from_filters  # noqa: F401
 from muscat_db.catalog import _resolve_archive_coords, resolve_lco_key_project_name
 
@@ -265,9 +266,13 @@ def _job_env() -> dict[str, str]:
     if that fails we fall back to the inherited environment rather than block
     the launch. Also applies jobs.core_pinning_env()'s optional thread-count
     caps (architecture issue #51 "Core Pinning"), a no-op unless
-    MUSCAT_JOB_MAX_THREADS is configured.
+    MUSCAT_JOB_MAX_THREADS is configured. With the frozen production
+    configuration, it also points prose at the packaged telescope snapshot.
     """
     env = {**os.environ, "PYTHONUNBUFFERED": "1", **jobs.core_pinning_env()}
+    if _prose_frozen_config():
+        from muscat_db.prose_config import frozen_env
+        env.update(frozen_env())
     tmpdir = prose_tmpdir()
     try:
         Path(tmpdir).mkdir(parents=True, exist_ok=True)
@@ -277,6 +282,11 @@ def _job_env() -> dict[str, str]:
     except OSError as exc:
         logger.warning("could not prepare TMPDIR %s (%s); using inherited temp", tmpdir, exc)
     return env
+
+
+def _prose_frozen_config() -> bool:
+    """Production mode: pinned prose with the packaged telescope snapshot."""
+    return os.environ.get("MUSCAT_PROSE_FROZEN_CONFIG") == "1"
 
 
 def prose_python() -> str | None:
@@ -396,8 +406,8 @@ def _write_run_product(
         db, inst, date, target, product_record.target_normalizer(db)
     )
     tool_versions = {"muscat_db": __version__, "prose": prose_version()}
-    if os.environ.get("MUSCAT_PROSE_FROZEN_CONFIG") == "1":
-        from muscat_db._prose_launcher import snapshot_bytes, SNAPSHOT_SHA256
+    if _prose_frozen_config():
+        from muscat_db.prose_config import snapshot_bytes, SNAPSHOT_SHA256
         snapshot_bytes()
         tool_versions["prose_config_sha256"] = SNAPSHOT_SHA256
     record = product_record.build_record(
@@ -429,18 +439,19 @@ def _prose_prefix(module: str = _MODULE, console_script: str | None = "photometr
     ``console_script`` may be ``None`` for entrypoints with no console script
     (e.g. ``prose.scripts.postprocess_lightcurves``), forcing module
     invocation.
+
+    With the frozen production configuration, the selected env must hold a
+    pinned, non-editable prose; ``_job_env`` supplies the snapshot through
+    ``PROSE_CONFIG_FILE``.
     """
     explicit = prose_python()
-    if os.environ.get("MUSCAT_PROSE_FROZEN_CONFIG") == "1":
-        python = explicit or _conda_env_python(prose_conda_env())
-        if python is None:
-            raise RuntimeError("frozen prose configuration requires its pinned environment")
-        return [python, "-I", str(_HERE / "_prose_launcher.py"),
-                "--config", str(_HERE / "_prose_telescopes.yaml"), module]
+    if _prose_frozen_config():
+        return _frozen_prose_prefix(explicit, module)
     if explicit:
         return [explicit, "-m", module]
     env = prose_conda_env()
     conda_py = _conda_env_python(env)
+    require_selected_env("prose", conda_py)
     if conda_py:
         if console_script:
             script_path = Path(conda_py).parent / console_script
@@ -453,6 +464,35 @@ def _prose_prefix(module: str = _MODULE, console_script: str | None = "photometr
     # Last resort: let uv resolve an interpreter from the project directory.
     return ["uv", "run", "--project", str(prose_project_dir()),
             "python", "-m", module]
+
+
+def _write_log_header(logf, cmd: list[str]) -> None:
+    """Start a run log with the command and, in production, the snapshot digest."""
+    logf.write(f"$ {shlex.join(cmd)}\n\n")
+    if _prose_frozen_config():
+        from muscat_db.prose_config import SNAPSHOT_SHA256
+        logf.write(f"MuSCAT prose telescope snapshot sha256: {SNAPSHOT_SHA256}\n")
+    logf.flush()
+
+
+def _frozen_prose_prefix(explicit: str | None, module: str) -> list[str]:
+    """Production launch: the selected env's pinned prose, nothing else."""
+    if explicit:
+        raise RuntimeError(
+            "frozen prose configuration runs the selected pinned env; unset MUSCAT_PROSE_PYTHON"
+        )
+    env = prose_conda_env()
+    python = _conda_env_python(env)
+    if python is None:
+        raise RuntimeError(f"frozen prose configuration requires its pinned environment {env!r}")
+    version = prose_version()
+    if not is_pinned_version(version):
+        raise RuntimeError(
+            f"frozen prose configuration requires a pinned, non-editable prose install; "
+            f"{env!r} reports {version}"
+        )
+    # -I keeps cwd, PYTHONPATH and user site-packages from shadowing the pin.
+    return [python, "-I", "-m", module]
 
 
 def valid_date(date: str) -> bool:
@@ -1942,8 +1982,7 @@ def start_run(
         cmd = build_command(inst, date, target, opts, test_run=test_run, run_id=run_id)
         log_path = _run_log_path(rdir, inst, date, target, run_id)
         logf = open(log_path, "w")
-        logf.write(f"$ {shlex.join(cmd)}\n\n")
-        logf.flush()
+        _write_log_header(logf, cmd)
         try:
             env = _job_env()
             proc = subprocess.Popen(
@@ -2685,8 +2724,7 @@ def sync_jobs() -> None:
                 pending_log_path = _run_log_path(rdir, inst, date, target, run_id)
                 try:
                     logf = open(pending_log_path, "w")
-                    logf.write(f"$ {shlex.join(cmd)}\n\n")
-                    logf.flush()
+                    _write_log_header(logf, cmd)
                     proc_env = _job_env()
                     proc = subprocess.Popen(cmd, cwd=str(rdir), stdout=logf, stderr=subprocess.STDOUT, text=True, start_new_session=True, env=proc_env)
                     try:

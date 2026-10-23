@@ -1,12 +1,16 @@
-# Owner repositories and full commits only. Environment names include the
-# revision: create a new environment for upgrades rather than changing one
-# while workers may still be using it.
+# Full commits of each engine owner's repository. A fork is allowed only when
+# declared with fork_of (the owner's repository) and fork_reason. Environment
+# names include the revision: create a new environment for upgrades rather
+# than changing one while workers may still be using it.
 [engines.prose]
 repository = "https://github.com/jpdeleon/prose2"
-commit = "6029ea8777121bd4ba4de9248735744a101ab425"
-environment = "prose-prod-6029ea87"
+# Includes jpdeleon/prose2#16 (read-only PROSE_CONFIG_FILE loading), which
+# replaces muscat-db's import adapter.
+commit = "8c3b0aa7779e7a6c5ecfafaa7889c447ac81b17d"
+environment = "prose-prod-8c3b0aa7"
 source_environment = "prose"
 module = "prose"
+# Captured at 6029ea87; telescope definitions are unchanged through this pin.
 frozen_config_sha256 = "39503fce597e2d5fd349fa8009ed5068222fc6e31f098cf50e62f2a17f314a08"
 # The working editable metadata predates prose2's matplotlib<3.9 requirement.
 # Pin the newest compatible 3.8 release rather than bypassing pip check.
@@ -20,6 +24,11 @@ environment = "timer-prod-b8428258"
 source_environment = "timer"
 module = "timer"
 
-# harmonic is deliberately not pinned to the fork. Owner upstream a32fb8e3
-# lacks --mu-min-me/--mu-max-me/--z-max used by muscat-db (#77). Keep its
-# current environment until the compatibility decision is resolved.
+[engines.harmonic]
+repository = "https://github.com/jpdeleon/harmonic"
+fork_of = "https://github.com/john-livingston/harmonic"
+fork_reason = "owner a32fb8e3 lacks --mu-min-me/--mu-max-me/--z-max sent by muscat-db (#77); the fork adds them on top of it"
+commit = "f616614568f7655858da29fbc46fb9edfdb022ee"
+environment = "harmonic-prod-f6166145"
+source_environment = "harmonic"
+module = "harmonic"

@@ -1,5 +1,7 @@
 """Small metadata probes executed by each engine's own Python interpreter."""
 
+import os
+
 # Local-version label marking an editable (dev checkout) install, whose
 # reported commit can change while muscat-db is running.
 EDITABLE_LABEL = ".editable"
@@ -69,3 +71,24 @@ def version_probe(distributions: tuple[str, ...]) -> str:
 def is_mutable_version(version: str) -> bool:
     """True when ``version`` came from an editable checkout and may change."""
     return EDITABLE_LABEL in version
+
+
+def is_pinned_version(version: str) -> bool:
+    """True when ``version`` names an immutable pinned git install."""
+    return "+git." in version and not is_mutable_version(version)
+
+
+def require_selected_env(engine: str, python: str | None) -> None:
+    """Refuse to fall back when an operator-selected engine env is missing (#101).
+
+    ``MUSCAT_<ENGINE>_CONDA_ENV`` is how the production profile selects each
+    engine's pinned environment. If that environment does not resolve, the
+    launchers' fallbacks (``conda run``, an executable on ``PATH``, the prose2
+    checkout) would silently run unpinned engine code instead.
+    """
+    var = f"MUSCAT_{engine.upper()}_CONDA_ENV"
+    if python is None and os.environ.get(var):
+        raise RuntimeError(
+            f"{engine} conda env {os.environ[var]!r} selected by {var} was not found; "
+            "refusing to fall back to an unpinned install"
+        )

@@ -26,7 +26,14 @@ OWNERS = {
 }
 DEFAULT_CONFIG = Path(__file__).with_name("engines.toml")
 FROZEN_CONFIG = Path(__file__).resolve().parents[1] / "src/muscat_db/_prose_telescopes.yaml"
-PROSE_LAUNCHER = FROZEN_CONFIG.with_name("_prose_launcher.py")
+# Imports the real engine with the frozen file selected the way production
+# launches it (jpdeleon/prose2#16); an engine without that loader fails here.
+CONFIG_CHECK = """
+import json, prose
+c = prose.CONFIG
+print(json.dumps(dict(read_only=c.read_only, prose_config_sha256=c.config_sha256,
+    telescope_aliases=len(c.telescopes_dict))))
+"""
 # Metadata and find_spec avoid importing engines (imports may create config
 # files, download reference data, or initialize numerical runtimes).
 PROBE = """
@@ -41,11 +48,30 @@ print(json.dumps(dict(version=d.version, python=sys.version,
 """
 
 
+def _check_repository(name: str, pin: dict) -> None:
+    """The owner's repository, or a fork of it declared with a written reason.
+
+    A fork pin carries muscat-db's dependency on unmerged engine changes in
+    the open: ``fork_of`` must name the owner's repository and ``fork_reason``
+    must say why the owner's commits cannot be used yet.
+    """
+    if name not in OWNERS:
+        raise ValueError(f"{name}: unknown engine")
+    repository = pin["repository"].removesuffix(".git")
+    if repository == OWNERS[name] and "fork_of" not in pin:
+        return
+    if pin.get("fork_of", "").removesuffix(".git") != OWNERS[name]:
+        raise ValueError(f"{name}: a fork pin must declare fork_of = {OWNERS[name]!r}")
+    if repository == OWNERS[name]:
+        raise ValueError(f"{name}: fork_of is set but repository is the owner's")
+    if not pin.get("fork_reason", "").strip():
+        raise ValueError(f"{name}: a fork pin must give a fork_reason")
+
+
 def load_pins(path: Path) -> dict:
     pins = tomllib.loads(path.read_text())["engines"]
     for name, pin in pins.items():
-        if name not in OWNERS or pin["repository"].removesuffix(".git") != OWNERS[name]:
-            raise ValueError(f"{name}: repository must be the engine owner's repository")
+        _check_repository(name, pin)
         if not re.fullmatch(r"[0-9a-f]{40}", pin["commit"]):
             raise ValueError(f"{name}: commit must be a full SHA")
         for key in ("environment", "source_environment"):
@@ -87,8 +113,12 @@ def validate_install(name: str, pin: dict, info: dict, prefix: Path) -> None:
 
 
 def check_frozen_config(prefix: Path, pin: dict, info: dict) -> None:
-    output = run([str(prefix / "bin/python"), "-I", str(PROSE_LAUNCHER), "--check"])
+    env = {**os.environ, "PROSE_CONFIG_FILE": str(FROZEN_CONFIG),
+           "PROSE_CONFIG_SHA256": pin["frozen_config_sha256"]}
+    output = run([str(prefix / "bin/python"), "-I", "-c", CONFIG_CHECK], env=env)
     config = json.loads(output.splitlines()[-1])
+    if config.get("read_only") is not True:
+        raise ValueError("prose: engine did not load the frozen configuration read-only")
     if config["prose_config_sha256"] != pin["frozen_config_sha256"]:
         raise ValueError("prose: frozen configuration does not match the deployment pin")
     info.update(config)

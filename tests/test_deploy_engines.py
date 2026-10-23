@@ -1,6 +1,7 @@
 """Production pins must identify an owner's exact non-editable installation."""
 import copy
 import importlib.util
+import json
 import tomllib
 from pathlib import Path
 
@@ -58,6 +59,80 @@ def test_rejects_unapproved_pin_config(tmp_path, key, value):
     config.write_text("[engines.timer]\n" + "".join(f'{k} = "{v}"\n' for k, v in pin.items()))
     with pytest.raises(ValueError):
         engines.load_pins(config)
+
+
+def _write_pin(tmp_path, name, pin):
+    config = tmp_path / "pins.toml"
+    config.write_text(f"[engines.{name}]\n" + "".join(f'{k} = "{v}"\n' for k, v in pin.items()))
+    return config
+
+
+def test_harmonic_is_pinned_to_a_declared_fork_of_its_owner():
+    pin = engines.load_pins(engines.DEFAULT_CONFIG)["harmonic"]
+    assert pin["repository"] == "https://github.com/jpdeleon/harmonic"
+    assert pin["fork_of"] == engines.OWNERS["harmonic"]
+    assert pin["fork_reason"].strip()
+
+
+@pytest.mark.parametrize("change", [
+    {"fork_reason": ""},                                     # undeclared reason
+    {"fork_of": "https://github.com/somebody/harmonic"},     # not the owner
+    {"fork_of": None},                                       # fork without fork_of
+])
+def test_rejects_a_fork_pin_that_is_not_declared(tmp_path, change):
+    pin = copy.deepcopy(engines.load_pins(engines.DEFAULT_CONFIG)["harmonic"])
+    for key, value in change.items():
+        if value is None:
+            pin.pop(key)
+        else:
+            pin[key] = value
+    with pytest.raises(ValueError, match="fork"):
+        engines.load_pins(_write_pin(tmp_path, "harmonic", pin))
+
+
+def test_validate_install_requires_the_fork_repository_for_a_fork_pin(tmp_path):
+    pin = engines.load_pins(engines.DEFAULT_CONFIG)["harmonic"]
+    info = {
+        "prefix": str(tmp_path), "module_file": str(tmp_path / "lib/harmonic/__init__.py"),
+        "direct_url": {"url": pin["fork_of"],
+                       "vcs_info": {"vcs": "git", "commit_id": pin["commit"]}},
+    }
+    with pytest.raises(ValueError, match="repository"):
+        engines.validate_install("harmonic", pin, info, tmp_path)
+    info["direct_url"]["url"] = pin["repository"]
+    engines.validate_install("harmonic", pin, info, tmp_path)
+
+
+@pytest.mark.parametrize("loaded,match", [
+    ({"read_only": False}, "read-only"),
+    ({"prose_config_sha256": "0" * 64}, "does not match"),
+])
+def test_frozen_config_check_requires_the_engine_to_load_the_snapshot_read_only(
+        tmp_path, monkeypatch, loaded, match):
+    pin = engines.load_pins(engines.DEFAULT_CONFIG)["prose"]
+    report = {"read_only": True, "prose_config_sha256": pin["frozen_config_sha256"],
+              "telescope_aliases": 94, **loaded}
+    seen = {}
+
+    def fake_run(argv, *, env=None):
+        seen["env"] = env
+        return "noise from the engine\n" + json.dumps(report) + "\n"
+
+    monkeypatch.setattr(engines, "run", fake_run)
+    with pytest.raises(ValueError, match=match):
+        engines.check_frozen_config(tmp_path, pin, {})
+    assert seen["env"]["PROSE_CONFIG_FILE"] == str(engines.FROZEN_CONFIG)
+    assert seen["env"]["PROSE_CONFIG_SHA256"] == pin["frozen_config_sha256"]
+
+
+def test_frozen_config_check_records_what_the_engine_loaded(tmp_path, monkeypatch):
+    pin = engines.load_pins(engines.DEFAULT_CONFIG)["prose"]
+    report = {"read_only": True, "prose_config_sha256": pin["frozen_config_sha256"],
+              "telescope_aliases": 94}
+    monkeypatch.setattr(engines, "run", lambda argv, *, env=None: json.dumps(report))
+    info = {}
+    engines.check_frozen_config(tmp_path, pin, info)
+    assert info["telescope_aliases"] == 94
 
 
 def test_install_never_replaces_an_existing_environment(tmp_path):

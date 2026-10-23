@@ -186,7 +186,7 @@ def test_photometry_run_records_author_inputs_settings_versions(db, tmp_path):
 
 
 def test_frozen_photometry_records_configuration_digest(db, tmp_path, monkeypatch):
-    from muscat_db._prose_launcher import SNAPSHOT_SHA256
+    from muscat_db.prose_config import SNAPSHOT_SHA256
     monkeypatch.setenv("MUSCAT_PROSE_FROZEN_CONFIG", "1")
     phot._write_run_product(
         tmp_path, inst=INST, date=DATE, target=TARGET, opts={}, test_run=False,

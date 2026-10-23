@@ -721,20 +721,28 @@ authoritative for all three pipelines once the `-prod` envs exist.
 
 #### Pinned production engines
 
-`deploy/engines.toml` records owner repositories, full commits, and revision-specific
-production environment names. `deploy/engines.py` audits the development baseline,
+`deploy/engines.toml` records each engine's repository, full commit, and
+revision-specific production environment name. The repository is the owner's,
+or a fork of it declared with `fork_of` (the owner's repository) and a written
+`fork_reason`; `engines.py` rejects any other repository. `deploy/engines.py` audits the development baseline,
 clones its working dependencies into a **new** environment, replaces the editable
 engine with the pinned non-editable Git install, and verifies repository, commit,
 interpreter, import location, and `pip check`. It refuses to overwrite an existing
 environment. A failed provision leaves an unapproved environment for diagnosis;
 do not select it for production. An existing environment must pass `verify` before use.
 
-The initial candidates, audited on 2026-10-18, are:
+The current pins are:
 
-| Engine | Owner repository | Commit | Candidate environment |
+| Engine | Repository | Commit | Candidate environment |
 |---|---|---|---|
-| prose2 | `jpdeleon/prose2` | `6029ea8777121bd4ba4de9248735744a101ab425` | `prose-prod-6029ea87` |
+| prose2 | `jpdeleon/prose2` | `8c3b0aa7779e7a6c5ecfafaa7889c447ac81b17d` | `prose-prod-8c3b0aa7` |
 | timer | `john-livingston/timer` | `b8428258c9b62266532173af4abd7fbafee6dcef` | `timer-prod-b8428258` |
+| harmonic | `jpdeleon/harmonic` (fork of `john-livingston/harmonic`) | `f616614568f7655858da29fbc46fb9edfdb022ee` | `harmonic-prod-f6166145` |
+
+The 2026-10-18 audit below covered prose2 `6029ea87` and timer. prose2
+`8c3b0aa7` adds jpdeleon/prose2#16 (read-only configuration loading) and
+leaves telescope definitions unchanged; `harmonic-prod-f6166145` is new. Both
+need `install` and `verify`, and the dependency records below, before rollout.
 
 These retain the working baseline's Python (prose 3.10.15, timer 3.13.13) and
 science dependencies. Prose's one explicit dependency override is
@@ -760,53 +768,55 @@ smoke fit has identical posterior means. The sampling check uses only 20 tuning
 and 20 draws; it tests migration compatibility, not scientific convergence.
 
 **Production photometry uses a frozen effective telescope configuration.**
-`MUSCAT_PROSE_FROZEN_CONFIG=1` routes both reductions and postprocessing through
-the standalone `_prose_launcher.py` adapter in the selected conda interpreter,
-passing `--config <path-to-_prose_telescopes.yaml>` explicitly. This is one
-authoritative, version-controlled configuration, not independently maintained
-configuration directories for each environment. An explicit path must contain
-the approved snapshot: missing or changed files fail without falling back to
-`~/.prose`.
-Before importing prose, it checks the packaged `_prose_telescopes.yaml` checksum
-and matching installed engine commit, then supplies a read-only `ConfigManager`
-initialized from the snapshot. The original initializer never runs, so it cannot
-read development telescope symlinks, create shared config files or download the
-unused Ballet model. HOME, `~/.prose` and the engine checkout are unchanged.
-All configuration write methods are rejected, including `set()` before it can
-mutate settings, builtin updates, legacy file migrations and model downloads.
-The read-only contract concerns configuration APIs and filesystem side effects;
-the engine's in-memory working dictionaries remain ordinary dictionaries.
+With `MUSCAT_PROSE_FROZEN_CONFIG=1`, reductions and postprocessing run
+`<pinned env>/bin/python -I -m <module>` with `PROSE_CONFIG_FILE` pointing at the
+packaged `_prose_telescopes.yaml` and `PROSE_CONFIG_SHA256` set to its digest.
+prose2 (jpdeleon/prose2#16) then loads that file read-only before touching HOME:
+it never reads `~/.prose` or development telescope symlinks, never creates shared
+config files, never downloads the unused Ballet model, and rejects configuration
+writes. A missing or changed file fails without falling back to `~/.prose`.
+prose exports both variables, so spawn and forkserver workers load the same file;
+the adapter's fork-only restriction is gone. This is one authoritative,
+version-controlled configuration, not a configuration directory per environment.
+muscat-db checks the packaged checksum before each launch. `-I` keeps cwd,
+`PYTHONPATH` and user site-packages from shadowing the pinned install.
+
+Frozen mode refuses to launch unless the selected env reports a pinned,
+non-editable prose (`version+git.<SHA>`), and refuses `MUSCAT_PROSE_PYTHON`,
+which would bypass the selected env.
 
 The snapshot preserves all 94 effective aliases, including builtin/custom
 definitions, resolved duplicate-name precedence, and YAML tuple types. It records
 the source telescope-file hashes. No camera values or header precedence are
-changed by freezing them. The digest is printed in each run log and stored as
-`tool_versions.prose_config_sha256` in `_product.json`; `engines.py verify` also
-imports the real engine with the adapter and verifies the digest against its pin.
-The YAML is included in the installed muscat-db wheel.
-
-Forked workers inherit this configuration. The adapter requires the pinned
-Python 3.10/Linux `fork` start method and refuses spawn/forkserver, which could
-re-import prose without the adapter. The engine has no supported explicit,
-read-only configuration loading API yet;
-[jpdeleon/prose2#15](https://github.com/jpdeleon/prose2/issues/15) tracks that API
-so this adapter can eventually be removed. Independent directories are not a
-requirement: installations may load the same approved configuration file.
+changed by freezing them. It was captured at prose2 `6029ea87`; its
+`engine_commit` field records that capture, not the current pin. The digest is
+written at the top of each run log and stored as
+`tool_versions.prose_config_sha256` in `_product.json`. `engines.py verify`
+imports the real pinned engine with the file selected the way production launches
+it, and requires a read-only configuration with the pinned digest; an engine
+without #16 fails this check. The YAML is included in the installed muscat-db wheel.
 
 To prepare a future configuration update, `deploy/engines.py capture-config
 --snapshot <new-file>` captures the effective configuration using clean engine
 code at the approved commit. It refuses to overwrite an existing snapshot. Review
 the candidate's scientific settings, then update the packaged YAML and both
-recorded SHA-256 values (launcher and `engines.toml`) together. Never regenerate
-the production snapshot automatically at launch or by following live symlinks.
+recorded SHA-256 values (`muscat_db/prose_config.py` and `engines.toml`) together.
+Never regenerate the production snapshot automatically at launch or by following
+live symlinks.
 
-Harmonic is not yet covered by #101: the live editable install is the
-`jpdeleon/harmonic` fork at `f616614568f7655858da29fbc46fb9edfdb022ee`.
-The owner's upstream `john-livingston/harmonic` at
-`a32fb8e32ca776e0e6e7dc92ad4232cef1f12194` lacks the custom-prior flags
-`--mu-min-me`, `--mu-max-me`, and `--z-max` sent by muscat-db (#77).
-Do not pin the fork or silently discard requested priors. Resolve compatibility
-before adding harmonic to the production pins; keep #101 open until then.
+**Harmonic is pinned to the `jpdeleon/harmonic` fork.** The owner's upstream
+`john-livingston/harmonic` at `a32fb8e32ca776e0e6e7dc92ad4232cef1f12194` lacks
+the custom-prior flags `--mu-min-me`, `--mu-max-me`, and `--z-max` sent by
+muscat-db (#77); fork commit `f616614568f7655858da29fbc46fb9edfdb022ee` adds them
+on top of it. The pin declares this with `fork_of` and `fork_reason`. Requested
+priors are never silently discarded. Move the pin back to the owner's repository
+once upstream carries the flags.
+
+**A selected engine env never falls back.** The production profile selects each
+engine's env through `MUSCAT_<ENGINE>_CONDA_ENV`. When that env is missing, all
+three launchers raise instead of falling back to `conda run`, an executable on
+`PATH`, or the prose2 checkout. Development, which leaves these unset, keeps the
+fallbacks.
 
 Prepare without changing any live process:
 
@@ -819,7 +829,7 @@ uv run python deploy/engines.py verify
 Use `--conda /absolute/path/to/miniconda3/bin/conda` for another installation.
 Temporary build files go under `~/temp` (`--scratch` overrides this).
 Verify on **each** worker host as well as ut2, and exercise the installed
-`photometry` and `timer-fit` entrypoints against isolated output directories.
+`photometry`, `timer-fit` and `harmonic` entrypoints against isolated output directories.
 Check telescope resources and both test/full execution paths. Run the fast suite
 with `uv run pytest`; heavyweight integration checks must use separate databases,
 output trees and obslog paths, never a default production run directory.
@@ -828,16 +838,16 @@ Roll out only after the PR is merged, released and taken by the deploy host:
 
 1. Take a verified SQLite backup; record the current web and worker engine settings.
 2. Confirm `deploy/engines.py verify` succeeds everywhere and that no jobs are active.
-3. `deploy/workers.toml [profiles.prod].engine_envs` selects pinned prose and timer
-   for **both** `render_env` and `web-env`; `prose_frozen_config = true` enables
-   the adapter in both processes. Development keeps its existing environments
+3. `deploy/workers.toml [profiles.prod].engine_envs` selects pinned prose, timer and
+   harmonic for **both** `render_env` and `web-env`; `prose_frozen_config = true`
+   enables the frozen configuration in both processes. Development keeps its existing environments
    and exports `MUSCAT_PROSE_FROZEN_CONFIG=0`.
    Apply with `uv run python deploy/workers.py --profile prod up`. Busy workers are
    deliberately left unchanged; re-run after they drain and check all units.
 4. Merge the `web-env` engine exports into production's existing `.web-env`, preserving
    its Postgres and control-plane settings. Do not replace that file with only the
    generated fragment. Ensure `MUSCAT_PROSE_PYTHON` is unset in both `.env` and the
-   launch environment, since it takes precedence over `MUSCAT_PROSE_CONDA_ENV`.
+   launch environment: frozen mode refuses to launch while it is set.
 5. Restart the production web process in `muscatdbgui`, verify `/healthz`, then run
    one queued job per migrated pipeline and check its log and `_product.json`.
    Pinned engines now record `version+git.<full SHA>` in the existing version fields.

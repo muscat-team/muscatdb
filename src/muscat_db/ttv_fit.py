@@ -32,7 +32,7 @@ from muscat_db.photometry import (
     harmonic_conda_env,
 )
 from muscat_db.cache import register_cache
-from muscat_db.engine_identity import version_probe
+from muscat_db.engine_identity import require_selected_env, version_probe
 
 _REPO_ROOT = pathlib.Path(__file__).parent.parent.parent.resolve()
 logger = logging.getLogger(__name__)
@@ -264,6 +264,7 @@ def ttv_job_key(target: str, run_name: str = "") -> str:
 def _harmonic_prefix() -> list[str]:
     env = harmonic_conda_env()
     conda_py = _conda_env_python(env)
+    require_selected_env("harmonic", conda_py)
     if conda_py:
         harmonic_cli = pathlib.Path(conda_py).parent / "harmonic"
         if harmonic_cli.is_file():
