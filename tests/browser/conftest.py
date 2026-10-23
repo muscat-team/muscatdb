@@ -110,6 +110,22 @@ def _block_network(mp: pytest.MonkeyPatch) -> None:
     mp.setattr(socket, "getaddrinfo", getaddrinfo)
 
 
+def _offline_iers(mp: pytest.MonkeyPatch) -> None:
+    """Keep astropy on its bundled Earth-orientation tables.
+
+    Alt/az (transit windows, visibility) needs UT1-UTC. With no fresh IERS-A
+    table cached, astropy downloads one; the guard above blocks that, and the
+    stale bundled table then raises instead of computing, so /api/lco/windows
+    fails on a clean CI runner but not on a host whose ~/.astropy holds one.
+    UT1-UTC moves alt/az by well under a second, so results are unchanged.
+    """
+    from astropy.utils import iers
+
+    mp.setattr(iers.conf, "auto_download", False)
+    mp.setattr(iers.conf, "auto_max_age", None)
+    mp.setattr(iers.conf, "iers_degraded_accuracy", "warn")
+
+
 # ── no pipeline launches ─────────────────────────────────────────────────────
 
 # Modules that start prose/timer/harmonic/funpack/postprocess processes. The
@@ -261,6 +277,7 @@ def live_server(tmp_path_factory):
 
         _redirect_repo_data(mp, paths.data)
         _block_network(mp)
+        _offline_iers(mp)
         _block_launches(mp)
         seed.patch_app(mp, paths)
 
