@@ -16,6 +16,7 @@ Copy `.env.example` to `.env` only if you need to override a default (see
 uv run ruff check .
 uv run pytest -q                 # fast suite (heavyweight `slow`-marked tests are deselected by default)
 uv run pytest -m slow            # only on a host with the real prose/timer/harmonic conda envs and data
+uv run playwright install chromium-headless-shell   # once, so the browser tests (tests/browser/ and tests/*_browser.py) run instead of skipping
 uv run pytest --cov=src/muscat_db --cov-report=term-missing   # coverage gate in CI is 68%, target 80%
 ```
 

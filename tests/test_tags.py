@@ -558,7 +558,7 @@ def test_tag_page_uses_normalized_target_header(mock_db, monkeypatch):
 
     html = TestClient(app).get("/tag?name=FollowUp").text
 
-    assert '<th data-sort-attr="normName">Normalized Target</th>' in html
+    assert '<th data-sort-attr="normName" data-sort-type="string">Normalized Target</th>' in html
 
 
 def test_tag_page_has_rename_control(mock_db):
