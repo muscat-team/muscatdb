@@ -605,6 +605,26 @@ def test_prose_version_retries_after_a_failed_lookup(monkeypatch):
     assert len(calls) == 2
 
 
+def test_prose_version_rechecks_an_editable_checkout_every_time(monkeypatch):
+    """A dev checkout can switch commits while the server runs; never cache it."""
+    sha_a, sha_b = "a" * 40, "b" * 40
+    outcomes = iter([f"3.4.0+git.{sha_a}.editable\n", f"3.4.0+git.{sha_b}.editable\n"])
+
+    class _R:
+        returncode = 0
+
+        def __init__(self):
+            self.stdout = next(outcomes)
+
+    monkeypatch.setattr(phot, "_PROSE_VERSION", None)
+    monkeypatch.setattr(phot, "_PROSE_VERSION_FAILED_AT", None, raising=False)
+    monkeypatch.setattr(phot, "_conda_env_python", lambda _env: "/bin/python")
+    monkeypatch.setattr(phot.subprocess, "run", lambda *_a, **_k: _R())
+
+    assert phot.prose_version() == f"3.4.0+git.{sha_a}.editable"
+    assert phot.prose_version() == f"3.4.0+git.{sha_b}.editable"
+
+
 # -- target spelling (#221, #245) ---------------------------------------------
 
 VARIANT_INST = "muscat3"

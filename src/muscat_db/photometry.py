@@ -334,7 +334,9 @@ _PROSE_VERSION_RETRY_S = 300.0
 def prose_version() -> str:
     """Installed prose version in the prose conda env.
 
-    A success is cached for the life of the process. A failure is remembered
+    A success is cached for the life of the process, except for an editable
+    checkout: it can switch commits while the server runs, so it is looked up
+    again on every call. A failure is remembered
     only for ``_PROSE_VERSION_RETRY_S``: a missing env or one slow lookup must
     not label every later run ``unknown`` until the next restart, and must not
     make every launch in that window wait on the subprocess again.
@@ -349,9 +351,9 @@ def prose_version() -> str:
         if _PROSE_VERSION is not None:
             return _PROSE_VERSION
         found = None
+        from muscat_db.engine_identity import is_mutable_version, version_probe
         prose_py = _conda_env_python(prose_conda_env())
         if prose_py is not None:
-            from muscat_db.engine_identity import version_probe
             code = version_probe(_PROSE_DISTRIBUTIONS)
             try:
                 result = subprocess.run(
@@ -365,6 +367,8 @@ def prose_version() -> str:
         if found is None:
             _PROSE_VERSION_FAILED_AT = now
             return "unknown"
+        if is_mutable_version(found):
+            return found
         _PROSE_VERSION = found
     return _PROSE_VERSION
 
