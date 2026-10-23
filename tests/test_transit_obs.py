@@ -566,3 +566,53 @@ def test_transit_plans_relay_prefers_full_coverage_over_a_cheap_gapped_pair():
     relay = next(p for p in plans if p["type"] == "relay")
     assert relay["gap_min"] == 0.0
     assert "ogg" in relay["sites"]
+
+
+@pytest.mark.parametrize("values", [2461223.0, [2461223.0, 2461233.0]])
+@pytest.mark.parametrize("failed_pass", [1, 2])
+def test_bjd_conversion_retries_stale_iers(values, failed_pass, monkeypatch, caplog):
+    import logging
+    from astropy.time import Time
+    from astropy.utils import iers
+
+    expected = T.bjd_tdb_to_jd_utc(values, 228.45, -45.01)
+    real_light_travel_time = Time.light_travel_time
+    calls = []
+    error = (
+        "interpolating from IERS_Auto using predictive values that are more "
+        "than 30.0 days old."
+    )
+
+    def fail_once(time, *args, **kwargs):
+        calls.append((iers.conf.auto_download, iers.conf.auto_max_age))
+        if len(calls) == failed_pass:
+            raise ValueError(error)
+        return real_light_travel_time(time, *args, **kwargs)
+
+    monkeypatch.setattr(Time, "light_travel_time", fail_once)
+    # The session fixture disables this path. Override it explicitly to check
+    # the retry settings and restoration of the normal production policy.
+    with iers.conf.set_temp("auto_download", True), iers.conf.set_temp("auto_max_age", 30):
+        with caplog.at_level(logging.WARNING, logger="muscat_db.transit_obs"):
+            result = T.bjd_tdb_to_jd_utc(values, 228.45, -45.01)
+        assert iers.conf.auto_download is True
+        assert iers.conf.auto_max_age == 30
+    assert result == pytest.approx(expected, abs=1e-9)
+    assert calls[failed_pass:] == [(False, None), (False, None)]
+    assert error in caplog.text
+
+
+@pytest.mark.parametrize("error", ["invalid coordinates", "IERS unrelated validation error"])
+def test_bjd_conversion_does_not_retry_unrelated_value_errors(error, monkeypatch):
+    from astropy.time import Time
+
+    calls = []
+
+    def fail(*args, **kwargs):
+        calls.append(True)
+        raise ValueError(error)
+
+    monkeypatch.setattr(Time, "light_travel_time", fail)
+    with pytest.raises(ValueError, match=error):
+        T.bjd_tdb_to_jd_utc(2461223.0, 228.45, -45.01)
+    assert len(calls) == 1
