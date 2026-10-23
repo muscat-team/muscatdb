@@ -179,3 +179,52 @@ def test_ttv_fit_sync_keeps_requeued_run_pending(ttv_job):
     ttv.sync_jobs()
 
     assert [r["state"] for r in _rows("ttv_fit")] == ["pending"]
+
+
+# -- a newer run that is already running or finished --------------------------
+#
+# The same overwrite happens when the newer run is past pending. The web
+# process keeps a finished test run; a full run on the same key is queued, and a
+# fleet worker on another host claims it and marks the row running before the
+# web process's next sync pass. That pass then finds a running row, not a
+# pending one, and wrote the test run's terminal state over the live full run.
+
+
+def _save_newer(type_: str, started_at: float, state: str, **kw) -> None:
+    # Held by a live sibling instance, as a relaunch from another process is,
+    # so this process's orphan reconciliation leaves the running row alone.
+    get_job_store().save(
+        type_=type_, inst=kw.pop("inst", INST), date=kw.pop("date", DATE), target=TARGET,
+        state=state, returncode=None if state == "running" else 0, elapsed=0,
+        started_at=started_at, run_type="test", instance_id="other-host:1:live",
+    )
+
+
+@pytest.mark.parametrize("newer_state", ["running", "cancelled"])
+def test_photometry_sync_leaves_a_newer_run_alone(phot_job, newer_state):
+    _save_newer("photometry", phot_job.started_at + 5, newer_state)
+
+    phot.sync_jobs()
+
+    assert [r["state"] for r in _rows("photometry")] == [newer_state]
+    assert phot_job.key not in phot._JOBS
+
+
+@pytest.mark.parametrize("newer_state", ["running", "cancelled"])
+def test_transit_fit_sync_leaves_a_newer_run_alone(fit_job, newer_state):
+    _save_newer("transit_fit", fit_job.started_at + 5, newer_state)
+
+    fit.sync_jobs()
+
+    assert [r["state"] for r in _rows("transit_fit")] == [newer_state]
+    assert fit_job.key not in fit._FIT_JOBS
+
+
+@pytest.mark.parametrize("newer_state", ["running", "cancelled"])
+def test_ttv_fit_sync_leaves_a_newer_run_alone(ttv_job, newer_state):
+    _save_newer("ttv_fit", ttv_job.started_at + 5, newer_state, inst="_", date="_")
+
+    ttv.sync_jobs()
+
+    assert [r["state"] for r in _rows("ttv_fit")] == [newer_state]
+    assert ttv_job.key not in ttv._TTV_JOBS

@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import os
 import sqlite3
-import time
 
 import pytest
 
@@ -55,10 +54,12 @@ def _row(key: str) -> dict:
     return next(j for j in database.get_persisted_jobs() if j["key"] == key)
 
 
-def _save_cancelled(type_: str, **kw) -> None:
+def _save_cancelled(type_: str, started_at: float, **kw) -> None:
+    # cancel_run records the job's own started_at; a later one would mark the
+    # row as a newer run that supersedes the job.
     get_job_store().save(
         type_=type_, inst=INST, date=DATE, target=TARGET, state="cancelled",
-        returncode=jobs.CANCELLED_RC, elapsed=0, started_at=time.time(),
+        returncode=jobs.CANCELLED_RC, elapsed=0, started_at=started_at,
         error_desc="Cancelled by user", **kw,
     )
 
@@ -109,7 +110,7 @@ def phot_job(tmp_path, monkeypatch, jobs_db):
 
 def test_photometry_sync_keeps_cancelled_while_process_dies(phot_job):
     job, db_key = phot_job
-    _save_cancelled("photometry")
+    _save_cancelled("photometry", job.started_at)
 
     phot.sync_jobs()  # process still alive: live state is "cancelling"
 
@@ -118,7 +119,7 @@ def test_photometry_sync_keeps_cancelled_while_process_dies(phot_job):
 
 def test_photometry_sync_records_real_exit_code_once_terminal(phot_job):
     job, db_key = phot_job
-    _save_cancelled("photometry")
+    _save_cancelled("photometry", job.started_at)
     phot.sync_jobs()
 
     job.proc._rc = -15
@@ -152,7 +153,7 @@ def fit_job(tmp_path, jobs_db):
 
 
 def test_transit_fit_sync_keeps_cancelled_while_process_dies(fit_job):
-    _save_cancelled("transit_fit")
+    _save_cancelled("transit_fit", fit_job.started_at)
 
     fit.sync_jobs()
 
