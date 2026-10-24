@@ -1361,27 +1361,44 @@ def _safe_float(v: str) -> float | None:
         return None
 
 
-def get_instruments(db_path: str) -> list[dict]:
+def get_instruments(
+    db_path: str, *, denied: frozenset[str] = frozenset()
+) -> list[dict]:
+    """Instruments with at least one summary row outside a *denied* proposal,
+    so an instrument whose data is all hidden reads as having none."""
+    visible, visible_params = sql_not_denied(denied)
     with get_conn(db_path) as conn:
-        cur = conn.execute("SELECT DISTINCT instrument FROM summaries ORDER BY instrument")
+        cur = conn.execute(
+            f"SELECT DISTINCT instrument FROM summaries WHERE {visible} ORDER BY instrument",
+            visible_params,
+        )
         return [{"name": r[0]} for r in cur.fetchall()]
 
 
-def get_instruments_summary(db_path: str, min_frames: int = 1000) -> list[dict]:
+def get_instruments_summary(
+    db_path: str, min_frames: int = 1000, *, denied: frozenset[str] = frozenset()
+) -> list[dict]:
     """Return count of dates, frames, and targets for all instruments.
 
     Filters science targets to only count those with at least min_frames frames.
+    Summaries under a *denied* proposal are left out before aggregating, as in
+    :func:`get_dates`, so the totals match what the viewer can browse to.
     """
     with get_conn(db_path) as conn:
-        return _instruments_summary(conn, min_frames)
+        return _instruments_summary(conn, min_frames, denied)
 
 
-def _instruments_summary(conn: sqlite3.Connection, min_frames: int) -> list[dict]:
+def _instruments_summary(
+    conn: sqlite3.Connection, min_frames: int, denied: frozenset[str] = frozenset()
+) -> list[dict]:
+    visible, visible_params = sql_not_denied(denied)
     # Get total dates and frames per instrument
     base_stats = conn.execute(
-        """SELECT instrument, COUNT(DISTINCT obsdate), SUM(nframes)
+        f"""SELECT instrument, COUNT(DISTINCT obsdate), SUM(nframes)
            FROM summaries
-           GROUP BY instrument"""
+           WHERE {visible}
+           GROUP BY instrument""",
+        visible_params,
     ).fetchall()
     stats_map = {r[0]: (r[1] or 0, r[2] or 0) for r in base_stats}
     
@@ -1399,11 +1416,12 @@ def _instruments_summary(conn: sqlite3.Connection, min_frames: int) -> list[dict
                   AND LOWER(TRIM(object)) NOT LIKE 'bias%'
                   AND LOWER(TRIM(object)) NOT LIKE '%test%'
                   AND TRIM(object) NOT GLOB '*:*:*'
+                  AND {visible}
                 GROUP BY instrument, object
                 HAVING target_frames >= ?
             )
             GROUP BY instrument""",
-        (min_frames,)
+        (*visible_params, min_frames)
     ).fetchall()
     target_map = {r[0]: r[1] for r in target_stats}
 

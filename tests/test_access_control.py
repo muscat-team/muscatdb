@@ -243,6 +243,53 @@ def test_rendered_page_cache_is_not_shared_across_denied_sets(client, db):
     assert _n_observations(denied) == 0
 
 
+# ── /obs instrument statistics ──────────────────────────────────────────
+
+
+def _obs_stats(client, user: str) -> dict[str, tuple[int, int, int]]:
+    """``{instrument: (n_dates, n_targets, n_frames)}`` from the /obs table."""
+    html = client.get("/obs?min_frames=1", headers=_headers(user)).text
+    rows = re.findall(
+        r'<a href="/(\w+)">\1</a></strong></td>\s*'
+        r'<td class="mono">(\d+)</td>\s*<td class="mono">(\d+)</td>\s*<td class="mono">(\d+)</td>',
+        html,
+    )
+    return {name: (int(d), int(t), int(f)) for name, d, t, f in rows}
+
+
+def _obs_has_data(client, user: str) -> dict[str, bool]:
+    html = client.get("/obs", headers=_headers(user)).text
+    cards = re.findall(r'<div class="name">(\w+)</div>\s*<div class="meta">([^<]*)', html)
+    return {name: meta.startswith("Click to view") for name, meta in cards}
+
+
+def test_obs_stats_count_only_what_the_viewer_may_see(client, db):
+    _set_admin(db, "root")
+    full = _obs_stats(client, "root")
+    denied = _obs_stats(client, "alice")
+
+    assert full["sinistro"] == (2, 1, 5)
+    assert full["muscat3"] == (2, 2, 2)
+    # The restricted sinistro night and HIDDENTGT's night drop out entirely.
+    assert denied["sinistro"] == (1, 1, 2)
+    assert denied["muscat3"] == (1, 1, 1)
+
+
+def test_obs_instrument_with_only_hidden_data_looks_empty(client, db):
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            """INSERT INTO summaries (instrument, obsdate, ccd, object, nframes, proposal_id)
+               VALUES ('muscat4', '260301', 0, 'HIDDENTGT', 4, ?)""",
+            (_RESTRICTED,),
+        )
+    _set_admin(db, "root")
+
+    assert _obs_has_data(client, "root")["muscat4"] is True
+    assert _obs_stats(client, "root")["muscat4"] == (1, 1, 4)
+    assert _obs_has_data(client, "alice")["muscat4"] is False
+    assert _obs_stats(client, "alice")["muscat4"] == (0, 0, 0)
+
+
 # ── /target ─────────────────────────────────────────────────────────────
 
 
