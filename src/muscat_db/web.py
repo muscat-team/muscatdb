@@ -716,19 +716,9 @@ _CURRENT_USER: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 def _viewer_denied() -> frozenset[str]:
     """Restricted proposals the current request's viewer may not see (issue
     #144); empty for admins and whenever nothing is restricted."""
-    db = _db_path()
-    overrides: dict[str, str] | None = None
-
-    def normalize(name: str) -> str:
-        # Called only when a scoped viewer has target grants to resolve, once
-        # per distinct object spelling in the catalog (thousands of calls), so
-        # the overrides table is read on the first call only.
-        nonlocal overrides
-        if overrides is None:
-            overrides = _get_norm_name_overrides(db)
-        return _normalize_target_name(name, overrides)
-
-    return denied_proposal_ids_for(db, _CURRENT_USER.get(), normalize)
+    # Target grants match by stored target key (issue #228), never through the
+    # name overrides: a rename on the target page does not change access.
+    return denied_proposal_ids_for(_db_path(), _CURRENT_USER.get())
 
 
 def _night_visibility(denied: frozenset[str] | None = None) -> NightVisibility:

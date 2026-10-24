@@ -59,6 +59,8 @@ uv run muscat-db access scope <user> [--off]
 # Scoped viewer + one target under any proposal (issue #228)
 uv run muscat-db access grant-target <user> <target>
 uv run muscat-db access revoke-target <user> <target>
+# Re-key objects and target grants with the current rule; lists dead target grants
+uv run muscat-db access target-keys [--dry-run]
 # Per-user job caps (issue #265): show, set (0 = unlimited) or clear a user's overrides
 uv run muscat-db access limit <user> [--running N] [--queued N] [--reset]
 ```
@@ -98,12 +100,23 @@ admins included.
   PostgreSQL each user's claims and enqueues take a transaction advisory lock.
 
 A scoped viewer can also be given single targets with `access grant-target
-<user> <target>` (spaces and case ignored, resolved to the raw `object`
-spellings): they then see every observation of that target under any proposal,
-and nothing else of the proposals it is in. Target grants apply to scoped
-viewers only; the command refuses anyone else. `access explain <user>` lists
-them. A target first observed under a new spelling after the viewer's grants
-were resolved is picked up on the next request.
+<user> <target>`: they then see every observation of that target under any
+proposal, and nothing else of the proposals it is in. Target grants apply to
+scoped viewers only; the command refuses anyone else. `access explain <user>`
+lists them. A target first observed under a new spelling after the viewer's
+grants were resolved is picked up on the next request.
+
+Target grants (`grant-target`, `group grant --target`) match by *target key*
+(`src/muscat_db/target_keys.py`): the host-level normalized name, so case,
+spaces, hyphens, leading zeros, candidate suffixes (`.01`) and planet letters
+(`b`) do not matter, and `TOI1234` covers an `OBJECT` of `TOI-1234` or
+`TOI 01234.01`. The key ignores the target page's name overrides: renaming a
+target regroups it for display and never changes who can see it. Keys are
+stored per object (`object_keys`) and per grant (`group_grants.target_key`),
+written by `ingest-date` and `build-db`. After deploying a change to the key
+rule, run `uv run muscat-db access target-keys --dry-run`: it lists every grant
+the new rule would re-key and every target grant that would match nothing.
+Then run it without `--dry-run`, or let the nightly `build-db` do it.
 
 Connect to production via SSH tunnel: `ssh -L 8000:localhost:8000 <user>@muscat-ut2` → http://localhost:8000. Staging's public port is `:8002` (`ssh -L 8002:localhost:8002`).
 

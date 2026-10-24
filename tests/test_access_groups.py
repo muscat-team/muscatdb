@@ -14,7 +14,7 @@ import sqlite3
 import pytest
 from typer.testing import CliRunner
 
-from muscat_db import access, access_groups
+from muscat_db import access, access_groups, target_keys
 from muscat_db.access_groups import Access
 from muscat_db.cli import app as cli_app
 from muscat_db.database import _APP_OWNED_TABLES, _apply_schema
@@ -26,7 +26,7 @@ ROWS = [
     ("sinistro", "260103", "MIXEDTGT", "KEY-SECRET"),
     ("qhy600", "260104", "HIDDENTGT", "KEY-SECRET"),
     ("muscat2", "260105", "OPENTGT", ""),
-    ("muscat3", "260106", "TOI-6109", "OTHER-002"),
+    ("muscat3", "260106", "TOI-1234", "OTHER-002"),
 ]
 
 
@@ -63,8 +63,8 @@ def db(tmp_path):
     return path
 
 
-def _visible(db, user, normalize=None):
-    acc = access_groups.load_access(db, user, normalize)
+def _visible(db, user):
+    acc = access_groups.load_access(db, user)
     return {r for r in ROWS if acc.frame_visible(*r)}
 
 
@@ -158,82 +158,67 @@ def _grant_to(db, group, **kw):
 
 
 def test_target_grant_resolves_spellings_and_agrees_in_sql(db):
+    padded = ("sinistro", "260107", "TOI 01234.01", "KEY-SECRET")
     with sqlite3.connect(db) as conn:
         conn.execute(
             "INSERT INTO summaries (instrument, obsdate, ccd, object, proposal_id) "
-            "VALUES ('sinistro', '260107', 0, 'TOI 6109', 'KEY-SECRET')"
+            "VALUES (?, ?, 0, ?, ?)",
+            padded,
         )
         conn.commit()
-    _grant_to(db, "tgt", target="TOI-6109")
-    norm = lambda s: s.upper().replace(" ", "").replace("-", "")  # noqa: E731
-    acc = access_groups.load_access(db, "alice", norm)
-    assert acc.frame_visible("sinistro", "260107", "TOI 6109", "KEY-SECRET")
-    assert acc.frame_visible("muscat3", "260106", "TOI-6109", "OTHER-002")
-    assert not acc.frame_visible("sinistro", "260103", "MIXEDTGT", "KEY-SECRET")
-    assert _every_row(db, acc) >= {
-        ("sinistro", "260107", "TOI 6109", "KEY-SECRET"),
-        ("muscat3", "260106", "TOI-6109", "OTHER-002"),
-    }
-    assert _every_row(db, acc) == {
-        r
-        for r in ROWS + [("sinistro", "260107", "TOI 6109", "KEY-SECRET")]
-        if acc.frame_visible(*r)
-    }
-
-
-def test_target_grant_without_normalizer_matches_spaces_and_case_only(db):
-    _grant_to(db, "tgt", target="toi-6109")
+    _grant_to(db, "tgt", target="TOI-1234")
     acc = access_groups.load_access(db, "alice")
-    assert acc.frame_visible("muscat3", "260106", "TOI-6109", "OTHER-002")
-    assert not acc.frame_visible("muscat3", "260106", "TOI6109", "OTHER-002")
-
-
-def test_target_grants_normalize_each_object_once(db):
-    # Production has thousands of objects and web's normalizer is not free, so
-    # resolving several target grants must not normalize the catalog once per
-    # grant. The grant spellings match no object verbatim, so every call on an
-    # object name below comes from the object side.
-    _grant_to(db, "tgt", target="toi 6109")
-    _grant_to(db, "tgt2", target="hidden-tgt")
-    seen: list[str] = []
-
-    def norm(s):
-        seen.append(s)
-        return s.upper().replace(" ", "").replace("-", "")
-
-    acc = access_groups.load_access(db, "alice", norm)
-    objects = {r[2] for r in ROWS}
-    assert max(seen.count(o) for o in objects) == 1
-    assert acc.frame_visible("muscat3", "260106", "TOI-6109", "OTHER-002")
-    assert acc.frame_visible("qhy600", "260104", "HIDDENTGT", "KEY-SECRET")
+    assert acc.frame_visible(*padded)
+    assert acc.frame_visible("muscat3", "260106", "TOI-1234", "OTHER-002")
     assert not acc.frame_visible("sinistro", "260103", "MIXEDTGT", "KEY-SECRET")
+    assert _every_row(db, acc) >= {padded, ("muscat3", "260106", "TOI-1234", "OTHER-002")}
+    assert _every_row(db, acc) == {r for r in ROWS + [padded] if acc.frame_visible(*r)}
 
 
-def test_viewer_denied_reads_name_overrides_once(db, monkeypatch):
-    # The web normalizer used to re-read target_overrides (a new connection
-    # plus a schema migration) on every call: ~3500 times per page for a
-    # scoped viewer with a target grant on the production catalog.
+def test_target_grant_spelled_without_the_hyphen_matches_the_observed_object(db):
+    # Found in the #228 acceptance run: a grant typed without the hyphen the
+    # OBJECT header carries matched no frame, because this path compared names
+    # with only spaces and case ignored.
+    _grant_to(db, "tgt", target="TOI1234")
+    acc = access_groups.load_access(db, "alice")
+    assert acc.frame_visible("muscat3", "260106", "TOI-1234", "OTHER-002")
+    assert not acc.frame_visible("qhy600", "260104", "HIDDENTGT", "KEY-SECRET")
+
+
+def test_target_grants_read_stored_object_keys(db, monkeypatch):
+    # The per-request cost used to be one normalizer call per distinct object
+    # (~3,500 on production) for every scoped page view. Stored keys make it
+    # one SELECT; the rule runs only for objects or grants with no stored key.
+    _grant_to(db, "tgt", target="TOI-1234")
+    with sqlite3.connect(db) as conn:
+        target_keys.refresh(conn)
+        conn.commit()
+    calls: list[str] = []
+    real = target_keys.target_key
+    monkeypatch.setattr(target_keys, "target_key", lambda n: calls.append(n) or real(n))
+    acc = access_groups.load_access(db, "alice")
+    assert calls == []
+    assert acc.frame_visible("muscat3", "260106", "TOI-1234", "OTHER-002")
+
+
+def test_a_name_override_does_not_change_what_a_target_grant_covers(db, monkeypatch):
+    # An admin rename on the target page regroups objects for display. Before
+    # stored keys, web's normalizer honoured overrides, so renaming HIDDENTGT to
+    # TOI-1234 silently handed its KEY-SECRET night to every TOI-1234 grantee.
     from muscat_db import web
+    from muscat_db.database import set_norm_name_override
 
     access_groups.seed_from_blocklist(db)
-    _grant_to(db, "tgt", target="toi 6109")
-    reads: list[str] = []
-    real = web._get_norm_name_overrides
-
-    def counted(path):
-        reads.append(path)
-        return real(path)
-
+    _grant_to(db, "tgt", target="TOI-1234")
+    set_norm_name_override(db, "HIDDENTGT", "TOI1234")
     monkeypatch.setenv("MUSCAT_DB_PATH", db)
-    monkeypatch.setattr(web, "_get_norm_name_overrides", counted)
     token = web._CURRENT_USER.set("alice")
     try:
         denied = web._viewer_denied()
     finally:
         web._CURRENT_USER.reset(token)
-    assert len(reads) == 1
-    assert not access.is_denied("OTHER-002", denied, instrument="muscat3", obsdate="260106", obj="TOI-6109")
-    assert access.is_denied("KEY-SECRET", denied, instrument="sinistro", obsdate="260103", obj="MIXEDTGT")
+    assert not access.is_denied("OTHER-002", denied, instrument="muscat3", obsdate="260106", obj="TOI-1234")
+    assert access.is_denied("KEY-SECRET", denied, instrument="qhy600", obsdate="260104", obj="HIDDENTGT")
 
 
 def test_fields_of_one_grant_are_anded(db):

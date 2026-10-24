@@ -18,10 +18,12 @@ Model (design: issue #228):
 * a grant to one nginx user is stored as a grant to the hidden single-member
   group ``user:<name>``, so there is one mechanism and one evaluator.
 
-Target names cannot be normalized in SQL (the rule lives in Python and honours
-manual overrides), so a target grant is *resolved* to the raw ``object``
-spellings it matches when an :class:`Access` is built. An object first seen
-after that is hidden until the next build: it fails closed, like #202.
+A target grant matches by *target key* (:mod:`muscat_db.target_keys`): the
+grant's stored key against each object's key in ``object_keys``. It is
+resolved to the raw ``object`` spellings carrying that key when an
+:class:`Access` is built, so SQL can filter on ``object IN (...)``. An object
+first seen after that is hidden until the next build: it fails closed, like
+#202.
 """
 
 from __future__ import annotations
@@ -29,9 +31,10 @@ from __future__ import annotations
 import logging
 import re
 import sqlite3
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
+from muscat_db import target_keys
 from muscat_db.database import _apply_schema, get_conn
 
 logger = logging.getLogger(__name__)
@@ -50,18 +53,14 @@ def user_group(username: str) -> str:
     return f"{USER_PREFIX}{username}"
 
 
-def _compact(name: str) -> str:
-    return (name or "").replace(" ", "").casefold()
-
-
 # ── grant + evaluator ───────────────────────────────────────────────────
 
 
 @dataclass(frozen=True)
 class Grant:
-    """One rule. ``None`` fields match anything. ``objects`` is the resolved
-    set of raw ``object`` spellings for a target grant (``None`` = no target
-    constraint)."""
+    """One rule. ``None`` fields match anything. For a target grant,
+    ``target_key`` is what matches and ``objects`` the raw ``object``
+    spellings carrying that key (``None`` = no target constraint)."""
 
     id: int | None = None
     group: str = ""
@@ -71,6 +70,7 @@ class Grant:
     date_from: str | None = None
     date_to: str | None = None
     objects: frozenset[str] | None = None
+    target_key: str | None = None
 
     @property
     def is_proposal_only(self) -> bool:
@@ -212,31 +212,52 @@ def _group_names_for(conn: sqlite3.Connection, user: str | None, is_admin: bool)
     return frozenset(groups - excluded)
 
 
-def _resolve_objects(
-    targets: Iterable[str],
-    objects: Iterable[str],
-    normalize: Callable[[str], str] | None,
-) -> dict[str, frozenset[str]]:
-    """Raw ``object`` spellings matching each target name: equal with spaces
-    and case ignored, or equal under *normalize* when one is supplied."""
-    # Each object's keys are computed once, not once per target: there are
-    # thousands of objects, and *normalize* may be far from free.
-    keyed = [(o, _compact(o), normalize(o) if normalize else None) for o in objects if o]
-    out: dict[str, frozenset[str]] = {}
-    for target in set(targets):
-        want = _compact(target)
-        norm = normalize(target) if normalize else None
-        out[target] = frozenset(
-            o for o, compact, o_norm in keyed if compact == want or (norm is not None and o_norm == norm)
+_SELECT_FIELDS = "id, groupname, proposal_id, instrument, target, date_from, date_to"
+
+
+def _select_grants(conn: sqlite3.Connection, where: str, params: Iterable) -> list[tuple]:
+    """Live grant rows, each ending in its stored ``target_key``. *where* is a
+    trusted literal. A database whose schema predates the key column reads
+    as having no stored keys, which :func:`_build_grants` computes."""
+    params = tuple(params)
+    try:
+        return conn.execute(
+            f"SELECT {_SELECT_FIELDS}, target_key FROM group_grants WHERE {where} ORDER BY id",
+            params,
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        if "no such column: target_key" not in str(exc):
+            raise
+    return conn.execute(
+        f"SELECT {_SELECT_FIELDS}, NULL FROM group_grants WHERE {where} ORDER BY id", params
+    ).fetchall()
+
+
+def _build_grants(conn: sqlite3.Connection, rows: list[tuple]) -> tuple[Grant, ...]:
+    """Grants from :func:`_select_grants` rows, each target grant resolved to
+    the ``object`` spellings carrying its key. A key no object carries
+    resolves to nothing, so the grant shows nothing (fails closed)."""
+    by_key = target_keys.objects_by_key(conn) if any(r[4] is not None for r in rows) else {}
+    grants = []
+    for r in rows:
+        key = target_keys.grant_key(r[7], r[4]) if r[4] is not None else None
+        grants.append(
+            Grant(
+                id=r[0],
+                group=r[1],
+                proposal_id=r[2],
+                instrument=r[3],
+                target=r[4],
+                date_from=r[5],
+                date_to=r[6],
+                objects=by_key.get(key, frozenset()) if key is not None else None,
+                target_key=key,
+            )
         )
-    return out
+    return tuple(grants)
 
 
-def load_access(
-    db_path: str,
-    user: str | None,
-    normalize: Callable[[str], str] | None = None,
-) -> Access:
+def load_access(db_path: str, user: str | None) -> Access:
     """The :class:`Access` for *user* (``None`` = anonymous, who is in
     ``everyone`` only). A database with no group tables yet grants nothing,
     which is the safe reading; any other error propagates, because failing
@@ -248,85 +269,20 @@ def load_access(
             admin = bool(row and row[0])
         try:
             groups = _group_names_for(conn, user, admin)
-            rows = conn.execute(
-                "SELECT id, groupname, proposal_id, instrument, target, date_from, date_to "
-                f"FROM group_grants WHERE groupname IN ({','.join('?' for _ in groups)}) "
-                "ORDER BY id",
-                sorted(groups),
-            ).fetchall()
+            rows = _select_grants(
+                conn, f"groupname IN ({','.join('?' for _ in groups)})", sorted(groups)
+            )
         except sqlite3.OperationalError as exc:
             if _missing_table(exc):
                 return Access(user, admin, frozenset())
             raise
-        targets = {r[4] for r in rows if r[4] is not None}
-        resolved: dict[str, frozenset[str]] = {}
-        if targets:
-            objects = [r[0] for r in conn.execute("SELECT DISTINCT object FROM summaries")]
-            resolved = _resolve_objects(targets, objects, normalize)
-    grants = tuple(
-        Grant(
-            id=r[0],
-            group=r[1],
-            proposal_id=r[2],
-            instrument=r[3],
-            target=r[4],
-            date_from=r[5],
-            date_to=r[6],
-            objects=resolved.get(r[4]) if r[4] is not None else None,
-        )
-        for r in rows
-    )
+        grants = _build_grants(conn, rows)
     return Access(user, admin, groups, grants)
-
-
-def scoped_target_rules(
-    conn: sqlite3.Connection,
-    user: str,
-    normalize: Callable[[str], str] | None = None,
-) -> tuple[Grant, ...]:
-    """Target grants that widen a *scoped* viewer's proposal allowlist.
-
-    Only grants that name a target, from the viewer's own groups other than
-    ``everyone`` and ``admin``: a scoped viewer is outside ``everyone`` by
-    definition, and plain proposal grants already live in their allowlist
-    (#202). Missing group tables mean no grants.
-    """
-    try:
-        groups = _group_names_for(conn, user, False) - {EVERYONE, ADMIN}
-        if not groups:
-            return ()
-        rows = conn.execute(
-            "SELECT id, groupname, proposal_id, instrument, target, date_from, date_to "
-            f"FROM group_grants WHERE target IS NOT NULL AND groupname IN "
-            f"({','.join('?' for _ in groups)}) ORDER BY id",
-            sorted(groups),
-        ).fetchall()
-    except sqlite3.OperationalError as exc:
-        if _missing_table(exc):
-            return ()
-        raise
-    if not rows:
-        return ()
-    objects = [r[0] for r in conn.execute("SELECT DISTINCT object FROM summaries")]
-    resolved = _resolve_objects({r[4] for r in rows}, objects, normalize)
-    return tuple(
-        Grant(
-            id=r[0],
-            group=r[1],
-            proposal_id=r[2],
-            instrument=r[3],
-            target=r[4],
-            date_from=r[5],
-            date_to=r[6],
-            objects=resolved[r[4]],
-        )
-        for r in rows
-    )
 
 
 _GRANT_COLUMNS = (
     "id, groupname, proposal_id, instrument, target, date_from, date_to, "
-    "note, granted_by, granted_at"
+    "note, granted_by, granted_at, target_key, target_key_version"
 )
 
 
@@ -344,13 +300,17 @@ def _archive_grants(conn: sqlite3.Connection, where: str, params: tuple, revoked
 def remove_target_grants(
     conn: sqlite3.Connection, group: str, target: str, revoked_by: str = ""
 ) -> int:
-    """Revoke *group*'s grants on *target* (case-insensitive). Returns the count."""
-    return _archive_grants(
-        conn,
-        "groupname = ? AND target IS NOT NULL AND lower(target) = lower(?)",
-        (group, target),
-        revoked_by,
-    )
+    """Revoke *group*'s grants on *target*, matched by target key, so any
+    spelling of the target revokes it. Returns the count."""
+    want = target_keys.target_key(target)
+    ids = [
+        g.id
+        for g in _build_grants(conn, _select_grants(conn, "groupname = ? AND target IS NOT NULL", (group,)))
+        if want and g.target_key == want
+    ]
+    if not ids:
+        return 0
+    return _archive_grants(conn, f"id IN ({','.join('?' for _ in ids)})", tuple(ids), revoked_by)
 
 
 def revoke_grant(conn: sqlite3.Connection, grant_id: int, revoked_by: str = "") -> dict | None:
@@ -440,24 +400,32 @@ def add_grant(
     note: str = "",
     granted_by: str = "",
 ) -> bool:
-    """Insert a grant unless an identical one exists. Returns whether it did."""
+    """Insert a grant unless an equivalent one exists. Returns whether it did.
+
+    Two target grants are equivalent when their targets share a key: a grant
+    on ``TOI1234`` duplicates one on ``TOI-1234``."""
     if date_to is not None and date_from is None:
         raise ValueError("date_to needs date_from")
     if date_from is not None and date_to is None:
         date_to = date_from
-    existing = conn.execute(
-        "SELECT 1 FROM group_grants WHERE groupname = ? "
-        "AND proposal_id IS ? AND instrument IS ? AND target IS ? "
-        "AND date_from IS ? AND date_to IS ?",
-        (group, proposal_id, instrument, target, date_from, date_to),
-    ).fetchone()
-    if existing:
+    key = target_keys.target_key(target) if target is not None else None
+    same_fields = conn.execute(
+        "SELECT target FROM group_grants WHERE groupname = ? "
+        "AND proposal_id IS ? AND instrument IS ? AND date_from IS ? AND date_to IS ? "
+        "AND (target IS NULL) = ?",
+        (group, proposal_id, instrument, date_from, date_to, target is None),
+    ).fetchall()
+    if any(r[0] is None or target_keys.target_key(r[0]) == key for r in same_fields):
         return False
     conn.execute(
         "INSERT INTO group_grants "
-        "(groupname, proposal_id, instrument, target, date_from, date_to, note, granted_by) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (group, proposal_id, instrument, target, date_from, date_to, note, granted_by),
+        "(groupname, proposal_id, instrument, target, date_from, date_to, note, granted_by, "
+        "target_key, target_key_version) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            group, proposal_id, instrument, target, date_from, date_to, note, granted_by,
+            key, target_keys.TARGET_KEY_VERSION if key is not None else None,
+        ),
     )
     return True
 
@@ -704,6 +672,8 @@ def check_selector(
     known = sorted(instruments)
     if instrument is not None and instrument not in known:
         raise ValueError(f"unknown instrument '{instrument}' (known: {', '.join(known)}).")
+    if target is not None and not target_keys.target_key(target):
+        raise ValueError(f"target '{target}' has no name left once normalized.")
     if not (proposal_id or instrument or target or date_from):
         raise ValueError("Give at least one of --proposal, --instrument, --target or --date/--from.")
     return Selector(proposal_id, instrument, target, date_from, date_to)
@@ -782,23 +752,15 @@ def matching_summaries(db_path: str, grant: Grant) -> int:
         return conn.execute(f"SELECT COUNT(*) FROM summaries WHERE {clause}", params).fetchone()[0]
 
 
-def dead_grants(db_path: str, user: str | None, normalize: Callable[[str], str] | None = None) -> list[Grant]:
+def dead_grants(db_path: str, user: str | None) -> list[Grant]:
     """The grants reaching *user* that match no observation."""
-    return [g for g in load_access(db_path, user, normalize).grants if not matching_summaries(db_path, g)]
+    return [g for g in load_access(db_path, user).grants if not matching_summaries(db_path, g)]
 
 
-def load_grant(db_path: str, grant_id: int, normalize: Callable[[str], str] | None = None) -> Grant:
+def load_grant(db_path: str, grant_id: int) -> Grant:
     """One live grant by id, its target resolved as :func:`load_access` does."""
     with get_conn(db_path) as conn:
-        r = conn.execute(
-            "SELECT id, groupname, proposal_id, instrument, target, date_from, date_to "
-            "FROM group_grants WHERE id = ?",
-            (grant_id,),
-        ).fetchone()
-        if r is None:
+        rows = _select_grants(conn, "id = ?", (grant_id,))
+        if not rows:
             raise KeyError(grant_id)
-        objects = None
-        if r[4] is not None:
-            names = [o[0] for o in conn.execute("SELECT DISTINCT object FROM summaries")]
-            objects = _resolve_objects([r[4]], names, normalize)[r[4]]
-    return Grant(*r, objects=objects)
+        return _build_grants(conn, rows)[0]

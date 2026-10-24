@@ -1525,10 +1525,16 @@ def access_limit(
     )
 
 
+_TARGET_HELP = (
+    "Target name, matched by target key: case, spaces, hyphens, leading zeros, "
+    "candidate suffixes (.01) and planet letters (b) are ignored"
+)
+
+
 @access_app.command("grant-target")
 def access_grant_target(
     username: str = typer.Argument(..., help="nginx username (must be a scoped viewer)"),
-    target: str = typer.Argument(..., help="Target name; spaces and case are ignored"),
+    target: str = typer.Argument(..., help=_TARGET_HELP),
     granted_by: str = typer.Option(
         None, "--by", help="Recorded as the granting admin (default: your OS user)"
     ),
@@ -1671,6 +1677,40 @@ def access_groups_seed(
         console.print("[green]Already seeded; nothing to do.[/]")
 
 
+@access_app.command("target-keys")
+def access_target_keys(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Report what would change, write nothing"),
+) -> None:
+    """Re-key observed objects and target grants with the current rule (#228).
+
+    Ingest and `build-db` already do this; run it by hand after deploying a
+    change to the target-key rule, with --dry-run first, to see which grants it
+    re-keys before it does. Also lists target grants that match no object.
+    """
+    from muscat_db import target_keys
+    from muscat_db.database import _apply_schema, db_path, get_conn
+
+    with get_conn(db_path()) as conn:
+        _apply_schema(conn)
+        report = target_keys.refresh(conn)
+        if dry_run:
+            conn.rollback()
+        else:
+            conn.commit()
+    verb = "Would" if dry_run else "Did"
+    console.print(
+        f"{verb} add {report.objects_added}, re-key {len(report.objects_rekeyed)} and drop "
+        f"{report.objects_removed} object key(s); re-key {len(report.grants_rekeyed)} grant(s) "
+        f"(rule v{target_keys.TARGET_KEY_VERSION})"
+    )
+    for gid, group, target, old, new in report.grants_rekeyed:
+        console.print(f"  grant #{gid} {group} target={target}: {old or '(none)'} -> {new}")
+    for gid, group, target in report.dead_grants:
+        console.print(
+            f"[yellow]  grant #{gid} {group} target={target} matches no observed object[/]"
+        )
+
+
 def _refuse_implicit_group(group: str, action: str) -> None:
     """Exit 1 for a group whose membership is implied, saying what to use."""
     from muscat_db import access_groups
@@ -1761,7 +1801,7 @@ def access_group_grant(
     group: str = typer.Argument(..., help="Group name, `everyone`, or `user:<name>` for one user"),
     proposal_id: str | None = typer.Option(None, "--proposal", help="LCO proposal id"),
     instrument: str | None = typer.Option(None, "--instrument", help="Instrument, e.g. sinistro"),
-    target: str | None = typer.Option(None, "--target", help="Target name (spaces and case ignored)"),
+    target: str | None = typer.Option(None, "--target", help=_TARGET_HELP),
     date: str | None = typer.Option(None, "--date", help="One obsdate, YYMMDD"),
     date_from: str | None = typer.Option(None, "--from", help="First obsdate, YYMMDD (inclusive)"),
     date_to: str | None = typer.Option(None, "--to", help="Last obsdate, YYMMDD (inclusive)"),
