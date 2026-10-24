@@ -186,7 +186,7 @@ def test_photometry_run_records_author_inputs_settings_versions(db, tmp_path):
 
 
 def test_frozen_photometry_records_configuration_digest(db, tmp_path, monkeypatch):
-    from muscat_db._prose_launcher import SNAPSHOT_SHA256
+    from muscat_db.prose_config import SNAPSHOT_SHA256
     monkeypatch.setenv("MUSCAT_PROSE_FROZEN_CONFIG", "1")
     phot._write_run_product(
         tmp_path, inst=INST, date=DATE, target=TARGET, opts={}, test_run=False,
@@ -531,6 +531,28 @@ def test_start_ttv_fit_writes_record_with_author_and_inputs(db, monkeypatch):
             job.logf.close()
 
 
+def test_start_ttv_fit_never_sends_prior_flags(db, monkeypatch):
+    """harmonic upstream has no --mu-min-me/--mu-max-me/--z-max and its
+    argparse exits on them; options saved before #77 still carry the keys."""
+    launched = []
+    monkeypatch.setattr(ttv, "_harmonic_prefix", lambda: ["harmonic"])
+    monkeypatch.setattr(ttv, "_harmonic_version", lambda: "0.0.0")
+    monkeypatch.setattr(ttv.subprocess, "Popen", lambda cmd, **_k: launched.append(cmd) or _Proc())
+    monkeypatch.setattr(ttv, "_TTV_JOBS", {})
+    monkeypatch.setattr("muscat_db.database.save_job", lambda **_k: None)
+
+    options = _ttv_options(inputs=[_point()], run_name="r1")
+    options.update(mu_min_me=1.0, mu_max_me=30.0, z_max=0.1)
+    result = ttv.start_ttv_fit(TARGET, options, "erin")
+    try:
+        assert result["ok"] is True
+        assert len(launched) == 1
+        assert not {"--mu-min-me", "--mu-max-me", "--z-max"} & set(launched[0])
+    finally:
+        for job in ttv._TTV_JOBS.values():
+            job.logf.close()
+
+
 # -- review of #245: record contents must not over-expose ---------------------
 
 
@@ -603,6 +625,26 @@ def test_prose_version_retries_after_a_failed_lookup(monkeypatch):
     assert phot.prose_version() == "2.0.1"         # after the window: retried and cached
     assert phot.prose_version() == "2.0.1"
     assert len(calls) == 2
+
+
+def test_prose_version_rechecks_an_editable_checkout_every_time(monkeypatch):
+    """A dev checkout can switch commits while the server runs; never cache it."""
+    sha_a, sha_b = "a" * 40, "b" * 40
+    outcomes = iter([f"3.4.0+git.{sha_a}.editable\n", f"3.4.0+git.{sha_b}.editable\n"])
+
+    class _R:
+        returncode = 0
+
+        def __init__(self):
+            self.stdout = next(outcomes)
+
+    monkeypatch.setattr(phot, "_PROSE_VERSION", None)
+    monkeypatch.setattr(phot, "_PROSE_VERSION_FAILED_AT", None, raising=False)
+    monkeypatch.setattr(phot, "_conda_env_python", lambda _env: "/bin/python")
+    monkeypatch.setattr(phot.subprocess, "run", lambda *_a, **_k: _R())
+
+    assert phot.prose_version() == f"3.4.0+git.{sha_a}.editable"
+    assert phot.prose_version() == f"3.4.0+git.{sha_b}.editable"
 
 
 # -- target spelling (#221, #245) ---------------------------------------------

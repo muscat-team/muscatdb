@@ -32,7 +32,7 @@ from muscat_db.photometry import (
     harmonic_conda_env,
 )
 from muscat_db.cache import register_cache
-from muscat_db.engine_identity import version_probe
+from muscat_db.engine_identity import require_selected_env, version_probe
 
 _REPO_ROOT = pathlib.Path(__file__).parent.parent.parent.resolve()
 logger = logging.getLogger(__name__)
@@ -188,15 +188,6 @@ def get_ttv_command(target: str, options: dict) -> str:
     mstar = options.get("mstar")
     if mstar:
         cmd.extend(["-m", str(mstar)])
-    mu_min_me = options.get("mu_min_me")
-    if mu_min_me is not None:
-        cmd.extend(["--mu-min-me", str(mu_min_me)])
-    mu_max_me = options.get("mu_max_me")
-    if mu_max_me is not None:
-        cmd.extend(["--mu-max-me", str(mu_max_me)])
-    z_max = options.get("z_max")
-    if z_max is not None:
-        cmd.extend(["--z-max", str(z_max)])
     if options.get("clobber"):
         cmd.append("--clobber")
     return shlex.join(cmd)
@@ -264,6 +255,7 @@ def ttv_job_key(target: str, run_name: str = "") -> str:
 def _harmonic_prefix() -> list[str]:
     env = harmonic_conda_env()
     conda_py = _conda_env_python(env)
+    require_selected_env("harmonic", conda_py)
     if conda_py:
         harmonic_cli = pathlib.Path(conda_py).parent / "harmonic"
         if harmonic_cli.is_file():
@@ -579,15 +571,6 @@ def start_ttv_fit(
     mstar = options.get("mstar")
     if mstar:
         cmd.extend(["-m", str(mstar)])
-    mu_min_me = options.get("mu_min_me")
-    if mu_min_me is not None:
-        cmd.extend(["--mu-min-me", str(mu_min_me)])
-    mu_max_me = options.get("mu_max_me")
-    if mu_max_me is not None:
-        cmd.extend(["--mu-max-me", str(mu_max_me)])
-    z_max = options.get("z_max")
-    if z_max is not None:
-        cmd.extend(["--z-max", str(z_max)])
     if options.get("clobber"):
         cmd.append("--clobber")
 
@@ -1532,15 +1515,6 @@ def sync_jobs() -> None:
                 mstar = opts.get("mstar")
                 if mstar:
                     cmd.extend(["-m", str(mstar)])
-                mu_min_me = opts.get("mu_min_me")
-                if mu_min_me is not None:
-                    cmd.extend(["--mu-min-me", str(mu_min_me)])
-                mu_max_me = opts.get("mu_max_me")
-                if mu_max_me is not None:
-                    cmd.extend(["--mu-max-me", str(mu_max_me)])
-                z_max = opts.get("z_max")
-                if z_max is not None:
-                    cmd.extend(["--z-max", str(z_max)])
                 if opts.get("clobber"):
                     cmd.append("--clobber")
                 log_path = rdir / "harmonic.log"

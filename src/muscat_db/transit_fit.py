@@ -35,7 +35,7 @@ from muscat_db.photometry import (
     MULTISITE_MODES, _TELESCOPE_PREFIX, timer_conda_env,
 )
 from muscat_db.cache import register_cache
-from muscat_db.engine_identity import version_probe
+from muscat_db.engine_identity import require_selected_env, version_probe
 
 _REPO_ROOT = pathlib.Path(__file__).parent.parent.parent.resolve()
 logger = logging.getLogger(__name__)
@@ -371,6 +371,7 @@ def _timer_prefix() -> list[str]:
     """Resolve how to invoke the timer-fit tool, using the timer conda env."""
     env = timer_conda_env()
     conda_py = _conda_env_python(env)
+    require_selected_env("timer", conda_py)
     if conda_py:
         timer_fit_path = pathlib.Path(conda_py).parent / "timer-fit"
         if timer_fit_path.is_file():
