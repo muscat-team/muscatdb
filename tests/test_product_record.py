@@ -531,6 +531,28 @@ def test_start_ttv_fit_writes_record_with_author_and_inputs(db, monkeypatch):
             job.logf.close()
 
 
+def test_start_ttv_fit_never_sends_prior_flags(db, monkeypatch):
+    """harmonic upstream has no --mu-min-me/--mu-max-me/--z-max and its
+    argparse exits on them; options saved before #77 still carry the keys."""
+    launched = []
+    monkeypatch.setattr(ttv, "_harmonic_prefix", lambda: ["harmonic"])
+    monkeypatch.setattr(ttv, "_harmonic_version", lambda: "0.0.0")
+    monkeypatch.setattr(ttv.subprocess, "Popen", lambda cmd, **_k: launched.append(cmd) or _Proc())
+    monkeypatch.setattr(ttv, "_TTV_JOBS", {})
+    monkeypatch.setattr("muscat_db.database.save_job", lambda **_k: None)
+
+    options = _ttv_options(inputs=[_point()], run_name="r1")
+    options.update(mu_min_me=1.0, mu_max_me=30.0, z_max=0.1)
+    result = ttv.start_ttv_fit(TARGET, options, "erin")
+    try:
+        assert result["ok"] is True
+        assert len(launched) == 1
+        assert not {"--mu-min-me", "--mu-max-me", "--z-max"} & set(launched[0])
+    finally:
+        for job in ttv._TTV_JOBS.values():
+            job.logf.close()
+
+
 # -- review of #245: record contents must not over-expose ---------------------
 
 

@@ -54,6 +54,23 @@ def test_get_ttv_command_never_collides_input_and_output_dirs(tmp_path, monkeypa
     assert pathlib.Path(i_path).parent != pathlib.Path(o_path)
 
 
+# Saved options from runs before #77 carry these; harmonic upstream's argparse
+# exits on unknown flags, so a re-run must not forward them.
+_STALE_PRIORS = {"mu_min_me": 1.0, "mu_max_me": 30.0, "z_max": 0.1}
+_PRIOR_FLAGS = {"--mu-min-me", "--mu-max-me", "--z-max"}
+
+
+def test_get_ttv_command_never_sends_prior_flags(tmp_path, monkeypatch):
+    monkeypatch.setenv("MUSCAT_TTV_DIR", str(tmp_path))
+    monkeypatch.setattr(ttv_fit, "_harmonic_prefix", lambda: ["harmonic"])
+
+    cmd = shlex.split(ttv_fit.get_ttv_command(
+        "TOI-123", {"run_name": "r1", "planet_letters": "b", **_STALE_PRIORS},
+    ))
+
+    assert not _PRIOR_FLAGS & set(cmd)
+
+
 def test_sync_jobs_queue_drain_stages_inputs_like_start_ttv_fit(tmp_path, monkeypatch):
     """A job that misses its concurrency slot in ``start_ttv_fit`` is queued and
     later launched from ``sync_jobs``'s drain loop instead. That launch path
@@ -94,6 +111,7 @@ def test_sync_jobs_queue_drain_stages_inputs_like_start_ttv_fit(tmp_path, monkey
             "ini_content": "[INIT]\n",
             "run_name": "r1",
             "planet_letters": "b",
+            **_STALE_PRIORS,
         }}),
     }
 
@@ -130,6 +148,7 @@ def test_sync_jobs_queue_drain_stages_inputs_like_start_ttv_fit(tmp_path, monkey
             "stages under _input/, not rdir directly"
         )
         assert i_path.parent != o_path
+        assert not _PRIOR_FLAGS & set(cmd)
     finally:
         for job in fake_jobs.values():
             job.logf.close()

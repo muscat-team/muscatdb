@@ -722,9 +722,8 @@ authoritative for all three pipelines once the `-prod` envs exist.
 #### Pinned production engines
 
 `deploy/engines.toml` records each engine's repository, full commit, and
-revision-specific production environment name. The repository is the owner's,
-or a fork of it declared with `fork_of` (the owner's repository) and a written
-`fork_reason`; `engines.py` rejects any other repository. `deploy/engines.py` audits the development baseline,
+revision-specific production environment name. The repository must be the
+owner's; `engines.py` rejects a fork. `deploy/engines.py` audits the development baseline,
 clones its working dependencies into a **new** environment, replaces the editable
 engine with the pinned non-editable Git install, and verifies repository, commit,
 interpreter, import location, and `pip check`. It refuses to overwrite an existing
@@ -737,11 +736,11 @@ The current pins are:
 |---|---|---|---|
 | prose2 | `jpdeleon/prose2` | `3daed56b8b4bf23b6cf3a19f8f17d898b8c15785` (v3.4.0) | `prose-prod-3daed56b` |
 | timer | `john-livingston/timer` | `b8428258c9b62266532173af4abd7fbafee6dcef` | `timer-prod-b8428258` |
-| harmonic | `jpdeleon/harmonic` (fork of `john-livingston/harmonic`) | `f616614568f7655858da29fbc46fb9edfdb022ee` | `harmonic-prod-f6166145` |
+| harmonic | `john-livingston/harmonic` | `a32fb8e32ca776e0e6e7dc92ad4232cef1f12194` | `harmonic-prod-a32fb8e3` |
 
 The 2026-10-18 audit below covered prose2 `6029ea87` and timer. prose2
 v3.4.0 (`3daed56b`) adds jpdeleon/prose2#16 (read-only configuration loading) and
-leaves telescope definitions unchanged; `harmonic-prod-f6166145` is new. Both
+leaves telescope definitions unchanged; `harmonic-prod-a32fb8e3` is new. Both
 need `install` and `verify`, and the dependency records below, before rollout.
 
 These retain the working baseline's Python (prose 3.10.15, timer 3.13.13) and
@@ -804,19 +803,23 @@ recorded SHA-256 values (`muscat_db/prose_config.py` and `engines.toml`) togethe
 Never regenerate the production snapshot automatically at launch or by following
 live symlinks.
 
-**Harmonic is pinned to the `jpdeleon/harmonic` fork.** The owner's upstream
-`john-livingston/harmonic` at `a32fb8e32ca776e0e6e7dc92ad4232cef1f12194` lacks
-the custom-prior flags `--mu-min-me`, `--mu-max-me`, and `--z-max` sent by
-muscat-db (#77); fork commit `f616614568f7655858da29fbc46fb9edfdb022ee` adds them
-on top of it. The pin declares this with `fork_of` and `fork_reason`. Requested
-priors are never silently discarded. Move the pin back to the owner's repository
-once upstream carries the flags.
+**Harmonic runs on the owner's upstream with its default Lithwick priors.**
+`john-livingston/harmonic` at `a32fb8e32ca776e0e6e7dc92ad4232cef1f12194` has no
+`--mu-min-me`, `--mu-max-me` or `--z-max` CLI flags, so muscat-db no longer
+offers or sends them (#77). The constraints step uses harmonic's defaults:
+log-uniform mass 1–30 M⊕ per M☉ and |Z_free| ~ U(0, 0.1). Those bounds only
+affect the post-fit Lithwick mass/eccentricity constraints in `harmonic.log`,
+not the MCMC fit, samples, ΔBIC or plots. All earlier runs used exactly these
+values. Adding the flags upstream is proposed in john-livingston/harmonic#1;
+re-add the GUI inputs only once a pinned upstream commit has them.
 
 **A selected engine env never falls back.** The production profile selects each
 engine's env through `MUSCAT_<ENGINE>_CONDA_ENV`. When that env is missing, all
 three launchers raise instead of falling back to `conda run`, an executable on
 `PATH`, or the prose2 checkout. Development, which leaves these unset, keeps the
-fallbacks.
+fallbacks. A checkout whose `.env` names an env that does not exist on that host
+therefore stops launching that engine: provision the env or unset the variable
+before deploying this change.
 
 Prepare without changing any live process:
 

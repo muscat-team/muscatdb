@@ -1,7 +1,6 @@
-# Full commits of each engine owner's repository. A fork is allowed only when
-# declared with fork_of (the owner's repository) and fork_reason. Environment
-# names include the revision: create a new environment for upgrades rather
-# than changing one while workers may still be using it.
+# Owner repositories and full commits only. Environment names include the
+# revision: create a new environment for upgrades rather than changing one
+# while workers may still be using it.
 [engines.prose]
 repository = "https://github.com/jpdeleon/prose2"
 # Release v3.4.0. Includes jpdeleon/prose2#16 (read-only PROSE_CONFIG_FILE
@@ -25,10 +24,8 @@ source_environment = "timer"
 module = "timer"
 
 [engines.harmonic]
-repository = "https://github.com/jpdeleon/harmonic"
-fork_of = "https://github.com/john-livingston/harmonic"
-fork_reason = "owner a32fb8e3 lacks --mu-min-me/--mu-max-me/--z-max sent by muscat-db (#77); the fork adds them on top of it"
-commit = "f616614568f7655858da29fbc46fb9edfdb022ee"
-environment = "harmonic-prod-f6166145"
+repository = "https://github.com/john-livingston/harmonic"
+commit = "a32fb8e32ca776e0e6e7dc92ad4232cef1f12194"
+environment = "harmonic-prod-a32fb8e3"
 source_environment = "harmonic"
 module = "harmonic"

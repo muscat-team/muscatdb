@@ -29,7 +29,7 @@
 * do not use /tmp. use $HOME/temp
 
 ## External Engines (prose2, timer, harmonic)
-* upstream is the owner's repo: prose2 = jpdeleon, timer and harmonic = john-livingston. never fork an engine you do not own in order to carry a local patch. the one exception is a production pin in deploy/engines.toml that declares `fork_of` (the owner's repo) and a `fork_reason`, as harmonic does for #77; move it back to the owner's repo once upstream has the change
+* upstream is the owner's repo: prose2 = jpdeleon, timer and harmonic = john-livingston. never fork an engine you do not own in order to carry a local patch
 * when an engine blocks you, fix muscat-db so it is unblocked, then open an issue on the engine with a reproduction. leave the engine's own fix to its owner
 * the exception is a change you would want even if muscat-db did not exist, e.g. an undocumented contract or an unhelpful error. that is a genuine upstream fix and is still the owner's to make
 * widening an engine's behaviour so it tolerates something only muscat-db does is always the wrong fix. adapt muscat-db instead

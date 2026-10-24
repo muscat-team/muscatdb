@@ -67,40 +67,16 @@ def _write_pin(tmp_path, name, pin):
     return config
 
 
-def test_harmonic_is_pinned_to_a_declared_fork_of_its_owner():
+def test_harmonic_is_pinned_to_its_owner_repository():
     pin = engines.load_pins(engines.DEFAULT_CONFIG)["harmonic"]
-    assert pin["repository"] == "https://github.com/jpdeleon/harmonic"
-    assert pin["fork_of"] == engines.OWNERS["harmonic"]
-    assert pin["fork_reason"].strip()
+    assert pin["repository"] == engines.OWNERS["harmonic"]
 
 
-@pytest.mark.parametrize("change", [
-    {"fork_reason": ""},                                     # undeclared reason
-    {"fork_of": "https://github.com/somebody/harmonic"},     # not the owner
-    {"fork_of": None},                                       # fork without fork_of
-])
-def test_rejects_a_fork_pin_that_is_not_declared(tmp_path, change):
+def test_rejects_a_harmonic_fork_pin(tmp_path):
     pin = copy.deepcopy(engines.load_pins(engines.DEFAULT_CONFIG)["harmonic"])
-    for key, value in change.items():
-        if value is None:
-            pin.pop(key)
-        else:
-            pin[key] = value
-    with pytest.raises(ValueError, match="fork"):
+    pin["repository"] = "https://github.com/jpdeleon/harmonic"
+    with pytest.raises(ValueError, match="owner"):
         engines.load_pins(_write_pin(tmp_path, "harmonic", pin))
-
-
-def test_validate_install_requires_the_fork_repository_for_a_fork_pin(tmp_path):
-    pin = engines.load_pins(engines.DEFAULT_CONFIG)["harmonic"]
-    info = {
-        "prefix": str(tmp_path), "module_file": str(tmp_path / "lib/harmonic/__init__.py"),
-        "direct_url": {"url": pin["fork_of"],
-                       "vcs_info": {"vcs": "git", "commit_id": pin["commit"]}},
-    }
-    with pytest.raises(ValueError, match="repository"):
-        engines.validate_install("harmonic", pin, info, tmp_path)
-    info["direct_url"]["url"] = pin["repository"]
-    engines.validate_install("harmonic", pin, info, tmp_path)
 
 
 @pytest.mark.parametrize("loaded,match", [

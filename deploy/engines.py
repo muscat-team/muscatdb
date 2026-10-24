@@ -48,30 +48,11 @@ print(json.dumps(dict(version=d.version, python=sys.version,
 """
 
 
-def _check_repository(name: str, pin: dict) -> None:
-    """The owner's repository, or a fork of it declared with a written reason.
-
-    A fork pin carries muscat-db's dependency on unmerged engine changes in
-    the open: ``fork_of`` must name the owner's repository and ``fork_reason``
-    must say why the owner's commits cannot be used yet.
-    """
-    if name not in OWNERS:
-        raise ValueError(f"{name}: unknown engine")
-    repository = pin["repository"].removesuffix(".git")
-    if repository == OWNERS[name] and "fork_of" not in pin:
-        return
-    if pin.get("fork_of", "").removesuffix(".git") != OWNERS[name]:
-        raise ValueError(f"{name}: a fork pin must declare fork_of = {OWNERS[name]!r}")
-    if repository == OWNERS[name]:
-        raise ValueError(f"{name}: fork_of is set but repository is the owner's")
-    if not pin.get("fork_reason", "").strip():
-        raise ValueError(f"{name}: a fork pin must give a fork_reason")
-
-
 def load_pins(path: Path) -> dict:
     pins = tomllib.loads(path.read_text())["engines"]
     for name, pin in pins.items():
-        _check_repository(name, pin)
+        if name not in OWNERS or pin["repository"].removesuffix(".git") != OWNERS[name]:
+            raise ValueError(f"{name}: repository must be the engine owner's repository")
         if not re.fullmatch(r"[0-9a-f]{40}", pin["commit"]):
             raise ValueError(f"{name}: commit must be a full SHA")
         for key in ("environment", "source_environment"):
