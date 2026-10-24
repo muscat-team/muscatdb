@@ -128,12 +128,31 @@ def test_missing_webhook_file_still_exits_nonzero_and_reports_on_stderr(tree):
     assert _read(tree["posts"]) == ""
 
 
-def test_message_with_quotes_is_posted_as_valid_json(tree):
-    _stub(tree["root"] / "scripts" / "download_catalogs.sh", 'echo \'say "hi" \\ there\'; exit 1\n')
+def test_failed_catalog_download_alerts_but_the_scan_and_build_still_run(tree):
+    _stub(
+        tree["root"] / "scripts" / "download_catalogs.sh",
+        f'echo catalogs >> "{tree["calls"]}"\n'
+        'echo "2 of 5 catalog downloads failed, kept the existing files: TOIs.csv jwst_targets.csv"\n'
+        "exit 1\n",
+    )
 
     result = _run(tree, "run")
 
-    assert result.returncode == 1
+    # Stale catalogs must not cost the night's ingest, nor the staging refresh
+    # that the crontab chains after a successful run.
+    assert result.returncode == 0
+    assert _read(tree["calls"]).split() == ["catalogs", "scan-yesterday", "build-db"]
+    posted = _read(tree["posts"])
+    assert "download-catalogs failed (exit 1)" in posted
+    assert "2 of 5 catalog downloads failed" in posted
+    assert "kept the previous catalogs" in posted
+
+
+def test_message_with_quotes_is_posted_as_valid_json(tree):
+    _stub(tree["root"] / "scripts" / "download_catalogs.sh", 'echo \'say "hi" \\ there\'; exit 1\n')
+
+    _run(tree, "run")
+
     assert 'say \\"hi\\"' in _read(tree["posts"])
 
 

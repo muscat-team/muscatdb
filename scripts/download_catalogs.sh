@@ -6,23 +6,37 @@ DATA="$REPO/data"
 TMPDIR="${MUSCAT_TMPDIR:-$HOME/temp}"
 mkdir -p "$TMPDIR"
 BASE_URL="https://exoplanetarchive.ipac.caltech.edu/TAP/sync"
+# Retry every error, DNS included: the 17:30 nightly has failed with "Could not
+# resolve host" while the archive answered minutes later.
+RETRIES="${CATALOG_RETRIES:-4}"
+RETRY_DELAY_S="${CATALOG_RETRY_DELAY_S:-30}"
+ATTEMPTED=0
+FAILED=()
 
 download_csv() {
     local query="$1"
     local label="$2"
     local out="$3"
-    local tmp="$(mktemp "$TMPDIR/${label}_XXXXXX.csv")"
+    local tmp
+    tmp="$(mktemp "$TMPDIR/${label}_XXXXXX.csv")"
+    ATTEMPTED=$((ATTEMPTED + 1))
 
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Downloading $label -> $out ..."
-    if curl -sS -o "$tmp" -w "HTTP %{http_code}, %{size_download} bytes\n" \
+    # --fail keeps an HTTP error page out of data/, and a body that is not a
+    # CSV (empty, or a VOTable error document) is rejected the same way.
+    if curl -sS --fail --retry "$RETRIES" --retry-delay "$RETRY_DELAY_S" \
+         --retry-all-errors --retry-max-time 600 \
+         -o "$tmp" -w "HTTP %{http_code}, %{size_download} bytes\n" \
          --data-urlencode "query=$query" \
          --data-urlencode "format=csv" \
-         "$BASE_URL" --max-time 300; then
+         "$BASE_URL" --max-time 300 \
+       && [ -s "$tmp" ] && [ "$(head -c 1 "$tmp")" != "<" ]; then
         mv -f "$tmp" "$DATA/$out"
         echo "  -> $DATA/$out updated"
     else
-        echo "  WARNING: $label download failed, keeping existing $out"
+        echo "  WARNING: $label download failed or was not a CSV, keeping existing $out"
         rm -f "$tmp"
+        FAILED+=("$out")
     fi
 }
 
@@ -46,4 +60,10 @@ download_csv \
   "SELECT distinct pl_name FROM spectra" \
   "spectra_targets" "spectra_targets.csv"
 
+# Every catalog is attempted before failing, so one outage keeps all the old
+# files but a partial outage still refreshes what it can.
+if [ "${#FAILED[@]}" -gt 0 ]; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ${#FAILED[@]} of $ATTEMPTED catalog downloads failed, kept the existing files: ${FAILED[*]}"
+    exit 1
+fi
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Catalog download complete"

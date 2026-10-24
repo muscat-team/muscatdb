@@ -175,7 +175,10 @@ MUSCATDB_ROOT=/path/to/muscat-db
 build-db` chain, with the same per-step logs under `logs/`. The first failing
 step stops the chain and posts its name, exit code and the last 15 log lines to
 Slack, so a refused build (the integrity gate, #182) is no longer silent
-(#237). `check` runs `muscat-db build-status --max-age-hours 36` and alerts if
+(#237). The catalog download is the exception: it retries each catalog
+(DNS failures included), keeps the previous file when a download fails or is
+not a CSV, and exits non-zero naming the catalogs it kept, which `run` posts as
+a warning before carrying on with the scan and build. `check` runs `muscat-db build-status --max-age-hours 36` and alerts if
 the database was not rebuilt, which also catches a cron entry that never fired.
 Both use the webhook file `/etc/muscat-db/slack-webhook-url` that
 `deploy/pull-deploy.sh` uses (override with `SLACK_WEBHOOK_FILE`); without it
