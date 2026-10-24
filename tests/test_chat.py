@@ -278,6 +278,7 @@ def test_on_job_finished_persists_system_message(chat_db, monkeypatch):
         inst="muscat3",
         date="2026-07-18",
         state="done",
+        owner="",
     )
     msgs = get_recent_chat_messages(days=7)
     assert len(msgs) == 1
@@ -289,7 +290,8 @@ def test_on_job_finished_persists_system_message(chat_db, monkeypatch):
 
 
 def _job_finished_text(**info) -> str:
-    chat.on_job_finished(job_key=info.pop("job_key", "k"), **info)
+    """Text of an anonymous job's notification (owner="" skips the store lookup)."""
+    chat.on_job_finished(job_key=info.pop("job_key", "k"), owner="", **info)
     return get_recent_chat_messages(days=7)[-1]["text"]
 
 
@@ -330,6 +332,61 @@ def test_job_finished_explicit_owner_skips_jobs_table_lookup(chat_db, sio_harnes
     monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", lambda coro, _loop: asyncio.run(coro))
     chat.on_job_finished(job_key="lco_archive_download:x", type_="archive", state="done", owner="andrew")
     assert [kw.get("room") for _e, _p, kw in sio_harness.emits] == ["user:andrew"]
+
+
+_STORE_KEY = "photometry:sinistro/2026-07-18/HIDDENTGT"
+
+
+def _finish_with_store(monkeypatch, get, **kw):
+    """Run on_job_finished for _STORE_KEY against a job store whose ``get`` is *get*."""
+    from muscat_db import job_store
+
+    class _Store:
+        pass
+
+    store = _Store()
+    store.get = get
+    monkeypatch.setattr(job_store, "_STORE", store)
+    monkeypatch.setattr(chat, "_valid_loop", lambda: object())
+    monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", lambda coro, _loop: asyncio.run(coro))
+    chat.on_job_finished(job_key=_STORE_KEY, type_="photometry", target="HIDDENTGT", state="done", **kw)
+
+
+def test_job_finished_owner_comes_from_the_job_store(chat_db, sio_harness, monkeypatch):
+    """With MUSCAT_CONTROL_PLANE=postgres the job row lives only in the job
+    store, not the SQLite jobs table; the owner must still be found there."""
+    _finish_with_store(
+        monkeypatch, lambda k: {"key": k, "user_name": "andrew"} if k == _STORE_KEY else None
+    )
+    assert [kw.get("room") for _e, _p, kw in sio_harness.emits] == ["user:andrew"]
+    assert [m["visible_to"] for m in get_recent_chat_messages(days=7, user="andrew")] == ["andrew"]
+
+
+def _raise_unreachable(_key):
+    raise RuntimeError("postgres unreachable")
+
+
+@pytest.mark.parametrize("get", [_raise_unreachable, lambda _key: None], ids=["store-error", "missing-row"])
+def test_job_finished_with_unknown_owner_fails_closed(chat_db, sio_harness, monkeypatch, get):
+    """A failed lookup or a missing row must not announce the target publicly."""
+    _finish_with_store(monkeypatch, get)
+    assert sio_harness.emits == []
+    assert all("HIDDENTGT" not in m["text"] for m in get_recent_chat_messages(days=7))
+
+
+def test_job_finished_for_an_anonymous_row_is_public(chat_db, sio_harness, monkeypatch):
+    """Only a row that exists with an empty user_name means anonymous."""
+    _finish_with_store(monkeypatch, lambda k: {"key": k, "user_name": ""})
+    assert [kw.get("room") for _e, _p, kw in sio_harness.emits] == [chat._PUBLIC_ROOM]
+    assert any("HIDDENTGT" in m["text"] for m in get_recent_chat_messages(days=7, user="bob"))
+
+
+def test_job_finished_explicit_empty_owner_is_public_without_lookup(chat_db, sio_harness, monkeypatch):
+    """An anonymous archive download passes owner="": it has no store row, and
+    the caller already knows it is anonymous."""
+    _finish_with_store(monkeypatch, _raise_unreachable, owner="")
+    assert [kw.get("room") for _e, _p, kw in sio_harness.emits] == [chat._PUBLIC_ROOM]
+    assert any("HIDDENTGT" in m["text"] for m in get_recent_chat_messages(days=7, user="bob"))
 
 
 def test_archive_notify_reports_frames_owner_and_no_placeholders(monkeypatch):
@@ -900,7 +957,7 @@ def test_ownerless_job_finished_is_public_only_and_hidden_from_scoped_history(
 ):
     """With no owner the message goes to the shared room, which a scoped viewer
     never joins, and the addressed-only backfill drops it."""
-    rooms = _run_job_finished(monkeypatch, sio_harness, None)
+    rooms = _run_job_finished(monkeypatch, sio_harness, "")
     assert rooms == [chat._PUBLIC_ROOM]
     scoped = get_recent_chat_messages(days=7, user="andrew", addressed_only=True)
     assert all("HIDDENTGT" not in m["text"] for m in scoped)

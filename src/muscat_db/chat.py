@@ -33,6 +33,7 @@ from .auth import (
     resolve_forwarded_identity,
 )
 from . import database as db
+from .job_store import get_job_store
 from .web import sio
 # python-socketio forwards the reason to the client only for its own refusal
 # class; the builtin ConnectionRefusedError reaches the browser as a generic
@@ -653,13 +654,17 @@ async def _run_agent(sid: str, user: str | None, question: str) -> None:
 
 # ----- job-finished system messages ----------------------------------------
 def _job_user_name(job_key: str) -> str | None:
-    """Look up the user_name stored for a job key, or None if unknown."""
+    """Look up the user_name stored for a job key: "" for an anonymous job's
+    row, None when the store holds no row or the lookup fails.
+
+    Reads through the job store rather than the SQLite jobs table, so the
+    owner is found under MUSCAT_CONTROL_PLANE=postgres too."""
     try:
-        row = db.get_job_user_name(job_key)
-        return row or None
+        row = get_job_store().get(job_key)
     except Exception:
-        logger.debug("failed to look up job user_name for %s", job_key, exc_info=True)
+        logger.warning("failed to look up job user_name for %s", job_key, exc_info=True)
         return None
+    return None if row is None else str(row.get("user_name") or "")
 
 
 _JOB_LABELS = {
@@ -696,16 +701,20 @@ def on_job_finished(
     date: str = "",
     state: str = "",
     run_id: str = "",
-    owner: str = "",
+    owner: str | None = None,
     link: str = "",
     **_,
 ) -> None:
     """jobs.fire_job_finished hook (runs in the job-sync thread). Persists a
     system message scoped to the job's owner and schedules its delivery.
 
-    ``owner`` overrides the jobs-table lookup for jobs not persisted under
-    ``job_key`` (LCO archive downloads); ``link`` is an archive job's own
-    result URL (its photometry page once the dataset is ingested)."""
+    ``owner`` overrides the job-store lookup for jobs not persisted under
+    ``job_key`` (LCO archive downloads), where "" means a known-anonymous job.
+    Left as None, the owner comes from the job's row; an anonymous row goes to
+    the public room, while a missing row or failed lookup drops the message
+    rather than announce a possibly restricted target publicly. ``link`` is an
+    archive job's own result URL (its photometry page once the dataset is
+    ingested)."""
     label = _JOB_LABELS.get(type_, type_ or "Job")
     verb = {"done": "finished", "error": "failed", "cancelled": "was cancelled"}.get(state, state)
     where = " ".join(p for p in (inst, date) if p)
@@ -714,9 +723,13 @@ def on_job_finished(
     result_link = _job_result_link(type_, target, inst, date, run_id or "", link or "")
     if result_link:
         text += f" {result_link}"
-    owner = owner or _job_user_name(job_key)
+    if owner is None:
+        owner = _job_user_name(job_key)
+        if owner is None:
+            logger.warning("no owner found for job %s; dropping its chat notification", job_key)
+            return
     try:
-        msg = db.save_chat_message("system", text, kind="system", visible_to=owner)
+        msg = db.save_chat_message("system", text, kind="system", visible_to=owner or None)
     except Exception:
         logger.exception("failed to persist job-finished chat message")
         return
