@@ -1757,6 +1757,7 @@
         setRunning(true);
         nextPollDelay = Math.min(nextPollDelay || 2000, 2000);
       } else if (s.state === 'done') {
+        stopPolling();
         setRunning(false);
         logEl.innerHTML = MuscatDom.ansiToHtml((s.log || '') + '\n\n✓ done (' + s.elapsed + 's) — reloading…');
         MuscatStorage.set(logKey(), logEl.textContent);
@@ -1774,6 +1775,7 @@
           clearJob();
         }, reloadDelay);
       } else if (s.state === 'error') {
+        stopPolling();
         setRunning(false);
         logEl.innerHTML = MuscatDom.ansiToHtml(terminalLogText(s));
         MuscatStorage.set(logKey(), logEl.textContent);
@@ -1790,6 +1792,7 @@
           clearJob();
         }, 1200);
       } else if (s.state === 'cancelled') {
+        stopPolling();
         setRunning(false); clearJob();
         logEl.innerHTML = MuscatDom.ansiToHtml(terminalLogText(s));
         MuscatStorage.set(logKey(), logEl.textContent);
@@ -1805,6 +1808,7 @@
         }
         nextPollDelay = Math.min(nextPollDelay || 7000, 7000);
       } else if (s.state === 'none') {
+        stopPolling();
         var wasRunning = jobActive;
         setRunning(false);
         clearJob();
@@ -1866,10 +1870,10 @@
     var opts = collectOptions();
     console.log('[photometry] launch: overwrite=' + opts.overwrite + ' test_run=' + testRun);
 
-    fetch('/api/photometry/run', {
+    MuscatFetch.fetchJson('/api/photometry/run', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ inst: inst, date: date, target: target, test_run: testRun, options: opts })
-    }).then(function (r) { return r.json(); }).then(function (res) {
+    }).then(function (res) {
       if (!res.ok) {
         clearJob();
         setRunning(false);

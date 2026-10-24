@@ -23,7 +23,12 @@ from __future__ import annotations
 
 import datetime
 import itertools
+import logging
 import math
+from threading import Lock
+
+logger = logging.getLogger(__name__)
+_IERS_RETRY_LOCK = Lock()
 
 # Frozen LCO site coordinates (lat_deg, lon_deg, height_m). 2 m values match
 # prose2/data/muscat{3,4}_*.telescope; 1 m values from astropy's site registry.
@@ -141,18 +146,41 @@ def bjd_tdb_to_jd_utc(bjd_tdb, ra_deg: float, dec_deg: float):
     which brings a forward/backward round trip to sub-millisecond agreement
     without iterating to full convergence.
 
+    If fresh IERS data cannot be downloaded and Astropy refuses its stale
+    predictive values, log the original error and retry with the bundled
+    table. The retry disables downloads to avoid repeating failed network
+    timeouts and relaxes the table-age check only for that computation.
+    These Astropy settings are process-global and restored on exit; concurrent
+    Astropy computations may also use the relaxed policy during this retry.
+
     Accepts a scalar or array-like ``bjd_tdb`` and returns the same shape.
     """
     from astropy.time import Time
     from astropy.coordinates import SkyCoord, EarthLocation
     import astropy.units as u
+    from astropy.utils import iers
 
     geocenter = EarthLocation.from_geocentric(0 * u.m, 0 * u.m, 0 * u.m)
     coord = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg)
-    t_tdb = Time(bjd_tdb, format="jd", scale="tdb", location=geocenter)
-    first_pass = t_tdb - t_tdb.light_travel_time(coord, kind="barycentric")
-    corrected = t_tdb - first_pass.light_travel_time(coord, kind="barycentric")
-    return corrected.utc.jd
+
+    def convert():
+        t_tdb = Time(bjd_tdb, format="jd", scale="tdb", location=geocenter)
+        first_pass = t_tdb - t_tdb.light_travel_time(coord, kind="barycentric")
+        corrected = t_tdb - first_pass.light_travel_time(coord, kind="barycentric")
+        return corrected.utc.jd
+
+    try:
+        return convert()
+    except ValueError as exc:
+        message = str(exc)
+        if "IERS" not in message or "predictive values" not in message:
+            raise
+        logger.warning("BJD_TDB conversion retrying with bundled IERS data: %s", message)
+        # Serialize retries so overlapping temporary global configurations
+        # cannot restore one another's relaxed values as the normal policy.
+        with _IERS_RETRY_LOCK:
+            with iers.conf.set_temp("auto_download", False), iers.conf.set_temp("auto_max_age", None):
+                return convert()
 
 
 def _parse_iso_utc(value: str):

@@ -22,7 +22,7 @@ import yaml
 
 from muscat_db import jobs, database
 from muscat_db.job_store import current_instance_id, current_owner, get_job_store
-from muscat_db.job_limits import JobLimitExceeded, claim_caps, enqueue_caps, limit_refusal
+from muscat_db.job_limits import JobLimitExceeded, claim_caps, claim_caps_for_row, enqueue_caps, limit_refusal, params_with_running_cap
 from muscat_db import __meta__, __muscatdb_version__, __version__
 from muscat_db.photometry import (
     _conda_env_python,
@@ -32,7 +32,7 @@ from muscat_db.photometry import (
     harmonic_conda_env,
 )
 from muscat_db.cache import register_cache
-from muscat_db.engine_identity import version_probe
+from muscat_db.engine_identity import require_selected_env, version_probe
 
 _REPO_ROOT = pathlib.Path(__file__).parent.parent.parent.resolve()
 logger = logging.getLogger(__name__)
@@ -188,15 +188,6 @@ def get_ttv_command(target: str, options: dict) -> str:
     mstar = options.get("mstar")
     if mstar:
         cmd.extend(["-m", str(mstar)])
-    mu_min_me = options.get("mu_min_me")
-    if mu_min_me is not None:
-        cmd.extend(["--mu-min-me", str(mu_min_me)])
-    mu_max_me = options.get("mu_max_me")
-    if mu_max_me is not None:
-        cmd.extend(["--mu-max-me", str(mu_max_me)])
-    z_max = options.get("z_max")
-    if z_max is not None:
-        cmd.extend(["--z-max", str(z_max)])
     if options.get("clobber"):
         cmd.append("--clobber")
     return shlex.join(cmd)
@@ -264,6 +255,7 @@ def ttv_job_key(target: str, run_name: str = "") -> str:
 def _harmonic_prefix() -> list[str]:
     env = harmonic_conda_env()
     conda_py = _conda_env_python(env)
+    require_selected_env("harmonic", conda_py)
     if conda_py:
         harmonic_cli = pathlib.Path(conda_py).parent / "harmonic"
         if harmonic_cli.is_file():
@@ -527,15 +519,15 @@ def start_ttv_fit(
                     inst="_", date="_", target=target, run_id=run_seg,
                     started_at=time.time(),
                     run_type="full",
-                    params=json.dumps({"options": options}, separators=(",", ":")),
+                    params=params_with_running_cap(json.dumps({"options": options}, separators=(",", ":")), user_name),
                     run_name=run_name,
                     user_name=user_name,
                     **enqueue_caps(user_name),
                 )
             except JobLimitExceeded as exc:
                 return limit_refusal(exc)
-            except Exception:
-                return {"ok": False, "error": "database not writable"}
+            except Exception as exc:
+                return {"ok": False, "error": jobs.server_fault("The job could not be queued because the job database is not writable", exc)}
             return {"ok": True, "key": key, "queued": True}
 
     rdir = ttv_output_dir(target, run_name)
@@ -579,15 +571,6 @@ def start_ttv_fit(
     mstar = options.get("mstar")
     if mstar:
         cmd.extend(["-m", str(mstar)])
-    mu_min_me = options.get("mu_min_me")
-    if mu_min_me is not None:
-        cmd.extend(["--mu-min-me", str(mu_min_me)])
-    mu_max_me = options.get("mu_max_me")
-    if mu_max_me is not None:
-        cmd.extend(["--mu-max-me", str(mu_max_me)])
-    z_max = options.get("z_max")
-    if z_max is not None:
-        cmd.extend(["--z-max", str(z_max)])
     if options.get("clobber"):
         cmd.append("--clobber")
 
@@ -617,7 +600,7 @@ def start_ttv_fit(
         get_job_store().release_slot("ttv_fit", key)
         logf.write(f"\nfailed to launch harmonic: {exc}\n")
         logf.close()
-        return {"ok": False, "error": f"failed to launch harmonic: {exc}"}
+        return {"ok": False, "error": jobs.server_fault("The server could not start the TTV fit (harmonic)", exc)}
 
     with _TTV_LOCK:
         _TTV_JOBS[key] = TTVFitJob(
@@ -1296,11 +1279,11 @@ def sync_jobs() -> None:
             k = f"ttv_fit:{j.inst}/{j.date}/{j.target.replace(' ', '')}"
             return f"{k}/{j.run_id}" if j.run_id else k
 
-        # Drop finished jobs a newer queued run has replaced (same key) so their
-        # terminal state is not written over the pending row below.
+        # Drop finished jobs a newer run has replaced (same key: queued, launched
+        # elsewhere, or finished) so their terminal state is not written over it.
         for key in list(_TTV_JOBS.keys()):
             stale = _TTV_JOBS[key]
-            if jobs.superseded_by_queued_row(db_by_key.get(_db_key(stale)), stale.started_at, stale.proc):
+            if jobs.superseded_by_newer_row(db_by_key.get(_db_key(stale)), stale.started_at, stale.proc):
                 try:
                     stale.logf.close()
                 except OSError:
@@ -1340,7 +1323,7 @@ def sync_jobs() -> None:
 
             error_desc = ""
             if persist_state == "error":
-                error_desc = _get_error_desc(job.log_path)
+                error_desc = _get_error_desc(job.log_path, persist_rc)
             elif persist_state == "cancelled":
                 error_desc = "Cancelled by user"
 
@@ -1478,17 +1461,28 @@ def sync_jobs() -> None:
                 except ValueError:
                     store.save(type_="ttv_fit", inst="_", date="_", target=target, state="error", returncode=-1, elapsed=0, started_at=entry["started_at"], error_desc="Invalid target", run_id=run_seg, run_name=run_name)
                     continue
-                # Atomic: at most one process/caller ever wins this claim for a
-                # given key, so two workers draining the same pending row can
-                # never both launch it.
-                if not store.claim_slot("ttv_fit", key, _MAX_FULL_JOBS, **claim_caps(entry.get("user_name"))):
+                # Atomic: the slot and this row's pending -> running move are one
+                # transaction, so two workers draining the same pending row can
+                # never both launch it, even if a reconcile_slots pass elsewhere
+                # frees the slot before the save(state="running") below.
+                if not store.claim_slot("ttv_fit", key, _MAX_FULL_JOBS, **claim_caps_for_row(entry), pending_key=entry["key"]):
                     continue
-                rdir.mkdir(parents=True, exist_ok=True)
-                csv_content = opts.get("csv_content", "")
-                ini_content = opts.get("ini_content", "")
-                input_dir = write_ttv_inputs(rdir, csv_content, ini_content, opts, user_name=entry.get("user_name"))
+                try:
+                    rdir.mkdir(parents=True, exist_ok=True)
+                    csv_content = opts.get("csv_content", "")
+                    ini_content = opts.get("ini_content", "")
+                    input_dir = write_ttv_inputs(rdir, csv_content, ini_content, opts, user_name=entry.get("user_name"))
+                    harmonic = _harmonic_prefix()
+                except Exception as exc:
+                    # The claim already moved the row to running: leave it
+                    # terminal, not for orphan reconcile, which could trust a
+                    # previous run's log in this reused directory.
+                    logger.warning("failed to prepare queued TTV fit %s", key, exc_info=True)
+                    store.release_slot("ttv_fit", key)
+                    store.save(type_="ttv_fit", inst="_", date="_", target=target, state="error", returncode=-1, elapsed=0, started_at=entry["started_at"], error_desc=f"Failed to prepare run: {exc}", run_id=run_seg, run_name=run_name)
+                    continue
                 cmd = [
-                    *_harmonic_prefix(),
+                    *harmonic,
                     "-i", str(input_dir / "data.csv"),
                     "-c", str(input_dir / "config.ini"),
                     "-o", str(rdir),
@@ -1521,15 +1515,6 @@ def sync_jobs() -> None:
                 mstar = opts.get("mstar")
                 if mstar:
                     cmd.extend(["-m", str(mstar)])
-                mu_min_me = opts.get("mu_min_me")
-                if mu_min_me is not None:
-                    cmd.extend(["--mu-min-me", str(mu_min_me)])
-                mu_max_me = opts.get("mu_max_me")
-                if mu_max_me is not None:
-                    cmd.extend(["--mu-max-me", str(mu_max_me)])
-                z_max = opts.get("z_max")
-                if z_max is not None:
-                    cmd.extend(["--z-max", str(z_max)])
                 if opts.get("clobber"):
                     cmd.append("--clobber")
                 log_path = rdir / "harmonic.log"

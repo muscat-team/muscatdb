@@ -382,7 +382,7 @@
     document.querySelectorAll('#time-summary .job-count').forEach(function(e) { e.classList.remove('active'); });
     if (activeRecent === 'recent') { activeRecent = ''; }
     else { activeRecent = 'recent'; el.classList.add('active'); }
-    applyFilters(); reconcileSectionsForFilter(); saveFilters();
+    applyFilters(); reconcileSectionsForFilter(); showClearFilter(); saveFilters();
   };
 
   // ── Type filter (badges) ──────────────────────────────────────────────────
@@ -390,7 +390,7 @@
     document.querySelectorAll('#type-summary .job-count').forEach(function(e) { e.classList.remove('active'); });
     if (activeType === type) { activeType = ''; }
     else { activeType = type; el.classList.add('active'); }
-    applyFilters(); reconcileSectionsForFilter(); saveFilters();
+    applyFilters(); reconcileSectionsForFilter(); showClearFilter(); saveFilters();
   };
 
   // ── Instrument filter (badges) ────────────────────────────────────────────
@@ -398,7 +398,7 @@
     document.querySelectorAll('#inst-summary .job-count').forEach(function(e) { e.classList.remove('active'); });
     if (activeInst === inst) { activeInst = ''; }
     else { activeInst = inst; el.classList.add('active'); }
-    applyFilters(); reconcileSectionsForFilter(); saveFilters();
+    applyFilters(); reconcileSectionsForFilter(); showClearFilter(); saveFilters();
   };
 
   // Populate instrument badges from rows
@@ -513,7 +513,10 @@
         section.style.display = 'none';
         return;
       }
-      section.style.display = (anyVisible || alwaysVisible) ? '' : 'none';
+      // An always-visible section shows its "nothing tracked" row only when it
+      // really has no jobs; when a filter is merely hiding them, that row would
+      // be false, so the section hides like the others.
+      section.style.display = (anyVisible || (alwaysVisible && rows.length === 0)) ? '' : 'none';
     });
   }
 
@@ -679,10 +682,10 @@
   window.toggleStatus = function(el, status) {
     if (activeStatus === status) {
       activeStatus = null;
-      document.querySelectorAll('.job-count').forEach(function(e) { e.classList.remove('active'); });
+      document.querySelectorAll('#jobs-summary .job-count').forEach(function(e) { e.classList.remove('active'); });
     } else {
       activeStatus = status;
-      document.querySelectorAll('.job-count').forEach(function(e) { e.classList.remove('active'); });
+      document.querySelectorAll('#jobs-summary .job-count').forEach(function(e) { e.classList.remove('active'); });
       el.classList.add('active');
     }
     applyFilters(); reconcileSectionsForFilter(); showClearFilter(); saveFilters();
@@ -693,6 +696,7 @@
     activeType = '';
     activeInst = '';
     activeRecent = '';
+    if (searchInput) searchInput.value = '';
     document.querySelectorAll('.job-count').forEach(function(e) { e.classList.remove('active'); });
     applyFilters(); reconcileSectionsForFilter(); showClearFilter(); saveFilters();
   };
@@ -700,7 +704,7 @@
   function showClearFilter() {
     var el = document.getElementById('clear-filter');
     if (!el) return;
-    el.style.display = (activeStatus || activeType || activeInst || activeRecent) ? '' : 'none';
+    el.style.display = anyFilterActive() ? '' : 'none';
   }
 
   // ── Search ───────────────────────────────────────────────────────────────
@@ -776,7 +780,7 @@
     updateSectionVisibility();
   }
 
-  if (searchInput) searchInput.addEventListener('input', function() { applyFilters(); reconcileSectionsForFilter(); saveFilters(); });
+  if (searchInput) searchInput.addEventListener('input', function() { applyFilters(); reconcileSectionsForFilter(); showClearFilter(); saveFilters(); });
 
   // ── Delete row (with confirmation) ───────────────────────────────────────
   var pendingDeleteKey = null;
@@ -881,12 +885,12 @@
   window.reRunJob = function(btn, key) {
     btn.disabled = true;
     btn.innerText = 'Launching…';
-    fetch('/api/jobs/rerun', {
+    MuscatFetch.fetchJson('/api/jobs/rerun', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ key: key })
     })
-    .then(function(r) { if (!r.ok) return r.json().then(function(e) { throw new Error(e.error || 'Failed'); }); return r.json(); })
+    .then(function(res) { if (!res.ok) throw new Error(res.error || 'The server refused the re-run without giving a reason.'); })
     .then(function() {
       var row = rowByKey(key);
       if (row) {
@@ -970,7 +974,17 @@
   }
 
   function pollRunning() {
-    fetch('/api/jobs/status')
+    var watchedKeys = [];
+    allRows.forEach(function(row) {
+      if (['running', 'pending', 'cancelling'].indexOf(row.getAttribute('data-status')) !== -1) {
+        watchedKeys.push(row.getAttribute('data-key'));
+      }
+    });
+    fetch('/api/jobs/status', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ watch: watchedKeys })
+    })
       .then(function(r) { return r.json(); })
       .then(function(data) {
         // Update finished jobs in-place
@@ -1080,87 +1094,43 @@
   // ── Initialise ──────────────────────────────────────────────────────────
   if (searchStatus) searchStatus.textContent = total + ' jobs';
 
-  // Read all saved values first and apply them without intermediate saves.
-  // This avoids a race where toggleType/toggleStatus call saveFilters() before
-  // all dimensions have been restored, overwriting values yet to be read.
-  (function() {
-    var savedStatus, savedSearch, savedType, savedInst, savedRecent;
-    try { savedStatus = localStorage.getItem('jobs:activeStatus'); } catch (_) {}
-    try { savedSearch = localStorage.getItem('jobs:search'); } catch (_) {}
-    try { savedType = localStorage.getItem('jobs:typeFilter'); } catch (_) {}
-    try { savedInst = localStorage.getItem('jobs:instFilter'); } catch (_) {}
-    try { savedRecent = localStorage.getItem('jobs:recentFilter'); } catch (_) {}
-
-    if (savedStatus) {
-      try {
-        var el = document.querySelector('.job-count[data-status="' + savedStatus + '"]');
-        if (el) { toggleStatus(el, savedStatus); }
-      } catch (_) {}
+  // Restore a complete snapshot, including empty values. Calling the chip
+  // toggles here would save an incomplete snapshot over dimensions not read yet.
+  function restoreFilters() {
+    var saved;
+    try {
+      saved = {
+        status: localStorage.getItem('jobs:activeStatus') || '',
+        search: localStorage.getItem('jobs:search') || '',
+        type: localStorage.getItem('jobs:typeFilter') || '',
+        inst: localStorage.getItem('jobs:instFilter') || '',
+        recent: localStorage.getItem('jobs:recentFilter') || ''
+      };
+    } catch (_) { return; }
+    function restoreChip(container, attr, value) {
+      var selected = '';
+      document.querySelectorAll(container + ' .job-count[' + attr + ']').forEach(function(el) {
+        var matches = !!value && el.getAttribute(attr) === value;
+        el.classList.toggle('active', matches);
+        if (matches) selected = value;
+      });
+      return selected;
     }
-    if (savedSearch && searchInput) { searchInput.value = savedSearch; }
-    if (savedType) {
-      try {
-        var tel = document.querySelector('#type-summary .job-count[data-type="' + savedType + '"]');
-        if (tel) { toggleType(tel, savedType); }
-      } catch (_) {}
-    }
-    if (savedInst) {
-      try {
-        var iel = document.querySelector('#inst-summary .job-count[data-inst="' + savedInst + '"]');
-        if (iel) { toggleInst(iel, savedInst); }
-      } catch (_) {}
-    }
-    if (savedRecent) {
-      try {
-        var rel = document.querySelector('#time-summary .job-count[data-time="recent"]');
-        if (rel) { toggleRecent(rel); }
-      } catch (_) {}
-    }
-    // Save final consolidated state after all restores are done
-    saveFilters();
-    showClearFilter();
-  })();
-  applyFilters();        // ensure table reflects state (even when nothing was restored)
+    activeStatus = restoreChip('#jobs-summary', 'data-status', saved.status) || null;
+    activeType = restoreChip('#type-summary', 'data-type', saved.type);
+    activeInst = restoreChip('#inst-summary', 'data-inst', saved.inst);
+    activeRecent = restoreChip('#time-summary', 'data-time', saved.recent);
+    if (searchInput) searchInput.value = saved.search;
+  }
+  restoreFilters();
+  applyFilters();
   showClearFilter();
   window.addEventListener('pageshow', function(ev) {
     if (ev.persisted) {
-      // On bfcache restore the JS context is preserved, so activeType/activeInst
-      // still hold the old values. Directly set, don't toggle, to avoid toggling off.
-      try {
-        var s = localStorage.getItem('jobs:activeStatus');
-        if (s && activeStatus !== s) {
-          var el = document.querySelector('.job-count[data-status="' + s + '"]');
-          if (el) toggleStatus(el, s);
-        }
-      } catch (_) {}
-      try {
-        var sq = localStorage.getItem('jobs:search');
-        if (sq && searchInput) searchInput.value = sq;
-      } catch (_) {}
-      try {
-        var st = localStorage.getItem('jobs:typeFilter');
-        if (st && activeType !== st) {
-          var tel = document.querySelector('#type-summary .job-count[data-type="' + st + '"]');
-          if (tel) toggleType(tel, st);
-        }
-      } catch (_) {}
-      try {
-        var si = localStorage.getItem('jobs:instFilter');
-        if (si && activeInst !== si) {
-          var iel = document.querySelector('#inst-summary .job-count[data-inst="' + si + '"]');
-          if (iel) toggleInst(iel, si);
-        }
-      } catch (_) {}
-      try {
-        var sr = localStorage.getItem('jobs:recentFilter');
-        if (sr && activeRecent !== sr) {
-          var rel = document.querySelector('#time-summary .job-count[data-time="recent"]');
-          if (rel) toggleRecent(rel);
-        }
-      } catch (_) {}
+      restoreFilters();
       applyFilters();
+      reconcileSectionsForFilter();
       showClearFilter();
-      saveFilters();
     }
   });
 
@@ -1175,31 +1145,44 @@
   }
 
   // ── Sort persistence ────────────────────────────────────────────────────
-  function saveSort(colIdx, dir) {
-    try { localStorage.setItem('jobs:sort', JSON.stringify({ col: colIdx, dir })); } catch (_) {}
+  function sortKey(table) {
+    return 'jobs:sort:' + table.getAttribute('data-job-type');
   }
   function restoreSort() {
-    try {
-      var raw = localStorage.getItem('jobs:sort');
-      if (!raw) return;
-      var ref = JSON.parse(raw);
-      if (ref.col == null || !ref.dir) return;
-      allTables.forEach(function(table) {
-        var headerRow = table.tHead && table.tHead.rows[0];
-        if (!headerRow) return;
-        var th = headerRow.cells[ref.col];
+    // The old shared column index cannot be mapped across these table layouts.
+    try { localStorage.removeItem('jobs:sort'); } catch (_) {}
+    allTables.forEach(function(table) {
+      try {
+        var raw = localStorage.getItem(sortKey(table));
+        if (!raw) return;
+        var ref = JSON.parse(raw);
+        if (!ref.attr || (ref.dir !== 'asc' && ref.dir !== 'desc')) return;
+        var th = Array.from(table.querySelectorAll('thead th[data-sort-attr]'))
+          .find(function(h) { return h.getAttribute('data-sort-attr') === ref.attr; });
         if (!th) return;
         th.dataset.sortDir = ref.dir === 'asc' ? '' : 'asc';
         th.click();
-      });
-    } catch (_) {}
+      } catch (_) {}
+    });
   }
-  document.querySelectorAll('.jobs-table thead tr:first-child th.sortable').forEach(function(th) {
+  document.querySelectorAll('.jobs-table thead tr:first-child th[data-sort-attr]').forEach(function(th) {
     th.addEventListener('click', function() {
-      requestAnimationFrame(function() { saveSort(th.cellIndex, th.dataset.sortDir || ''); });
+      requestAnimationFrame(function() {
+        try {
+          localStorage.setItem(sortKey(th.closest('table')), JSON.stringify({
+            attr: th.getAttribute('data-sort-attr'), dir: th.dataset.sortDir || ''
+          }));
+        } catch (_) {}
+      });
     });
   });
-  requestAnimationFrame(restoreSort);
+  // The shared sortable handlers are installed at DOMContentLoaded. Restoring
+  // earlier can click an uninitialized header and never actually sort the rows.
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', function() { requestAnimationFrame(restoreSort); });
+  } else {
+    requestAnimationFrame(restoreSort);
+  }
 
   ['photometry-jobs-section', 'transit-fit-jobs-section', 'ttv-fit-jobs-section', 'lco-archive-jobs-section'].forEach(function(id) {
     var el = document.getElementById(id);

@@ -22,6 +22,7 @@ and the claim/insert atomically.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sqlite3
@@ -92,7 +93,7 @@ def limits_for(user_name: str | None) -> UserLimits | None:
                 "SELECT max_running_jobs, max_queued_jobs FROM users WHERE username = ?",
                 (user_name,),
             ).fetchone()
-    except sqlite3.Error:
+    except (sqlite3.Error, database.CatalogUnavailableError):
         logger.warning("could not read job limits for %s; using site defaults", user_name, exc_info=True)
         return defaults
     if row is None:
@@ -150,7 +151,8 @@ def queued_limit_message(user_name: str, cap: int) -> str:
     """The text a refused enqueue carries back to the caller (HTTP 429)."""
     return (
         f"{user_name} already has {cap} queued job(s), the per-user limit; "
-        "wait for one to start or cancel one"
+        "wait for one to start or cancel one on the Jobs page, "
+        "or ask an admin to raise your limit"
     )
 
 
@@ -158,6 +160,51 @@ def claim_caps(user_name: str | None) -> dict:
     """``claim_slot`` keyword arguments carrying *user_name*'s running cap."""
     limits = limits_for(user_name)
     return {"user_name": user_name or None, "max_user_slots": limits.running if limits else None}
+
+
+# A queued row carries its owner's running cap, read when it was queued, so the
+# pending drain on a worker never opens the catalog to look it up (#298). For a
+# row a worker drains, a limit changed after that applies to the rows the user
+# queues next.
+RUNNING_CAP_PARAM = "user_running_cap"
+
+
+def params_with_running_cap(params_json: str, user_name: str | None) -> str:
+    """*params_json* with *user_name*'s running cap added (see :data:`RUNNING_CAP_PARAM`)."""
+    try:
+        params = json.loads(params_json or "{}")
+    except (TypeError, ValueError):
+        return params_json
+    if not isinstance(params, dict):
+        return params_json
+    limits = limits_for(user_name)
+    params[RUNNING_CAP_PARAM] = limits.running if limits else None
+    return json.dumps(params, separators=(",", ":"))
+
+
+def claim_caps_for_row(entry: dict) -> dict:
+    """``claim_slot`` keyword arguments for a queued row being drained.
+
+    Where this process may read the catalog, the user's current cap is read, as
+    before, so a limit changed after the row was queued still applies. A worker
+    on a shared control plane uses the cap the row carries instead, and the
+    site defaults for a row queued before rows carried one.
+    """
+    from muscat_db import database
+
+    user_name = entry.get("user_name")
+    if database.catalog_allowed():
+        return claim_caps(user_name)
+    try:
+        params = json.loads(entry.get("params") or "{}")
+    except (TypeError, ValueError):
+        params = {}
+    if isinstance(params, dict) and RUNNING_CAP_PARAM in params:
+        cap = params[RUNNING_CAP_PARAM]
+        valid = cap is None or (isinstance(cap, int) and not isinstance(cap, bool) and cap >= UNLIMITED)
+        if valid:
+            return {"user_name": user_name or None, "max_user_slots": cap if user_name else None}
+    return claim_caps(user_name)
 
 
 def enqueue_caps(user_name: str | None) -> dict:

@@ -3409,6 +3409,10 @@ class TestTransitFitJobs:
         }
         saved = []
         monkeypatch.setattr("muscat_db.database.get_persisted_jobs", lambda: [pending_job])
+        monkeypatch.setattr(
+            "muscat_db.database.get_pending_persisted_jobs",
+            lambda type_: [pending_job] if type_ == "transit_fit" else [],
+        )
         monkeypatch.setattr("muscat_db.database.save_job", lambda **kwargs: saved.append(kwargs))
         monkeypatch.setattr(fit, "_FIT_JOBS", {})
 

@@ -381,14 +381,41 @@
   <div class="lco-tab-panel" data-panel="test" style="display: none;">
     <div class="lco-actions">
       <div class="lco-field" style="max-width: 150px;"><label for="sch-test-budget">Test budget (s) <span class="help-tooltip" title="Maximum cumulative exposure time for the test observation, in seconds. Candidate exposures beyond this budget are dropped from the plan. Excludes acquisition/readout.">?</span></label><input id="sch-test-budget" type="number" min="1" step="1" value="600"></div>
+      <div class="lco-field" style="max-width: 190px;"><label for="sch-test-window">Test window <span class="help-tooltip" title="Today: the next 24 h, cut short at the next selected transit. 1-day lead: from now until 1 day before the first selected transit, so the result is in hand before the science request needs adjusting. Neither overlaps a selected transit window.">?</span></label><select id="sch-test-window"><option value="today" selected>Today (next 24 h)</option><option value="lead">Until 1 day before transit</option></select></div>
       <button class="btn primary" type="button" id="btn-test-observation" title="Plan a guarded closed-loop test observation and build an editable draft">Create draft</button>
       <span class="lco-msg" id="msg-test-observation" style="margin: 0;"></span>
     </div>
-    <p class="lco-note">Plans a guarded closed-loop test observation. Exposure budget excludes acquisition/readout. Review all removed combinations and warnings, and edit the draft below (e.g. exposure/requested time) if needed, before checking settings.</p>
+    <p class="lco-note">Plans a guarded closed-loop test observation of two FOVs at PA 0 (optimized and target-centred). Exposure budget excludes acquisition/readout. Review all removed combinations and warnings, and edit the draft below (e.g. exposure/requested time) if needed, before checking settings.</p>
     <textarea id="test-observation-summary" class="lco-pre" spellcheck="false" aria-label="Test observation draft" style="display: none;"></textarea>
     <div class="lco-actions" id="test-obs-actions" style="display: none;">
       <button class="btn primary" type="button" id="btn-test-dry-run">Check settings</button>
       <button class="btn danger" type="button" id="btn-test-submit" disabled>Submit TEST</button>
+    </div>
+    <div class="lco-actions" style="margin-top: 0.75rem;">
+      <strong>Test history</strong>
+      <button class="btn" type="button" id="btn-test-history" title="Reload test observations for this target">Refresh</button>
+      <span class="lco-msg" id="msg-test-history" style="margin: 0;"></span>
+    </div>
+    <div class="lco-table-wrap">
+      <table class="lco-table" id="test-history-table" style="display: none; width: auto;">
+        <thead><tr><th>Created (UTC)</th><th>Inst</th><th>State</th><th>Requests</th><th></th></tr></thead>
+        <tbody id="test-history-body"></tbody>
+      </table>
+    </div>
+    <div id="test-recommendation" style="display: none; margin-top: 0.6rem;">
+      <div class="lco-table-wrap">
+        <table class="lco-table" id="test-rec-table" style="width: auto;">
+          <thead><tr><th>Band</th><th>Target-safe (s)</th><th>Comparison-safe (s)</th><th>Brightest comp</th><th>Usable comps</th></tr></thead>
+          <tbody id="test-rec-body"></tbody>
+        </table>
+      </div>
+      <ul class="lco-note" id="test-rec-notes"></ul>
+      <div class="lco-actions">
+        <button class="btn" type="button" id="btn-apply-target" title="Fill the Science obs exposure (and defocus, if recommended) with the target-safe values">Apply target-safe</button>
+        <button class="btn primary" type="button" id="btn-apply-comparison" title="Fill the Science obs exposure (and defocus, if recommended) with values that also keep the brightest comparison below 50% of saturation">Apply comparison-safe</button>
+        <button class="btn" type="button" id="btn-test-reanalyze" title="Re-run the analysis on the downloaded test frames">Re-analyze</button>
+        <span class="lco-msg" id="msg-test-apply" style="margin: 0;"></span>
+      </div>
     </div>
   </div>
 </details>
@@ -537,7 +564,7 @@
     'sch-sin-count','sch-site','sch-plan-policy',
     'sch-type','sch-observation-type','sch-guiding-config','sch-defocus',
     'sch-effective-filter','sch-effective-exptime','sch-effective-mode',
-    'sch-obs-airmass','sch-moon-sep','sch-max-lunar-phase','sch-ipp','sch-test-budget'
+    'sch-obs-airmass','sch-moon-sep','sch-max-lunar-phase','sch-ipp','sch-test-budget','sch-test-window'
   ];
 
   var CHECK_IDS = ['sch-include-padding', 'sch-rank'];
@@ -1155,6 +1182,19 @@
       .then(function (info) { if (info.ok) { lastTargetInfo = info; lastInfoTarget = target; } return info; });
   }
 
+  var catalogAstrometry = null;
+
+  // Epoch (Julian year) and proper motion (mas/yr) of the catalog position, for
+  // the LCO target, while sch-coords still holds that position. The catalogs
+  // are Gaia DR2 at 2015.5; without them LCO treats the position as J2000.
+  function coordsAstrometry() {
+    var a = catalogAstrometry;
+    if (!a || a.epoch == null || (val('sch-coords') || '').trim() !== a.text) return {};
+    var out = { epoch: a.epoch };
+    if (a.pmra != null && a.pmdec != null) { out.pmra = a.pmra; out.pmdec = a.pmdec; }
+    return out;
+  }
+
   function populateCoordinates(info, opts) {
     opts = opts || {};
     var coords = info && info.coordinates;
@@ -1165,10 +1205,14 @@
       if (val('sch-coords') && !fieldSources['sch-coords']) setFieldSource('sch-coords', 'manual');
       throw new Error('Coordinates not found for ' + (info && info.target ? info.target : 'that target'));
     }
+    var text = coords.ra.toFixed(5) + ', ' + coords.dec.toFixed(5);
+    // Epoch and proper motion travel with the catalog position only; buildParams
+    // drops them once the field no longer holds exactly this text (a manual edit).
+    catalogAstrometry = { text: text, epoch: coords.epoch, pmra: coords.pmra, pmdec: coords.pmdec };
     if (opts.isInitialLoad && val('sch-coords')) {
       return;
     }
-    setVal('sch-coords', coords.ra.toFixed(5) + ', ' + coords.dec.toFixed(5));
+    setVal('sch-coords', text);
     setFieldSource('sch-coords', String(coords.source || 'catalog').toUpperCase());
     updateGenWindowsButtonState();
     saveOptions();
@@ -2866,6 +2910,7 @@
       guiding_config: val('sch-guiding-config'),
       defocus: num('sch-defocus')
     };
+    Object.assign(p, coordsAstrometry());
     if (kind === 'muscat' || kind === 'muscat3' || kind === 'muscat4') {
       p.exposure_times = {};
       ['g', 'r', 'i', 'z'].forEach(function (b) { var v = num('sch-exp-' + b); if (v !== null) p.exposure_times[b] = v; });
@@ -3462,7 +3507,150 @@
       // a test observation still uses the single Request name and Site.
       el('sch-name-field').style.display = tab === 'test' ? '' : 'none';
       el('sch-site-field').style.display = tab === 'test' ? '' : 'none';
+      if (tab === 'test') loadTestHistory();
     });
+  });
+
+  // --- Test history and recommendation --------------------------------------
+  var currentRecommendation = null;
+  function fmtSeconds(t) {
+    if (t === null || t === undefined) return '—';
+    return Number(t) >= 1 ? Number(t).toFixed(1) : Number(t).toFixed(3);
+  }
+  function cell(tr, text) {
+    var td = document.createElement('td'); td.textContent = text; tr.appendChild(td); return td;
+  }
+  function loadTestHistory() {
+    var target = val('sch-target');
+    var url = '/api/lco/test-observations?limit=10' + (target ? '&target=' + encodeURIComponent(target) : '');
+    MuscatFetch.fetchJson(url).then(function (d) {
+      if (!d.ok) throw new Error(d.error || 'Could not load test history');
+      var body = el('test-history-body');
+      body.textContent = '';
+      d.records.forEach(function (record) {
+        var tr = document.createElement('tr');
+        cell(tr, (record.created_at || '').replace('T', ' ').slice(0, 16));
+        cell(tr, record.instrument);
+        var state = cell(tr, record.state);
+        if (record.failure_detail) state.title = record.failure_detail;
+        cell(tr, (record.request_ids || []).join(', ') || '—');
+        var action = document.createElement('td');
+        if (['complete', 'partial', 'failed'].indexOf(record.state) !== -1) {
+          var btn = document.createElement('button');
+          btn.type = 'button'; btn.className = 'btn'; btn.textContent = 'View';
+          btn.addEventListener('click', function () { showTestRecommendation(record); });
+          action.appendChild(btn);
+        }
+        tr.appendChild(action);
+        body.appendChild(tr);
+      });
+      el('test-history-table').style.display = d.records.length ? '' : 'none';
+      msg('msg-test-history', d.records.length ? '' : 'No test observations for this target yet.');
+    }).catch(function (e) { msg('msg-test-history', errText(e), 'err'); });
+  }
+  function showTestRecommendation(record) {
+    currentRecommendation = record;
+    var rec = record.recommendation || {};
+    var fovs = (record.result || {}).fovs || {};
+    var bands = fovs[String(rec.fov_index)] || {};
+    var body = el('test-rec-body');
+    body.textContent = '';
+    Object.keys(bands).forEach(function (band) {
+      var s = bands[band];
+      var tr = document.createElement('tr');
+      cell(tr, band);
+      if (!s.target_found) { cell(tr, 'target not found'); cell(tr, ''); cell(tr, ''); cell(tr, ''); body.appendChild(tr); return; }
+      cell(tr, (s.target.upper_limit ? '≤ ' : '') + fmtSeconds(s.exptime_target_s));
+      cell(tr, fmtSeconds(s.exptime_with_comparison_s));
+      var comp = s.brightest_comparison;
+      cell(tr, comp ? (comp.upper_limit ? '≤ ' : '') + fmtSeconds(comp.exptime_s) + ' s at ' + comp.sep_arcsec + '"' : '—');
+      cell(tr, String(s.n_usable_comparisons) + ' / ' + String(s.n_comparisons));
+      body.appendChild(tr);
+    });
+    var notes = el('test-rec-notes');
+    notes.textContent = '';
+    var lines = [];
+    if (record.state === 'failed') lines.push('Failed: ' + (record.failure_detail || 'unknown error'));
+    if (rec.fov_index !== undefined) {
+      lines.push('Recommended FOV: ' + (rec.target_centred ? 'target-centred' : 'optimized') +
+        ' (RA ' + Number(rec.center_ra).toFixed(6) + ', Dec ' + Number(rec.center_dec).toFixed(6) + ', PA 0). Exposures peak at ' +
+        Math.round((rec.safe_level_frac || 0.5) * 100) + '% of saturation.');
+    }
+    var focus = rec.defocus;
+    if (focus) {
+      lines.push(focus.recommended
+        ? 'Defocus recommended: ' + (focus.defocus_mm !== null ? focus.defocus_mm + ' mm' : 'amount not calibrated') + ' — ' + focus.reason + (focus.note ? ' (' + focus.note + ')' : '')
+        : 'No defocus: ' + focus.reason);
+      var atFocus = rec.exposure_times_target_defocused;
+      if (focus.recommended && atFocus) {
+        lines.push('Target-safe exposures at ' + focus.defocus_mm + ' mm: ' +
+          Object.keys(atFocus).map(function (b) { return b + ' ' + fmtSeconds(atFocus[b]) + ' s'; }).join(', '));
+      }
+    }
+    (rec.contamination || []).forEach(function (c) {
+      lines.push('Possible contamination (' + c.source + (c.bands ? ' ' + c.bands.join('/') : '') + '): ' + c.sep_arcsec + '" away, ' +
+        (c.dmag !== undefined ? 'ΔG ' + c.dmag + ', ' : '') + (c.flux_ratio * 100).toFixed(1) + '% of target flux');
+    });
+    (rec.warnings || []).forEach(function (w) { lines.push('⚠ ' + w); });
+    lines.forEach(function (line) { var li = document.createElement('li'); li.textContent = line; notes.appendChild(li); });
+    var applicable = rec.fov_index !== undefined && record.state !== 'failed';
+    el('btn-apply-target').disabled = !applicable;
+    el('btn-apply-comparison').disabled = !applicable;
+    msg('msg-test-apply', '');
+    el('test-recommendation').style.display = '';
+  }
+  function setField(id, value) {
+    setVal(id, value);
+    var input = el(id);
+    if (input) {
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  }
+  function applyRecommendation(which) {
+    if (!currentRecommendation) return;
+    var rec = currentRecommendation.recommendation || {};
+    var kind = currentRecommendation.instrument;
+    // With a recommended defocus, apply the exposures rescaled to it: the
+    // in-focus safe exposures would keep the duty cycle loss defocus fixes.
+    var focus = rec.defocus && rec.defocus.recommended && rec.defocus.defocus_mm !== null ? rec.defocus.defocus_mm : null;
+    var defocused = which === 'target' ? rec.exposure_times_target_defocused : rec.exposure_times_with_comparison_defocused;
+    var useDefocus = focus !== null && !!defocused;
+    var times = useDefocus ? defocused
+      : (which === 'target' ? rec.exposure_times_target : rec.exposure_times_with_comparison);
+    if (!times) return;
+    if (isSingleFilterKind(kind) !== isSingleFilterKind(val('sch-kind'))) {
+      msg('msg-test-apply', 'Science obs instrument does not match this test (' + kind + ').', 'err'); return;
+    }
+    if (isSingleFilterKind(kind)) {
+      var filter = Object.keys(times)[0];
+      setSelectValue('sch-effective-filter', filter);
+      setField('sch-effective-exptime', times[filter]);
+    } else {
+      ['g', 'r', 'i', 'z'].forEach(function (b) { if (times[b] !== undefined) setField('sch-exp-' + b, times[b]); });
+    }
+    var applied = 'Applied ' + (which === 'target' ? 'target-safe' : 'comparison-safe') + ' exposures';
+    if (useDefocus) {
+      setField('sch-defocus', focus);
+      applied += ' at ' + focus + ' mm defocus';
+    } else if (focus !== null) {
+      // A recommendation stored before defocused exposures were computed.
+      applied += ' (in focus); defocus not applied: re-analyze to get exposures at ' + focus + ' mm';
+    }
+    if (!rec.target_centred) applied += '. The science request still points at the target; the optimized FOV centre is not applied.';
+    msg('msg-test-apply', applied, 'ok');
+  }
+  el('btn-test-history').addEventListener('click', loadTestHistory);
+  el('btn-apply-target').addEventListener('click', function () { applyRecommendation('target'); });
+  el('btn-apply-comparison').addEventListener('click', function () { applyRecommendation('comparison'); });
+  el('btn-test-reanalyze').addEventListener('click', function () {
+    if (!currentRecommendation) return;
+    msg('msg-test-apply', 'Re-analyzing…');
+    MuscatFetch.fetchJson('/api/lco/test-observations/' + encodeURIComponent(currentRecommendation.id) + '/analyze', { method: 'POST' })
+      .then(function (d) {
+        if (!d.ok) throw new Error(d.error || 'Re-analysis failed');
+        showTestRecommendation(d.record); loadTestHistory();
+      }).catch(function (e) { msg('msg-test-apply', errText(e), 'err'); });
   });
 
   var currentTestRecord = null;
@@ -3483,12 +3671,12 @@
     if (!p.target_name || p.ra === null || p.dec === null) {
       showMessageModal('Incomplete schedule', 'Enter a target and coordinates.'); return;
     }
-    if (!p.windows.length) {
-      showMessageModal('Incomplete schedule', 'Generate and select a transit window first (Science obs tab).'); return;
+    p.test_window_mode = val('sch-test-window') || 'today';
+    if (p.test_window_mode === 'lead' && !p.windows.length) {
+      showMessageModal('Incomplete schedule', 'The 1-day lead needs a selected transit window (Science obs tab).'); return;
     }
     p.exposure_budget_s = num('sch-test-budget') || 600;
     p.defocus_mm = p.defocus;
-    p.test_window = p.windows[0];
     p.transit = { planet: val('sch-planet'), t0: val('sch-t0'), period: val('sch-period'), duration_h: val('sch-duration') };
     p.provenance = { schedule_state: 'lco_schedule', assumed_airmass: p.max_airmass, lunar_distance_deg: p.min_lunar_distance };
     msg('msg-test-observation', 'Optimizing FOV and generating plan…');
@@ -3497,7 +3685,7 @@
         if (!d.ok) throw new Error(d.error || 'Could not generate test plan');
         currentTestRecord = d.record; currentTestHash = null;
         el('btn-test-submit').disabled = true;
-        var _INTERNAL_PLAN_KEYS = ['fov_candidates', 'removed_combinations', 'provenance', 'capabilities', 'version'];
+        var _INTERNAL_PLAN_KEYS = ['fov_candidates', 'removed_combinations', 'provenance', 'version', 'science_windows', 'target_coord'];
         var displayPlan = Object.fromEntries(Object.entries(d.record.plan).filter(function (kv) { return !_INTERNAL_PLAN_KEYS.includes(kv[0]); }));
         el('test-observation-summary').value = JSON.stringify(displayPlan, null, 2);
         // Reveal the inline review + validate/submit controls in the Test obs tab.
@@ -3548,6 +3736,7 @@
           var warning = monitoringWarning(d.monitoring);
           msgHtml('msg-test-observation', 'Submitted successfully.' + warning, warning ? 'err' : 'ok');
           el('btn-test-submit').disabled = true;
+          loadTestHistory();
         })
         .catch(function (e) { msg('msg-test-observation', errText(e), 'err'); });
     });

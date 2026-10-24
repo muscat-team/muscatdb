@@ -26,6 +26,7 @@ from pathlib import Path
 
 import pytest
 
+from muscat_db import access_groups
 from muscat_db import photometry as phot
 from muscat_db import product_record
 from muscat_db import transit_fit as fit
@@ -77,6 +78,11 @@ def _own_all(author):
 
 
 def _make_group(db, name, *members, builtin=0):
+    if name == access_groups.EVERYONE:
+        # Creating `everyone` switches visibility onto the groups (#228 step 2),
+        # so give it what a real seed gives it; a grantless `everyone` would
+        # hide the run (404) before the owner check could refuse it (403).
+        access_groups.seed_from_blocklist(db)
     with sqlite3.connect(db) as conn:
         conn.execute("INSERT OR IGNORE INTO groups (name, builtin) VALUES (?, ?)", (name, builtin))
         conn.executemany(

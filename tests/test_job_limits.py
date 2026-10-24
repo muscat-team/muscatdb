@@ -7,10 +7,12 @@ from the CLI, handed to the job store by the pipelines, and reported over HTTP.
 
 from __future__ import annotations
 
+import pathlib
+
 import pytest
 from typer.testing import CliRunner
 
-from muscat_db import job_limits, ttv_fit, web
+from muscat_db import job_limits, photometry, transit_fit, ttv_fit, web
 from muscat_db.cli import app as cli_app
 from muscat_db.job_limits import JobLimitExceeded, UserLimits
 
@@ -136,11 +138,47 @@ def _ttv_launch(monkeypatch, store, user):
     return ttv_fit.start_ttv_fit("TOI-123", options={"run_name": "r1"}, user_name=user)
 
 
-def test_launch_passes_the_users_caps_to_claim_and_enqueue(db, monkeypatch):
+def _photometry_launch(monkeypatch, store, user, tmp_path):
+    monkeypatch.setattr(photometry, "get_job_store", lambda: store)
+    monkeypatch.setattr(photometry, "_MAX_FULL_JOBS", 1)
+    monkeypatch.setattr(photometry, "_JOBS", {})
+    monkeypatch.setattr(photometry, "raw_data_dir", lambda inst, date: tmp_path)
+    monkeypatch.setattr(photometry, "run_output_dir", lambda *a, **k: tmp_path / "run")
+    monkeypatch.setattr(photometry, "_detect_process_running", lambda rdir: False)
+    monkeypatch.setattr(photometry, "_reduction_products_exist", lambda *a, **k: False)
+    return photometry.start_run("muscat3", "260720", "TOI-123", options={}, test_run=False, user_name=user)
+
+
+def _transit_fit_launch(monkeypatch, store, user, tmp_path):
+    monkeypatch.setattr(transit_fit, "get_job_store", lambda: store)
+    monkeypatch.setattr(transit_fit, "_MAX_FULL_JOBS", 1)
+    monkeypatch.setattr(transit_fit, "_FIT_JOBS", {})
+    monkeypatch.setattr(transit_fit, "validate_fit_options", lambda options: None)
+    monkeypatch.setattr(
+        transit_fit, "get_csv_lightcurves",
+        lambda *a, **k: [pathlib.Path("TOI-123_muscat3_g.csv")],
+    )
+    monkeypatch.setattr(transit_fit, "validate_no_duplicate_datasets", lambda *a, **k: None)
+    monkeypatch.setattr(transit_fit, "fit_output_dir", lambda *a, **k: tmp_path / "run")
+    monkeypatch.setattr(transit_fit, "_fit_reduction_exists", lambda *a, **k: False)
+    return transit_fit.start_fit(
+        "muscat3", "260720", "TOI-123", options={"run_mode": "new"}, test_run=False, user_name=user,
+    )
+
+
+@pytest.mark.parametrize(
+    "launch",
+    [
+        pytest.param(_photometry_launch, id="photometry"),
+        pytest.param(_transit_fit_launch, id="transit_fit"),
+        pytest.param(lambda mp, store, user, _tmp: _ttv_launch(mp, store, user), id="ttv_fit"),
+    ],
+)
+def test_launch_passes_the_users_caps_to_claim_and_enqueue(launch, db, monkeypatch, tmp_path):
     job_limits.set_limits(db, "ann", running=2, queued=3)
     store = _RecordingStore(claim=False)
 
-    result = _ttv_launch(monkeypatch, store, "ann")
+    result = launch(monkeypatch, store, "ann", tmp_path)
 
     assert result["queued"] is True
     assert store.claims == [{"user_name": "ann", "max_user_slots": 2}]

@@ -33,7 +33,12 @@ from .auth import (
     resolve_forwarded_identity,
 )
 from . import database as db
+from .job_store import get_job_store
 from .web import sio
+# python-socketio forwards the reason to the client only for its own refusal
+# class; the builtin ConnectionRefusedError reaches the browser as a generic
+# "Connection refused by server".
+from socketio.exceptions import ConnectionRefusedError as SocketRefusedError
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +151,9 @@ def _known_users_map() -> dict[str, str]:
 
 
 def _parse_mentions(text: str) -> list[str]:
-    """Canonical usernames @-mentioned in text (reserved tokens excluded)."""
+    """Canonical usernames @-mentioned in text that may see the shared room
+    (reserved tokens excluded). Scoped viewers are dropped here, so the stored
+    mention list, its highlighting, and the nudges all agree."""
     known = _known_users_map()
     found: list[str] = []
     for raw in _MENTION_RE.findall(text):
@@ -156,7 +163,12 @@ def _parse_mentions(text: str) -> list[str]:
         canon = known.get(low)
         if canon and canon not in found:
             found.append(canon)
-    return found
+    return _unscoped(found)
+
+
+def _nudge_targets(names, sender: str | None) -> list[str]:
+    """Users to notify about a message: never the sender, never a scoped viewer."""
+    return _unscoped(n for n in names if n != sender)
 
 
 def _rate_ok(sid: str) -> bool:
@@ -212,7 +224,7 @@ async def connect(sid, environ):
     user, identity = _resolve_identity(environ)
     if identity == UNKNOWN_EMAIL:
         logger.warning("rejected chat connection %s: unmapped Access identity", sid)
-        raise ConnectionRefusedError("account not provisioned")
+        raise SocketRefusedError("account not provisioned")
     # Fail closed exactly like the HTTP middleware. socket.io is mounted as an
     # ASGI wrapper *in front of* the app, so /socket.io never passes through
     # that middleware: without this, a peer bypassing nginx (straight to the
@@ -220,7 +232,7 @@ async def connect(sid, environ):
     # "Anonymous", even with MUSCAT_REQUIRE_AUTH set.
     if user is None and authentication_required():
         logger.warning("rejected unauthenticated chat connection %s", sid)
-        raise ConnectionRefusedError("authentication required")
+        raise SocketRefusedError("authentication required")
     scoped = _user_is_scoped(user)
     await sio.save_session(sid, {"user": user, "scoped": scoped})
     _users_by_sid[sid] = user
@@ -231,12 +243,23 @@ async def connect(sid, environ):
     # Backfill recent history to this client only (never persisted here).
     # When the user is authenticated, scoped messages (e.g. job-finished
     # notifications) are included only for their owner.
+    until = time.time()
+    since = until - db.CHAT_BACKFILL_DAYS * 86400
+    payload = {"messages": []}
     try:
-        history = db.get_recent_chat_messages(user=user, addressed_only=scoped)
+        # Read one extra row to distinguish a complete window from truncation.
+        history = db.get_recent_chat_messages(
+            user=user, addressed_only=scoped, limit=501, since=since, until=until,
+        )
+        window = {"since": since, "until": until}
+        if len(history) > 500:
+            history = history[-500:]
+            window.update(since=history[0]["ts"], first_id=history[0]["id"])
+        payload = {"messages": history, "window": window}
     except Exception:
         logger.exception("failed to load chat history")
-        history = []
-    await sio.emit("history", {"messages": history}, to=sid)
+        # No authoritative window on failure: the client must keep its view.
+    await sio.emit("history", payload, to=sid)
     await _broadcast_presence()
 
 
@@ -248,6 +271,8 @@ async def disconnect(sid):
     # signed-in user's context is keyed by name (shared across tabs) and kept
     # until the idle-gap TTL expires, so a reload doesn't wipe their thread.
     _agent_ctx.pop(f"sid:{sid}", None)
+    await _cancel_agent_requests(f"sid:{sid}")
+    _agent_locks.pop(f"sid:{sid}", None)
     await _broadcast_presence()
 
 
@@ -338,7 +363,7 @@ async def message(sid, data):
             return
         payload = {**msg, "sid": sid}
         await sio.emit("message", payload, room=_PUBLIC_ROOM)
-        for name in _unscoped(mentions):
+        for name in _nudge_targets(mentions, user):
             await sio.emit("mention", {"from": display, "message": payload}, room=f"user:{name}")
         return
 
@@ -353,7 +378,7 @@ async def message(sid, data):
     payload = {**msg, "sid": sid}
     await sio.emit("message", payload, room=_PUBLIC_ROOM)
     # Nudge each mentioned user (on any page/tab) so they notice.
-    for name in _unscoped(mentions):
+    for name in _nudge_targets(mentions, user):
         await sio.emit("mention", {"from": display, "message": payload}, room=f"user:{name}")
     # @all / @everyone / @channel → ping every other online teammate too.
     if _BROADCAST_MENTION_RE.search(text):
@@ -375,11 +400,19 @@ async def edit_message(sid, data):
     text = text.strip()[:_MAX_TEXT_LEN]
     if not text:
         return
-    updated = db.edit_chat_message(msg_id, user, text)
+    before = db.get_chat_message(msg_id)
+    mentions = _parse_mentions(text)
+    updated = db.edit_chat_message(msg_id, user, text, mentions=mentions)
     if updated is None:
         await sio.emit("chat_error", {"error": "not allowed to edit that message"}, to=sid)
         return
     await sio.emit("message_edited", updated, room=_PUBLIC_ROOM)
+    # Nudge only names the edit added; anyone already mentioned was notified
+    # when the message was first sent.
+    already = set((before or {}).get("mentions") or [])
+    payload = {**updated, "sid": sid}
+    for name in _nudge_targets((m for m in mentions if m not in already), user):
+        await sio.emit("mention", {"from": user, "message": payload}, room=f"user:{name}")
 
 
 @sio.on("delete_message")
@@ -450,6 +483,29 @@ _agent_tasks: set[asyncio.Task] = set()
 # (the nginx user, or the socket id for anonymous sessions). Each value is a
 # ``(last_activity_ts, deque-of-turns)`` pair; the deque caps its own length.
 _agent_ctx: dict[str, tuple[float, deque]] = {}
+# One in-flight exchange per conversation: a second question from the same user
+# waits for the first, so its context includes the first answer.
+_agent_locks: dict[str, asyncio.Lock] = {}
+# Accepted requests, including those waiting for their conversation lock.
+_agent_requests: dict[str, set[asyncio.Task]] = {}
+
+
+def _forget_agent_request(key: str, task: asyncio.Task) -> None:
+    requests = _agent_requests.get(key)
+    if requests is not None:
+        requests.discard(task)
+        if not requests:
+            _agent_requests.pop(key, None)
+
+
+async def _cancel_agent_requests(key: str) -> None:
+    tasks = list(_agent_requests.pop(key, ()))
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        # Wait for capacity reservations to be released before accepting a
+        # fresh question after reset. Cancelled answers cannot restore context.
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def _ctx_key(user: str | None, sid: str) -> str:
@@ -492,12 +548,16 @@ def _agent_ctx_clear(key: str) -> None:
 
 def _spawn_agent(sid: str, user: str | None, question: str) -> None:
     """Answer in the background so the message handler returns at once (the model
-    call can take many seconds)."""
-    if _valid_loop() is None:  # no running loop captured yet; nothing to schedule onto
-        return
+    call can take many seconds). Called from a socket.io handler, so there is
+    always a running loop to schedule onto."""
     task = asyncio.create_task(_run_agent(sid, user, question))
     _agent_tasks.add(task)
     task.add_done_callback(_agent_tasks.discard)
+    if question and not chat_agent.is_reset_command(question):
+        # Register immediately: reset may arrive before this task first runs.
+        key = _ctx_key(user, sid)
+        _agent_requests.setdefault(key, set()).add(task)
+        task.add_done_callback(lambda done: _forget_agent_request(key, done))
 
 
 def _private_agent_payload(text: str) -> dict:
@@ -544,13 +604,15 @@ async def _run_agent(sid: str, user: str | None, question: str) -> None:
         return
     if chat_agent.is_reset_command(question):  # "@bot /reset": clear context, no model call
         _agent_ctx_clear(key)
+        await _cancel_agent_requests(key)
         await sio.emit(
             "message",
             _private_agent_payload("🧹 Cleared our conversation context. Starting fresh."),
             **target,
         )
         return
-    if not chat_agent.reserve():  # model already at capacity
+    # Reserve before waiting: queued exchanges count against capacity too.
+    if not chat_agent.reserve():
         await sio.emit(
             "message",
             _private_agent_payload(
@@ -559,39 +621,76 @@ async def _run_agent(sid: str, user: str | None, question: str) -> None:
             **target,
         )
         return
+    task = asyncio.current_task()
+    _agent_requests.setdefault(key, set()).add(task)
     heartbeat = asyncio.create_task(_typing_heartbeat(target))
     try:
-        reply = await chat_agent.answer(question, _agent_ctx_get(key))
-        _agent_ctx_add(
-            key,
-            {"role": "user", "content": f"{_display(user)}: {question}"},
-            {"role": "assistant", "content": reply},
-        )
-        await sio.emit("message", _private_agent_payload(reply), **target)
-    except Exception as e:
-        logger.warning("chat agent request failed: %s", e, exc_info=True)
-        await sio.emit(
-            "message",
-            _private_agent_payload(
-                "⚠️ Sorry, I couldn't reach the model right now. Please try again shortly."
-            ),
-            **target,
-        )
+        lock = _agent_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            try:
+                reply = await chat_agent.answer(question, _agent_ctx_get(key))
+                _agent_ctx_add(
+                    key,
+                    {"role": "user", "content": f"{_display(user)}: {question}"},
+                    {"role": "assistant", "content": reply},
+                )
+                await sio.emit("message", _private_agent_payload(reply), **target)
+            except Exception as e:
+                logger.warning("chat agent request failed: %s", e, exc_info=True)
+                await sio.emit(
+                    "message",
+                    _private_agent_payload(
+                        "⚠️ Sorry, I couldn't reach the model right now. Please try again shortly."
+                    ),
+                    **target,
+                )
     finally:
-        heartbeat.cancel()
         chat_agent.release()
+        _forget_agent_request(key, task)
+        heartbeat.cancel()
+        await asyncio.gather(heartbeat, return_exceptions=True)
         await sio.emit("typing", {"user": chat_agent.DISPLAY_NAME, "typing": False}, **target)
 
 
 # ----- job-finished system messages ----------------------------------------
 def _job_user_name(job_key: str) -> str | None:
-    """Look up the user_name stored for a job key, or None if unknown."""
+    """Look up the user_name stored for a job key: "" for an anonymous job's
+    row, None when the store holds no row or the lookup fails.
+
+    Reads through the job store rather than the SQLite jobs table, so the
+    owner is found under MUSCAT_CONTROL_PLANE=postgres too."""
     try:
-        row = db.get_job_user_name(job_key)
-        return row or None
+        row = get_job_store().get(job_key)
     except Exception:
-        logger.debug("failed to look up job user_name for %s", job_key, exc_info=True)
+        logger.warning("failed to look up job user_name for %s", job_key, exc_info=True)
         return None
+    return None if row is None else str(row.get("user_name") or "")
+
+
+_JOB_LABELS = {
+    "photometry": "Photometry",
+    "transit_fit": "Transit fit",
+    "archive": "LCO archive download",
+}
+# Result page each job type links to; the page itself offers "To Target".
+_JOB_RESULT_PATHS = {"photometry": "/photometry", "transit_fit": "/transit-fit"}
+_ARCHIVE_PAGE = "/lco/archive"
+
+
+def _job_result_link(
+    type_: str, target: str, inst: str, date: str, run_id: str, link: str
+) -> str:
+    """Relative URL of the page showing this job's outcome, or ""."""
+    if type_ == "archive":
+        return link if link.startswith("/") else _ARCHIVE_PAGE
+    path = _JOB_RESULT_PATHS.get(type_)
+    if not path or not (inst and date and target):
+        return f"/target?name={urllib.parse.quote(target)}" if target else ""
+    # Both pages canonicalize the target with spaces removed (307 otherwise).
+    query = {"inst": inst, "date": date, "target": target.replace(" ", "")}
+    if run_id:
+        query["run"] = run_id
+    return f"{path}?{urllib.parse.urlencode(query)}"
 
 
 def on_job_finished(
@@ -601,25 +700,36 @@ def on_job_finished(
     inst: str = "",
     date: str = "",
     state: str = "",
+    run_id: str = "",
+    owner: str | None = None,
+    link: str = "",
     **_,
 ) -> None:
     """jobs.fire_job_finished hook (runs in the job-sync thread). Persists a
-    system message scoped to the job's owner and schedules its delivery."""
-    label = {
-        "photometry": "Photometry",
-        "transit_fit": "Transit fit",
-        "archive": "LCO download",
-    }.get(type_, type_ or "Job")
+    system message scoped to the job's owner and schedules its delivery.
+
+    ``owner`` overrides the job-store lookup for jobs not persisted under
+    ``job_key`` (LCO archive downloads), where "" means a known-anonymous job.
+    Left as None, the owner comes from the job's row; an anonymous row goes to
+    the public room, while a missing row or failed lookup drops the message
+    rather than announce a possibly restricted target publicly. ``link`` is an
+    archive job's own result URL (its photometry page once the dataset is
+    ingested)."""
+    label = _JOB_LABELS.get(type_, type_ or "Job")
     verb = {"done": "finished", "error": "failed", "cancelled": "was cancelled"}.get(state, state)
     where = " ".join(p for p in (inst, date) if p)
-    target_link = f"/target?name={urllib.parse.quote(target)}" if target else ""
     parts = [f"{label} for {target}" if target else label, f"({where})" if where else "", verb]
     text = " ".join(p for p in parts if p)
-    if target_link:
-        text += f" {target_link}"
-    owner = _job_user_name(job_key)
+    result_link = _job_result_link(type_, target, inst, date, run_id or "", link or "")
+    if result_link:
+        text += f" {result_link}"
+    if owner is None:
+        owner = _job_user_name(job_key)
+        if owner is None:
+            logger.warning("no owner found for job %s; dropping its chat notification", job_key)
+            return
     try:
-        msg = db.save_chat_message("system", text, kind="system", visible_to=owner)
+        msg = db.save_chat_message("system", text, kind="system", visible_to=owner or None)
     except Exception:
         logger.exception("failed to persist job-finished chat message")
         return

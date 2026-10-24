@@ -248,6 +248,56 @@ class FinalizeConfig:
     success_marker: str | None = None
 
 
+def server_fault(what: str, cause: object = None) -> str:
+    """Launch-failure text for a fault the user cannot fix from the page (the
+    engine would not start, the job database refused a write), so a refusal
+    over their own settings and a broken server do not read alike."""
+    reason = f" ({cause})" if cause else ""
+    return f"{what}{reason}. This is not a problem with your settings; please contact an admin."
+
+
+# Signals a pipeline process actually dies of, worded for the Jobs page.
+_SIGNAL_DEATHS = {
+    9: "was killed (SIGKILL), most often because the server ran out of memory",
+    7: "crashed with a bus error (SIGBUS)",
+    11: "crashed with a segmentation fault (SIGSEGV)",
+    6: "aborted (SIGABRT)",
+    15: "was terminated (SIGTERM)",
+}
+
+
+def exit_signal(returncode: int | None) -> int | None:
+    """The signal a process died of: ``-N`` from ``Popen``, or ``128+N`` from a
+    shell wrapper. ``CANCELLED_RC`` is our own marker, not a signal."""
+    if returncode is None or returncode == CANCELLED_RC:
+        return None
+    if returncode < 0:
+        return -returncode
+    if 128 < returncode < 160:
+        return returncode - 128
+    return None
+
+
+def describe_exit(returncode: int | None) -> str:
+    """A return code in plain words, or ``""`` for success, unknown, or a cancel."""
+    if returncode in (None, 0, CANCELLED_RC):
+        return ""
+    sig = exit_signal(returncode)
+    if sig is None:
+        return f"The process exited with code {returncode}"
+    if sig in _SIGNAL_DEATHS:
+        return f"The process {_SIGNAL_DEATHS[sig]}"
+    return f"The process was stopped by signal {sig}"
+
+
+def watchdog_desc(reason: str) -> str:
+    """``error_desc`` for a run the watchdog killed (hung, or past the cap)."""
+    return (
+        f"watchdog: {reason}. The run was stopped so its slot could be freed; check the "
+        "log for where it stalled, then re-run it or contact an admin."
+    )
+
+
 def tail(path: Path, n: int = 200) -> str:
     """Return the last *n* lines of a log file, or ``""`` if unreadable/absent."""
     if not path.is_file():
@@ -394,17 +444,19 @@ def apply_cancel_requests(store, type_: str, instance_id: str, cancel_row) -> No
             _logger.exception("could not apply cancel request for %s", row.get("key"))
 
 
-def superseded_by_queued_row(row: dict | None, started_at: float | None, proc) -> bool:
-    """True when a finished in-memory job has been replaced by a newer queued row.
+def superseded_by_newer_row(row: dict | None, started_at: float | None, proc) -> bool:
+    """True when a finished in-memory job has been replaced by a newer run's row.
 
     A test run and a full run share one job key, and the registry keeps a
-    finished job so its page can keep showing the log. Enqueueing the next run
-    under that key writes a ``pending`` row with a later ``started_at``; syncing
-    the stale registry entry would then persist its terminal state over the
-    queued row and the worker would never see it. A process that is still alive
+    finished job so its page can keep showing the log. Any later run under that
+    key -- queued here, launched by another process, or already finished --
+    writes the row with a later ``started_at``; syncing the stale registry entry
+    would then persist its terminal state over it. With several processes
+    holding stale entries for one key, each rewrites the row on every pass and
+    it flips between their states indefinitely. A process that is still alive
     is never superseded -- ``start_run``'s overwrite/reuse paths own that case.
     """
-    if row is None or row.get("state") != "pending":
+    if row is None:
         return False
     if proc is not None and proc.poll() is None:
         return False
@@ -610,11 +662,18 @@ def terminate_pg(proc: subprocess.Popen) -> None:
 # a terminal state (guarded by ``_notified_job_keys``). The chat feature
 # registers a listener at startup to post a system message; kept here so the
 # pipelines stay decoupled from the web/chat layer (no import cycle).
+#
+# A job key names inst/date/target/run, so re-running the same run reuses it;
+# the dedup key therefore also carries the run's ``started_at``, otherwise every
+# re-run after the first would finish silently until the server restarts.
 # ---------------------------------------------------------------------------
 
 _logger = logging.getLogger(__name__)
 _JOB_FINISHED_HOOKS: list = []
-_notified_job_keys: set[str] = set()
+# Insertion-ordered so the oldest entries can be evicted; a finished run is
+# only ever re-fired by the next few sync passes, so a bounded window suffices.
+_notified_job_keys: dict[tuple[str, float | None], None] = {}
+_NOTIFIED_MAX = 5000
 _hook_lock = threading.Lock()
 
 
@@ -626,13 +685,18 @@ def register_job_finished_hook(fn) -> None:
 
 
 def fire_job_finished(job_key: str, **info) -> None:
-    """Invoke all registered hooks once per ``job_key``. Safe to call on every
-    sync pass: repeat calls for an already-notified key are ignored. Hook
-    exceptions are logged, never propagated into the job lifecycle."""
+    """Invoke all registered hooks once per run (``job_key`` + ``started_at``).
+    Safe to call on every sync pass: repeat calls for an already-notified run
+    are ignored. Hook exceptions are logged, never propagated into the job
+    lifecycle."""
+    started_at = info.get("started_at")
+    dedup = (job_key, float(started_at) if started_at is not None else None)
     with _hook_lock:
-        if job_key in _notified_job_keys:
+        if dedup in _notified_job_keys:
             return
-        _notified_job_keys.add(job_key)
+        _notified_job_keys[dedup] = None
+        while len(_notified_job_keys) > _NOTIFIED_MAX:
+            del _notified_job_keys[next(iter(_notified_job_keys))]
         hooks = list(_JOB_FINISHED_HOOKS)
     for fn in hooks:
         try:

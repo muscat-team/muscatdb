@@ -2,6 +2,7 @@
 # Nightly ingest + rebuild with a Slack alert on failure (issue #237).
 #
 #   deploy/nightly.sh run     catalogs -> scan-yesterday -> build-db
+#                             -> backup-control-plane (Postgres checkouts only)
 #   deploy/nightly.sh check   alert if the database was not rebuilt recently
 #
 # `run` keeps the old `a && b && c` semantics: the first failing step stops the
@@ -14,7 +15,8 @@
 # produces no failure to report. Run it some hours after `run`.
 #
 # Environment: UV_BIN (default `uv`), MAX_BUILD_AGE_HOURS (default 36),
-# SLACK_WEBHOOK_FILE (see deploy/notify-slack.sh).
+# SLACK_WEBHOOK_FILE (see deploy/notify-slack.sh), NIGHTLY_WEB_ENV_FILE
+# (default `<checkout>/.web-env`; absent means no control-plane backup).
 set -u
 
 MODE="${1:-run}"
@@ -54,6 +56,15 @@ case "$MODE" in
     leak="$(tail -c +"$((before + 1))" logs/build-db.log 2>/dev/null | grep -m1 "INTEGRITY-LEAK")"
     if [ -n "$leak" ]; then
       alert ":warning: muscat-db nightly on $(hostname): the database has unreferenced pages (integrity_check), so rows may be lost. The build went ahead; the last clean snapshot is kept. See notes/DEPLOYMENT.md, Database integrity failure. ${leak}"
+    fi
+    # Last, so a Postgres outage alerts without holding up the catalog rebuild.
+    # Only a checkout on the Postgres control plane has .web-env (written by
+    # `deploy/workers.py web-env`); it supplies MUSCAT_POSTGRES_DSN. Sourced in
+    # a subshell so its worker caps do not leak into anything after this.
+    web_env="${NIGHTLY_WEB_ENV_FILE:-$ROOT/.web-env}"
+    if [ -f "$web_env" ]; then
+      step backup-control-plane logs/pg-backup.log \
+        bash -c '. "$1" && exec "$2" run muscat-db backup-control-plane' _ "$web_env" "$UV"
     fi
     ;;
   check)

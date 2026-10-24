@@ -14,6 +14,7 @@ import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from typing import Annotated
 
 import socketio
 
@@ -54,7 +55,14 @@ import markdown
 import nh3
 from collections.abc import AsyncIterator, Callable
 
-from fastapi import Body, FastAPI, HTTPException, Request
+from fastapi import Body, FastAPI, HTTPException, Query, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exception_handlers import (
+    http_exception_handler as fastapi_http_exception_handler,
+    request_validation_exception_handler as fastapi_validation_exception_handler,
+)
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import (
     FileResponse,
@@ -87,6 +95,8 @@ from muscat_db.auth import (
     PROXY_SECRET_HEADER,
     authentication_required as _authentication_required,
     resolve_forwarded_identity,
+    unauthenticated_message,
+    unprovisioned_message,
     request_user as _request_user,
     settings_auth_error as _settings_auth_error,
     is_same_origin as _is_same_origin,
@@ -103,12 +113,13 @@ from muscat_db import fov as fov_opt
 from muscat_db import ephemeris_math
 from muscat_db import ephemeris_import
 from muscat_db import gsheet_ephemeris
-from muscat_db import test_observations
+from muscat_db import test_analysis, test_observations
 from muscat_db import lco_monitor
 from muscat_db import http_client
 from muscat_db import chat
 from muscat_db.catalog import (
     _adql_literal,
+    _angular_sep_arcsec,
     _ads_token_for_request,
     _catalog_source_cache_key,
     _db_mtime,
@@ -136,6 +147,7 @@ from muscat_db.catalog import (
     _query_target_planets_toi,
     _resolve_all_aliases,
     _resolve_archive_coords,
+    resolve_target_astrometry,
     resolve_lco_key_project_name,
     _target_tic_id,
     _toi_db_membership,
@@ -200,7 +212,8 @@ from muscat_db.database import (
     get_targets_for_tag as _get_targets_for_tag,
     get_tags_for_targets,
 )
-from muscat_db.job_store import get_job_store, notify_enabled, set_owner, wait_for_work_or_sleep
+from muscat_db.job_store import get_job_store, notify_enabled, set_owner, uses_shared_control_plane, wait_for_work_or_sleep
+from muscat_db.target_refresh import FinishedJobWatcher, refresh_worker_finished_targets
 from muscat_db.cache import LRUCache
 from muscat_db.instruments import INSTRUMENTS
 
@@ -235,12 +248,19 @@ STATIC_DIR = HERE / "static"
 MUSCAT2_HTML_DIR = pathlib.Path(os.environ.get("MUSCAT2_HTML_DIR", "/ut2/muscat/html"))
 
 
+_FINISHED_JOB_WATCHER = FinishedJobWatcher()
+
+
 def _reconcile_all_jobs() -> None:
     """Advance every in-process pipeline from one server-owned cadence."""
     phot.sync_jobs()
     fit.sync_jobs()
     ttv.sync_jobs()
     _lco_archive_download_rows()
+    # Workers on a shared control plane leave target status to this process
+    # (#298); on SQLite they refresh it themselves.
+    if uses_shared_control_plane():
+        refresh_worker_finished_targets(_FINISHED_JOB_WATCHER, get_job_store())
 
 
 async def _job_reconciliation_loop() -> None:
@@ -366,6 +386,8 @@ photometry_router = APIRouter(prefix="/api/photometry", tags=["photometry"])
 transit_fit_router = APIRouter(prefix="/api/transit-fit", tags=["transit-fit"])
 ttv_fit_router = APIRouter(prefix="/api/ttv-fit", tags=["ttv-fit"])
 exposure_router = APIRouter(prefix="/api/exposure", tags=["exposure"])
+# Upper bound accepted for the exposure calculator's seeing input (arcsec).
+_MAX_SEEING_ARCSEC = 10.0
 jobs_router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 target_router = APIRouter(prefix="/api/targets", tags=["targets"])
 tags_router = APIRouter(prefix="/api/tags", tags=["tags"])
@@ -450,6 +472,43 @@ def _sse_response(generator: AsyncIterator[bytes]) -> StreamingResponse:
         },
     )
 
+# API errors in the shape the pages read. FastAPI answers an HTTPException with
+# ``{"detail": ...}`` and a malformed body with a list of pydantic errors, but
+# the templates read ``res.error``, so a refusal raised that way showed only a
+# generic fallback ("Error: failed to start"). ``detail`` stays for any client
+# that reads it; HTML pages keep FastAPI's default handling.
+def _is_api_request(request: Request) -> bool:
+    return request.url.path.startswith("/api/")
+
+
+@app.exception_handler(StarletteHTTPException)
+async def _api_http_exception_handler(request: Request, exc: StarletteHTTPException):
+    if not _is_api_request(request) or not isinstance(exc.detail, str):
+        return await fastapi_http_exception_handler(request, exc)
+    return JSONResponse(
+        {"ok": False, "error": exc.detail, "detail": exc.detail},
+        status_code=exc.status_code, headers=getattr(exc, "headers", None),
+    )
+
+
+def _describe_validation_errors(errors: list) -> str:
+    parts = []
+    for err in errors:
+        loc = [str(p) for p in err.get("loc", ()) if p not in ("body", "query", "path")]
+        parts.append(f"{'.'.join(loc) or 'request'}: {err.get('msg', 'invalid value')}")
+    return "invalid request (" + "; ".join(parts) + ")" if parts else "invalid request"
+
+
+@app.exception_handler(RequestValidationError)
+async def _api_validation_exception_handler(request: Request, exc: RequestValidationError):
+    if not _is_api_request(request):
+        return await fastapi_validation_exception_handler(request, exc)
+    errors = jsonable_encoder(exc.errors())
+    return JSONResponse(
+        {"ok": False, "error": _describe_validation_errors(errors), "detail": errors}, status_code=422,
+    )
+
+
 # Middleware: extract the authenticated user from the nginx reverse proxy.
 # The trust rule (only honor X-Forwarded-User from a loopback proxy peer) lives
 # in muscat_db.auth so the companion-app gateway applies it identically.
@@ -490,11 +549,11 @@ async def _nginx_auth_middleware(request: Request, call_next):
             # than fall through as anonymous, and never auto-provision (#50).
             logger.warning("rejecting unmapped Access identity %r", forwarded)
             return JSONResponse(
-                {"ok": False, "error": "account not provisioned"}, status_code=403
+                {"ok": False, "error": unprovisioned_message(forwarded)}, status_code=403
             )
         if _authentication_required() and protected and not user:
             return JSONResponse(
-                {"ok": False, "error": "authentication required"},
+                {"ok": False, "error": unauthenticated_message(forwarded)},
                 status_code=401,
             )
         if (
@@ -763,11 +822,20 @@ def _viewer_may_modify_run(level: str, inst: str, date: str, target: str, run_id
     return run_ownership.may_modify_run(_db_path(), user, _jobs_user_is_admin(user), owner)
 
 
-def _require_may_modify_run(level: str, inst: str, date: str, target: str, run_id: str = "") -> None:
+def _require_may_modify_run(
+    level: str, inst: str, date: str, target: str, run_id: str = "",
+    *, action: str = "change", offer_new_run: bool = False,
+) -> None:
     """403 a delete or cancel of a run the viewer neither owns nor shares a
-    group with the owner of. Call after the run is known to be visible."""
+    group with the owner of. Call after the run is known to be visible. The
+    message says who the viewer was taken to be and whose run it is; see
+    :func:`muscat_db.run_ownership.refusal_message`."""
     if not _viewer_may_modify_run(level, inst, date, target, run_id):
-        raise HTTPException(403, "only the run's owner, an admin, or someone in the owner's group may change it")
+        user = _CURRENT_USER.get()
+        raise HTTPException(403, run_ownership.refusal_message(
+            user, run_ownership.viewer_groups(_db_path(), user),
+            run_ownership.run_owner(level, inst, date, target, run_id), action, offer_new_run,
+        ))
 
 
 def _run_id_taken(level: str, inst: str, date: str, target: str, run_id: str = "") -> bool:
@@ -790,7 +858,7 @@ def _require_may_replace_run(level: str, inst: str, date: str, target: str, run_
     change (issue #272). A run id nobody has used yet stays open to everyone who
     can see the night, so starting a new run needs no ownership."""
     if _run_id_taken(level, inst, date, target, run_id):
-        _require_may_modify_run(level, inst, date, target, run_id)
+        _require_may_modify_run(level, inst, date, target, run_id, action="overwrite", offer_new_run=True)
 
 
 def _replace_guard(level: str, inst: str, date: str, target: str) -> Callable[[str], None]:
@@ -1390,6 +1458,54 @@ def api_target_lamost_rv(name: str = ""):
 # ESO Science Archive TAP constants
 _ESO_TOKEN_URL = "https://www.eso.org/sso/oidc/token"
 _ESO_TAP_URL = "https://archive.eso.org/tap_obs/sync"
+_ESO_CONE_RADIUS_DEG = 1.0 / 60.0
+# nginx's default proxy_read_timeout is 60 s; past it the browser gets an HTML
+# 504 instead of our JSON. Bound the entire lookup, including alias/coordinate
+# resolution: HTTPX's per-operation timeouts are not wall-clock deadlines.
+_ESO_TOTAL_TIMEOUT_S = 55.0
+_ESO_TOKEN_TIMEOUT_S = 8.0
+_ESO_NAME_TIMEOUT_S = 20.0
+_ESO_CONE_TIMEOUT_S = 12.0
+
+
+def _eso_cone_box_where(ra_deg: float, dec_deg: float, radius_deg: float) -> str:
+    """ADQL WHERE clause for an s_ra/s_dec bounding box enclosing a cone.
+
+    ESO's ObsCore answers s_ra/s_dec range filters from an index in ~1 s, while
+    CONTAINS(POINT('ICRS', s_ra, s_dec), CIRCLE(...)) is not index-backed and
+    routinely exceeds 120 s. The box over-selects its corners, so callers trim
+    rows to the true circle afterwards.
+    """
+    dec_lo = max(dec_deg - radius_deg, -90.0)
+    dec_hi = min(dec_deg + radius_deg, 90.0)
+    dec_clause = f"s_dec BETWEEN {dec_lo:.6f} AND {dec_hi:.6f}"
+    # RA half-width grows as 1/cos(dec); use the box edge nearest the pole.
+    cos_edge = math.cos(math.radians(max(abs(dec_lo), abs(dec_hi))))
+    if cos_edge <= 0.0 or radius_deg / cos_edge >= 180.0:
+        return dec_clause
+    half_width = radius_deg / cos_edge
+    ra_lo, ra_hi = ra_deg - half_width, ra_deg + half_width
+    if ra_lo < 0.0:
+        ra_clause = f"(s_ra >= {ra_lo + 360.0:.6f} OR s_ra <= {ra_hi:.6f})"
+    elif ra_hi >= 360.0:
+        ra_clause = f"(s_ra >= {ra_lo:.6f} OR s_ra <= {ra_hi - 360.0:.6f})"
+    else:
+        ra_clause = f"s_ra BETWEEN {ra_lo:.6f} AND {ra_hi:.6f}"
+    return f"{ra_clause} AND {dec_clause}"
+
+
+def _rows_within_radius(rows: list[dict], ra_deg: float, dec_deg: float, radius_deg: float) -> list[dict]:
+    """Keep TAP rows whose s_ra/s_dec lie within radius_deg of (ra_deg, dec_deg)."""
+    limit_arcsec = radius_deg * 3600.0
+    kept = []
+    for row in rows:
+        try:
+            sep = _angular_sep_arcsec(ra_deg, dec_deg, float(row["s_ra"]), float(row["s_dec"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if sep <= limit_arcsec:
+            kept.append(row)
+    return kept
 
 # LAMOST DR11 TAP constants
 _LAMOST_TAP_URL = "https://www.lamost.org/dr11/v2.0/voservice/tap"
@@ -1398,6 +1514,18 @@ _LAMOST_ARCHIVE_TABLE = "public.med_combined"
 
 @target_router.get("/eso-archive", response_class=JSONResponse)
 async def api_target_eso_archive(name: str = "", request: Request = None):
+    """Return ESO archive results or a JSON timeout before nginx's deadline."""
+    try:
+        async with asyncio.timeout(_ESO_TOTAL_TIMEOUT_S):
+            return await _query_eso_archive(name, request)
+    except TimeoutError:
+        return JSONResponse(
+            {"ok": False, "error": "ESO archive lookup timed out; please try again later."},
+            status_code=504,
+        )
+
+
+async def _query_eso_archive(name: str, request: Request | None):
     """Query ESO Science Archive TAP for observations of the given target.
 
     Strategy:
@@ -1412,12 +1540,12 @@ async def api_target_eso_archive(name: str = "", request: Request = None):
         return JSONResponse({"ok": False, "error": "Target name is required"}, status_code=400)
 
     # Resolve credentials: per-user > global env fallback > anonymous
-    user = _request_user(request) if request else None
+    user = await asyncio.to_thread(_request_user, request) if request else None
     eso_username: str | None = None
     eso_password: str | None = None
     if user:
         try:
-            eso_username, eso_password = get_user_eso_credentials(user)
+            eso_username, eso_password = await asyncio.to_thread(get_user_eso_credentials, user)
         except UserSettingsError:
             pass
     if not (eso_username and eso_password):
@@ -1438,7 +1566,7 @@ async def api_target_eso_archive(name: str = "", request: Request = None):
                     "username": eso_username,
                     "password": eso_password,
                 },
-                timeout=15.0,
+                timeout=_ESO_TOKEN_TIMEOUT_S,
             )
             if tok_resp.status_code == 200:
                 tok_data = tok_resp.json()
@@ -1508,7 +1636,7 @@ async def api_target_eso_archive(name: str = "", request: Request = None):
     rows: list = []
     query_method = "name"
     try:
-        name_data = await _tap_query(adql_name, timeout=30.0)
+        name_data = await _tap_query(adql_name, timeout=_ESO_NAME_TIMEOUT_S)
         columns, rows = _parse_tap(name_data)
     except httpx.HTTPStatusError as exc:
         eso_msg = ""
@@ -1531,10 +1659,10 @@ async def api_target_eso_archive(name: str = "", request: Request = None):
         )
 
     # --- Step 2: coordinate cone-search, only when the name query found nothing ---
-    # Lazy on purpose: the spatial CONTAINS() query is far more expensive on ESO's
-    # side than the name query, so we do not issue it on every page load (AGENTS.md:
-    # do not overload external databases). Retry once on timeout with a generous
-    # timeout, and surface a warning instead of silently implying "no observations".
+    # Keep the fallback lazy to avoid unnecessary ESO queries. The indexed box
+    # narrows the spatial work; DISTANCE filters corners before TOP 200, so
+    # newer off-circle rows cannot hide older observations inside the cone.
+    # Retry once on an HTTP timeout, within the whole-lookup deadline.
     cone_warning = ""
     if not rows:
         try:
@@ -1544,18 +1672,19 @@ async def api_target_eso_archive(name: str = "", request: Request = None):
             resolved = None
         if resolved:
             ra_deg, dec_deg, coord_source = resolved
-            radius_deg = 1.0 / 60.0  # 1 arcmin
+            radius_deg = _ESO_CONE_RADIUS_DEG
             adql_cone = (
                 _SELECT
-                + "WHERE CONTAINS("
-                + "POINT('ICRS', s_ra, s_dec), "
-                + f"CIRCLE('ICRS', {ra_deg}, {dec_deg}, {radius_deg})"
-                + ") = 1 ORDER BY t_min DESC"
+                + f"WHERE {_eso_cone_box_where(ra_deg, dec_deg, radius_deg)} "
+                + "AND DISTANCE(POINT('ICRS', s_ra, s_dec), "
+                + f"POINT('ICRS', {ra_deg}, {dec_deg})) <= {radius_deg} "
+                + "ORDER BY t_min DESC"
             )
             for attempt in range(2):
                 try:
-                    cone_data = await _tap_query(adql_cone, timeout=120.0)
-                    columns, rows = _parse_tap(cone_data)
+                    cone_data = await _tap_query(adql_cone, timeout=_ESO_CONE_TIMEOUT_S)
+                    columns, box_rows = _parse_tap(cone_data)
+                    rows = _rows_within_radius(box_rows, ra_deg, dec_deg, radius_deg)
                     if rows:
                         query_method = f"cone ({coord_source}, 1 arcmin)"
                     cone_warning = ""
@@ -1692,12 +1821,13 @@ async def api_target_lamost_archive(name: str = "", request: Request = None):
 @app.get("/obs", response_class=HTMLResponse)
 def logs_page(min_frames: int = 1000):
     db = _db_path()
-    with_data = {row["name"] for row in _get_instruments(db)}
+    denied = _viewer_denied()
+    with_data = {row["name"] for row in _get_instruments(db, denied=denied)}
     instruments = [
         {"name": name, "has_data": name in with_data}
         for name in INSTRUMENTS
     ]
-    summaries = _get_instruments_summary(db, min_frames=min_frames)
+    summaries = _get_instruments_summary(db, min_frames=min_frames, denied=denied)
     return _render(
         "logs.html",
         instruments=instruments,
@@ -3463,7 +3593,7 @@ def transit_fit_cancel(payload: dict = Body(...)):
     target = (payload.get("target") or "").strip()
     run_id = (payload.get("run_id") or payload.get("run") or "").strip()
     _require_visible_run("transit_fit", inst, date, target, run_id)
-    _require_may_modify_run("transit_fit", inst, date, target, run_id)
+    _require_may_modify_run("transit_fit", inst, date, target, run_id, action="cancel")
     result = fit.cancel_fit(inst, date, target, run_id=run_id)
     if not result.get("ok"):
         return JSONResponse(result, status_code=400)
@@ -3483,7 +3613,7 @@ def transit_fit_delete(payload: dict = Body(...)):
     if not (target or "").strip():
         return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
     _require_visible_run("transit_fit", inst, date, target, run_id)
-    _require_may_modify_run("transit_fit", inst, date, target, run_id)
+    _require_may_modify_run("transit_fit", inst, date, target, run_id, action="delete")
     result = fit.delete_fit(inst, date, target, run_id=run_id)
     return JSONResponse(result, status_code=500 if result.get("delete_failed") else 200)
 
@@ -3714,6 +3844,7 @@ def exposure_page(inst: str = "", target: str = ""):
         sel_target=target,
         calibrations=calibrations,
         inst_params=exp_calc.INSTRUMENT_PARAMS,
+        model_summary={name: exp_calc.model_summary(name) for name in INSTRUMENTS},
     )
 
 
@@ -3742,6 +3873,18 @@ def exposure_calculate(payload: dict = Body(...)):
 
     if not mags:
         return JSONResponse({"ok": False, "error": "No magnitudes provided"}, status_code=400)
+    seeing = payload.get("seeing")
+    if seeing not in (None, ""):
+        try:
+            seeing = float(seeing)
+        except (TypeError, ValueError):
+            seeing = math.nan
+        if not (0 < seeing <= _MAX_SEEING_ARCSEC):
+            return JSONResponse(
+                {"ok": False, "error": f"Seeing must be between 0 and {_MAX_SEEING_ARCSEC:g} arcsec"}, status_code=400
+            )
+    else:
+        seeing = None
 
     extra_sources = None
     raw_extra_sources = payload.get("extra_sources")
@@ -3760,18 +3903,22 @@ def exposure_calculate(payload: dict = Body(...)):
             label = entry.get("label")
             extra_sources.append({"label": str(label) if label else None, "mags": cleaned_mags})
 
-    result = exp_calc.calc_all_bands(
-        instrument=inst,
-        mags=mags,
-        focus_mm=focus_mm,
-        airmass=airmass,
-        sat_frac=sat_frac,
-        mode=mode,
-        exptime=exptime,
-        target_adu=target_adu,
-        confmode=confmode,
-        extra_sources=extra_sources,
-    )
+    try:
+        result = exp_calc.calc_all_bands(
+            instrument=inst,
+            mags=mags,
+            focus_mm=focus_mm,
+            airmass=airmass,
+            sat_frac=sat_frac,
+            mode=mode,
+            exptime=exptime,
+            target_adu=target_adu,
+            confmode=confmode,
+            extra_sources=extra_sources,
+            seeing=seeing,
+        )
+    except exp_calc.UncalibratedBandError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
     return JSONResponse({"ok": True, **result})
 
 
@@ -3911,9 +4058,11 @@ def exposure_status():
 
 
 @exposure_router.get("/coeffs/{instrument}", response_class=JSONResponse)
-def exposure_coeffs(instrument: str):
+def exposure_coeffs(instrument: str, confmode: str | None = None):
     if instrument not in INSTRUMENTS:
         return JSONResponse({"ok": False, "error": "Invalid instrument"}, status_code=400)
+    if instrument in exp_calc.exposure_model.MODEL_INSTRUMENTS:
+        return JSONResponse({"ok": True, "instrument": instrument, "coeffs": exp_calc.model_coeff_rows(instrument, confmode)})
     coeffs = exp_calc.load_coeffs(instrument)
     # Convert to serializable format
     rows = []
@@ -5178,16 +5327,52 @@ def _submitted_request_ids(result: dict) -> list[int]:
     return ids
 
 
+def _test_saturation_model(kind: str, ra, dec, focus_mm: float, filter_name: str | None) -> tuple[dict, list[str]]:
+    """Predicted target peak rate and full well per plan band, for the plan's saturation pre-check.
+
+    One Pan-STARRS/SkyMapper lookup per plan. Without magnitudes the pre-check
+    is skipped and the plan says so, rather than guessing.
+    """
+    from muscat_db import exposure
+
+    try:
+        mags, _source, _approx = exposure.lookup_magnitudes_with_fallback(float(ra), float(dec))
+    except Exception as exc:  # noqa: BLE001 - reported in the plan
+        logger.warning("target magnitude lookup failed during test plan: %s", exc)
+        mags = None
+    if not mags:
+        return {}, ["no catalog griz magnitudes for the target; saturation pre-check skipped"]
+    if kind in test_observations.SINGLE_FILTER_KINDS:
+        bands = {filter_name or "rp": test_analysis._calculator_band(kind, filter_name or "rp")}
+    else:
+        bands = dict(test_analysis.MUSCAT_BAND_CODES)
+    model, missing = {}, []
+    for key, code in bands.items():
+        if not code or code not in mags:
+            missing.append(key)
+            continue
+        peak = exposure.calc_peak(kind, code, float(mags[code]), focus_mm, 1.0)
+        model[key] = {"rate": float(peak["peak_electrons"]), "level": exposure._full_well_gain(kind, code)[0]}
+    warnings = [f"no magnitude for band(s) {', '.join(missing)}; saturation pre-check skipped there"] if missing else []
+    return model, warnings
+
+
 @lco_router.post("/test-observations/plan", response_class=JSONResponse)
-def api_lco_test_plan(payload: dict = Body(...)):
-    """Generate and persist a deterministic, observer-reviewable test plan."""
+def api_lco_test_plan(request: Request, payload: dict = Body(...)):
+    """Generate and persist a deterministic, observer-reviewable test plan.
+
+    Two FOVs are tested, both at PA 0: the optimizer's pointing and the
+    target-centred one. The test window never overlaps the selected science
+    windows (``test_window_mode``: ``today`` or ``lead``).
+    """
     try:
         if not payload.get("fov_candidates"):
             try:
+                # pa_step_deg=180 restricts the search to PA 0: rotation is not allowed.
                 result = fov_opt.optimize(
                     payload.get("kind"), target=payload.get("target_name") or "",
                     ra=payload.get("ra"), dec=payload.get("dec"),
-                    sinistro_mode=payload.get("readout_mode"),
+                    sinistro_mode=payload.get("readout_mode"), pa_step_deg=180.0,
                 )
             except Exception as exc:
                 # Surface as JSON; an unhandled error would reach the browser as an HTML 500.
@@ -5197,46 +5382,86 @@ def api_lco_test_plan(payload: dict = Body(...)):
                 raise test_observations.TestObservationError(result.error or "FOV optimization failed")
             best = result.to_dict()
             payload["fov_candidates"] = [
-                {"center_ra": best["center_ra"], "center_dec": best["center_dec"], "pa_deg": best["pa_deg"],
-                 "comparisons": best.get("comps", []), "edge_margin_arcsec": best.get("margin_arcsec")},
+                {"center_ra": best["center_ra"], "center_dec": best["center_dec"], "pa_deg": 0,
+                 "comparisons": best.get("comps", []), "edge_margin_arcsec": best.get("margin_arcsec"),
+                 "label": "optimized"},
                 {"center_ra": best["ra"], "center_dec": best["dec"], "pa_deg": 0,
                  "comparisons": best.get("brightest_in_field", []), "edge_margin_arcsec": best.get("margin_arcsec"),
-                 "fallback_reason": "target-centered conservative pointing"},
+                 "label": "target-centred"},
             ]
             payload.setdefault("provenance", {})["fov_optimizer"] = {
                 "catalog": best.get("catalog"), "fov_arcsec": best.get("fov_arcsec"),
                 "margin_arcsec": best.get("margin_arcsec"), "software": test_observations.ANALYSIS_VERSION,
             }
+        payload["science_windows"] = payload.get("windows") or []
+        if "saturation_model" not in payload:
+            model, warnings = _test_saturation_model(
+                str(payload.get("kind") or ""), payload.get("ra"), payload.get("dec"),
+                float(payload.get("defocus_mm") or 0.0), payload.get("filter"),
+            )
+            payload["saturation_model"] = model
+            payload["plan_warnings"] = [*(payload.get("plan_warnings") or []), *warnings]
         plan = test_observations.generate_plan(payload)
-        record = test_observations.create_record(plan)
+        record = test_observations.create_record(plan, created_by=_request_user(request) or "")
         return JSONResponse({"ok": True, "record": record})
     except test_observations.TestObservationError as exc:
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
 
 
-def _test_request(record: dict, params: dict, plan_override: dict | None = None) -> dict:
-    # The editable draft may carry small tweaks to the displayed plan; overlay
-    # them on the stored plan (which still holds the guarded internal keys).
-    plan = record["plan"] if not plan_override else {**record["plan"], **plan_override}
+def _test_hidden(record: dict, denied: frozenset[str] | None = None) -> bool:
+    """Whether a test observation is on a target the viewer may not see (#144).
+    The record carries no proposal, so its target decides, as on /target."""
+    denied = _viewer_denied() if denied is None else denied
+    return _object_hidden(_db_path(), str(record.get("target") or ""), denied)
+
+
+def _visible_test_record(observation_id: str) -> dict:
+    """The record, or KeyError when it does not exist or the viewer may not see
+    it, so a hidden test answers exactly like a missing one."""
+    record = test_observations.get_record(observation_id)
+    if _test_hidden(record):
+        raise KeyError(observation_id)
+    return record
+
+
+def _may_modify_test(record: dict, user: str | None) -> bool:
+    """The creator or an admin, with the Jobs page's convention that a record
+    without an owner belongs to the ``anonymous`` (local) user."""
+    if _jobs_user_is_admin(user):
+        return True
+    owner = (record.get("created_by") or "anonymous").strip() or "anonymous"
+    return owner == ((user or "anonymous").strip() or "anonymous")
+
+
+def _test_request(record: dict, params: dict, plan_override: dict | None = None) -> tuple[dict, dict]:
+    """(request group, merged plan). The editable draft may carry small tweaks
+    to the displayed plan; overlay them on the stored plan (which still holds
+    the guarded internal keys)."""
+    plan = test_observations.merge_plan_override(record["plan"], plan_override)
     base = {**params, "kind": plan["kind"]}
     base["name"] = str(base.get("name") or f"TEST {plan.get('target') or record['id']}")
     if not base["name"].upper().startswith("TEST"):
         base["name"] = "TEST " + base["name"]
+    # The test runs only in its own window, never in the science windows the
+    # form still carries.
+    base["windows"] = [test_observations.request_window(plan)]
     configs = test_observations.request_configurations(plan, base)
-    return lco.build_requestgroup(plan["kind"], base, configurations=configs)
+    return lco.build_requestgroup(plan["kind"], base, configurations=configs), plan
 
 
 @lco_router.post("/test-observations/{observation_id}/ipp", response_class=JSONResponse)
 def api_lco_test_ipp(observation_id: str, request: Request, payload: dict = Body(...)):
     try:
-        record = test_observations.get_record(observation_id)
-        rg = _test_request(record, payload, payload.get("plan_override"))
+        record = _visible_test_record(observation_id)
+        rg, _plan = _test_request(record, payload, payload.get("plan_override"))
         ipp = lco.max_allowable_ipp(rg, _request_user(request))
         digest = lco.payload_hash(rg)
         record = test_observations.update_record(observation_id, state="validated", payload_hash=digest)
         return JSONResponse({"ok": True, "payload": rg, "payload_hash": digest, "ipp": ipp, "record": record})
     except KeyError:
         return JSONResponse({"ok": False, "error": "test observation not found"}, status_code=404)
+    except test_observations.TestObservationError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
     except lco.LcoError as exc:
         return _lco_error_response(exc)
 
@@ -5246,29 +5471,59 @@ def api_lco_test_submit(observation_id: str, request: Request, payload: dict = B
     if not payload.get("confirm"):
         return JSONResponse({"ok": False, "error": "submission requires explicit confirm"}, status_code=400)
     try:
-        record = test_observations.get_record(observation_id)
-        rg = _test_request(record, payload, payload.get("plan_override"))
+        record = _visible_test_record(observation_id)
+        rg, plan = _test_request(record, payload, payload.get("plan_override"))
         digest = lco.payload_hash(rg)
         if not payload.get("dry_run_hash") or payload["dry_run_hash"] != digest or record["payload_hash"] != digest:
             return JSONResponse({"ok": False, "error": "no matching test-observation dry-run; run the dry-run again"}, status_code=409)
         result = lco.submit_requestgroup(rg, _request_user(request))
         ids = _submitted_request_ids(result)
-        record = test_observations.update_record(observation_id, state="submitted", request_ids=ids)
+        # Store the plan as submitted: the analysis matches frames against its
+        # exposure times, so draft edits must not be lost here.
+        record = test_observations.update_record(observation_id, state="submitted", request_ids=ids, plan=plan)
         params = {**payload, "kind": record["plan"]["kind"], "target_name": record["plan"].get("target") or ""}
         monitoring = _record_lco_submission(result, rg, params, _request_user(request))
         return JSONResponse({"ok": True, "result": result, "record": record, "monitoring": monitoring})
     except KeyError:
         return JSONResponse({"ok": False, "error": "test observation not found"}, status_code=404)
+    except test_observations.TestObservationError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
     except lco.LcoError as exc:
         return _lco_error_response(exc)
+
+
+@lco_router.get("/test-observations", response_class=JSONResponse)
+def api_lco_test_list(target: str | None = None, limit: int = 20):
+    """Recent test observations, newest first, optionally for one target.
+    Tests on targets the viewer may not see are left out."""
+    records = test_observations.list_records(target=target or None, limit=limit, denied=_viewer_denied())
+    return JSONResponse({"ok": True, "records": records})
 
 
 @lco_router.get("/test-observations/{observation_id}", response_class=JSONResponse)
 def api_lco_test_status(observation_id: str):
     try:
-        return JSONResponse({"ok": True, "record": test_observations.get_record(observation_id)})
+        return JSONResponse({"ok": True, "record": _visible_test_record(observation_id)})
     except KeyError:
         return JSONResponse({"ok": False, "error": "test observation not found"}, status_code=404)
+
+
+@lco_router.post("/test-observations/{observation_id}/analyze", response_class=JSONResponse)
+def api_lco_test_analyze(observation_id: str, request: Request):
+    """Re-run the analysis of a finished test on its ingested frames.
+
+    It overwrites the stored result, so only the test's creator or an admin
+    may run it.
+    """
+    try:
+        record = _visible_test_record(observation_id)
+        if not _may_modify_test(record, _request_user(request)):
+            return JSONResponse({"ok": False, "error": "only the test's creator or an admin may re-analyze it"}, status_code=403)
+        return JSONResponse({"ok": True, "record": test_observations.reanalyze(observation_id)})
+    except KeyError:
+        return JSONResponse({"ok": False, "error": "test observation not found"}, status_code=404)
+    except test_observations.TestObservationError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
 
 
 @lco_router.post("/submit", response_class=JSONResponse)
@@ -6226,15 +6481,14 @@ def _target_coordinates(target: str) -> dict | None:
     SIMBAD.
 
     The ephemeris catalogs (NASA/TOI) are consulted first via
-    ``_resolve_archive_coords``; when the target is in neither, it falls back to
-    SIMBAD name resolution (both cached), so a catalog-less target still gets
+    ``resolve_target_astrometry``; when the target is in neither, it falls back
+    to SIMBAD name resolution (both cached), so a catalog-less target still gets
     coordinates instead of an empty RA/Dec field. Returns ``{"ra", "dec",
-    "source"}`` (source one of nasa/toi/simbad) or None when unresolved."""
-    resolved = _resolve_archive_coords(target)
-    if resolved is None:
-        return None
-    ra, dec, source = resolved
-    return {"ra": ra, "dec": dec, "source": source}
+    "source", "epoch", "pmra", "pmdec"}`` (source one of nasa/toi/simbad;
+    epoch a Julian year; proper motion mas/yr, None when unknown) or None when
+    unresolved. The epoch matters: the catalogs are Gaia DR2 at 2015.5, so a
+    high proper-motion star is arcseconds away from its catalog position."""
+    return resolve_target_astrometry(target)
 
 
 @ephemeris_router.get("/target-info", response_class=JSONResponse)
@@ -6970,17 +7224,13 @@ def jobs_page():
     return _render("jobs.html", jobs=all_jobs, counts=counts, is_admin=is_admin)
 
 
-_last_running: set[str] = set()
-
 @jobs_router.get("/status", response_class=JSONResponse)
-def jobs_status(active_only: bool = False):
+def jobs_status(active_only: bool = False, watch: Annotated[list[str] | None, Query()] = None):
     if active_only:
         # Lightweight path for the site-wide loading indicator. Reports only
         # indexed durable rows plus live archive jobs. It deliberately does not
-        # reconcile pipelines, load terminal history, or touch `_last_running`
-        # baseline — that diff belongs to the full Jobs-page poll, and letting
-        # a second site-wide poller mutate it would steal `finished`
-        # transitions from the Jobs page.
+        # reconcile pipelines or load terminal history. Completion updates
+        # belong to the full Jobs-page poll.
         rows = [
             _adapt_persisted_lco_archive_row(persisted)
             if persisted.get("type") == "lco_archive_download"
@@ -7006,10 +7256,10 @@ def jobs_status(active_only: bool = False):
     if orphan_fits:
         all_jobs.extend(orphan_fits)
 
-    global _last_running
-    current_running = {j["key"] for j in all_jobs if j["state"] in ("running", "cancelling", "pending")}
-    # _last_running is shared by every viewer's poll, so it tracks all jobs;
-    # only what this viewer is shown is narrowed (issue #144).
+    # Each viewer supplies its live row keys. Repeated polls (and different
+    # server workers) can then return the same completion independently, without
+    # sending the entire terminal history on every poll. Visibility still wins.
+    watched_keys = set(watch or [])
     all_jobs = _visible_jobs(all_jobs)
     finished = {}
     for j in all_jobs:
@@ -7017,7 +7267,7 @@ def jobs_status(active_only: bool = False):
             j.get("type") == "lco_archive_download"
             and j.get("state") in {"done", "error", "cancelled"}
         )
-        if (j["key"] in _last_running and j["key"] not in current_running) or is_terminal_lco_archive:
+        if (j["key"] in watched_keys and j.get("state") in _JOB_TERMINAL_STATES) or is_terminal_lco_archive:
             finished[j["key"]] = {
                 "key": j["key"],
                 "type": j.get("type", ""),
@@ -7039,7 +7289,6 @@ def jobs_status(active_only: bool = False):
                 "obslog_url": j.get("obslog_url", ""),
                 "photometry_url": j.get("photometry_url", ""),
             }
-    _last_running = current_running
     running = [
         {
             "key": j["key"],
@@ -7070,6 +7319,12 @@ def jobs_status(active_only: bool = False):
         if s in counts:
             counts[s] += 1
     return {"running": running, "counts": counts, "finished": finished}
+
+
+@jobs_router.post("/status", response_class=JSONResponse)
+def jobs_watched_status(watch: Annotated[list[str], Body(embed=True)]):
+    """Poll a page's watched jobs without URL limits for large pending queues."""
+    return jobs_status(watch=watch)
 
 
 @jobs_router.get("/log/{type_}/{inst}/{date}/{target}")
@@ -7505,7 +7760,7 @@ def photometry_postprocess(payload: phot_api.PostprocessRequest):
         return phot_api.response(phot_api.PostprocessResponse, {"ok": False, "error": "a run is required"}, status_code=400)
     _require_visible_run("photometry", inst, date, target, run)
     if payload.get("apply", False):  # a dry run only reads the run
-        _require_may_modify_run("photometry", inst, date, target, run)
+        _require_may_modify_run("photometry", inst, date, target, run, action="post-process")
     result = postproc.postprocess(
         inst,
         date,
@@ -7541,7 +7796,7 @@ def photometry_postprocess_restore(payload: phot_api.RestoreRequest):
     if not run:
         return phot_api.response(phot_api.RestoreResponse, {"ok": False, "error": "a run is required"}, status_code=400)
     _require_visible_run("photometry", inst, date, target, run)
-    _require_may_modify_run("photometry", inst, date, target, run)
+    _require_may_modify_run("photometry", inst, date, target, run, action="restore")
     result = postproc.restore_clip(inst, date, target, run)
     if not result.get("ok"):
         return phot_api.response(phot_api.RestoreResponse, result, status_code=400)
@@ -7651,7 +7906,7 @@ def photometry_cancel(payload: phot_api.CancelRequest):
     target = (payload.get("target") or "").strip()
     run_id = (payload.get("run_id") or payload.get("run") or "").strip()
     _require_visible_run("photometry", inst, date, target, run_id)
-    _require_may_modify_run("photometry", inst, date, target, run_id)
+    _require_may_modify_run("photometry", inst, date, target, run_id, action="cancel")
     result = phot.cancel_run(inst, date, target, run_id=run_id)
     if not result.get("ok"):
         return phot_api.response(phot_api.ActionResponse, result, status_code=400)
@@ -7673,7 +7928,7 @@ def photometry_delete(payload: phot_api.CancelRequest):
         return phot_api.response(phot_api.ActionResponse, {"ok": False, "error": "target is required"}, status_code=400)
     run_id = (payload.get("run_id") or payload.get("run") or "").strip()
     _require_visible_run("photometry", inst, date, target, run_id)
-    _require_may_modify_run("photometry", inst, date, target, run_id)
+    _require_may_modify_run("photometry", inst, date, target, run_id, action="delete")
     result = phot.delete_reduction(inst, date, target, run_id=run_id)
     return phot_api.response(phot_api.ActionResponse, result)
 
@@ -8025,7 +8280,7 @@ def api_cancel_ttv_fit(payload: dict = Body(...)):
     if not target:
         return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
     _require_visible_ttv_run(target, run_name)
-    _require_may_modify_run("ttv_fit", "", "", target, run_name)
+    _require_may_modify_run("ttv_fit", "", "", target, run_name, action="cancel")
     res = ttv.cancel_ttv_fit(target, run_name)
     return JSONResponse(res)
 
@@ -8037,7 +8292,7 @@ def api_delete_ttv_fit(payload: dict = Body(...)):
     if not target:
         return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
     _require_visible_ttv_run(target, run_name)
-    _require_may_modify_run("ttv_fit", "", "", target, run_name)
+    _require_may_modify_run("ttv_fit", "", "", target, run_name, action="delete")
     res = ttv.delete_ttv_fit(target, run_name)
     return JSONResponse(res, status_code=500 if res.get("delete_failed") else 200)
 

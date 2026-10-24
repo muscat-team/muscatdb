@@ -461,11 +461,12 @@ def test_scale_coef_lowers_the_peak_for_a_smaller_telescope(exposure_db):
 
 
 def test_calibration_status_groups_by_band(exposure_db):
-    exposure.save_coeff("muscat3", "g", 0.0, coef=1.0, fwhm_pix=3.0, n_frames=10)
-    exposure.save_coeff("muscat3", "g", 2.0, coef=1.1, fwhm_pix=3.1, n_frames=5)
-    exposure.save_coeff("muscat3", "r", 0.0, coef=1.2, fwhm_pix=3.2, n_frames=7)
+    # muscat2 still uses the legacy per-focus coefficient table.
+    exposure.save_coeff("muscat2", "g", 0.0, coef=1.0, fwhm_pix=3.0, n_frames=10)
+    exposure.save_coeff("muscat2", "g", 2.0, coef=1.1, fwhm_pix=3.1, n_frames=5)
+    exposure.save_coeff("muscat2", "r", 0.0, coef=1.2, fwhm_pix=3.2, n_frames=7)
 
-    status = exposure.calibration_status("muscat3")
+    status = exposure.calibration_status("muscat2")
     assert status["n_bands"] == 2
     by_band = {b["band"]: b for b in status["bands"]}
     assert by_band["g"]["n_focus"] == 2
@@ -473,8 +474,8 @@ def test_calibration_status_groups_by_band(exposure_db):
     assert by_band["r"]["n_focus"] == 1
 
 
-def test_calibration_status_empty_for_uncalibrated_instrument(exposure_db):
-    assert exposure.calibration_status("sinistro") == {"n_bands": 0, "bands": []}
+def test_calibration_status_reports_defaults_for_uncalibrated_archive_instrument(exposure_db):
+    assert exposure.calibration_status("sinistro") == {"n_bands": 0, "bands": [], "model": "archive", "source": "default"}
 
 
 def test_calibration_job_raises_for_unknown_id(exposure_db):

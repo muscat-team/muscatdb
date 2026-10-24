@@ -177,4 +177,33 @@ def is_same_origin(request: Request) -> bool:
 
 def csrf_error() -> JSONResponse:
     """403 response for state-changing endpoints that fail the same-origin check."""
-    return JSONResponse({"ok": False, "error": "cross-origin request rejected"}, status_code=403)
+    return JSONResponse({"ok": False, "error": (
+        "The request was refused because it did not come from a MuSCAT-DB page "
+        "(cross-origin request). Reload the page and try again."
+    )}, status_code=403)
+
+
+def unauthenticated_message(forwarded_user: str | None) -> str:
+    """Why a request with no usable user was refused (401). No
+    ``X-Forwarded-User`` at all reads as not logged in; one that failed the
+    peer/secret check means a login did happen but reached the app some other
+    way than through the proxy. The identity outcome cannot tell these apart:
+    with a secret configured, a request with no header is UNTRUSTED as well."""
+    if forwarded_user:
+        return (
+            "Your login could not be verified: the request did not come through the "
+            "site's login proxy. Open MuSCAT-DB through its usual address and try again; "
+            "please contact an admin if this keeps happening."
+        )
+    return (
+        "You are not logged in. Open MuSCAT-DB through the address that asks you to "
+        "log in, not the server's port directly, and try again."
+    )
+
+
+def unprovisioned_message(identity_email: str) -> str:
+    """Why a validated identity with no ``users`` row was refused (403, #50)."""
+    return (
+        f"You signed in as {identity_email}, but no MuSCAT-DB account is linked to that "
+        "address. Please contact an admin to create one."
+    )

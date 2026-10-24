@@ -44,10 +44,11 @@ from pathlib import Path
 
 from muscat_db import jobs, database
 from muscat_db.job_store import current_instance_id, current_owner, get_job_store
-from muscat_db.job_limits import JobLimitExceeded, claim_caps, enqueue_caps, limit_refusal
+from muscat_db.job_limits import JobLimitExceeded, claim_caps, claim_caps_for_row, enqueue_caps, limit_refusal, params_with_running_cap
 from muscat_db.ref_time import is_valid_ref_time
 from muscat_db.instruments import INSTRUMENTS
 from muscat_db.cache import register_cache
+from muscat_db.engine_identity import is_pinned_version, require_selected_env
 from muscat_db.band_utils import DEFAULT_BANDS, NARROW_BANDS, _FILTER_BAND_ALIAS, bands_from_filters  # noqa: F401
 from muscat_db.catalog import _resolve_archive_coords, resolve_lco_key_project_name
 
@@ -265,9 +266,13 @@ def _job_env() -> dict[str, str]:
     if that fails we fall back to the inherited environment rather than block
     the launch. Also applies jobs.core_pinning_env()'s optional thread-count
     caps (architecture issue #51 "Core Pinning"), a no-op unless
-    MUSCAT_JOB_MAX_THREADS is configured.
+    MUSCAT_JOB_MAX_THREADS is configured. With the frozen production
+    configuration, it also points prose at the packaged telescope snapshot.
     """
     env = {**os.environ, "PYTHONUNBUFFERED": "1", **jobs.core_pinning_env()}
+    if _prose_frozen_config():
+        from muscat_db.prose_config import frozen_env
+        env.update(frozen_env())
     tmpdir = prose_tmpdir()
     try:
         Path(tmpdir).mkdir(parents=True, exist_ok=True)
@@ -277,6 +282,11 @@ def _job_env() -> dict[str, str]:
     except OSError as exc:
         logger.warning("could not prepare TMPDIR %s (%s); using inherited temp", tmpdir, exc)
     return env
+
+
+def _prose_frozen_config() -> bool:
+    """Production mode: pinned prose with the packaged telescope snapshot."""
+    return os.environ.get("MUSCAT_PROSE_FROZEN_CONFIG") == "1"
 
 
 def prose_python() -> str | None:
@@ -334,7 +344,9 @@ _PROSE_VERSION_RETRY_S = 300.0
 def prose_version() -> str:
     """Installed prose version in the prose conda env.
 
-    A success is cached for the life of the process. A failure is remembered
+    A success is cached for the life of the process, except for an editable
+    checkout: it can switch commits while the server runs, so it is looked up
+    again on every call. A failure is remembered
     only for ``_PROSE_VERSION_RETRY_S``: a missing env or one slow lookup must
     not label every later run ``unknown`` until the next restart, and must not
     make every launch in that window wait on the subprocess again.
@@ -349,9 +361,9 @@ def prose_version() -> str:
         if _PROSE_VERSION is not None:
             return _PROSE_VERSION
         found = None
+        from muscat_db.engine_identity import is_mutable_version, version_probe
         prose_py = _conda_env_python(prose_conda_env())
         if prose_py is not None:
-            from muscat_db.engine_identity import version_probe
             code = version_probe(_PROSE_DISTRIBUTIONS)
             try:
                 result = subprocess.run(
@@ -365,8 +377,47 @@ def prose_version() -> str:
         if found is None:
             _PROSE_VERSION_FAILED_AT = now
             return "unknown"
+        if is_mutable_version(found):
+            return found
         _PROSE_VERSION = found
     return _PROSE_VERSION
+
+
+def _lookup_frames_inputs(inst: str, date: str, target: str) -> tuple[list[dict] | None, str | None]:
+    """A run's frame inputs, read from the catalog (``product_record.frames_inputs``)."""
+    from muscat_db import product_record
+
+    db = database.db_path()
+    return product_record.frames_inputs(db, inst, date, target, product_record.target_normalizer(db))
+
+
+def frames_inputs_param(inst: str, date: str, target: str) -> dict | None:
+    """The frame inputs a queued row carries to whichever worker launches it.
+
+    Computed where the row is queued (the web process on ut2, which has the
+    catalog on local disk), so the worker never opens the catalog (#298).
+    ``None`` when the lookup fails; the worker then leaves the record for
+    ``backfill-products`` instead of guessing.
+    """
+    try:
+        inputs, note = _lookup_frames_inputs(inst, date, target)
+    except Exception:  # a provenance lookup must never fail a launch
+        logger.warning("could not look up frame inputs for %s/%s/%s", inst, date, target, exc_info=True)
+        return None
+    return {"inputs": inputs, "note": note}
+
+
+def _frames_from_params(params: dict) -> dict | None:
+    """The ``frames_inputs`` a queued row carries, or ``None`` if absent or malformed."""
+    frames = params.get("frames_inputs")
+    if not isinstance(frames, dict):
+        return None
+    inputs, note = frames.get("inputs"), frames.get("note")
+    if inputs is not None and not (isinstance(inputs, list) and all(isinstance(i, dict) for i in inputs)):
+        return None
+    if note is not None and not isinstance(note, str):
+        return None
+    return {"inputs": inputs, "note": note}
 
 
 def _write_run_product(
@@ -382,18 +433,34 @@ def _write_run_product(
     telescope: str,
     mode: str,
     run_name: str,
+    frames: dict | None = None,
 ) -> None:
-    """Record a photometry run's inputs, settings, versions and author (#208)."""
+    """Record a photometry run's inputs, settings, versions and author (#208).
+
+    *frames* is the ``{"inputs", "note"}`` pair a queued row carries (see
+    :func:`frames_inputs_param`). Without it the inputs are looked up in the
+    catalog, unless this process may not open it (a worker on a shared control
+    plane, #298): the record is then left unwritten, because ``muscat-db
+    backfill-products`` fills an absent record from the catalog but never
+    rewrites one that says its inputs are undetermined.
+    """
     from muscat_db import __version__
     from muscat_db import product_record
 
-    db = database.db_path()
-    inputs, note = product_record.frames_inputs(
-        db, inst, date, target, product_record.target_normalizer(db)
-    )
+    if frames is not None:
+        inputs, note = frames["inputs"], frames["note"]
+    elif database.catalog_allowed():
+        inputs, note = _lookup_frames_inputs(inst, date, target)
+    else:
+        logger.warning(
+            "photometry run %s/%s/%s was queued without its frame inputs and this "
+            "worker cannot read the catalog; leaving its product record for "
+            "`muscat-db backfill-products`", inst, date, target,
+        )
+        return
     tool_versions = {"muscat_db": __version__, "prose": prose_version()}
-    if os.environ.get("MUSCAT_PROSE_FROZEN_CONFIG") == "1":
-        from muscat_db._prose_launcher import snapshot_bytes, SNAPSHOT_SHA256
+    if _prose_frozen_config():
+        from muscat_db.prose_config import snapshot_bytes, SNAPSHOT_SHA256
         snapshot_bytes()
         tool_versions["prose_config_sha256"] = SNAPSHOT_SHA256
     record = product_record.build_record(
@@ -425,18 +492,19 @@ def _prose_prefix(module: str = _MODULE, console_script: str | None = "photometr
     ``console_script`` may be ``None`` for entrypoints with no console script
     (e.g. ``prose.scripts.postprocess_lightcurves``), forcing module
     invocation.
+
+    With the frozen production configuration, the selected env must hold a
+    pinned, non-editable prose; ``_job_env`` supplies the snapshot through
+    ``PROSE_CONFIG_FILE``.
     """
     explicit = prose_python()
-    if os.environ.get("MUSCAT_PROSE_FROZEN_CONFIG") == "1":
-        python = explicit or _conda_env_python(prose_conda_env())
-        if python is None:
-            raise RuntimeError("frozen prose configuration requires its pinned environment")
-        return [python, "-I", str(_HERE / "_prose_launcher.py"),
-                "--config", str(_HERE / "_prose_telescopes.yaml"), module]
+    if _prose_frozen_config():
+        return _frozen_prose_prefix(explicit, module)
     if explicit:
         return [explicit, "-m", module]
     env = prose_conda_env()
     conda_py = _conda_env_python(env)
+    require_selected_env("prose", conda_py)
     if conda_py:
         if console_script:
             script_path = Path(conda_py).parent / console_script
@@ -449,6 +517,35 @@ def _prose_prefix(module: str = _MODULE, console_script: str | None = "photometr
     # Last resort: let uv resolve an interpreter from the project directory.
     return ["uv", "run", "--project", str(prose_project_dir()),
             "python", "-m", module]
+
+
+def _write_log_header(logf, cmd: list[str]) -> None:
+    """Start a run log with the command and, in production, the snapshot digest."""
+    logf.write(f"$ {shlex.join(cmd)}\n\n")
+    if _prose_frozen_config():
+        from muscat_db.prose_config import SNAPSHOT_SHA256
+        logf.write(f"MuSCAT prose telescope snapshot sha256: {SNAPSHOT_SHA256}\n")
+    logf.flush()
+
+
+def _frozen_prose_prefix(explicit: str | None, module: str) -> list[str]:
+    """Production launch: the selected env's pinned prose, nothing else."""
+    if explicit:
+        raise RuntimeError(
+            "frozen prose configuration runs the selected pinned env; unset MUSCAT_PROSE_PYTHON"
+        )
+    env = prose_conda_env()
+    python = _conda_env_python(env)
+    if python is None:
+        raise RuntimeError(f"frozen prose configuration requires its pinned environment {env!r}")
+    version = prose_version()
+    if not is_pinned_version(version):
+        raise RuntimeError(
+            f"frozen prose configuration requires a pinned, non-editable prose install; "
+            f"{env!r} reports {version}"
+        )
+    # -I keeps cwd, PYTHONPATH and user site-packages from shadowing the pin.
+    return [python, "-I", "-m", module]
 
 
 def valid_date(date: str) -> bool:
@@ -1890,6 +1987,15 @@ def start_run(
                 "error": "full runs are disabled on this instance (MUSCAT_MAX_FULL_JOBS=0); run a test instead",
             }
 
+        # The row carries its frame inputs, looked up here on the catalog's own
+        # host, so a worker that launches or relaunches it never opens the
+        # catalog (#298).
+        frames = frames_inputs_param(inst, date, target)
+        run_params = {"test_run": test_run, "options": opts, "run_id": run_id, "site": site, "telescope": telescope, "mode": mode, "run_name": run_name}
+        if frames is not None:
+            run_params["frames_inputs"] = frames
+        run_params_json = json.dumps(run_params, separators=(",", ":"))
+
         # Claim a cross-process concurrency slot for full jobs (test jobs are
         # capped above instead). Not yet claimed here just means queue below.
         claimed_slot = False
@@ -1905,7 +2011,7 @@ def start_run(
                     inst=inst, date=date, target=target,
                     started_at=time.time(),
                     run_type=run_type,
-                    params=json.dumps({"test_run": test_run, "options": opts, "run_id": run_id, "site": site, "telescope": telescope, "mode": mode, "run_name": run_name}, separators=(",", ":")),
+                    params=params_with_running_cap(run_params_json, user_name),
                     run_id=run_id,
                     run_name=run_name,
                     user_name=user_name,
@@ -1914,7 +2020,7 @@ def start_run(
             except JobLimitExceeded as exc:
                 return limit_refusal(exc)
             except sqlite3.OperationalError as exc:
-                return {"ok": False, "error": f"database not writable: {exc}"}
+                return {"ok": False, "error": jobs.server_fault("The job could not be recorded because the job database is not writable", exc)}
             return {"ok": True, "key": key, "queued": True, "run_id": run_id}
 
         try:
@@ -1928,18 +2034,17 @@ def start_run(
             if not ok:
                 if claimed_slot:
                     get_job_store().release_slot("photometry", key)
-                return {"ok": False, "error": delete_error or "failed to delete previous reduction products"}
+                return {"ok": False, "error": jobs.server_fault("The previous reduction products could not be deleted before the re-run", delete_error)}
             if removed:
                 logger.info(f"start_run: deleted {removed} previous product(s) for {key} before overwrite run")
         rdir.mkdir(parents=True, exist_ok=True)
 
         _write_run_meta(rdir, inst=inst, date=date, target=target, run_id=run_id, site=site, telescope=telescope, mode=mode, run_name=run_name, run_type=run_type)
-        _write_run_product(rdir, inst=inst, date=date, target=target, opts=opts, test_run=test_run, user_name=user_name, site=site, telescope=telescope, mode=mode, run_name=run_name)
+        _write_run_product(rdir, inst=inst, date=date, target=target, opts=opts, test_run=test_run, user_name=user_name, site=site, telescope=telescope, mode=mode, run_name=run_name, frames=frames)
         cmd = build_command(inst, date, target, opts, test_run=test_run, run_id=run_id)
         log_path = _run_log_path(rdir, inst, date, target, run_id)
         logf = open(log_path, "w")
-        logf.write(f"$ {shlex.join(cmd)}\n\n")
-        logf.flush()
+        _write_log_header(logf, cmd)
         try:
             env = _job_env()
             proc = subprocess.Popen(
@@ -1963,7 +2068,7 @@ def start_run(
                 get_job_store().release_slot("photometry", key)
             logf.write(f"\nfailed to launch pipeline: {exc}\n")
             logf.close()
-            return {"ok": False, "error": f"failed to launch pipeline: {exc}"}
+            return {"ok": False, "error": jobs.server_fault("The server could not start the photometry pipeline", exc)}
         _JOBS[key] = Job(
             key=key, inst=inst, date=date, target=target,
             cmd=cmd, proc=proc, logf=logf, log_path=log_path,
@@ -1981,7 +2086,7 @@ def start_run(
                 elapsed=0,
                 started_at=_JOBS[key].started_at,
                 run_type=run_type,
-                params=json.dumps({"test_run": test_run, "options": opts, "run_id": run_id, "site": site, "telescope": telescope, "mode": mode, "run_name": run_name}, separators=(",", ":")),
+                params=run_params_json,
                 run_id=run_id,
                 run_name=run_name,
                 user_name=user_name,
@@ -2002,7 +2107,7 @@ def start_run(
             except OSError:
                 pass
             _JOBS.pop(key, None)
-            return {"ok": False, "error": f"database not writable: {exc}"}
+            return {"ok": False, "error": jobs.server_fault("The job could not be recorded because the job database is not writable", exc)}
     return {"ok": True, "key": key, "run_id": run_id}
 
 
@@ -2166,7 +2271,7 @@ def _persisted_status(inst: str, date: str, target: str, run_id: str = "") -> di
             lp = log_path(inst, date, target, run_id)
             error_desc = entry.get("error_desc") or ""
             if state == "error" and not error_desc and lp:
-                error_desc = _get_error_desc(lp)
+                error_desc = _get_error_desc(lp, entry.get("returncode"))
             elif state == "cancelled" and not error_desc:
                 error_desc = "Cancelled by user"
             return {
@@ -2218,7 +2323,7 @@ def job_status(inst: str, date: str, target: str, run_id: str = "") -> dict:
         elapsed = job.elapsed if job.state not in ("running", "cancelling") and job.elapsed is not None else round(time.time() - job.started_at)
     error_desc = ""
     if state == "error" and job_log:
-        error_desc = _get_error_desc(job_log)
+        error_desc = _get_error_desc(job_log, rc)
     elif state == "cancelled":
         error_desc = "Cancelled by user"
     return {
@@ -2335,26 +2440,49 @@ def cancel_run(inst: str, date: str, target: str, run_id: str = "") -> dict:
     return {"ok": True, "key": key}
 
 
-def _get_error_desc(log_path: Path) -> str:
+_ERROR_DESC_MAX = 200
+
+
+def _clip_error(text: str) -> str:
+    if len(text) <= _ERROR_DESC_MAX:
+        return text
+    return text[:_ERROR_DESC_MAX] + "… (see the log for the full message)"
+
+
+def _get_error_desc(log_path: Path, returncode: int | None = None) -> str:
+    """A failed job's ``error_desc``: the last error line of its log, led by
+    how the process died when a signal killed it. A process killed for memory
+    stops mid-stream, so its last logged error is usually an older, unrelated
+    one; without the signal the description would blame that instead."""
+    exit_text = jobs.describe_exit(returncode)
     if not log_path.is_file():
-        return "Unknown error"
+        return (
+            f"{exit_text or 'The job failed'} and left no log, so the cause is unknown; "
+            "please contact an admin if this keeps happening."
+        )
     try:
         with open(log_path, errors="replace") as f:
             lines = [line.strip() for line in f if line.strip()]
-        if not lines:
-            return "Empty log file"
-        for line in reversed(lines):
-            if "Error" in line or "ERROR" in line or "Exception" in line or "failed" in line:
-                # Remove ANSI escape codes
-                clean = re.sub(r'\x1b\[[0-9;]*m', '', line)
-                if " - ERROR: " in clean:
-                    clean = clean.split(" - ERROR: ")[1]
-                elif " - WARNING: " in clean:
-                    clean = clean.split(" - WARNING: ")[1]
-                return clean[:100]
-        return re.sub(r'\x1b\[[0-9;]*m', '', lines[-1])[:100]
-    except Exception:
-        return "Failed to parse log"
+    except OSError as exc:
+        return f"{exit_text or 'The job failed'}, and its log could not be read ({exc})."
+    if not lines:
+        return (
+            f"{exit_text or 'The job failed'} before writing any output; the engine "
+            "probably could not start. Please contact an admin."
+        )
+    died = f"{exit_text}. " if jobs.exit_signal(returncode) is not None else ""
+    for line in reversed(lines):
+        if "Error" in line or "ERROR" in line or "Exception" in line or "failed" in line:
+            # Remove ANSI escape codes
+            clean = re.sub(r'\x1b\[[0-9;]*m', '', line)
+            if " - ERROR: " in clean:
+                clean = clean.split(" - ERROR: ")[1]
+            elif " - WARNING: " in clean:
+                clean = clean.split(" - WARNING: ")[1]
+            return died + ("Last error in the log: " if died else "") + _clip_error(clean)
+    last = _clip_error(re.sub(r'\x1b\[[0-9;]*m', '', lines[-1]))
+    lead = f"{exit_text}. " if exit_text else "The job failed. "
+    return f"{lead}There is no error line in the log; its last line was: {last}"
 
 
 def _detect_process_running(rdir: Path) -> bool:
@@ -2388,7 +2516,7 @@ def sync_jobs() -> None:
                 type_="photometry", inst=job.inst, date=job.date, target=job.target,
                 state="error", returncode=-1,
                 elapsed=round(now - job.started_at), started_at=job.started_at,
-                error_desc=f"watchdog: {reason}", run_type=job.run_type,
+                error_desc=jobs.watchdog_desc(reason), run_type=job.run_type,
                 run_id=job.run_id,
             )
             _JOBS.pop(key, None)
@@ -2397,12 +2525,12 @@ def sync_jobs() -> None:
         running_keys = {j["key"] for j in db_jobs if j["state"] == "running" and j["type"] == "photometry"}
         db_by_key = {j["key"]: j for j in db_jobs}
 
-        # Drop finished jobs a newer queued run has replaced (same key) so their
-        # terminal state is not written over the pending row below.
+        # Drop finished jobs a newer run has replaced (same key: queued, launched
+        # elsewhere, or finished) so their terminal state is not written over it.
         for key in list(_JOBS.keys()):
             stale = _JOBS[key]
             stale_key = f"photometry:{job_key(stale.inst, stale.date, stale.target, stale.run_id)}"
-            if jobs.superseded_by_queued_row(db_by_key.get(stale_key), stale.started_at, stale.proc):
+            if jobs.superseded_by_newer_row(db_by_key.get(stale_key), stale.started_at, stale.proc):
                 try:
                     stale.logf.close()
                 except OSError:
@@ -2455,9 +2583,9 @@ def sync_jobs() -> None:
             if persist_state == "done" and _log_has_partial_failure(job.log_path):
                 persist_state = "error"
                 job.state = "error"
-                error_desc = _get_error_desc(job.log_path)
+                error_desc = _get_error_desc(job.log_path, persist_rc)
             elif persist_state == "error":
-                error_desc = _get_error_desc(job.log_path)
+                error_desc = _get_error_desc(job.log_path, persist_rc)
             elif persist_state == "cancelled":
                 error_desc = "Cancelled by user"
 
@@ -2483,7 +2611,7 @@ def sync_jobs() -> None:
                 jobs.fire_job_finished(
                     job_key=db_key, type_="photometry", target=job.target,
                     inst=job.inst, date=job.date, state=persist_state,
-                    run_id=job.run_id,
+                    run_id=job.run_id, started_at=job.started_at,
                 )
 
         for db_key in running_keys:
@@ -2613,10 +2741,11 @@ def sync_jobs() -> None:
                 if candidate_key in _JOBS:
                     store.save(type_="photometry", inst=entry["inst"], date=entry["date"], target=entry["target"], state="error", returncode=-1, elapsed=0, started_at=entry["started_at"], error_desc="Duplicate entry", run_id=run_id, run_name=entry.get("run_name", ""))
                     continue
-                # Atomic: at most one process/caller ever wins this claim for a
-                # given key, so two workers draining the same pending row can
-                # never both launch it.
-                if not store.claim_slot("photometry", candidate_key, _MAX_FULL_JOBS, **claim_caps(entry.get("user_name"))):
+                # Atomic: the slot and this row's pending -> running move are one
+                # transaction, so two workers draining the same pending row can
+                # never both launch it, even if a reconcile_slots pass elsewhere
+                # frees the slot before the save(state="running") below.
+                if not store.claim_slot("photometry", candidate_key, _MAX_FULL_JOBS, **claim_caps_for_row(entry), pending_key=entry["key"]):
                     continue
                 try:
                     p = json.loads(entry.get("params") or "{}")
@@ -2634,22 +2763,30 @@ def sync_jobs() -> None:
                 mode = p.get("mode", opts.get("mode", "")) if inst in MULTISITE_MODES else ""
                 run_name = p.get("run_name", opts.get("run_name", ""))
                 key = job_key(inst, date, target, run_id)
-                cmd = build_command(inst, date, target, opts, test_run=test_run, run_id=run_id)
                 try:
                     rdir = run_output_dir(inst, date, target, run_id)
                 except ValueError as exc:
                     store.release_slot("photometry", candidate_key)
                     store.save(type_="photometry", inst=inst, date=date, target=target, state="error", returncode=-1, elapsed=0, started_at=entry["started_at"], error_desc=str(exc), run_id=run_id, run_name=run_name)
                     continue
-                rdir.mkdir(parents=True, exist_ok=True)
                 run_type = "test" if test_run else "full"
-                _write_run_meta(rdir, inst=inst, date=date, target=target, run_id=run_id, site=site, telescope=telescope, mode=mode, run_name=run_name, run_type=run_type)
-                _write_run_product(rdir, inst=inst, date=date, target=target, opts=opts, test_run=test_run, user_name=entry.get("user_name"), site=site, telescope=telescope, mode=mode, run_name=run_name)
+                try:
+                    cmd = build_command(inst, date, target, opts, test_run=test_run, run_id=run_id)
+                    rdir.mkdir(parents=True, exist_ok=True)
+                    _write_run_meta(rdir, inst=inst, date=date, target=target, run_id=run_id, site=site, telescope=telescope, mode=mode, run_name=run_name, run_type=run_type)
+                    _write_run_product(rdir, inst=inst, date=date, target=target, opts=opts, test_run=test_run, user_name=entry.get("user_name"), site=site, telescope=telescope, mode=mode, run_name=run_name, frames=_frames_from_params(p))
+                except Exception as exc:
+                    # The claim already moved the row to running: leave it
+                    # terminal, not for orphan reconcile, which could trust a
+                    # previous run's log in this reused directory.
+                    logger.warning("failed to prepare queued photometry run %s", key, exc_info=True)
+                    store.release_slot("photometry", candidate_key)
+                    store.save(type_="photometry", inst=inst, date=date, target=target, state="error", returncode=-1, elapsed=0, started_at=entry["started_at"], error_desc=f"Failed to prepare run: {exc}", run_id=run_id, run_name=run_name)
+                    continue
                 pending_log_path = _run_log_path(rdir, inst, date, target, run_id)
                 try:
                     logf = open(pending_log_path, "w")
-                    logf.write(f"$ {shlex.join(cmd)}\n\n")
-                    logf.flush()
+                    _write_log_header(logf, cmd)
                     proc_env = _job_env()
                     proc = subprocess.Popen(cmd, cwd=str(rdir), stdout=logf, stderr=subprocess.STDOUT, text=True, start_new_session=True, env=proc_env)
                     try:

@@ -1433,16 +1433,22 @@ def _notify_archive_download_finished(job: dict) -> None:
     job_id = job.get("job_id") or ""
     if not job_id:
         return
-    instruments = job.get("instruments") or []
-    obsdates = job.get("obsdates") or []
-    objects = job.get("objects") or []
+    # The raw job only holds frames; objects/instruments/dates are derived
+    # from them by the snapshot (the same values the status API reports).
+    snap = _archive_download_snapshot(job)
+    user = str(job.get("user_name") or "")
     _jobs.fire_job_finished(
         job_key=f"lco_archive_download:{job_id}",
         type_="archive",
-        target=", ".join(objects) if objects else "LCO archive",
-        inst=",".join(instruments) if instruments else "lco",
-        date=",".join(obsdates) if obsdates else "mixed",
+        target=", ".join(snap["objects"]),
+        inst=", ".join(snap["instruments"]),
+        date=", ".join(snap["obsdates"]),
         state=job.get("state") or "done",
+        started_at=job.get("started_at"),
+        # Archive jobs are not persisted under job_key, so the chat hook's
+        # jobs-table owner lookup misses and would broadcast publicly.
+        owner="" if user == "anonymous" else user,
+        link=snap["photometry_url"],
     )
 
 
@@ -2306,6 +2312,50 @@ def requestgroup_to_params(rg: dict) -> dict:
     return {k: v for k, v in params.items() if v is not None}
 
 
+# LCO's Target model limits (observation-portal requestgroups/models.py).
+_MAX_EPOCH = 2100.0
+_MIN_EPOCH = 1900.0
+_MAX_PROPER_MOTION_MAS_YR = 20000.0
+
+
+def _target_astrometry(params: dict) -> dict:
+    """LCO ICRS target ``epoch`` / ``proper_motion_ra`` / ``proper_motion_dec``
+    from the schedule params ``epoch`` (Julian year) and ``pmra``/``pmdec``
+    (mas/yr, pmra including cos dec -- LCO's rise-set divides by cos dec).
+
+    Omitted fields are left out so LCO applies its defaults (epoch 2000, no
+    proper motion), which is what a manually typed position gets. A proper
+    motion without an epoch is rejected: LCO would apply it from 2000, but the
+    catalog positions are at 2015.5."""
+    def _number(key: str) -> float | None:
+        raw = params.get(key)
+        if raw in (None, ""):
+            return None
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            value = math.nan
+        if not math.isfinite(value):
+            raise LcoError(f"{key} must be a number, got {raw!r}", status=400)
+        return value
+
+    epoch, pmra, pmdec = _number("epoch"), _number("pmra"), _number("pmdec")
+    out: dict = {}
+    if epoch is not None:
+        if not _MIN_EPOCH <= epoch <= _MAX_EPOCH:
+            raise LcoError(f"epoch {epoch} is outside {_MIN_EPOCH:g}-{_MAX_EPOCH:g}", status=400)
+        out["epoch"] = epoch
+    for key, value, field in (("pmra", pmra, "proper_motion_ra"), ("pmdec", pmdec, "proper_motion_dec")):
+        if value is None:
+            continue
+        if epoch is None:
+            raise LcoError(f"{key} needs the epoch of the coordinates", status=400)
+        if abs(value) > _MAX_PROPER_MOTION_MAS_YR:
+            raise LcoError(f"{key} {value} mas/yr exceeds LCO's {_MAX_PROPER_MOTION_MAS_YR:g}", status=400)
+        out[field] = value
+    return out
+
+
 def build_requestgroup(kind: str, params: dict, configurations: list[dict] | None = None) -> dict:
     """Construct the requestgroup payload for an observation.
 
@@ -2351,6 +2401,7 @@ def build_requestgroup(kind: str, params: dict, configurations: list[dict] | Non
         "type": "ICRS",
         "ra": params["ra"],
         "dec": params["dec"],
+        **_target_astrometry(params),
     }
 
     # These constraints are defined at the request level, but get copied into

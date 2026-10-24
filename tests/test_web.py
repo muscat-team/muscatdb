@@ -234,7 +234,6 @@ def test_jobs_status_elapsed_uses_latest_rerun_started_at(mock_db, monkeypatch):
         elapsed=0,
         started_at=2000.0,
     )
-    monkeypatch.setattr("muscat_db.web._last_running", set())
     monkeypatch.setattr("muscat_db.web.time.time", lambda: 2030.0)
 
     response = TestClient(app).get("/api/jobs/status")
@@ -409,7 +408,6 @@ def test_jobs_status_includes_lco_archive_download(mock_db, monkeypatch):
 
 
 def test_jobs_status_returns_terminal_lco_archive_even_if_baseline_missed(mock_db, monkeypatch):
-    monkeypatch.setattr("muscat_db.web._last_running", set())
     monkeypatch.setattr(
         "muscat_db.lco.archive_download_jobs",
         lambda: [{
@@ -698,10 +696,12 @@ class _FakeAsyncClient:
     def __init__(self, behaviours):
         self._behaviours = list(behaviours)
         self.calls = 0
+        self.kwargs = []
 
     async def get(self, url, **kwargs):
         b = self._behaviours[min(self.calls, len(self._behaviours) - 1)]
         self.calls += 1
+        self.kwargs.append(kwargs)
         if isinstance(b, Exception):
             raise b
         return b
@@ -781,7 +781,9 @@ def test_eso_archive_cone_retries_on_timeout(monkeypatch):
     from muscat_db import http_client, web
 
     name_empty = httpx.Response(200, json=_eso_tap_json([]), request=httpx.Request("GET", "https://eso.invalid"))
-    cone_ok = httpx.Response(200, json=_eso_tap_json(["NearbyStar"]), request=httpx.Request("GET", "https://eso.invalid"))
+    cone_ok = httpx.Response(
+        200, json=_eso_tap_json_coords([("NearbyStar", 197.1, 55.0)]), request=httpx.Request("GET", "https://eso.invalid")
+    )
     # name(empty) -> cone(timeout) -> cone(success)
     fake = _FakeAsyncClient([name_empty, httpx.ReadTimeout(""), cone_ok])
     monkeypatch.setattr(http_client, "get_async_client", lambda: fake)
@@ -795,6 +797,198 @@ def test_eso_archive_cone_retries_on_timeout(monkeypatch):
     assert body["total"] == 1
     assert "cone" in body["query_method"]
     assert fake.calls == 3  # name + timed-out cone + retried cone
+
+
+def _eso_tap_json_coords(rows):
+    """ESO TAP JSON envelope with target_name, s_ra, s_dec columns."""
+    return {
+        "metadata": [{"name": "target_name"}, {"name": "s_ra"}, {"name": "s_dec"}],
+        "data": [list(r) for r in rows],
+    }
+
+
+def test_eso_archive_cone_uses_indexed_box_not_contains(monkeypatch):
+    # ESO's ObsCore answers s_ra/s_dec range filters from an index in ~1 s, but
+    # CONTAINS(POINT(s_ra, s_dec), CIRCLE(...)) took >120 s for TOI-5169, so the
+    # endpoint outlived nginx's 60 s proxy timeout and the page showed an HTML 504.
+    import httpx
+    from muscat_db import http_client, web
+
+    req = httpx.Request("GET", "https://eso.invalid")
+    name_empty = httpx.Response(200, json=_eso_tap_json([]), request=req)
+    # One row 2 arcsec away (inside 1 arcmin), one in the box corner (outside the circle).
+    cone_rows = httpx.Response(
+        200,
+        json=_eso_tap_json_coords([
+            ("Near", 154.868917, 6.582766 + 2 / 3600),
+            ("Corner", 154.868917 + 0.0166, 6.582766 + 0.0166),
+        ]),
+        request=req,
+    )
+    fake = _FakeAsyncClient([name_empty, cone_rows])
+    monkeypatch.setattr(http_client, "get_async_client", lambda: fake)
+    monkeypatch.setattr(web, "_resolve_archive_coords", lambda name: (154.868917, 6.582766, "toi"))
+
+    r = TestClient(app).get("/api/targets/eso-archive?name=TOI5169")
+
+    assert r.status_code == 200
+    body = r.json()
+    cone_adql = fake.kwargs[1]["params"]["QUERY"]
+    assert "CONTAINS" not in cone_adql
+    assert "s_ra BETWEEN" in cone_adql and "s_dec BETWEEN" in cone_adql
+    assert [row["target_name"] for row in body["rows"]] == ["Near"]
+    assert body["total"] == 1
+
+
+def test_eso_archive_total_timeout_fits_inside_nginx_proxy_timeout(monkeypatch):
+    # Every ESO call timing out must still end before nginx's default 60 s
+    # proxy_read_timeout, so the browser gets our JSON, never nginx's HTML 504.
+    import httpx
+    from muscat_db import http_client, web
+
+    req = httpx.Request("GET", "https://eso.invalid")
+    name_empty = httpx.Response(200, json=_eso_tap_json([]), request=req)
+    token_no_id = httpx.Response(200, json={}, request=req)
+    fake = _FakeAsyncClient([token_no_id, name_empty, httpx.ReadTimeout(""), httpx.ReadTimeout("")])
+    monkeypatch.setattr(http_client, "get_async_client", lambda: fake)
+    monkeypatch.setattr(web, "_resolve_archive_coords", lambda name: (154.868917, 6.582766, "toi"))
+    monkeypatch.setenv("ESO_USERNAME", "u")
+    monkeypatch.setenv("ESO_PASSWORD", "p")
+
+    r = TestClient(app).get("/api/targets/eso-archive?name=TOI5169")
+
+    assert r.headers["content-type"].startswith("application/json")
+    # Per-operation caps remain useful, but the outer deadline is the ceiling.
+    assert sum(kw["timeout"] for kw in fake.kwargs) < 60.0
+    assert 0 < web._ESO_TOTAL_TIMEOUT_S < 60.0
+    assert "timed out" in r.json().get("warning", "")
+
+
+def test_eso_archive_applies_circle_before_result_limit(monkeypatch):
+    import httpx
+    from muscat_db import catalog, http_client, web
+
+    # A service with 200 newer box-corner rows and one older in-circle row.
+    # Execute its generated SELECT against SQLite, translating only TAP's TOP
+    # syntax and geometry primitives, so filter/limit order is exercised.
+    db = sqlite3.connect(":memory:", check_same_thread=False)
+    db.create_function("POINT", 3, lambda frame, ra, dec: json.dumps([ra, dec]))
+    db.create_function(
+        "DISTANCE", 2,
+        lambda a, b: web._angular_sep_arcsec(*json.loads(a), *json.loads(b)) / 3600,
+    )
+    db.execute("ATTACH DATABASE ':memory:' AS ivoa")
+    db.execute("CREATE TABLE ivoa.ObsCore (target_name, instrument_name, obs_collection, "
+               "dataproduct_type, t_min, t_max, s_fov, proposal_id, obs_release_date, "
+               "obs_id, access_url, s_ra, s_dec)")
+    for i in range(201):
+        corner = i < 200
+        db.execute(
+            "INSERT INTO ivoa.ObsCore (target_name, t_min, s_ra, s_dec) VALUES (?, ?, ?, ?)",
+            ("Corner" if corner else "Inside", 10 if corner else 1,
+             100.015 if corner else 100., .015 if corner else 0.),
+        )
+
+    class QueryClient:
+        async def get(self, url, **kwargs):
+            adql = kwargs["params"]["QUERY"]
+            if "s_ra BETWEEN" not in adql:
+                result = _eso_tap_json_coords([])
+            else:
+                match = re.search(r"SELECT TOP (\d+)", adql)
+                sql = re.sub(r"SELECT TOP \d+", "SELECT", adql)
+                if match:
+                    sql += " LIMIT " + match.group(1)
+                cursor = db.execute(sql)
+                result = {"metadata": [{"name": col[0]} for col in cursor.description],
+                          "data": cursor.fetchall()}
+            return httpx.Response(200, json=result, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(catalog, "_resolve_all_aliases", lambda name: set())
+    monkeypatch.setattr(web, "_resolve_archive_coords", lambda name: (100., 0., "toi"))
+    monkeypatch.setattr(http_client, "get_async_client", QueryClient)
+    try:
+        body = TestClient(app).get("/api/targets/eso-archive?name=NONAME999").json()
+    finally:
+        db.close()
+    assert [row["target_name"] for row in body["rows"]] == ["Inside"]
+
+
+@pytest.mark.parametrize("slow_stage", ["token", "aliases", "name", "coords", "cone"])
+def test_eso_archive_deadline_covers_resolution_and_http(monkeypatch, slow_stage):
+    import asyncio
+    import time
+    import httpx
+    from muscat_db import catalog, http_client, web
+
+    def aliases(name):
+        if slow_stage == "aliases":
+            time.sleep(.15)
+        return set()
+
+    def coords(name):
+        if slow_stage == "coords":
+            time.sleep(.15)
+        return (100., 0., "toi")
+
+    cancelled = []
+    class SlowClient:
+        async def get(self, url, **kwargs):
+            query = kwargs.get("params", {}).get("QUERY", "")
+            stage = "token" if "oidc" in url else ("name" if "target_name LIKE" in query else "cone")
+            if stage == slow_stage:
+                try:
+                    await asyncio.sleep(.15)
+                except asyncio.CancelledError:
+                    cancelled.append(stage)
+                    raise
+            payload = {} if stage == "token" else _eso_tap_json_coords([])
+            return httpx.Response(200, json=payload, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(catalog, "_resolve_all_aliases", aliases)
+    monkeypatch.setattr(web, "_resolve_archive_coords", coords)
+    monkeypatch.setattr(http_client, "get_async_client", SlowClient)
+    # raising=False lets this regression run before the deadline is added.
+    monkeypatch.setattr(web, "_ESO_TOTAL_TIMEOUT_S", .03, raising=False)
+    monkeypatch.setenv("ESO_USERNAME", "test-user")
+    monkeypatch.setenv("ESO_PASSWORD", "test-password")
+
+    async def call():
+        started = time.monotonic()
+        response = await web.api_target_eso_archive(name="NONAME999")
+        return response, time.monotonic() - started
+
+    response, elapsed = asyncio.run(call())
+    assert response.status_code == 504
+    assert "timed out" in json.loads(response.body)["error"].lower()
+    assert elapsed < .12
+    if slow_stage in {"token", "name", "cone"}:
+        assert cancelled == [slow_stage]
+
+
+@pytest.mark.parametrize(
+    "ra, dec, expect",
+    [
+        (154.87, 6.58, ["s_ra BETWEEN"]),
+        (0.005, 10.0, ["s_ra >= 359.", "s_ra <= 0.0"]),  # wraps below 0
+        (359.995, 10.0, ["s_ra >= 359.", "s_ra <= 0.0"]),  # wraps above 360
+    ],
+)
+def test_eso_cone_box_where_handles_ra_wrap(ra, dec, expect):
+    from muscat_db.web import _eso_cone_box_where
+
+    where = _eso_cone_box_where(ra, dec, 1.0 / 60.0)
+    for frag in expect:
+        assert frag in where
+    assert "s_dec BETWEEN" in where
+
+
+def test_eso_cone_box_where_drops_ra_limit_at_pole():
+    from muscat_db.web import _eso_cone_box_where
+
+    where = _eso_cone_box_where(12.0, 89.995, 1.0 / 60.0)
+    assert "s_ra" not in where
+    assert "s_dec BETWEEN 89.978" in where and "AND 90.0" in where
 
 
 def test_ephemeris_targets_are_normalized_unique_names(mock_db):
@@ -1945,15 +2139,19 @@ def test_test_request_overlays_plan_override(monkeypatch):
     monkeypatch.setattr(_web.test_observations, "request_configurations", fake_request_configurations)
     monkeypatch.setattr(_web.lco, "build_requestgroup",
                         lambda kind, base, configurations=None: {"kind": kind, "configs": configurations})
-    record = {"id": "t1", "plan": {"kind": "sinistro", "exposure_time": 60, "target": "X"}}
+    window = {"start": "2999-01-01T00:00:00Z", "end": "2999-01-02T00:00:00Z"}
+    record = {"id": "t1", "plan": {
+        "version": _web.test_observations.ANALYSIS_VERSION, "kind": "sinistro", "target": "X", "window": window,
+        "configurations": [], "exposure_budget_s": 600, "readout_overhead_s": 9.0, "warnings": [],
+    }}
 
-    _web._test_request(record, {"name": "TEST X"})
-    assert captured["plan"]["exposure_time"] == 60  # stored plan used as-is
+    _rg, plan = _web._test_request(record, {"name": "TEST X"})
+    assert captured["plan"]["warnings"] == [] and plan is captured["plan"]  # stored plan used as-is
 
-    _web._test_request(record, {"name": "TEST X"}, {"exposure_time": 999})
-    assert captured["plan"]["exposure_time"] == 999  # override applied
-    assert captured["plan"]["target"] == "X"         # untouched keys preserved
-    assert record["plan"]["exposure_time"] == 60     # stored record left intact
+    _web._test_request(record, {"name": "TEST X"}, {"warnings": ["edited"]})
+    assert captured["plan"]["warnings"] == ["edited"]  # override applied
+    assert captured["plan"]["target"] == "X"           # untouched keys preserved
+    assert record["plan"]["warnings"] == []            # stored record left intact
 
 
 def test_lco_split_partial_booking_still_registers_successful_leg(mock_db, monkeypatch):

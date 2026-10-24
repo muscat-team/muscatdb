@@ -222,18 +222,6 @@
         <label for="opt-mstar">Stellar mass (M☉) <span class="help-tooltip" title="Host star mass in solar masses. Used for mass/eccentricity constraints from Lithwick+2012.">?</span></label>
         <input type="number" id="opt-mstar" value="1.0" min="0.1" step="0.01">
       </div>
-      <div class="opt">
-        <label for="opt-mu_min_me">Planet mass prior min (M<sub>⊕</sub>) <span class="help-tooltip" title="Lower bound of the log-uniform mass-ratio prior in Earth masses (per Msun of host). Default 1 M⊕.">?</span></label>
-        <input type="number" id="opt-mu_min_me" value="1.0" min="0.01" step="0.5">
-      </div>
-      <div class="opt">
-        <label for="opt-mu_max_me">Planet mass prior max (M<sub>⊕</sub>) <span class="help-tooltip" title="Upper bound of the log-uniform mass-ratio prior in Earth masses (per Msun of host). Default 30 M⊕.">?</span></label>
-        <input type="number" id="opt-mu_max_me" value="30.0" min="0.1" step="5">
-      </div>
-      <div class="opt">
-        <label for="opt-z_max">Eccentricity prior max <span class="help-tooltip" title="Upper bound of the uniform free-eccentricity prior |Zfree| ~ U(0, z_max). Default 0.1.">?</span></label>
-        <input type="number" id="opt-z_max" value="0.1" min="0.001" max="1" step="0.01">
-      </div>
     </div>
 
     <!-- Optional: Non-transiting outer / Phase offsets -->
@@ -777,7 +765,7 @@
     if (state.ttv_opts && typeof state.ttv_opts === 'object') {
       const opts = state.ttv_opts;
       localStorage.setItem(TTV_STORAGE_KEY, JSON.stringify(opts));
-      const textFields = ['run_name','walkers','steps','burn','thin','nproc','seed','mstar','mu_min_me','mu_max_me','z_max','planet_letters','ini_content'];
+      const textFields = ['run_name','walkers','steps','burn','thin','nproc','seed','mstar','planet_letters','ini_content'];
       textFields.forEach(f => {
         const el = document.getElementById('opt-' + f);
         if (el && opts[f] !== undefined) el.value = opts[f];
@@ -815,7 +803,7 @@
     });
 
     const ttvFields = {};
-    ['opt-run_name','opt-walkers','opt-steps','opt-burn','opt-thin','opt-nproc','opt-seed','opt-mstar','opt-mu_min_me','opt-mu_max_me','opt-z_max','opt-planet_letters'].forEach(id => {
+    ['opt-run_name','opt-walkers','opt-steps','opt-burn','opt-thin','opt-nproc','opt-seed','opt-mstar','opt-planet_letters'].forEach(id => {
       const el = document.getElementById(id);
       if (el) ttvFields[id.replace('opt-', '')] = el.value;
     });
@@ -3629,9 +3617,6 @@
       nproc: document.getElementById('opt-nproc')?.value || '10',
       seed: document.getElementById('opt-seed')?.value || '42',
       mstar: document.getElementById('opt-mstar')?.value || '1.0',
-      mu_min_me: document.getElementById('opt-mu_min_me')?.value || '1.0',
-      mu_max_me: document.getElementById('opt-mu_max_me')?.value || '30.0',
-      z_max: document.getElementById('opt-z_max')?.value || '0.1',
       non_transiting_outer: document.getElementById('opt-non_transiting_outer')?.checked || false,
       phase_offsets: document.getElementById('opt-phase_offsets')?.checked || false,
       clobber: document.getElementById('opt-clobber')?.checked || false,
@@ -3655,9 +3640,6 @@
     if (document.getElementById('opt-nproc')) document.getElementById('opt-nproc').value = opts.nproc || '10';
     if (document.getElementById('opt-seed')) document.getElementById('opt-seed').value = opts.seed || '42';
     if (document.getElementById('opt-mstar')) document.getElementById('opt-mstar').value = opts.mstar || '1.0';
-    if (document.getElementById('opt-mu_min_me')) document.getElementById('opt-mu_min_me').value = opts.mu_min_me || '1.0';
-    if (document.getElementById('opt-mu_max_me')) document.getElementById('opt-mu_max_me').value = opts.mu_max_me || '30.0';
-    if (document.getElementById('opt-z_max')) document.getElementById('opt-z_max').value = opts.z_max || '0.1';
     if (document.getElementById('opt-non_transiting_outer')) document.getElementById('opt-non_transiting_outer').checked = !!opts.non_transiting_outer;
     if (document.getElementById('opt-phase_offsets')) document.getElementById('opt-phase_offsets').checked = !!opts.phase_offsets;
     if (document.getElementById('opt-clobber')) document.getElementById('opt-clobber').checked = !!opts.clobber;
@@ -3762,13 +3744,12 @@
           logEl.style.display = 'block';
           logEl.textContent = 'Launching TTV fitting run…';
           localStorage.setItem(JOB_KEY, JSON.stringify({ target: target, run_name: runNameVal }));
-          return fetch('/api/ttv-fit/start', {
+          return MuscatFetch.fetchJson('/api/ttv-fit/start', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ target: target, options: options })
           });
         })
-        .then(response => response ? response.json() : null)
         .then(res => {
           if (!res) return;
           const logEl = document.getElementById('run-log');
@@ -4521,9 +4502,6 @@
     const nproc = parseInt(document.getElementById('opt-nproc').value) || 10;
     const seed = parseInt(document.getElementById('opt-seed').value) || 42;
     const mstar = parseFloat(document.getElementById('opt-mstar').value) || 1.0;
-    const mu_min_me = parseFloat(document.getElementById('opt-mu_min_me').value) || 1.0;
-    const mu_max_me = parseFloat(document.getElementById('opt-mu_max_me').value) || 30.0;
-    const z_max = parseFloat(document.getElementById('opt-z_max').value) || 0.1;
     const non_transiting_outer = document.getElementById('opt-non_transiting_outer').checked;
     const phase_offsets = document.getElementById('opt-phase_offsets').checked;
     const clobber = document.getElementById('opt-clobber').checked;
@@ -4542,9 +4520,6 @@
       nproc: nproc,
       seed: seed,
       mstar: mstar,
-      mu_min_me: mu_min_me,
-      mu_max_me: mu_max_me,
-      z_max: z_max,
       non_transiting_outer: non_transiting_outer,
       phase_offsets: phase_offsets,
       clobber: clobber,

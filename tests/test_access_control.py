@@ -243,6 +243,53 @@ def test_rendered_page_cache_is_not_shared_across_denied_sets(client, db):
     assert _n_observations(denied) == 0
 
 
+# ── /obs instrument statistics ──────────────────────────────────────────
+
+
+def _obs_stats(client, user: str) -> dict[str, tuple[int, int, int]]:
+    """``{instrument: (n_dates, n_targets, n_frames)}`` from the /obs table."""
+    html = client.get("/obs?min_frames=1", headers=_headers(user)).text
+    rows = re.findall(
+        r'<a href="/(\w+)">\1</a></strong></td>\s*'
+        r'<td class="mono">(\d+)</td>\s*<td class="mono">(\d+)</td>\s*<td class="mono">(\d+)</td>',
+        html,
+    )
+    return {name: (int(d), int(t), int(f)) for name, d, t, f in rows}
+
+
+def _obs_has_data(client, user: str) -> dict[str, bool]:
+    html = client.get("/obs", headers=_headers(user)).text
+    cards = re.findall(r'<div class="name">(\w+)</div>\s*<div class="meta">([^<]*)', html)
+    return {name: meta.startswith("Click to view") for name, meta in cards}
+
+
+def test_obs_stats_count_only_what_the_viewer_may_see(client, db):
+    _set_admin(db, "root")
+    full = _obs_stats(client, "root")
+    denied = _obs_stats(client, "alice")
+
+    assert full["sinistro"] == (2, 1, 5)
+    assert full["muscat3"] == (2, 2, 2)
+    # The restricted sinistro night and HIDDENTGT's night drop out entirely.
+    assert denied["sinistro"] == (1, 1, 2)
+    assert denied["muscat3"] == (1, 1, 1)
+
+
+def test_obs_instrument_with_only_hidden_data_looks_empty(client, db):
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            """INSERT INTO summaries (instrument, obsdate, ccd, object, nframes, proposal_id)
+               VALUES ('muscat4', '260301', 0, 'HIDDENTGT', 4, ?)""",
+            (_RESTRICTED,),
+        )
+    _set_admin(db, "root")
+
+    assert _obs_has_data(client, "root")["muscat4"] is True
+    assert _obs_stats(client, "root")["muscat4"] == (1, 1, 4)
+    assert _obs_has_data(client, "alice")["muscat4"] is False
+    assert _obs_stats(client, "alice")["muscat4"] == (0, 0, 0)
+
+
 # ── /target ─────────────────────────────────────────────────────────────
 
 
@@ -967,3 +1014,47 @@ def test_groups_parity_covers_target_grants(db):
     # the check would report a mismatch for it, so this fails if detail is lost.
     nights = {(m["instrument"], m["obsdate"]) for m in access_groups.parity(db)}
     assert ("muscat3", "260201") not in nights
+
+
+# --- LCO test observations ---------------------------------------------------
+
+def _test_record(db: str, target: str, created_by: str = "") -> str:
+    from muscat_db import test_observations
+
+    record = test_observations.create_record({"kind": "muscat3", "target": target}, db, created_by=created_by)
+    return record["id"]
+
+
+def test_scoped_viewer_neither_lists_nor_fetches_a_test_on_a_hidden_target(client, db):
+    hidden = _test_record(db, "HIDDENTGT")
+    visible = _test_record(db, "OPENTGT")
+    _set_admin(db, "root")
+
+    listed = client.get("/api/lco/test-observations", headers=_headers("alice")).json()["records"]
+    assert [r["id"] for r in listed] == [visible]
+    by_target = client.get("/api/lco/test-observations?target=HIDDENTGT", headers=_headers("alice")).json()
+    assert by_target["records"] == []
+    response = client.get(f"/api/lco/test-observations/{hidden}", headers=_headers("alice"))
+    assert response.status_code == 404
+    # Same answer as an id that never existed.
+    assert response.json() == client.get("/api/lco/test-observations/no-such-id", headers=_headers("alice")).json()
+    assert client.post(f"/api/lco/test-observations/{hidden}/analyze", headers=_headers("alice")).status_code == 404
+    assert client.post(f"/api/lco/test-observations/{hidden}/ipp", json={}, headers=_headers("alice")).status_code == 404
+
+    admin = client.get("/api/lco/test-observations", headers=_headers("root")).json()["records"]
+    assert {r["id"] for r in admin} == {hidden, visible}
+    assert client.get(f"/api/lco/test-observations/{hidden}", headers=_headers("root")).status_code == 200
+
+
+def test_only_the_creator_or_an_admin_may_reanalyze_a_test(client, db):
+    record = _test_record(db, "OPENTGT", created_by="bob")
+    _set_admin(db, "root")
+    url = f"/api/lco/test-observations/{record}/analyze"
+
+    assert client.post(url, headers=_headers("alice")).status_code == 403
+    # The creator and an admin get past the ownership check; the draft then
+    # cannot be re-analyzed, which is the state check's 400.
+    for user in ("bob", "root"):
+        response = client.post(url, headers=_headers(user))
+        assert response.status_code == 400, user
+        assert "cannot re-analyze" in response.json()["error"]

@@ -312,3 +312,84 @@ class TestHostCapConcurrency:
         assert sum(results) == 3
         total_claimed = sum(store.count_claimed(p) for p in pipelines)
         assert total_claimed == 3
+
+
+class TestClaimFromPendingConcurrency:
+    """claim_slot(pending_key=...) under real concurrency (issue #51 step A):
+    many drainers holding the same pending() snapshot, each with its own slot
+    key so the slot primary key cannot be what stops them. Only the row's
+    pending -> running guard can."""
+
+    def test_only_one_drainer_wins_a_pending_row(self, store):
+        store.enqueue(
+            type_="photometry", inst="muscat4", date="260101", target="HIP1",
+            started_at=100.0,
+        )
+        row_key = "photometry:muscat4/260101/HIP1"
+        results: list[bool] = []
+        lock = threading.Lock()
+        barrier = threading.Barrier(8)
+
+        def drain(i: int) -> None:
+            barrier.wait()
+            won = store.claim_slot("photometry", f"drainer{i}", 10, pending_key=row_key)
+            with lock:
+                results.append(won)
+
+        threads = [threading.Thread(target=drain, args=(i,)) for i in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert results.count(True) == 1
+        assert store.count_claimed("photometry") == 1
+        assert store.get(row_key)["state"] == "running"
+
+
+class TestSchemaEnsureConcurrency:
+    """_ensure_pg_jobs_schema run by many processes at once (issue #51 step B).
+
+    A coordinated restart of the web app and several worker hosts runs it
+    concurrently. Each round first drops one column per table, so every
+    session has a real migration to apply, which is what deadlocked on
+    2026-10-10. Each thread holds its own connection, as separate processes
+    would."""
+
+    def test_concurrent_schema_ensure_does_not_deadlock(self, store):
+        import psycopg
+
+        sessions = 6
+        errors: list[BaseException] = []
+        lock = threading.Lock()
+        for _ in range(5):
+            with store._pool.connection() as conn:
+                conn.execute("ALTER TABLE jobs DROP COLUMN IF EXISTS cancel_requested_at")
+                conn.execute("ALTER TABLE job_concurrency_slots DROP COLUMN IF EXISTS user_name")
+            barrier = threading.Barrier(sessions)
+
+            def ensure() -> None:
+                try:
+                    with psycopg.connect(_DSN, connect_timeout=5) as conn:
+                        barrier.wait()
+                        job_store._ensure_pg_jobs_schema(conn)
+                        conn.commit()
+                except BaseException as exc:
+                    with lock:
+                        errors.append(exc)
+
+            threads = [threading.Thread(target=ensure) for _ in range(sessions)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+        assert errors == []
+        save_kwargs = dict(
+            type_="photometry", inst="muscat4", date="260101", target="HIP1",
+            state="running", returncode=None, elapsed=0, started_at=1.0,
+            user_name="ann",
+        )
+        store.save(**save_kwargs)
+        assert store.claim_slot("photometry", "k", 1, user_name="ann", max_user_slots=1) is True
+        assert store.get("photometry:muscat4/260101/HIP1")["cancel_requested_at"] == 0

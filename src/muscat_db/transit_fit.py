@@ -26,7 +26,7 @@ import yaml
 from muscat_db import jobs, database
 from muscat_db._optimize_helper import DONE_MARKER as _OPTIMIZE_DONE_MARKER
 from muscat_db.job_store import current_instance_id, current_owner, get_job_store
-from muscat_db.job_limits import JobLimitExceeded, claim_caps, enqueue_caps, limit_refusal
+from muscat_db.job_limits import JobLimitExceeded, claim_caps, claim_caps_for_row, enqueue_caps, limit_refusal, params_with_running_cap
 from muscat_db import __meta__, __muscatdb_version__, __version__
 from muscat_db.instruments import INSTRUMENTS
 from muscat_db.photometry import (
@@ -35,7 +35,7 @@ from muscat_db.photometry import (
     MULTISITE_MODES, _TELESCOPE_PREFIX, timer_conda_env,
 )
 from muscat_db.cache import register_cache
-from muscat_db.engine_identity import version_probe
+from muscat_db.engine_identity import require_selected_env, version_probe
 
 _REPO_ROOT = pathlib.Path(__file__).parent.parent.parent.resolve()
 logger = logging.getLogger(__name__)
@@ -371,6 +371,7 @@ def _timer_prefix() -> list[str]:
     """Resolve how to invoke the timer-fit tool, using the timer conda env."""
     env = timer_conda_env()
     conda_py = _conda_env_python(env)
+    require_selected_env("timer", conda_py)
     if conda_py:
         timer_fit_path = pathlib.Path(conda_py).parent / "timer-fit"
         if timer_fit_path.is_file():
@@ -1640,15 +1641,15 @@ def start_fit(
                     inst=inst, date=date, target=target, run_id=run_id,
                     started_at=time.time(),
                     run_type=run_type,
-                    params=params_json,
+                    params=params_with_running_cap(params_json, user_name),
                     run_name=run_name,
                     user_name=user_name,
                     **enqueue_caps(user_name),
                 )
             except JobLimitExceeded as exc:
                 return limit_refusal(exc)
-            except Exception:
-                return {"ok": False, "error": "database not writable"}
+            except Exception as exc:
+                return {"ok": False, "error": jobs.server_fault("The job could not be queued because the job database is not writable", exc)}
             return {"ok": True, "key": key, "queued": True, "run_id": run_id}
 
     # Working directory
@@ -1699,7 +1700,7 @@ def start_fit(
             get_job_store().release_slot("transit_fit", key)
         logf.write(f"\nfailed to launch fitting: {exc}\n")
         logf.close()
-        return {"ok": False, "error": f"failed to launch fitting: {exc}"}
+        return {"ok": False, "error": jobs.server_fault("The server could not start the transit fit", exc)}
 
     with _FIT_LOCK:
         _FIT_JOBS[key] = TransitFitJob(
@@ -2377,12 +2378,12 @@ def sync_jobs() -> None:
         running_keys = {j["key"] for j in db_jobs if j["state"] == "running" and j["type"] == "transit_fit"}
         db_by_key = {j["key"]: j for j in db_jobs}
 
-        # Drop finished jobs a newer queued run has replaced (same key) so their
-        # terminal state is not written over the pending row below.
+        # Drop finished jobs a newer run has replaced (same key: queued, launched
+        # elsewhere, or finished) so their terminal state is not written over it.
         for key in list(_FIT_JOBS.keys()):
             stale = _FIT_JOBS[key]
             stale_key = f"transit_fit:{fit_job_key(stale.inst, stale.date, stale.target, stale.run_id)}"
-            if jobs.superseded_by_queued_row(db_by_key.get(stale_key), stale.started_at, stale.proc):
+            if jobs.superseded_by_newer_row(db_by_key.get(stale_key), stale.started_at, stale.proc):
                 try:
                     stale.logf.close()
                 except OSError:
@@ -2435,7 +2436,7 @@ def sync_jobs() -> None:
 
             error_desc = ""
             if persist_state == "error":
-                error_desc = _get_error_desc(job.log_path)
+                error_desc = _get_error_desc(job.log_path, persist_rc)
             elif persist_state == "cancelled":
                 error_desc = "Cancelled by user"
 
@@ -2462,7 +2463,7 @@ def sync_jobs() -> None:
                 jobs.fire_job_finished(
                     job_key=db_key, type_="transit_fit", target=job.target,
                     inst=job.inst, date=job.date, state=persist_state,
-                    run_id=job.run_id,
+                    run_id=job.run_id, started_at=job.started_at,
                 )
 
         for db_key in running_keys:
@@ -2618,23 +2619,33 @@ def sync_jobs() -> None:
                     run_name=run_name,
                 )
                     continue
-                # Atomic: at most one process/caller ever wins this claim for a
-                # given key, so two workers draining the same pending row can
-                # never both launch it.
-                if not store.claim_slot("transit_fit", key, _MAX_FULL_JOBS, **claim_caps(entry.get("user_name"))):
+                # Atomic: the slot and this row's pending -> running move are one
+                # transaction, so two workers draining the same pending row can
+                # never both launch it, even if a reconcile_slots pass elsewhere
+                # frees the slot before the save(state="running") below.
+                if not store.claim_slot("transit_fit", key, _MAX_FULL_JOBS, **claim_caps_for_row(entry), pending_key=entry["key"]):
                     continue
-                rdir.mkdir(parents=True, exist_ok=True)
-                csvs = get_csv_lightcurves(inst, date, target)
-                if selected_csvs is not None:
-                    selected = set(str(p) for p in selected_csvs)
-                    csvs = [c for c in csvs if str(c) in selected]
-                narrowband_aliases = _write_fit_inputs(
-                    rdir, inst, date, target, csvs, opts,
-                    site=site, telescope=telescope, mode=mode, run_name=run_name, run_id=run_id,
-                    run_type=run_type)
-                _write_fit_product(rdir, inst, date, target, csvs, opts, test_run, entry.get("user_name"))
-                _fit_outputs_cache.clear()
-                cmd = _fit_command(rdir, run_type)
+                try:
+                    rdir.mkdir(parents=True, exist_ok=True)
+                    csvs = get_csv_lightcurves(inst, date, target)
+                    if selected_csvs is not None:
+                        selected = set(str(p) for p in selected_csvs)
+                        csvs = [c for c in csvs if str(c) in selected]
+                    narrowband_aliases = _write_fit_inputs(
+                        rdir, inst, date, target, csvs, opts,
+                        site=site, telescope=telescope, mode=mode, run_name=run_name, run_id=run_id,
+                        run_type=run_type)
+                    _write_fit_product(rdir, inst, date, target, csvs, opts, test_run, entry.get("user_name"))
+                    _fit_outputs_cache.clear()
+                    cmd = _fit_command(rdir, run_type)
+                except Exception as exc:
+                    # The claim already moved the row to running: leave it
+                    # terminal, not for orphan reconcile, which could trust a
+                    # previous run's log in this reused directory.
+                    logger.warning("failed to prepare queued transit fit %s", key, exc_info=True)
+                    store.release_slot("transit_fit", key)
+                    store.save(type_="transit_fit", inst=inst, date=date, target=target, run_id=run_id, state="error", returncode=-1, elapsed=0, started_at=entry["started_at"], error_desc=f"Failed to prepare run: {exc}", run_name=run_name)
+                    continue
                 log_path = rdir / "timer-fit.log"
                 try:
                     logf = open(log_path, "w")

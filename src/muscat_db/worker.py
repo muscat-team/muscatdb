@@ -67,7 +67,7 @@ import logging
 import signal
 from collections.abc import Callable
 
-from muscat_db import job_store, jobs
+from muscat_db import database, job_store, jobs
 
 logger = logging.getLogger(__name__)
 
@@ -176,6 +176,12 @@ def run(pipeline: str, *, interval: float = 2.0, once: bool = False) -> None:
     # earlier in its life.
     previous_owner = job_store.current_owner()
     job_store.set_owner("worker")
+    # On a shared control plane this process may run on another host, where
+    # muscat.db is reached over NFS. SQLite's locks are unsupported there, so
+    # the catalog is off limits for the worker's whole life (#298): the web
+    # process on ut2 refreshes target status for jobs finished here, and a
+    # queued photometry row carries the frame inputs its product record needs.
+    # Set inside the try below and lifted in its finally, like the owner tag.
     stop = False
 
     def _handle_signal(signum: int, _frame: object) -> None:
@@ -193,6 +199,8 @@ def run(pipeline: str, *, interval: float = 2.0, once: bool = False) -> None:
     # restoration above exists to close.
     prev_handlers = None
     try:
+        if job_store.uses_shared_control_plane():
+            database.forbid_catalog("this is a worker on a shared control plane (#298)")
         _resolve_stale_cancelling()
         if not once:
             prev_handlers = (signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGINT))
@@ -209,6 +217,7 @@ def run(pipeline: str, *, interval: float = 2.0, once: bool = False) -> None:
         # can't succeed here (never possible in production, where run()
         # only ever executes on the main thread) is a lesser concern.
         job_store.set_owner(previous_owner)
+        database.allow_catalog()
         if prev_handlers is not None:
             signal.signal(signal.SIGTERM, prev_handlers[0])
             signal.signal(signal.SIGINT, prev_handlers[1])

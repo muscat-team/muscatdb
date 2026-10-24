@@ -299,10 +299,13 @@
       });
     });
 
-    // Restore sort after the sortable initialiser from base.html has run.
-    requestAnimationFrame(() => {
-      restoreSort('targets-table');
-      restoreSort('unidentified-table');
+    // The sorter is attached on DOMContentLoaded by base.html. A frame can
+    // run before that event while footer scripts are still loading.
+    document.addEventListener('DOMContentLoaded', () => {
+      requestAnimationFrame(() => {
+        restoreSort('targets-table');
+        restoreSort('unidentified-table');
+      });
     });
 
     // ── persist <details> open state ─────────────────────────────────────────

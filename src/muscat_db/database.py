@@ -47,6 +47,19 @@ def format_elapsed(seconds: int) -> str:
     return f"{days}d {hrs}h"
 
 
+# Fitted exposure models written by Calibrate (exposure_model.save_models).
+# Part of SCHEMA so build_db creates it in the fresh image it restores into.
+EXPOSURE_MODELS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS exposure_models (
+    instrument  TEXT NOT NULL,
+    band        TEXT NOT NULL,
+    mode        TEXT NOT NULL DEFAULT '',
+    params_json TEXT NOT NULL,
+    n_frames    INTEGER NOT NULL DEFAULT 0,
+    updated_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (instrument, band, mode)
+);
+"""
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS frames (
@@ -182,7 +195,7 @@ CREATE TABLE IF NOT EXISTS exposure_coeffs (
     updated_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (instrument, band, focus_mm)
 );
-
+""" + EXPOSURE_MODELS_SCHEMA + """
 CREATE TABLE IF NOT EXISTS exposure_jobs (
     id          TEXT PRIMARY KEY,
     instrument  TEXT NOT NULL,
@@ -213,7 +226,8 @@ CREATE TABLE IF NOT EXISTS test_observations (
     recommendation_json TEXT NOT NULL DEFAULT '{}',
     failure_detail      TEXT NOT NULL DEFAULT '',
     created_at          TEXT NOT NULL,
-    updated_at          TEXT NOT NULL
+    updated_at          TEXT NOT NULL,
+    created_by          TEXT NOT NULL DEFAULT ''
 );
 
 -- Every child Request accepted by LCO through the scheduler is monitored until
@@ -414,6 +428,26 @@ CREATE TABLE IF NOT EXISTS group_grants (
            OR target IS NOT NULL OR date_from IS NOT NULL)
 );
 CREATE INDEX IF NOT EXISTS idx_group_grants_group ON group_grants(groupname);
+
+-- Revoked grants, moved here from group_grants (issue #228, step 4) so the
+-- history of who could see what survives. A separate table rather than a
+-- revoked_at column on group_grants: no reader of the live grants can forget
+-- to filter one out. ``id`` is the grant's own id, which AUTOINCREMENT never
+-- reuses.
+CREATE TABLE IF NOT EXISTS group_grants_revoked (
+    id          INTEGER PRIMARY KEY,
+    groupname   TEXT NOT NULL COLLATE NOCASE,
+    proposal_id TEXT COLLATE NOCASE,
+    instrument  TEXT COLLATE NOCASE,
+    target      TEXT,
+    date_from   TEXT,
+    date_to     TEXT,
+    note        TEXT NOT NULL DEFAULT '',
+    granted_by  TEXT NOT NULL DEFAULT '',
+    granted_at  TEXT NOT NULL DEFAULT '',
+    revoked_by  TEXT NOT NULL DEFAULT '',
+    revoked_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 # Idempotent schema migrations for columns added after initial deployment.
@@ -448,6 +482,9 @@ _MIGRATIONS = [
     # (job_limits.site_defaults); 0 means unlimited.
     "ALTER TABLE users ADD COLUMN max_running_jobs INTEGER",
     "ALTER TABLE users ADD COLUMN max_queued_jobs INTEGER",
+    # PR #280: who created a test observation, for its ownership check. Rows
+    # from before it stay ownerless ('' reads as the anonymous local user).
+    "ALTER TABLE test_observations ADD COLUMN created_by TEXT NOT NULL DEFAULT ''",
 ]
 
 
@@ -885,8 +922,8 @@ def _set_temp_store_dir(conn: sqlite3.Connection, db_file: str) -> None:
 # Tables owned by the app rather than derived from the obslog CSVs. build_db
 # rebuilds the observation tables (frames/summaries/targets) from scratch, so
 # these must be copied across the atomic swap or the daily cron silently wipes
-# user notes, manual identification overrides, exposure calibration coefficients,
-# job history, saved ephemeris views, closed-loop test observations, and LCO
+# user notes, manual identification overrides, exposure calibration coefficients
+# and fitted exposure models, job history, saved ephemeris views, closed-loop test observations, and LCO
 # request-monitoring state on every successful build.  Monitor leases are
 # deliberately excluded because they are process-local and must be reacquired.
 _APP_OWNED_TABLES = (
@@ -896,6 +933,7 @@ _APP_OWNED_TABLES = (
     "target_notes",
     "target_overrides",
     "exposure_coeffs",
+    "exposure_models",
     "test_observations",
     "lco_observation_requests",
     "lco_observation_frames",
@@ -909,6 +947,7 @@ _APP_OWNED_TABLES = (
     "group_members",
     "group_exclusions",
     "group_grants",
+    "group_grants_revoked",
 )
 
 
@@ -932,6 +971,25 @@ def _restore_table(conn: sqlite3.Connection, table: str, rows: list[dict]) -> No
             f"INSERT OR REPLACE INTO {table} ({','.join(cols)}) VALUES ({placeholders})",
             tuple(row[c] for c in cols),
         )
+
+
+def _restore_sequences(conn: sqlite3.Connection, sequences: list[dict]) -> None:
+    """Keep app-owned AUTOINCREMENT IDs above every previously issued ID.
+
+    Restoring rows only advances SQLite's sequence to the largest surviving
+    ID. Deleted or archived IDs must not become available again after a build.
+    sqlite_sequence has no unique constraint on name, so update before insert.
+    """
+    for row in sequences:
+        cur = conn.execute(
+            "UPDATE sqlite_sequence SET seq = MAX(seq, ?) WHERE name = ?",
+            (row["seq"], row["name"]),
+        )
+        if cur.rowcount == 0:
+            conn.execute(
+                "INSERT INTO sqlite_sequence (name, seq) VALUES (?, ?)",
+                (row["name"], row["seq"]),
+            )
 
 
 def _page_size(db_path: str) -> int:
@@ -980,6 +1038,13 @@ def _read_app_owned_tables(db_path: str) -> dict[str, list[dict]]:
                     continue
                 rows = old_conn.execute(f"SELECT * FROM {table}").fetchall()
                 preserved[table] = [dict(r) for r in rows]
+            # Read sequence counters in the same snapshot as their rows. The
+            # ingest tables are rebuilt, so preserve only app-owned counters.
+            if "sqlite_sequence" in existing:
+                preserved["sqlite_sequence"] = [
+                    dict(r) for r in old_conn.execute("SELECT name, seq FROM sqlite_sequence")
+                    if r["name"] in _APP_OWNED_TABLES
+                ]
         finally:
             old_conn.rollback()
     return preserved
@@ -1135,6 +1200,7 @@ def build_db(db_path: str, progress=None) -> int:
         preserved = _read_app_owned_tables(db_path)
         for table in _APP_OWNED_TABLES:
             _restore_table(conn, table, preserved.get(table) or [])
+        _restore_sequences(conn, preserved.get("sqlite_sequence") or [])
         conn.commit()
         conn.close()
 
@@ -1295,27 +1361,44 @@ def _safe_float(v: str) -> float | None:
         return None
 
 
-def get_instruments(db_path: str) -> list[dict]:
+def get_instruments(
+    db_path: str, *, denied: frozenset[str] = frozenset()
+) -> list[dict]:
+    """Instruments with at least one summary row outside a *denied* proposal,
+    so an instrument whose data is all hidden reads as having none."""
+    visible, visible_params = sql_not_denied(denied)
     with get_conn(db_path) as conn:
-        cur = conn.execute("SELECT DISTINCT instrument FROM summaries ORDER BY instrument")
+        cur = conn.execute(
+            f"SELECT DISTINCT instrument FROM summaries WHERE {visible} ORDER BY instrument",
+            visible_params,
+        )
         return [{"name": r[0]} for r in cur.fetchall()]
 
 
-def get_instruments_summary(db_path: str, min_frames: int = 1000) -> list[dict]:
+def get_instruments_summary(
+    db_path: str, min_frames: int = 1000, *, denied: frozenset[str] = frozenset()
+) -> list[dict]:
     """Return count of dates, frames, and targets for all instruments.
 
     Filters science targets to only count those with at least min_frames frames.
+    Summaries under a *denied* proposal are left out before aggregating, as in
+    :func:`get_dates`, so the totals match what the viewer can browse to.
     """
     with get_conn(db_path) as conn:
-        return _instruments_summary(conn, min_frames)
+        return _instruments_summary(conn, min_frames, denied)
 
 
-def _instruments_summary(conn: sqlite3.Connection, min_frames: int) -> list[dict]:
+def _instruments_summary(
+    conn: sqlite3.Connection, min_frames: int, denied: frozenset[str] = frozenset()
+) -> list[dict]:
+    visible, visible_params = sql_not_denied(denied)
     # Get total dates and frames per instrument
     base_stats = conn.execute(
-        """SELECT instrument, COUNT(DISTINCT obsdate), SUM(nframes)
+        f"""SELECT instrument, COUNT(DISTINCT obsdate), SUM(nframes)
            FROM summaries
-           GROUP BY instrument"""
+           WHERE {visible}
+           GROUP BY instrument""",
+        visible_params,
     ).fetchall()
     stats_map = {r[0]: (r[1] or 0, r[2] or 0) for r in base_stats}
     
@@ -1333,11 +1416,12 @@ def _instruments_summary(conn: sqlite3.Connection, min_frames: int) -> list[dict
                   AND LOWER(TRIM(object)) NOT LIKE 'bias%'
                   AND LOWER(TRIM(object)) NOT LIKE '%test%'
                   AND TRIM(object) NOT GLOB '*:*:*'
+                  AND {visible}
                 GROUP BY instrument, object
                 HAVING target_frames >= ?
             )
             GROUP BY instrument""",
-        (min_frames,)
+        (*visible_params, min_frames)
     ).fetchall()
     target_map = {r[0]: r[1] for r in target_stats}
 
@@ -2249,15 +2333,59 @@ def db_path() -> str:
 _SYNCHRONOUS = "NORMAL"
 
 
-def connect(path: str | None = None, *, timeout: float = 30.0) -> sqlite3.Connection:
+# Catalog access guard (#298). A worker on a shared (Postgres) control plane
+# runs on another host and would reach muscat.db over NFS, where SQLite's
+# POSIX byte-range locks and WAL shared memory are unsupported: a client that
+# loses its NFS state while holding one of those locks blocks every writer on
+# ut2 until the server drops that client. worker.run() forbids the catalog for
+# its lifetime, so any code path that would open it from a worker fails loudly
+# instead of silently taking NFS locks. None means access is allowed. The flag
+# is process-wide on purpose: only a standalone worker process sets it, and the
+# web process, whose threads all need the catalog, never does.
+_CATALOG_FORBIDDEN: str | None = None
+
+
+class CatalogUnavailableError(RuntimeError):
+    """Raised when a process that must not touch the catalog tries to open it."""
+
+
+def forbid_catalog(reason: str) -> None:
+    """Make every later :func:`connect` in this process raise, citing *reason*."""
+    global _CATALOG_FORBIDDEN
+    _CATALOG_FORBIDDEN = reason
+
+
+def allow_catalog() -> None:
+    """Lift :func:`forbid_catalog`."""
+    global _CATALOG_FORBIDDEN
+    _CATALOG_FORBIDDEN = None
+
+
+def catalog_allowed() -> bool:
+    """Whether this process may open the catalog (see :func:`forbid_catalog`)."""
+    return _CATALOG_FORBIDDEN is None
+
+
+def connect(
+    path: str | None = None, *, timeout: float = 30.0, readonly: bool = False
+) -> sqlite3.Connection:
     """Open a connection to the live database with the policy above applied.
 
     Prefer :func:`get_conn`, which also guarantees the connection is closed;
     this is for the few callers that manage the connection's lifetime
     themselves.
+
+    *readonly* opens the file with ``mode=ro`` and sets no pragmas, so the
+    connection can neither write nor switch the journal mode. Raises
+    :class:`CatalogUnavailableError` when this process has forbidden the
+    catalog.
     """
+    if _CATALOG_FORBIDDEN is not None:
+        raise CatalogUnavailableError(f"the SQLite catalog is not available here: {_CATALOG_FORBIDDEN}")
     if path is None:
         path = db_path()
+    if readonly:
+        return sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=timeout)
     conn = sqlite3.connect(path, timeout=timeout)
     try:
         conn.execute("PRAGMA journal_mode=WAL;")
@@ -2275,6 +2403,7 @@ def get_conn(
     *,
     timeout: float = 30.0,
     row_factory=None,
+    readonly: bool = False,
 ) -> Iterator[sqlite3.Connection]:
     """Single entry point for SQLite connections.
 
@@ -2283,8 +2412,9 @@ def get_conn(
     exception between the two — and applies the connection policy of
     :func:`connect` (busy timeout, WAL, synchronous). Schema-ensure and
     migration calls stay at the call site because they vary per table.
+    *readonly* is passed to :func:`connect`.
     """
-    conn = connect(path, timeout=timeout)
+    conn = connect(path, timeout=timeout, readonly=readonly)
     try:
         if row_factory is not None:
             conn.row_factory = row_factory
@@ -2754,16 +2884,6 @@ def save_job(
     clear_all_caches()
 
 
-def get_job_user_name(job_key: str) -> str:
-    """Return the ``user_name`` stored for *job_key*, or ``""`` if not found."""
-    path = db_path()
-    with get_conn(path) as conn:
-        row = conn.execute(
-            "SELECT user_name FROM jobs WHERE key = ?", (job_key,)
-        ).fetchone()
-    return row[0] if row else ""
-
-
 def get_persisted_jobs() -> list[dict]:
     path = db_path()
     with get_conn(path) as conn:
@@ -2794,6 +2914,33 @@ def get_active_persisted_jobs() -> list[dict]:
             """SELECT * FROM jobs
                WHERE state IN ('running', 'cancelling', 'pending')
                ORDER BY started_at DESC"""
+        )
+        columns = [d[0] for d in cur.description]
+        result = []
+        for row in cur.fetchall():
+            item = dict(zip(columns, row))
+            item["inst"] = item["instrument"]
+            item["date"] = item["obsdate"]
+            if not str(item.get("run_name") or "").strip():
+                item["run_name"] = str(item.get("run_id") or "").strip()
+            result.append(item)
+        return result
+
+
+def get_pending_persisted_jobs(type_: str) -> list[dict]:
+    """Return pending rows of *type_*, oldest-first (FIFO drain order).
+
+    Every pending-drain pass calls this, so it filters in SQL on the
+    active-state index rather than reading the whole job history.
+    """
+    path = db_path()
+    with get_conn(path) as conn:
+        _ensure_jobs_migrated(conn, path)
+        cur = conn.execute(
+            """SELECT * FROM jobs
+               WHERE state = 'pending' AND type = ?
+               ORDER BY started_at, key""",
+            (type_,),
         )
         columns = [d[0] for d in cur.description]
         result = []
@@ -2880,18 +3027,30 @@ def refresh_target_status(obj: str) -> None:
 
     Best-effort: a failed refresh (e.g. read-only DB, unknown target) is logged
     but never propagated, so it cannot break the surrounding job sync.
+
+    A process that has forbidden the catalog (a worker on a shared control
+    plane, #298) skips the refresh; the web process does it for that worker's
+    jobs (``target_refresh``), and the nightly ``build_db`` is the backstop.
+
+    The output scan runs between two short connections, with nothing open on
+    the catalog: it walks every observation date's output directories, so
+    holding a read snapshot across it would pin the WAL for as long as the
+    filesystem takes to answer.
     """
+    if not catalog_allowed():
+        return
     try:
-        with get_conn() as conn:
+        with get_conn(readonly=True) as conn:
             row = conn.execute(
                 "SELECT COALESCE(inst_dates, '') FROM targets WHERE object = ?",
                 (obj,),
             ).fetchone()
-            if row is None:
-                # No target row yet (e.g. unidentified object, or built after the
-                # last daily run). Nothing to update until the next build_db.
-                return
-            phot_status, fit_status = _aggregate_target_status(obj, row[0])
+        if row is None:
+            # No target row yet (e.g. unidentified object, or built after the
+            # last daily run). Nothing to update until the next build_db.
+            return
+        phot_status, fit_status = _aggregate_target_status(obj, row[0])
+        with get_conn() as conn:
             conn.execute(
                 "UPDATE targets SET phot_status = ?, fit_status = ? WHERE object = ?",
                 (phot_status, fit_status, obj),
@@ -3012,55 +3171,83 @@ def get_recent_chat_messages(
     limit: int = 500,
     user: str | None = None,
     addressed_only: bool = False,
+    since: float | None = None,
+    until: float | None = None,
 ) -> list[dict]:
     """Return persisted messages from the last ``days`` (oldest first), with
     reactions attached. ``limit`` caps the payload for a very busy window.
     When ``user`` is given, messages with a ``visible_to`` restriction are
     filtered to only those addressed to that user (plus all public messages).
     ``addressed_only`` (a scoped viewer, issue #202) drops the public ones
-    too, leaving only messages addressed to ``user``."""
+    too, leaving only messages addressed to ``user``. Explicit ``since`` and
+    ``until`` bounds let reconnects describe exactly which window was read."""
     path = db_path()
     window_days = CHAT_BACKFILL_DAYS if days is None else days
-    since = time.time() - window_days * 86400
+    until = time.time() if until is None else until
+    since = until - window_days * 86400 if since is None else since
     with get_conn(path, row_factory=sqlite3.Row) as conn:
         _ensure_chat_schema(conn, path)
         if user and addressed_only:
             rows = conn.execute(
-                "SELECT * FROM chat_messages WHERE created_at >= ? "
+                "SELECT * FROM chat_messages WHERE created_at >= ? AND created_at <= ? "
                 "AND visible_to = ? "
-                "ORDER BY created_at DESC LIMIT ?",
-                (since, user, limit),
+                "ORDER BY created_at DESC, id DESC LIMIT ?",
+                (since, until, user, limit),
             ).fetchall()
         elif user:
             rows = conn.execute(
-                "SELECT * FROM chat_messages WHERE created_at >= ? "
+                "SELECT * FROM chat_messages WHERE created_at >= ? AND created_at <= ? "
                 "AND (visible_to IS NULL OR visible_to = ?) "
-                "ORDER BY created_at DESC LIMIT ?",
-                (since, user, limit),
+                "ORDER BY created_at DESC, id DESC LIMIT ?",
+                (since, until, user, limit),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT * FROM chat_messages WHERE created_at >= ? "
+                "SELECT * FROM chat_messages WHERE created_at >= ? AND created_at <= ? "
                 "AND visible_to IS NULL "
-                "ORDER BY created_at DESC LIMIT ?",
-                (since, limit),
+                "ORDER BY created_at DESC, id DESC LIMIT ?",
+                (since, until, limit),
             ).fetchall()
         rows = list(reversed(rows))
         reactions = _reactions_by_message(conn, [r["id"] for r in rows])
         return [_chat_row_to_dict(r, reactions) for r in rows]
 
 
-def edit_chat_message(msg_id: int, user_name: str, new_text: str) -> dict | None:
+# Message kinds an author may edit or delete: ordinary messages and /me lines.
+# System (job-finished) messages have no human author.
+_AUTHOR_EDITABLE_KINDS = ("user", "action")
+
+
+def get_chat_message(msg_id: int) -> dict | None:
+    """Return one persisted message (with reactions), or ``None``."""
+    path = db_path()
+    with get_conn(path, row_factory=sqlite3.Row) as conn:
+        _ensure_chat_schema(conn, path)
+        row = conn.execute("SELECT * FROM chat_messages WHERE id = ?", (msg_id,)).fetchone()
+        if row is None:
+            return None
+        return _chat_row_to_dict(row, _reactions_by_message(conn, [msg_id]))
+
+
+def edit_chat_message(
+    msg_id: int, user_name: str, new_text: str, mentions: list[str] | None = None
+) -> dict | None:
     """Edit a message in place. Author-only: returns the updated message, or
-    ``None`` if the message does not exist or ``user_name`` is not its author."""
+    ``None`` if the message does not exist or ``user_name`` is not its author.
+    ``mentions`` (when given) replaces the stored mention list, so an @name
+    added or removed by the edit is reflected in highlighting."""
     path = db_path()
     edited_at = time.time()
     with get_conn(path, row_factory=sqlite3.Row) as conn:
         _ensure_chat_schema(conn, path)
+        sets, params = ["text = ?", "edited_at = ?"], [new_text, edited_at]
+        if mentions is not None:
+            sets.append("mentions = ?")
+            params.append(json.dumps(sorted(set(mentions)), ensure_ascii=True))
         cur = conn.execute(
-            "UPDATE chat_messages SET text = ?, edited_at = ? "
-            "WHERE id = ? AND user_name = ? AND kind = 'user'",
-            (new_text, edited_at, msg_id, user_name),
+            f"UPDATE chat_messages SET {', '.join(sets)} "
+            "WHERE id = ? AND user_name = ? AND kind IN (?, ?)",
+            (*params, msg_id, user_name, *_AUTHOR_EDITABLE_KINDS),
         )
         conn.commit()
         if cur.rowcount == 0:
@@ -3077,8 +3264,8 @@ def delete_chat_message(msg_id: int, user_name: str) -> bool:
     with get_conn(path) as conn:
         _ensure_chat_schema(conn, path)
         cur = conn.execute(
-            "DELETE FROM chat_messages WHERE id = ? AND user_name = ? AND kind = 'user'",
-            (msg_id, user_name),
+            "DELETE FROM chat_messages WHERE id = ? AND user_name = ? AND kind IN (?, ?)",
+            (msg_id, user_name, *_AUTHOR_EDITABLE_KINDS),
         )
         if cur.rowcount:
             conn.execute("DELETE FROM chat_reactions WHERE message_id = ?", (msg_id,))
