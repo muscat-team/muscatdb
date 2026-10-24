@@ -768,10 +768,11 @@ The current pins are:
 
 The 2026-10-18 audit below covered prose2 `6029ea87` and timer. prose2
 v3.4.0 (`3daed56b`) adds jpdeleon/prose2#16 (read-only configuration loading) and
-leaves telescope definitions unchanged; `harmonic-prod-a32fb8e3` is new. Both
-need `install` and `verify`, and the dependency records below, before rollout.
+leaves telescope definitions unchanged; `harmonic-prod-a32fb8e3` is new. Both were
+installed and verified on 2026-10-24 (see the activation record below).
 
-These retain the working baseline's Python (prose 3.10.15, timer 3.13.13) and
+These retain the working baseline's Python (prose 3.10.15, timer 3.13.13,
+harmonic 3.12.13) and
 science dependencies. Prose's one explicit dependency override is
 `matplotlib==3.8.4`: the working environment's 3.9.3 violates the current
 owner package's `matplotlib<3.9` constraint (the old editable metadata did not
@@ -784,15 +785,35 @@ installer: a later clone of a changed development environment may have different
 dependencies even at the same engine commit. Compare dependency records before
 accepting any rebuilt environment.
 
-Prepared on ut2 on 2026-10-18; **not activated** in the web app or fleet.
-Both installations pass metadata/import-location checks and `pip check` on ut2
-and ut3–ut7. The dependency records are also checked in under
-`deploy/conda/production/{prose,timer}.json`. The baseline/pinned comparisons in
-`tests/test_pinned_engines_slow.py` passed for photometry preview and full reduction
-and for timer optimize-only and seeded sampling. The real Sinistro/260624
-TIC88297141 light curve is identical (311 rows), and timer's real KIC multi-band
-smoke fit has identical posterior means. The sampling check uses only 20 tuning
-and 20 draws; it tests migration compatibility, not scientific convergence.
+**Activated on 2026-10-24** for the production web app (`:8001`) and the fleet
+(ut3–ut7), with `main` at `5220fef1`:
+
+- `deploy/engines.py install prose harmonic` provisioned `prose-prod-3daed56b` and
+  `harmonic-prod-a32fb8e3` on ut2; `timer-prod-b8428258` was reused. `verify` passes
+  for all three on ut2 and ut3–ut7, which share `/ut2/jerome/miniconda3`.
+- The dependency records are checked in under
+  `deploy/conda/production/{prose,timer,harmonic}.json`.
+- `tests/test_pinned_engines_slow.py` passed for photometry preview and full
+  reduction (the pinned run launched frozen, through the same job environment and
+  log header as production) and for timer optimize-only and seeded sampling. The
+  real Sinistro/260624 TIC88297141 light curve is identical, and timer's real KIC
+  multi-band smoke fit has identical posterior means. The sampling check uses only
+  20 tuning and 20 draws; it tests migration compatibility, not scientific
+  convergence.
+- harmonic has no slow comparison yet. A replay of the recorded TOI7504 two-planet
+  fit (`-l bc`, seed 42) against the dev env gave the same ΔBIC (−12.40), χ² equal to
+  about 1e-7, and every posterior median within 0.064 posterior SD; the remaining
+  difference is the owner's parameter order. A single planet letter without
+  `--non-transiting-outer` has no planet pair and so no TTV model; the owner's
+  commit fails it with `KeyError: 't0_<letter>'`.
+- `deploy/workers.py --profile prod up` rendered the engine selections into the
+  worker env files, and the four engine lines from `web-env` were added to
+  production's `.web-env` before the web process was restarted in `muscatdbgui`.
+  Pinned engines now report `version+git.<SHA>`.
+
+The pre-activation `.web-env` and worker env files are kept in
+`~/temp/rollout-20261024/` for the Rollback below; the dev and earlier `-prod`
+environments are untouched.
 
 **Production photometry uses a frozen effective telescope configuration.**
 With `MUSCAT_PROSE_FROZEN_CONFIG=1`, reductions and postprocessing run
