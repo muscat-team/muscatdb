@@ -332,6 +332,25 @@ def test_job_finished_explicit_owner_skips_jobs_table_lookup(chat_db, sio_harnes
     assert [kw.get("room") for _e, _p, kw in sio_harness.emits] == ["user:andrew"]
 
 
+def test_job_finished_owner_comes_from_the_job_store(chat_db, sio_harness, monkeypatch):
+    """With MUSCAT_CONTROL_PLANE=postgres the job row lives only in the job
+    store, not the SQLite jobs table; the owner must still be found there."""
+    from muscat_db import job_store
+
+    key = "photometry:sinistro/2026-07-18/HIDDENTGT"
+
+    class _Store:
+        def get(self, k):
+            return {"key": key, "user_name": "andrew"} if k == key else None
+
+    monkeypatch.setattr(job_store, "_STORE", _Store())
+    monkeypatch.setattr(chat, "_valid_loop", lambda: object())
+    monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", lambda coro, _loop: asyncio.run(coro))
+    chat.on_job_finished(job_key=key, type_="photometry", target="HIDDENTGT", state="done")
+    assert [kw.get("room") for _e, _p, kw in sio_harness.emits] == ["user:andrew"]
+    assert [m["visible_to"] for m in get_recent_chat_messages(days=7, user="andrew")] == ["andrew"]
+
+
 def test_archive_notify_reports_frames_owner_and_no_placeholders(monkeypatch):
     from muscat_db import jobs, lco
 

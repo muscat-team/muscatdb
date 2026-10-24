@@ -33,6 +33,7 @@ from .auth import (
     resolve_forwarded_identity,
 )
 from . import database as db
+from .job_store import get_job_store
 from .web import sio
 # python-socketio forwards the reason to the client only for its own refusal
 # class; the builtin ConnectionRefusedError reaches the browser as a generic
@@ -653,10 +654,13 @@ async def _run_agent(sid: str, user: str | None, question: str) -> None:
 
 # ----- job-finished system messages ----------------------------------------
 def _job_user_name(job_key: str) -> str | None:
-    """Look up the user_name stored for a job key, or None if unknown."""
+    """Look up the user_name stored for a job key, or None if unknown.
+
+    Reads through the job store rather than the SQLite jobs table, so the
+    owner is found under MUSCAT_CONTROL_PLANE=postgres too."""
     try:
-        row = db.get_job_user_name(job_key)
-        return row or None
+        row = get_job_store().get(job_key)
+        return (row or {}).get("user_name") or None
     except Exception:
         logger.debug("failed to look up job user_name for %s", job_key, exc_info=True)
         return None

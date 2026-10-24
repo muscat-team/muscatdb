@@ -2820,16 +2820,6 @@ def save_job(
     clear_all_caches()
 
 
-def get_job_user_name(job_key: str) -> str:
-    """Return the ``user_name`` stored for *job_key*, or ``""`` if not found."""
-    path = db_path()
-    with get_conn(path) as conn:
-        row = conn.execute(
-            "SELECT user_name FROM jobs WHERE key = ?", (job_key,)
-        ).fetchone()
-    return row[0] if row else ""
-
-
 def get_persisted_jobs() -> list[dict]:
     path = db_path()
     with get_conn(path) as conn:
