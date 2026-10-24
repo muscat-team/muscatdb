@@ -24,7 +24,7 @@ import sqlite3
 import pytest
 from fastapi.testclient import TestClient
 
-from muscat_db import web
+from muscat_db import access, web
 from muscat_db.coord import CoordRepr
 from muscat_db.database import SCHEMA, _insert_summary_rows, _populate_targets, _summary_rows
 from tests.test_access_control import (
@@ -65,13 +65,10 @@ def _build_db(db_path: str, *, restrict: bool = True) -> None:
     )
     _insert_summary_rows(conn, _summary_rows(conn))
     _populate_targets(conn)
-    if restrict:
-        conn.execute(
-            "INSERT INTO restricted_proposals (proposal_id) VALUES (?)",
-            (_RESTRICTED.lower(),),
-        )
     conn.commit()
     conn.close()
+    if restrict:
+        access.restrict(db_path, _RESTRICTED.lower())
 
 
 @pytest.fixture(autouse=True)
@@ -124,11 +121,7 @@ def test_instrument_page_counts_only_visible_frames_on_mixed_night(db):
 
 def test_admin_and_granted_user_see_every_night(client, db):
     _set_admin(db, "root")
-    with sqlite3.connect(db) as conn:
-        conn.execute(
-            "INSERT INTO user_proposal_access (username, proposal_id) VALUES ('bob', ?)",
-            (_RESTRICTED,),
-        )
+    access.grant(db, "bob", _RESTRICTED, "test")
     for user in ("root", "bob"):
         assert 'href="/sinistro/260102"' in _get(client, "/sinistro", user=user).text
 

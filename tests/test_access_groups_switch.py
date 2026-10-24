@@ -1,10 +1,11 @@
-"""Call sites read the group model once it is seeded (issue #228, rollout step 2).
+"""The group model is the only source of visibility (issue #228).
 
-Before ``access groups-seed`` has created the ``everyone`` group, the #144/#202
-blocklist still decides. After it, the groups decide, allow-only: a proposal no
-group was granted is hidden from every non-admin, including one ingested after
-the seed. The blocklist CLI writes both models, so ``restrict``, ``unrestrict``,
-``grant``, ``revoke`` and ``scope`` keep working on a seeded database.
+The groups decide, allow-only: a proposal no group was granted is hidden from
+every non-admin, including one ingested after the seed. ``restrict``,
+``unrestrict``, ``grant``, ``revoke`` and ``scope`` write the groups only, and
+the first of them seeds the groups on a fresh database. The #144/#202 blocklist
+tables are read only by ``access groups-seed``, the migration; a database that
+still holds rules there but has no groups fails closed.
 """
 
 from __future__ import annotations
@@ -147,10 +148,66 @@ def client(db, monkeypatch):
 # ── which model decides ─────────────────────────────────────────────────
 
 
-def test_unseeded_database_still_uses_the_blocklist(db):
+def _bare_db(tmp_path) -> str:
+    """The fixture database with no access rule written yet."""
+    path = str(tmp_path / "bare.db")
+    conn = sqlite3.connect(path)
+    conn.create_aggregate("coord_repr", 2, CoordRepr)
+    conn.executescript(SCHEMA)
+    _insert_frames(conn, [
+        ("sinistro", "260101", "SIN_2601010001", "OPENTGT", 1.0, "OPEN-001"),
+        ("qhy600", "260104", "QHY_2601040001", "HIDDENTGT", 4.0, "KEY-SECRET"),
+    ])
+    _rebuild_summaries(conn)
+    conn.executemany(
+        "INSERT INTO users (username, display_name, is_admin) VALUES (?, ?, ?)",
+        [("alice", "alice", 0), ("boss", "boss", 1)],
+    )
+    conn.commit()
+    conn.close()
+    return path
+
+
+def test_the_first_access_write_seeds_the_groups(db):
+    with sqlite3.connect(db) as conn:
+        assert access_groups.is_active(conn)
     denied = access.denied_proposal_ids_for(db, "alice")
-    assert not isinstance(denied, ScopedDenied)
-    assert denied == frozenset({"KEY-SECRET"})
+    assert isinstance(denied, ScopedDenied)
+    assert ("qhy600", "260104", "HIDDENTGT", "KEY-SECRET") not in _visible(db, "alice")
+    assert ("sinistro", "260101", "OPENTGT", "OPEN-001") in _visible(db, "alice")
+
+
+def test_a_database_without_any_rule_hides_nothing(tmp_path):
+    path = _bare_db(tmp_path)
+    assert access.denied_proposal_ids_for(path, "alice") == frozenset()
+    assert len(_visible(path, None)) == 2
+
+
+@pytest.mark.parametrize(
+    "legacy_sql",
+    [
+        "INSERT INTO restricted_proposals (proposal_id) VALUES ('KEY-SECRET')",
+        "INSERT INTO user_proposal_access (username, proposal_id) VALUES ('alice', 'KEY-SECRET')",
+        "UPDATE users SET scoped = 1 WHERE username = 'alice'",
+    ],
+)
+def test_an_unmigrated_blocklist_database_fails_closed(tmp_path, legacy_sql):
+    # Its rules are no longer read, so it must not fall open to "nothing is
+    # restricted" before `access groups-seed` migrates them.
+    path = _bare_db(tmp_path)
+    with sqlite3.connect(path) as conn:
+        conn.execute(legacy_sql)
+    assert _visible(path, "alice") == set()
+    assert _visible_sql(path, None) == set()
+    assert len(_visible(path, "boss")) == 2
+
+
+def test_groups_seed_migrates_an_unmigrated_blocklist_database(tmp_path):
+    path = _bare_db(tmp_path)
+    with sqlite3.connect(path) as conn:
+        conn.execute("INSERT INTO restricted_proposals (proposal_id) VALUES ('KEY-SECRET')")
+    access_groups.seed_from_blocklist(path)
+    assert _visible(path, "alice") == {("sinistro", "260101", "OPENTGT", "OPEN-001")}
 
 
 def test_seeded_database_decides_from_the_groups(seeded):
@@ -161,7 +218,9 @@ def test_seeded_database_decides_from_the_groups(seeded):
         assert _visible_sql(seeded, user) == expected, user
 
 
-def test_seeding_changes_nothing_anyone_sees(db):
+def test_reseeding_changes_nothing_anyone_sees(db):
+    # A proposal restricted through the groups is not in the legacy table, so
+    # a reseed must read the revoke history to keep it hidden.
     before = {u: _visible(db, u) for u in ("alice", "fukui", "boss", None)}
     access_groups.seed_from_blocklist(db)
     after = {u: _visible(db, u) for u in ("alice", "fukui", "boss", None)}
@@ -198,29 +257,27 @@ def test_unrestrict_shares_a_new_proposal_with_everyone(seeded):
     assert row in _visible_sql(seeded, None)
 
 
-def test_group_check_reports_a_proposal_awaiting_a_grant(seeded):
-    assert access_groups.parity(seeded) == []
-    _ingest_new_proposal(seeded)
-    mismatches = access_groups.parity(seeded)
-    assert mismatches
-    assert {m["proposal_id"] for m in mismatches} == {_NEW}
-    assert all(m["blocklist"] and not m["groups"] for m in mismatches)
+def test_access_writers_leave_the_legacy_tables_untouched(seeded):
+    access.restrict(seeded, "OPEN-001")
+    access.grant(seeded, "alice", "OPEN-001", "test")
+    access.set_scoped(seeded, "alice", True)
+    with sqlite3.connect(seeded) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM restricted_proposals").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM user_proposal_access").fetchone()[0] == 0
 
 
-# ── the blocklist CLI writes both models ────────────────────────────────
+# ── the access CLI writes the groups ────────────────────────────────────
 
 
 def test_restrict_on_a_seeded_database_hides_the_proposal(seeded):
     access.restrict(seeded, "OPEN-001")
     assert not any(k[3] == "OPEN-001" for k in _visible(seeded, "alice"))
     assert not any(k[3] == "OPEN-001" for k in _visible_sql(seeded, "alice"))
-    assert access_groups.parity(seeded) == []
 
 
 def test_unrestrict_restores_a_restricted_proposal(seeded):
     assert access.unrestrict(seeded, "KEY-SECRET") is True
     assert ("qhy600", "260104", "HIDDENTGT", "KEY-SECRET") in _visible(seeded, "alice")
-    assert access_groups.parity(seeded) == []
 
 
 def test_unrestrict_is_false_when_nothing_changes(seeded):
@@ -232,20 +289,16 @@ def test_grant_and_revoke_on_a_seeded_database(seeded):
     assert row not in _visible(seeded, "alice")
     access.grant(seeded, "alice", "KEY-SECRET", "test")
     assert row in _visible(seeded, "alice")
-    assert access_groups.parity(seeded) == []
     access.revoke(seeded, "alice", "KEY-SECRET")
     assert row not in _visible(seeded, "alice")
-    assert access_groups.parity(seeded) == []
 
 
 def test_scope_on_a_seeded_database_limits_the_user_to_their_grants(seeded):
     access.grant(seeded, "alice", "KEY-SECRET", "test")
     access.set_scoped(seeded, "alice", True)
     assert {k[3] for k in _visible(seeded, "alice")} == {"KEY-SECRET"}
-    assert access_groups.parity(seeded) == []
     access.set_scoped(seeded, "alice", False)
     assert "OPEN-001" in {k[3] for k in _visible(seeded, "alice")}
-    assert access_groups.parity(seeded) == []
 
 
 def test_restrict_keeps_a_users_direct_grant(seeded):

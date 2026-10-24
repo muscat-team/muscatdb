@@ -1,9 +1,10 @@
-"""Allow-only groups and grants (issue #228, rollout step 1).
+"""Allow-only groups and grants (issue #228).
 
-The group model is not wired into the web app yet; what has to hold is that,
-seeded from the #144/#202 blocklist, it gives every viewer exactly what the
-blocklist does (``parity``), and that its evaluator agrees with itself between
-Python (``frame_visible``) and SQL (``sql_visible``).
+The fixture is a database from before the groups, with its rules in the
+#144/#202 blocklist tables. What has to hold is that the migration
+(``seed_from_blocklist``) gives every viewer exactly what the blocklist did,
+and that the evaluator agrees with itself between Python (``frame_visible``)
+and SQL (``sql_visible``).
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import sqlite3
 import pytest
 from typer.testing import CliRunner
 
-from muscat_db import access, access_groups
+from muscat_db import access_groups
 from muscat_db.access_groups import Access
 from muscat_db.cli import app as cli_app
 from muscat_db.database import _APP_OWNED_TABLES, _apply_schema
@@ -50,11 +51,15 @@ def db(tmp_path):
             "INSERT INTO users (username, display_name, is_admin, scoped) VALUES (?, ?, ?, ?)",
             (name, name, admin, scoped),
         )
+    # A database from before the groups: its rules live in the blocklist
+    # tables, which only the migration (`seed_from_blocklist`) reads.
+    conn.execute("INSERT INTO restricted_proposals (proposal_id) VALUES ('key-secret')")
+    conn.executemany(
+        "INSERT INTO user_proposal_access (username, proposal_id) VALUES (?, ?)",
+        [("fukui", "KEY-SECRET"), ("andrew", "OPEN-001")],
+    )
     conn.commit()
     conn.close()
-    access.restrict(path, "key-secret", "test")
-    access.grant(path, "fukui", "KEY-SECRET", "test")
-    access.grant(path, "andrew", "OPEN-001", "test")
     return path
 
 
@@ -63,14 +68,12 @@ def _visible(db, user, normalize=None):
     return {r for r in ROWS if acc.frame_visible(*r)}
 
 
-def test_unseeded_groups_grant_nothing_so_parity_flags_it(db):
+def test_unseeded_groups_grant_nothing(db):
     assert _visible(db, "alice") == set()
-    assert access_groups.parity(db)
 
 
-def test_seeded_groups_match_the_blocklist_for_every_viewer(db):
+def test_seeding_gives_every_viewer_what_the_blocklist_did(db):
     access_groups.seed_from_blocklist(db)
-    assert access_groups.parity(db) == []
     # spot checks of the shapes that matter
     assert ("sinistro", "260103", "MIXEDTGT", "KEY-SECRET") not in _visible(db, "alice")
     assert ("sinistro", "260103", "MIXEDTGT", "KEY-SECRET") in _visible(db, "fukui")
@@ -101,9 +104,11 @@ def test_a_proposal_ingested_after_seeding_is_hidden_until_reseeded(db):
             "INSERT INTO summaries (instrument, obsdate, ccd, object, proposal_id) "
             "VALUES ('sinistro', '260201', 0, 'NEWTGT', 'NEW-003')"
         )
-    assert access_groups.parity(db)  # allow-only default, reported rather than leaked
+    new = ("sinistro", "260201", "NEWTGT", "NEW-003")
+    acc = access_groups.load_access(db, "alice")
+    assert not acc.frame_visible(*new)  # allow-only default: hidden, not leaked
     access_groups.seed_from_blocklist(db)
-    assert access_groups.parity(db) == []
+    assert access_groups.load_access(db, "alice").frame_visible(*new)
 
 
 def test_lco_frames_without_propid_stay_visible(db):
@@ -114,7 +119,7 @@ def test_lco_frames_without_propid_stay_visible(db):
         )
     report = access_groups.seed_from_blocklist(db)
     assert report.blank_lco_instruments == ["sinistro"]
-    assert access_groups.parity(db) == []
+    assert access_groups.load_access(db, "alice").frame_visible("sinistro", "260301", "BLANKTGT", "")
     assert ("sinistro", "260301", "BLANKTGT", "") not in _visible(db, "andrew")
 
 
@@ -228,12 +233,11 @@ def test_grant_tables_survive_a_rebuild():
         assert table in _APP_OWNED_TABLES
 
 
-def test_cli_seed_then_check(db, monkeypatch):
+def test_cli_seed_migrates_the_blocklist(db, monkeypatch):
     monkeypatch.setenv("MUSCAT_DB_PATH", db)
     runner = CliRunner()
-    assert runner.invoke(cli_app, ["access", "groups-check"]).exit_code == 1
     seeded = runner.invoke(cli_app, ["access", "groups-seed"])
     assert seeded.exit_code == 0, seeded.output
-    ok = runner.invoke(cli_app, ["access", "groups-check"])
-    assert ok.exit_code == 0, ok.output
-    assert "agree" in ok.output
+    assert "user:fukui  proposal_id=KEY-SECRET" in seeded.output
+    assert ("sinistro", "260103", "MIXEDTGT", "KEY-SECRET") in _visible(db, "fukui")
+    assert ("sinistro", "260103", "MIXEDTGT", "KEY-SECRET") not in _visible(db, "alice")

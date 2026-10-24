@@ -41,8 +41,8 @@ uv run muscat-db htpasswd list
 # Make an existing user admin without touching their password
 uv run muscat-db htpasswd promote <user>
 
-# Restrict an LCO proposal's observations and grant users access (issue #144)
-uv run muscat-db access restrict <proposal_id> [--description "..."]
+# Restrict an LCO proposal's observations and grant users access (issues #144, #228)
+uv run muscat-db access restrict <proposal_id>     # revokes the proposal's `everyone` grant
 uv run muscat-db access unrestrict <proposal_id>   # also shares a newly ingested proposal (groups are allow-only)
 uv run muscat-db access grant <user> <proposal_id>
 uv run muscat-db access revoke <user> <proposal_id>
@@ -189,7 +189,7 @@ reader until the data step has run on production:
 | Writer (released first) | Data step on the host | Reader (released after) |
 |---|---|---|
 | Product records written per run (#208, #245) | `muscat-db backfill-products` | Visibility read from `_product.json` |
-| Group/grant tables (#228 step 1, #247) | `muscat-db access groups-seed`, then `access groups-check` must exit 0 | Call sites switched from the blocklist to groups (#228 step 2) |
+| Group/grant tables (#228 step 1, #247) | `muscat-db access groups-seed` | Call sites switched from the blocklist to groups (#228 step 2); blocklist retired (#228) |
 
 `backfill-products` first walks the `jobs` table, then the run directories on disk
 (`prose/<inst>/<date>/_runs/<target>/<run>` and `timer/<inst>/<date>/<target>[/<run>]`),
@@ -199,15 +199,19 @@ left without one. Check with a second `--dry-run`: it must report `would write 0
 record(s)`. Transit fits found on disk take their light curves from `fit.yaml`; an
 unreadable `fit.yaml` or a missing light curve leaves the fit undetermined.
 
-`groups-check` compares what the group model and the blocklist let every viewer
-see. Since #228 step 2 the groups decide on a seeded database and are allow-only:
-a proposal ingested after the seed is hidden from every non-admin until an admin
-runs `access unrestrict <proposal_id>` (everyone) or `access grant <user>
-<proposal_id>` (one user). `restrict`, `unrestrict`, `grant`, `revoke` and `scope`
-write both models, so `groups-check` stays at exit 0 except for such new
-proposals, which it lists. Its nonzero exit is then a to-do list, not a fault.
-Do not rerun `groups-seed` to share them: it would grant `everyone` every new
-proposal at once, so it refuses on a seeded database without `--force`.
+The access groups are the only source of visibility, and they are allow-only:
+a proposal ingested after the seed is hidden from every non-admin, and from the
+published static site, until an admin runs `access unrestrict <proposal_id>`
+(everyone) or `access grant <user> <proposal_id>` (one user). `restrict`,
+`unrestrict`, `grant`, `revoke` and `scope` write the groups only; the first of
+them on a fresh database seeds the groups. `access list` shows what `everyone`
+may not see. The old blocklist tables (`restricted_proposals`,
+`user_proposal_access`) are no longer read or written, except by `groups-seed`,
+the one-time migration of a database from before the groups; such a database
+fails closed for non-admins until it runs. The tables are dropped in a later
+release. Do not rerun `groups-seed` to share new proposals: it would grant
+`everyone` every new proposal at once, so it refuses on a seeded database
+without `--force` (a forced reseed keeps every proposal `everyone` has lost).
 
 The files under `/etc/nginx/sites-available/` are root-owned copies, not links to
 `deploy/`. A change to `deploy/nginx*.conf` does not reach nginx on a deploy: diff
