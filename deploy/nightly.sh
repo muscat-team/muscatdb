@@ -9,7 +9,9 @@
 # chain, but the failure is now reported with the step name and the tail of
 # its log instead of leaving only a traceback in logs/ and a stale
 # `last_build_at`. A refused build (the integrity gate, #182) exits non-zero
-# and is reported the same way.
+# and is reported the same way. The catalog download is the exception: it
+# alerts but does not stop the chain, because a stale catalog should not cost
+# the night's ingest (download_catalogs.sh keeps the previous files).
 #
 # `check` is the second, independent signal: a cron entry that never fires
 # produces no failure to report. Run it some hours after `run`.
@@ -45,9 +47,21 @@ $(tail -n 15 "$log")"
   fi
 }
 
+# warn_step <name> <log> <command...>: like step, but a failure only alerts.
+warn_step() {
+  local name="$1" log="$2"
+  shift 2
+  "$@" >> "$log" 2>&1
+  local code=$?
+  if [ "$code" -ne 0 ]; then
+    alert ":warning: muscat-db nightly: ${name} failed (exit ${code}) on $(hostname); kept the previous catalogs and continued. Last lines of ${log}:
+$(tail -n 15 "$log")"
+  fi
+}
+
 case "$MODE" in
   run)
-    step download-catalogs logs/download_catalogs.log bash scripts/download_catalogs.sh
+    warn_step download-catalogs logs/download_catalogs.log bash scripts/download_catalogs.sh
     step scan-yesterday logs/scan.log "$UV" run muscat-db scan-yesterday
     # A leaked-pages snapshot is accepted so the build runs, but the pages may
     # hide lost rows: say so out loud instead of leaving it in the log.
