@@ -634,12 +634,14 @@ section](../README.md#cron-daily) of the README), but that override never
 covered manual CLI runs or the `muscatdbgui` session, which only read `.env`.
 The cron now runs from the **production checkout** (`$HOME/deploy/main/app`),
 not the dev tree, so it has no dependency on a dev branch switch (see issue
-#26): it does the nightly prod `scan-yesterday` + `build-db`, then reseeds
-`muscat_test.db` from prod via SQLite's backup API and runs an isolated staging
-`scan-yesterday` against staging's own `MUSCAT_OBSLOG_DIR`. The README's [Cron
-section](../README.md#cron-daily) gives the generic, host-agnostic three-step
-form for anyone else deploying this repo; the literal line actually installed
-on this host, staging refresh included, is:
+#26): it runs `deploy/nightly.sh run` (catalogs, prod `scan-yesterday`,
+`build-db`, control-plane backup), then reseeds `muscat_test.db` from prod via
+SQLite's backup API and runs an isolated staging `scan-yesterday` against
+staging's own `MUSCAT_OBSLOG_DIR`. A failed catalog download does not stop that
+chain: `nightly.sh run` posts it as a warning and still exits 0. The README's
+[Cron section](../README.md#cron-daily) gives the generic, host-agnostic form
+for anyone else deploying this repo; the literal nightly entries installed on
+this host, staging refresh included, are (`crontab -l`, 2026-10-25):
 
 ```
 MUSCAT_OBSLOG_DIR=/ut2/muscat/obslog
@@ -647,7 +649,8 @@ MUSCATDB_ROOT=/ut2/jerome/deploy/main/app
 MUSCAT_TEST_ROOT=/ut2/jerome/deploy/test/app
 MUSCAT_TEST_DB=/ut2/jerome/deploy/test/muscat_test.db
 MUSCAT_TEST_OBSLOG_DIR=/ut2/jerome/deploy/test/obslog
-30 17 * * * cd $MUSCATDB_ROOT && bash scripts/download_catalogs.sh >> $MUSCATDB_ROOT/logs/download_catalogs.log 2>&1 && /ut2/jerome/.local/bin/uv run muscat-db scan-yesterday >> $MUSCATDB_ROOT/logs/scan.log 2>&1 && /ut2/jerome/.local/bin/uv run muscat-db build-db >> $MUSCATDB_ROOT/logs/build-db.log 2>&1 && /usr/bin/python3 -c "import sqlite3; s=sqlite3.connect('file:/ut2/jerome/github/research/project/muscat-db/muscat.db?mode=ro',uri=True); d=sqlite3.connect('$MUSCAT_TEST_DB'); s.backup(d); d.close(); s.close()" >> $MUSCAT_TEST_ROOT/logs/staging-refresh.log 2>&1 && cd $MUSCAT_TEST_ROOT && MUSCAT_OBSLOG_DIR=$MUSCAT_TEST_OBSLOG_DIR /ut2/jerome/.local/bin/uv run muscat-db scan-yesterday >> $MUSCAT_TEST_ROOT/logs/scan.log 2>&1
+30 17 * * * cd $MUSCATDB_ROOT && UV_BIN=/ut2/jerome/.local/bin/uv bash deploy/nightly.sh run && /usr/bin/python3 -c "import sqlite3; s=sqlite3.connect('file:/ut2/jerome/github/research/project/muscat-db/muscat.db?mode=ro',uri=True); d=sqlite3.connect('$MUSCAT_TEST_DB'); s.backup(d); d.close(); s.close()" >> $MUSCAT_TEST_ROOT/logs/staging-refresh.log 2>&1 && cd $MUSCAT_TEST_ROOT && MUSCAT_OBSLOG_DIR=$MUSCAT_TEST_OBSLOG_DIR /ut2/jerome/.local/bin/uv run muscat-db scan-yesterday >> $MUSCAT_TEST_ROOT/logs/scan.log 2>&1
+30 21 * * * cd $MUSCATDB_ROOT && UV_BIN=/ut2/jerome/.local/bin/uv MAX_BUILD_AGE_HOURS=24 bash deploy/nightly.sh check
 ```
 
 `cronjob.txt` itself is not tracked (it was a root-level file that only ever
