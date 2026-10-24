@@ -216,7 +216,7 @@ def test_transit_fit_records_each_selected_lightcurve(db, tmp_path):
 def _ttv_options(**kw):
     opts = {
         "csv_content": "planet,epoch,tc,tc_unc\n0,0,2459000.1,0.001\n",
-        "ini_content": "[INIT]\n", "planet_letters": "b",
+        "ini_content": "[INIT]\na_bc = 0.001\n", "planet_letters": "bc",
     }
     opts.update(kw)
     return opts
