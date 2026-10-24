@@ -1224,6 +1224,16 @@ def get_job_store() -> DatabaseJobStore:
     return _STORE  # type: ignore[return-value]
 
 
+def uses_shared_control_plane() -> bool:
+    """Whether jobs live in Postgres, shared across hosts, not in ``muscat.db``.
+
+    Only then can a worker run on a host other than ut2, so only then must it
+    stay off the SQLite catalog (#298). On the SQLite control plane the jobs
+    table *is* in the catalog, and a worker has to open it.
+    """
+    return isinstance(get_job_store(), PostgresJobStore)
+
+
 def set_job_store(store) -> None:
     """Install a different job store implementation (Postgres backend, test double)."""
     global _STORE

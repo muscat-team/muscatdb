@@ -579,6 +579,28 @@ since boot, so a hardware fault is not indicated. Look for what interrupts a
 write: a killed process, a long-running writer during a backup, or several
 servers on one file.
 
+The likeliest cause is NFS (#298). Workers on ut3–ut7 opened the catalog over
+the `/mnt_ut2` mount, which SQLite does not support: its POSIX byte-range locks
+and WAL shared memory only work between processes on one host. On 2026-10-23
+page 31 (`idx_lco_observation_due`) was zeroed overnight. That afternoon, and
+again overnight into 2026-10-24, ut6's NFS client lost its state while holding a
+SQLite lock on `muscat.db`. Each time nfsd kept the lock on ut6's behalf, and
+every writer on ut2 failed with `database is locked`, for 2 h 15 m the first time
+and 8 h 16 m the second. Both ended when ut2 expired ut6's client state:
+
+```
+sudo sh -c 'for c in /proc/fs/nfsd/clients/*; do grep -q "<client IP>" $c/info && echo expire > $c/ctl; done'
+```
+
+Since #298 a worker on the Postgres control plane cannot open the catalog
+(`database.forbid_catalog`, set by `worker.run`). The web process on ut2
+refreshes target status for jobs workers finish, and a queued row carries the
+frame inputs and running cap the drain needs. A worker job that finishes while
+the web process is down, or within one reconciliation pass of being queued,
+keeps its old Targets-page status until the nightly `build-db`. A row queued
+before #298 deployed launches without a product record; run `muscat-db
+backfill-products` to write it.
+
 ## Shared filesystem
 
 The **linchpin assumption** for multi-host workers: `/ut2` and everything under it resolves identically on every host (the §12 shared-mount invariant).

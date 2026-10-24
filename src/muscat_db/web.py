@@ -212,7 +212,8 @@ from muscat_db.database import (
     get_targets_for_tag as _get_targets_for_tag,
     get_tags_for_targets,
 )
-from muscat_db.job_store import get_job_store, notify_enabled, set_owner, wait_for_work_or_sleep
+from muscat_db.job_store import get_job_store, notify_enabled, set_owner, uses_shared_control_plane, wait_for_work_or_sleep
+from muscat_db.target_refresh import FinishedJobWatcher, refresh_worker_finished_targets
 from muscat_db.cache import LRUCache
 from muscat_db.instruments import INSTRUMENTS
 
@@ -247,12 +248,19 @@ STATIC_DIR = HERE / "static"
 MUSCAT2_HTML_DIR = pathlib.Path(os.environ.get("MUSCAT2_HTML_DIR", "/ut2/muscat/html"))
 
 
+_FINISHED_JOB_WATCHER = FinishedJobWatcher()
+
+
 def _reconcile_all_jobs() -> None:
     """Advance every in-process pipeline from one server-owned cadence."""
     phot.sync_jobs()
     fit.sync_jobs()
     ttv.sync_jobs()
     _lco_archive_download_rows()
+    # Workers on a shared control plane leave target status to this process
+    # (#298); on SQLite they refresh it themselves.
+    if uses_shared_control_plane():
+        refresh_worker_finished_targets(_FINISHED_JOB_WATCHER, get_job_store())
 
 
 async def _job_reconciliation_loop() -> None:

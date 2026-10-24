@@ -21,7 +21,7 @@ import sqlite3
 
 import pytest
 
-from muscat_db import database, job_limits
+from muscat_db import database, job_limits, job_store
 from muscat_db import photometry as phot
 from muscat_db import transit_fit as fit
 from muscat_db import ttv_fit as ttv
@@ -220,3 +220,63 @@ def test_drain_does_not_launch_a_row_that_is_no_longer_pending(drain, sync, type
     assert len(spy.claims) == 1
     assert launched == []
     assert _states(type_) == ["done"]
+
+
+# -- a worker on a shared control plane (#298) --------------------------------
+
+
+class _CatalogBypass:
+    """Lets the job store's own calls through the catalog guard.
+
+    On production the jobs live in Postgres, so a worker's store never opens
+    ``muscat.db``; here the store is SQLite and has to. Every other catalog
+    access from the drain still meets the guard.
+    """
+
+    def __init__(self, store):
+        self._store = store
+
+    def __getattr__(self, name):
+        attr = getattr(self._store, name)
+        if not callable(attr):
+            return attr
+
+        def call(*args, **kwargs):
+            saved = database._CATALOG_FORBIDDEN
+            database._CATALOG_FORBIDDEN = None
+            try:
+                return attr(*args, **kwargs)
+            finally:
+                database._CATALOG_FORBIDDEN = saved
+
+        return call
+
+
+_MODULES = {"photometry": phot, "transit_fit": fit, "ttv_fit": ttv}
+
+
+@pytest.mark.parametrize(("drain", "sync", "type_"), _DRAINS)
+def test_worker_drain_claims_with_the_cap_the_row_carries_without_the_catalog(
+    drain, sync, type_, request, launched, monkeypatch
+):
+    """A worker drains with the running cap stored on the row at enqueue, so it
+    never reads the users table over NFS (#298)."""
+    spy = request.getfixturevalue(drain)
+    [row_key] = _pending_keys(type_)
+    with database.get_conn(database.db_path()) as conn:
+        params = json.loads(conn.execute("SELECT params FROM jobs WHERE key = ?", (row_key,)).fetchone()[0])
+        params[job_limits.RUNNING_CAP_PARAM] = 3
+        conn.execute("UPDATE jobs SET params = ? WHERE key = ?", (json.dumps(params), row_key))
+        conn.commit()
+    monkeypatch.setattr(_MODULES[type_], "get_job_store", lambda: _CatalogBypass(spy))
+
+    job_store.set_owner("worker")
+    database.forbid_catalog("worker on a shared control plane")
+    try:
+        sync()
+    finally:
+        database.allow_catalog()
+        job_store.set_owner("web")
+
+    assert spy.claims == [{"user_name": USER, "max_user_slots": 3, "pending_key": row_key}]
+    assert len(launched) == 1

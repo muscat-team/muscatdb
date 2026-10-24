@@ -2315,15 +2315,59 @@ def db_path() -> str:
 _SYNCHRONOUS = "NORMAL"
 
 
-def connect(path: str | None = None, *, timeout: float = 30.0) -> sqlite3.Connection:
+# Catalog access guard (#298). A worker on a shared (Postgres) control plane
+# runs on another host and would reach muscat.db over NFS, where SQLite's
+# POSIX byte-range locks and WAL shared memory are unsupported: a client that
+# loses its NFS state while holding one of those locks blocks every writer on
+# ut2 until the server drops that client. worker.run() forbids the catalog for
+# its lifetime, so any code path that would open it from a worker fails loudly
+# instead of silently taking NFS locks. None means access is allowed. The flag
+# is process-wide on purpose: only a standalone worker process sets it, and the
+# web process, whose threads all need the catalog, never does.
+_CATALOG_FORBIDDEN: str | None = None
+
+
+class CatalogUnavailableError(RuntimeError):
+    """Raised when a process that must not touch the catalog tries to open it."""
+
+
+def forbid_catalog(reason: str) -> None:
+    """Make every later :func:`connect` in this process raise, citing *reason*."""
+    global _CATALOG_FORBIDDEN
+    _CATALOG_FORBIDDEN = reason
+
+
+def allow_catalog() -> None:
+    """Lift :func:`forbid_catalog`."""
+    global _CATALOG_FORBIDDEN
+    _CATALOG_FORBIDDEN = None
+
+
+def catalog_allowed() -> bool:
+    """Whether this process may open the catalog (see :func:`forbid_catalog`)."""
+    return _CATALOG_FORBIDDEN is None
+
+
+def connect(
+    path: str | None = None, *, timeout: float = 30.0, readonly: bool = False
+) -> sqlite3.Connection:
     """Open a connection to the live database with the policy above applied.
 
     Prefer :func:`get_conn`, which also guarantees the connection is closed;
     this is for the few callers that manage the connection's lifetime
     themselves.
+
+    *readonly* opens the file with ``mode=ro`` and sets no pragmas, so the
+    connection can neither write nor switch the journal mode. Raises
+    :class:`CatalogUnavailableError` when this process has forbidden the
+    catalog.
     """
+    if _CATALOG_FORBIDDEN is not None:
+        raise CatalogUnavailableError(f"the SQLite catalog is not available here: {_CATALOG_FORBIDDEN}")
     if path is None:
         path = db_path()
+    if readonly:
+        return sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=timeout)
     conn = sqlite3.connect(path, timeout=timeout)
     try:
         conn.execute("PRAGMA journal_mode=WAL;")
@@ -2341,6 +2385,7 @@ def get_conn(
     *,
     timeout: float = 30.0,
     row_factory=None,
+    readonly: bool = False,
 ) -> Iterator[sqlite3.Connection]:
     """Single entry point for SQLite connections.
 
@@ -2349,8 +2394,9 @@ def get_conn(
     exception between the two — and applies the connection policy of
     :func:`connect` (busy timeout, WAL, synchronous). Schema-ensure and
     migration calls stay at the call site because they vary per table.
+    *readonly* is passed to :func:`connect`.
     """
-    conn = connect(path, timeout=timeout)
+    conn = connect(path, timeout=timeout, readonly=readonly)
     try:
         if row_factory is not None:
             conn.row_factory = row_factory
@@ -2973,18 +3019,30 @@ def refresh_target_status(obj: str) -> None:
 
     Best-effort: a failed refresh (e.g. read-only DB, unknown target) is logged
     but never propagated, so it cannot break the surrounding job sync.
+
+    A process that has forbidden the catalog (a worker on a shared control
+    plane, #298) skips the refresh; the web process does it for that worker's
+    jobs (``target_refresh``), and the nightly ``build_db`` is the backstop.
+
+    The output scan runs between two short connections, with nothing open on
+    the catalog: it walks every observation date's output directories, so
+    holding a read snapshot across it would pin the WAL for as long as the
+    filesystem takes to answer.
     """
+    if not catalog_allowed():
+        return
     try:
-        with get_conn() as conn:
+        with get_conn(readonly=True) as conn:
             row = conn.execute(
                 "SELECT COALESCE(inst_dates, '') FROM targets WHERE object = ?",
                 (obj,),
             ).fetchone()
-            if row is None:
-                # No target row yet (e.g. unidentified object, or built after the
-                # last daily run). Nothing to update until the next build_db.
-                return
-            phot_status, fit_status = _aggregate_target_status(obj, row[0])
+        if row is None:
+            # No target row yet (e.g. unidentified object, or built after the
+            # last daily run). Nothing to update until the next build_db.
+            return
+        phot_status, fit_status = _aggregate_target_status(obj, row[0])
+        with get_conn() as conn:
             conn.execute(
                 "UPDATE targets SET phot_status = ?, fit_status = ? WHERE object = ?",
                 (phot_status, fit_status, obj),
