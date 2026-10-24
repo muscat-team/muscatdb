@@ -43,10 +43,13 @@ def _interpreters(engine):
 
 
 def _run(command, directory):
-    env = {**os.environ, "TMPDIR": str(directory), "PYTHONNOUSERSITE": "1",
+    # Launch with the job environment and log header production uses, so a
+    # frozen run gets PROSE_CONFIG_FILE/PROSE_CONFIG_SHA256 and the digest line.
+    env = {**phot._job_env(), "TMPDIR": str(directory), "PYTHONNOUSERSITE": "1",
            "OMP_NUM_THREADS": "2", "MKL_NUM_THREADS": "2", "OPENBLAS_NUM_THREADS": "2"}
     # Each command is bounded, and its output remains available on failure.
     with (directory / "smoke.log").open("w") as log:
+        phot._write_log_header(log, command)
         result = subprocess.run(command, cwd=directory, env=env, stdout=log,
                                 stderr=subprocess.STDOUT, timeout=1800)
     assert result.returncode == 0, (directory / "smoke.log").read_text()[-6000:]
@@ -69,10 +72,18 @@ def test_photometry_pinned_install_matches_baseline(tmp_path, monkeypatch, previ
     for label, python in zip(("baseline", "pinned"), interpreters):
         directory = tmp_path / label
         directory.mkdir()
-        monkeypatch.setenv("MUSCAT_PROSE_PYTHON", python)
-        monkeypatch.setenv("MUSCAT_PROSE_FROZEN_CONFIG", "1" if label == "pinned" else "0")
+        if label == "pinned":
+            # Select the pinned env the way production does: frozen mode
+            # refuses an explicit MUSCAT_PROSE_PYTHON.
+            monkeypatch.delenv("MUSCAT_PROSE_PYTHON", raising=False)
+            monkeypatch.setenv("MUSCAT_PROSE_CONDA_ENV", _PINS["prose"]["environment"])
+            monkeypatch.setenv("MUSCAT_PROSE_FROZEN_CONFIG", "1")
+        else:
+            monkeypatch.setenv("MUSCAT_PROSE_PYTHON", python)
+            monkeypatch.setenv("MUSCAT_PROSE_FROZEN_CONFIG", "0")
         command = phot.build_command("sinistro", "260624", "TIC88297141", options,
                                      test_run=preview)
+        assert command[0] == python, f"{label} run launched {command[0]}"
         command[command.index("--results_dir") + 1] = str(directory)
         _run(command, directory)
         if label == "pinned":
