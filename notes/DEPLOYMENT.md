@@ -211,7 +211,8 @@ the one-time migration of a database from before the groups; such a database
 fails closed for non-admins until it runs. The tables are dropped in a later
 release. Do not rerun `groups-seed` to share new proposals: it would grant
 `everyone` every new proposal at once, so it refuses on a seeded database
-without `--force` (a forced reseed keeps every proposal `everyone` has lost).
+without `--force` (a forced reseed keeps every proposal `everyone` has lost, and
+every user grant revoked since the migration).
 
 The files under `/etc/nginx/sites-available/` are root-owned copies, not links to
 `deploy/`. A change to `deploy/nginx*.conf` does not reach nginx on a deploy: diff

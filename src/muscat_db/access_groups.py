@@ -484,7 +484,8 @@ def seed_from_blocklist(db_path: str, dry_run: bool = False) -> SeedReport:
       is not restricted, an instrument grant for each no-PROPID instrument, and
       a blank-``proposal_id`` grant if an LCO instrument has frames without one
       (the blocklist never hid those);
-    * each ``user_proposal_access`` row becomes a grant to ``user:<name>``;
+    * each ``user_proposal_access`` row becomes a grant to ``user:<name>``,
+      unless the revoke history shows that grant was revoked since;
     * a scoped user is excluded from ``everyone``, so only their own grants
       apply -- the #202 allowlist.
 
@@ -545,6 +546,21 @@ def _legacy_rows(conn: sqlite3.Connection, sql: str) -> list[tuple]:
         raise
 
 
+def _revoked_proposal_ids(conn: sqlite3.Connection, group: str) -> set[str]:
+    """Proposals whose plain grant *group* lost, upper-cased, from the revoke
+    history."""
+    return {
+        r[0].upper()
+        for r in conn.execute(
+            "SELECT proposal_id FROM group_grants_revoked WHERE groupname = ? "
+            "AND proposal_id IS NOT NULL AND instrument IS NULL AND target IS NULL "
+            "AND date_from IS NULL AND date_to IS NULL",
+            (group,),
+        )
+        if r[0]
+    }
+
+
 def _seed(conn: sqlite3.Connection) -> SeedReport:
     report = SeedReport()
     # A proposal `everyone` lost is restricted too: the legacy table stopped
@@ -554,16 +570,7 @@ def _seed(conn: sqlite3.Connection) -> SeedReport:
         r[0].upper()
         for r in _legacy_rows(conn, "SELECT proposal_id FROM restricted_proposals")
         if r[0]
-    } | {
-        r[0].upper()
-        for r in conn.execute(
-            "SELECT proposal_id FROM group_grants_revoked WHERE groupname = ? "
-            "AND proposal_id IS NOT NULL AND instrument IS NULL AND target IS NULL "
-            "AND date_from IS NULL AND date_to IS NULL",
-            (EVERYONE,),
-        )
-        if r[0]
-    }
+    } | _revoked_proposal_ids(conn, EVERYONE)
     observed = [
         r[0]
         for r in conn.execute(
@@ -602,12 +609,19 @@ def _seed(conn: sqlite3.Connection) -> SeedReport:
     ):
         report.everyone_grants.append("proposal_id='' (blank PROPID on LCO frames)")
 
+    # Likewise a migrated user grant revoked since: `revoke` leaves its legacy
+    # row, so a reseed would grant it again.
+    revoked: dict[str, set[str]] = {}
     for username, pid, by in _legacy_rows(
         conn,
         "SELECT username, proposal_id, granted_by FROM user_proposal_access "
         "ORDER BY username, proposal_id",
     ):
         group = user_group(username)
+        if group not in revoked:
+            revoked[group] = _revoked_proposal_ids(conn, group)
+        if (pid or "").upper() in revoked[group]:
+            continue
         if ensure_group(conn, group, f"direct grants for {username}", builtin=True):
             report.groups += 1
         add_member(conn, group, username, SEED_BY)

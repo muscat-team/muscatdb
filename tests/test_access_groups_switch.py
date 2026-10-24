@@ -227,6 +227,24 @@ def test_reseeding_changes_nothing_anyone_sees(db):
     assert after == before
 
 
+def test_reseeding_keeps_a_migrated_user_grant_revoked(tmp_path):
+    # Revoking a migrated grant leaves its legacy row, which nothing writes any
+    # more, so a reseed must read the revoke history to keep the revoke.
+    path = _bare_db(tmp_path)
+    with sqlite3.connect(path) as conn:
+        conn.execute("INSERT INTO restricted_proposals (proposal_id) VALUES ('KEY-SECRET')")
+        conn.execute(
+            "INSERT INTO user_proposal_access (username, proposal_id) VALUES ('alice', 'KEY-SECRET')"
+        )
+    access_groups.seed_from_blocklist(path)
+    row = ("qhy600", "260104", "HIDDENTGT", "KEY-SECRET")
+    assert row in _visible(path, "alice")
+    assert access.revoke(path, "alice", "KEY-SECRET") is True
+    access_groups.seed_from_blocklist(path)
+    assert row not in _visible(path, "alice")
+    assert row not in _visible_sql(path, "alice")
+
+
 def test_admin_on_a_seeded_database_is_denied_nothing(seeded):
     assert access.denied_proposal_ids_for(seeded, "boss") == frozenset()
 
