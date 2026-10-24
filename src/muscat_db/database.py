@@ -1589,23 +1589,11 @@ def get_summaries(
         return [dict(r) for r in cur.fetchall()]
 
 
-def restricted_proposal_ids(db_path: str) -> set[str]:
-    """Currently opt-in-restricted LCO proposal ids (issue #144).
-
-    ``restricted_proposals`` starts empty and only an admin write
-    (``muscat-db access restrict``, PR4) adds to it, so every caller that
-    gates on this result is a no-op until then.
-    """
-    with get_conn(db_path) as conn:
-        cur = conn.execute("SELECT proposal_id FROM restricted_proposals")
-        return {r[0] for r in cur.fetchall()}
-
-
 def objects_with_restricted_proposal(
     db_path: str, restricted: set[str] | frozenset[str]
 ) -> set[str]:
-    """Target/object names with at least one ``summaries`` row under a
-    currently-restricted proposal (issue #144).
+    """Target/object names with at least one ``summaries`` row the *restricted*
+    set hides (issue #144).
 
     Returns the empty set without touching the database when nothing is
     restricted.

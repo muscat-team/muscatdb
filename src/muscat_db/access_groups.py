@@ -1,12 +1,12 @@
 """Allow-only, group-based data visibility (issue #228).
 
-This module holds the group/grant model and its evaluator. Step 1 proved that
-the model, seeded from the #144/#202 blocklist, gives every viewer what the
-blocklist does (:func:`parity`). Step 2 made it authoritative: once the
-``everyone`` group exists (:func:`is_active`),
+This module holds the group/grant model and its evaluator, the only source of
+visibility. Once the ``everyone`` group exists (:func:`is_active`),
 :func:`muscat_db.access.denied_proposal_ids_for` builds each viewer's denied
-set from their grants, so every call site of the blocklist helpers reads the
-groups. Before that, the blocklist still decides.
+set from their grants. Every access writer seeds the groups first
+(:func:`ensure_seeded`), so a database without them has no rule at all. The
+#144/#202 blocklist tables are read only by :func:`seed_from_blocklist`, the
+one-time migration of a database that predates the groups.
 
 Model (design: issue #228):
 
@@ -477,8 +477,8 @@ class SeedReport:
 
 def seed_from_blocklist(db_path: str, dry_run: bool = False) -> SeedReport:
     """Express the #144/#202 blocklist as groups and grants, so the new model
-    gives every viewer what they have today. Idempotent: it only adds rows that
-    are missing, and never removes or edits one an admin made by hand.
+    gives every viewer what they had under it. Idempotent: it only adds rows
+    that are missing, and never removes or edits one an admin made by hand.
 
     * ``everyone`` gets a ``proposal_id`` grant for every observed proposal that
       is not restricted, an instrument grant for each no-PROPID instrument, and
@@ -488,74 +488,14 @@ def seed_from_blocklist(db_path: str, dry_run: bool = False) -> SeedReport:
     * a scoped user is excluded from ``everyone``, so only their own grants
       apply -- the #202 allowlist.
 
-    Proposals ingested after this run are not in ``everyone`` until it is run
-    again; that is the allow-only default, and :func:`parity` reports them.
+    The legacy tables are read here only, as the input of this one-time
+    migration; nothing writes them any more. Proposals ingested after this run
+    are not in ``everyone`` until an admin shares them (``access unrestrict``):
+    that is the allow-only default.
     """
-    report = SeedReport()
     with get_conn(db_path) as conn:
         _apply_schema(conn)
-        restricted = {
-            r[0].upper()
-            for r in conn.execute("SELECT proposal_id FROM restricted_proposals")
-            if r[0]
-        }
-        observed = [
-            r[0]
-            for r in conn.execute(
-                "SELECT DISTINCT proposal_id FROM summaries WHERE proposal_id <> '' "
-                "ORDER BY proposal_id"
-            )
-        ]
-        blank_lco = [
-            r[0]
-            for r in conn.execute(
-                "SELECT DISTINCT instrument FROM summaries WHERE proposal_id = '' ORDER BY 1"
-            )
-            if r[0].lower() not in NO_PROPID_INSTRUMENTS
-        ]
-        report.blank_lco_instruments = blank_lco
-
-        for name, desc in (
-            (EVERYONE, "every user, unless excluded"),
-            (ADMIN, "mirrors users.is_admin"),
-        ):
-            if ensure_group(conn, name, desc, builtin=True):
-                report.groups += 1
-
-        seen_ids: set[str] = set()
-        for pid in observed:
-            if pid.upper() in restricted or pid.upper() in seen_ids:
-                continue
-            seen_ids.add(pid.upper())
-            if add_grant(conn, EVERYONE, proposal_id=pid, note=SEED_NOTE, granted_by=SEED_BY):
-                report.everyone_grants.append(f"proposal_id={pid}")
-        for inst in NO_PROPID_INSTRUMENTS:
-            if add_grant(conn, EVERYONE, instrument=inst, note=SEED_NOTE, granted_by=SEED_BY):
-                report.everyone_grants.append(f"instrument={inst}")
-        if blank_lco and add_grant(
-            conn, EVERYONE, proposal_id="", note=SEED_NOTE, granted_by=SEED_BY
-        ):
-            report.everyone_grants.append("proposal_id='' (blank PROPID on LCO frames)")
-
-        for username, pid, by in conn.execute(
-            "SELECT username, proposal_id, granted_by FROM user_proposal_access "
-            "ORDER BY username, proposal_id"
-        ).fetchall():
-            group = user_group(username)
-            if ensure_group(conn, group, f"direct grants for {username}", builtin=True):
-                report.groups += 1
-            add_member(conn, group, username, SEED_BY)
-            if add_grant(conn, group, proposal_id=pid, note=SEED_NOTE, granted_by=by or SEED_BY):
-                report.user_grants.append((username, pid))
-
-        for (username,) in conn.execute("SELECT username FROM users WHERE scoped = 1").fetchall():
-            cur = conn.execute(
-                "INSERT OR IGNORE INTO group_exclusions (groupname, username) VALUES (?, ?)",
-                (EVERYONE, username),
-            )
-            if cur.rowcount:
-                report.exclusions.append(username)
-
+        report = _seed(conn)
         if dry_run:
             conn.rollback()
         else:
@@ -563,50 +503,125 @@ def seed_from_blocklist(db_path: str, dry_run: bool = False) -> SeedReport:
     return report
 
 
-# ── parity with the blocklist ───────────────────────────────────────────
+def ensure_seeded(conn: sqlite3.Connection) -> None:
+    """Seed the groups on *conn* (uncommitted) unless they already decide.
+
+    Every access writer calls this first, so a grant, restriction or scope
+    made on a fresh database lands in the group model rather than in tables
+    nothing reads. A fresh database has no legacy rows, so this only shares
+    every observed proposal with ``everyone``, which is what the viewer saw
+    before any rule existed."""
+    if not is_active(conn):
+        _seed(conn)
 
 
-def parity(db_path: str, normalize: Callable[[str], str] | None = None) -> list[dict]:
-    """Every (viewer, night, object, proposal) where the group model disagrees
-    with the blocklist. Viewers are every user known to ``users`` or
-    ``user_proposal_access``, plus the anonymous viewer.
+def legacy_rules_unmigrated(conn: sqlite3.Connection) -> bool:
+    """Whether an unseeded database still holds #144/#202 blocklist rules.
 
-    The groups decide once seeded, and the blocklist CLI writes both, so the
-    expected mismatch is a proposal ingested after the seed: visible under the
-    blocklist, hidden under the groups until someone grants it."""
-    from muscat_db import access
-
-    with get_conn(db_path) as conn:
-        keys = conn.execute(
-            "SELECT DISTINCT instrument, obsdate, object, proposal_id FROM summaries"
-        ).fetchall()
-        users: set[str | None] = {None}
-        users.update(r[0] for r in conn.execute("SELECT username FROM users"))
+    Such a database predates the group model and was never migrated with
+    ``access groups-seed``. Its rules are no longer read, so visibility must
+    fail closed rather than silently drop them."""
+    probes = (
+        "SELECT 1 FROM restricted_proposals LIMIT 1",
+        "SELECT 1 FROM user_proposal_access LIMIT 1",
+        "SELECT 1 FROM users WHERE scoped = 1 LIMIT 1",
+    )
+    for sql in probes:
         try:
-            users.update(r[0] for r in conn.execute("SELECT username FROM user_proposal_access"))
+            if conn.execute(sql).fetchone():
+                return True
         except sqlite3.OperationalError as exc:
-            if not _missing_table(exc):
+            if not (_missing_table(exc) or "no such column" in str(exc)):
                 raise
-    mismatches: list[dict] = []
-    for user in sorted(users, key=lambda u: (u is not None, u or "")):
-        denied = access.blocklist_denied_proposal_ids_for(db_path, user, normalize)
-        grants = load_access(db_path, user, normalize)
-        for inst, date, obj, pid in keys:
-            old = not access.is_denied(pid, denied, instrument=inst, obsdate=date, obj=obj)
-            new = grants.frame_visible(inst, date, obj, pid)
-            if old != new:
-                mismatches.append(
-                    {
-                        "user": user,
-                        "instrument": inst,
-                        "obsdate": date,
-                        "object": obj,
-                        "proposal_id": pid,
-                        "blocklist": old,
-                        "groups": new,
-                    }
-                )
-    return mismatches
+    return False
+
+
+def _legacy_rows(conn: sqlite3.Connection, sql: str) -> list[tuple]:
+    try:
+        return conn.execute(sql).fetchall()
+    except sqlite3.OperationalError as exc:
+        if _missing_table(exc):
+            return []
+        raise
+
+
+def _seed(conn: sqlite3.Connection) -> SeedReport:
+    report = SeedReport()
+    # A proposal `everyone` lost is restricted too: the legacy table stopped
+    # recording restrictions, so without this a reseed (`groups-seed --force`)
+    # would share again every proposal restricted since.
+    restricted = {
+        r[0].upper()
+        for r in _legacy_rows(conn, "SELECT proposal_id FROM restricted_proposals")
+        if r[0]
+    } | {
+        r[0].upper()
+        for r in conn.execute(
+            "SELECT proposal_id FROM group_grants_revoked WHERE groupname = ? "
+            "AND proposal_id IS NOT NULL AND instrument IS NULL AND target IS NULL "
+            "AND date_from IS NULL AND date_to IS NULL",
+            (EVERYONE,),
+        )
+        if r[0]
+    }
+    observed = [
+        r[0]
+        for r in conn.execute(
+            "SELECT DISTINCT proposal_id FROM summaries WHERE proposal_id <> '' "
+            "ORDER BY proposal_id"
+        )
+    ]
+    blank_lco = [
+        r[0]
+        for r in conn.execute(
+            "SELECT DISTINCT instrument FROM summaries WHERE proposal_id = '' ORDER BY 1"
+        )
+        if r[0].lower() not in NO_PROPID_INSTRUMENTS
+    ]
+    report.blank_lco_instruments = blank_lco
+
+    for name, desc in (
+        (EVERYONE, "every user, unless excluded"),
+        (ADMIN, "mirrors users.is_admin"),
+    ):
+        if ensure_group(conn, name, desc, builtin=True):
+            report.groups += 1
+
+    seen_ids: set[str] = set()
+    for pid in observed:
+        if pid.upper() in restricted or pid.upper() in seen_ids:
+            continue
+        seen_ids.add(pid.upper())
+        if add_grant(conn, EVERYONE, proposal_id=pid, note=SEED_NOTE, granted_by=SEED_BY):
+            report.everyone_grants.append(f"proposal_id={pid}")
+    for inst in NO_PROPID_INSTRUMENTS:
+        if add_grant(conn, EVERYONE, instrument=inst, note=SEED_NOTE, granted_by=SEED_BY):
+            report.everyone_grants.append(f"instrument={inst}")
+    if blank_lco and add_grant(
+        conn, EVERYONE, proposal_id="", note=SEED_NOTE, granted_by=SEED_BY
+    ):
+        report.everyone_grants.append("proposal_id='' (blank PROPID on LCO frames)")
+
+    for username, pid, by in _legacy_rows(
+        conn,
+        "SELECT username, proposal_id, granted_by FROM user_proposal_access "
+        "ORDER BY username, proposal_id",
+    ):
+        group = user_group(username)
+        if ensure_group(conn, group, f"direct grants for {username}", builtin=True):
+            report.groups += 1
+        add_member(conn, group, username, SEED_BY)
+        if add_grant(conn, group, proposal_id=pid, note=SEED_NOTE, granted_by=by or SEED_BY):
+            report.user_grants.append((username, pid))
+
+    for (username,) in conn.execute("SELECT username FROM users WHERE scoped = 1").fetchall():
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO group_exclusions (groupname, username) VALUES (?, ?)",
+            (EVERYONE, username),
+        )
+        if cur.rowcount:
+            report.exclusions.append(username)
+    return report
 
 
 # ── admin CLI support (rollout step 4) ──────────────────────────────────
