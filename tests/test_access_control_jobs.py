@@ -451,6 +451,36 @@ def test_archive_download_job_hidden_if_any_listed_night_is(client):
     assert "HIDDEN TGT" in _get(client, "/jobs", user="root").text
 
 
+def test_archive_download_naming_no_object_is_hidden_on_a_restricted_night(client, monkeypatch):
+    """A finished download whose frames carry no OBJECT is listed under the
+    placeholder target "LCO archive". On a night with restricted rows that name
+    matches no visible object, so the row fails closed and its obslog link
+    cannot reveal that the night (260102 holds only HIDDENTGT) was ingested.
+    The same download of an open night keeps its row and link."""
+    from muscat_db import lco
+
+    snapshots = [
+        {
+            "job_id": job_id, "state": "done", "phase": "done", "frames_total": 1,
+            "frames_done": 1, "funpack_total": 0, "funpack_done": 0,
+            "instruments": [INST], "obsdates": [date], "objects": [], "dest_dirs": [],
+            "started_at": time.time() - 5, "finished_at": time.time(),
+            "error": None, "user_name": "bob",
+        }
+        for job_id, date in (("hiddennight000000", "260102"), ("opennight00000000", "260101"))
+    ]
+    monkeypatch.setattr(lco, "archive_download_jobs", lambda: snapshots)
+
+    alice = _get(client, "/jobs").text
+    root = _get(client, "/jobs", user="root").text
+    assert 'data-key="lco_archive_download:hiddennight000000"' in root
+    assert f'href="/{INST}/260102"' in root
+    assert 'data-key="lco_archive_download:hiddennight000000"' not in alice
+    assert f'href="/{INST}/260102"' not in alice
+    assert 'data-key="lco_archive_download:opennight00000000"' in alice
+    assert f'href="/{INST}/260101"' in alice
+
+
 def test_rerun_of_hidden_job_is_404(client):
     key = f"photometry:{INST}/260103/HIDDENTGT/{RUN}"
     assert _post(client, "/api/jobs/rerun", {"key": key}).status_code == 404

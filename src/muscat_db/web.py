@@ -1821,12 +1821,13 @@ async def api_target_lamost_archive(name: str = "", request: Request = None):
 @app.get("/obs", response_class=HTMLResponse)
 def logs_page(min_frames: int = 1000):
     db = _db_path()
-    with_data = {row["name"] for row in _get_instruments(db)}
+    denied = _viewer_denied()
+    with_data = {row["name"] for row in _get_instruments(db, denied=denied)}
     instruments = [
         {"name": name, "has_data": name in with_data}
         for name in INSTRUMENTS
     ]
-    summaries = _get_instruments_summary(db, min_frames=min_frames)
+    summaries = _get_instruments_summary(db, min_frames=min_frames, denied=denied)
     return _render(
         "logs.html",
         instruments=instruments,
