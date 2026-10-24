@@ -146,6 +146,32 @@ def phot_drain(tmp_path, monkeypatch, jobs_db, launched):
     _close(phot._JOBS)
 
 
+def test_drain_fails_a_queued_photometry_row_with_an_option_build_command_refuses(
+    tmp_path, monkeypatch, jobs_db, launched,
+):
+    """#273: a queued row never went through validate_run_options at launch, so
+    the real build_command refuses the value and the row ends as an error."""
+    monkeypatch.setattr(phot, "run_output_dir", lambda *a, **k: tmp_path / "phot-run")
+    monkeypatch.setattr(phot, "_write_run_meta", lambda *a, **k: None)
+    monkeypatch.setattr(phot, "_write_run_product", lambda *a, **k: None)
+    monkeypatch.setattr(phot, "_JOBS", {})
+    options = {"bands": ["gp"], "wcs_method": "--data_dir"}
+    get_job_store().enqueue(
+        type_="photometry", inst=INST, date=DATE, target=TARGET, started_at=1.0,
+        run_type="full", params=json.dumps({"test_run": False, "options": options}),
+        run_id="default", user_name=USER,  # start_run always queues with its run_id
+    )
+    _spy(monkeypatch, phot)
+
+    phot.sync_jobs()
+
+    assert launched == []
+    [job] = [j for j in database.get_persisted_jobs() if j["type"] == "photometry"]
+    assert job["state"] == "error"
+    assert "wcs_method" in job["error_desc"]
+    _close(phot._JOBS)
+
+
 
 # -- transit fit --------------------------------------------------------------
 

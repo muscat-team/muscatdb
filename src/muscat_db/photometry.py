@@ -1387,6 +1387,54 @@ _BAND_RE = re.compile(r"^[A-Za-z0-9_]+$")
 # validate_run_options and dropped by build_command.
 _INT_ITEM_RE = re.compile(r"[0-9]+")
 _JD_ITEM_RE = re.compile(r"[0-9]+(\.[0-9]+)?")
+# target_coord is "RA Dec" in degrees or sexagesimal (159.15, 10:36:37.9,
+# 10h36m37.9s, 1.2e-05): each part opens with an optional sign and a digit.
+_COORD_PART_RE = re.compile(r"[+-]?[0-9][0-9A-Za-z.:+\-]*")
+
+
+def _coord_ok(value) -> bool:
+    parts = str(value or "").split()
+    return len(parts) <= 2 and all(_COORD_PART_RE.fullmatch(p) for p in parts)
+
+
+def forwarded_option_error(o: dict) -> str | None:
+    """``"<option> <value>"`` for the first free-text option that
+    ``build_command`` would forward and that is not an allowed value, else
+    ``None``.
+
+    Format and allow-list only, never cross-option rules, so a run queued under
+    older rules is not refused for a reason that has nothing to do with what
+    reaches prose2's argv (#273).
+    """
+    def text(key):
+        return str(o.get(key) or "").strip()
+
+    def compact(key):
+        return str(o.get(key) or "").replace(" ", "")
+
+    checks = [("bands", str(b), _BAND_RE.fullmatch(str(b))) for b in o.get("bands") or []]
+    checks += [
+        ("ref_band", text("ref_band"), _BAND_RE.fullmatch(text("ref_band"))),
+        ("aper_unit", text("aper_unit"), text("aper_unit") in ("pix", "fwhm")),
+        ("aper_radii", compact("aper_radii"), _TRIPLE_RE.fullmatch(compact("aper_radii"))),
+        ("annulus", compact("annulus"), _PAIR_RE.fullmatch(compact("annulus"))),
+        ("ccd_trim", compact("ccd_trim"), _INTPAIR_RE.fullmatch(compact("ccd_trim"))),
+        ("wcs_method", text("wcs_method"), text("wcs_method") in ("twirl", "astrometry.net")),
+        ("centroid_method", text("centroid_method"), text("centroid_method") in CENTROID_METHODS),
+        ("site", text("site"), text("site").lower() in SINISTRO_SITES),
+        ("telescope", text("telescope"), TELESCOPE_RE.fullmatch(text("telescope"))),
+        ("mode", text("mode"), text("mode") in SINISTRO_MODES),
+        ("cmap", text("cmap"), text("cmap") in CMAP_CHOICES),
+        ("nan_imputation_method", text("nan_imputation_method"),
+         text("nan_imputation_method") in NAN_IMPUTATION_METHODS),
+        ("target_coord", text("target_coord"), _coord_ok(o.get("target_coord"))),
+    ]
+    if o.get("ref_select") == "time":  # the only time --ref_time is forwarded
+        checks.append(("ref_time", text("ref_time"), is_valid_ref_time(text("ref_time"))))
+    for key, value, ok in checks:
+        if value and not ok:
+            return f"{key} {value!r}"
+    return None
 
 
 def _list_items(value) -> list[str]:
@@ -1575,6 +1623,13 @@ def validate_run_options(o: dict, inst: str | None = None) -> str | None:
         return "target ID must be an integer"
     if str(o.get("calib_dir") or "").strip():
         return "the calibration directory cannot be set; it is always the night's own"
+    if not _coord_ok(o.get("target_coord")):
+        return "target coordinates must be 'RA Dec' in degrees or sexagesimal (e.g. 159.157968 -64.798231)"
+    # build_command refuses the same values, so a run accepted here never
+    # fails at launch; the checks above give the friendlier message first.
+    bad = forwarded_option_error(o)
+    if bad:
+        return f"invalid {bad}"
     return None
 
 
@@ -1591,8 +1646,15 @@ def build_command(
 
     ``--overwrite`` (on by default) lets a new target coexist with others
     already reduced in the same inst/date directory.
+
+    Raises ``ValueError`` for a free-text option that is not an allowed value
+    (:func:`forwarded_option_error`): queued and stored options reach this
+    function without ``validate_run_options`` (the fleet worker, sync_jobs).
     """
     o = normalize_run_options(options)
+    bad = forwarded_option_error(o)
+    if bad:
+        raise ValueError(f"refusing to build the prose command: invalid {bad}")
     args = [
         *_prose_prefix(),
         "--target_name", target,

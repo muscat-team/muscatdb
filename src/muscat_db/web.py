@@ -7739,7 +7739,12 @@ def photometry_command(payload: phot_api.CommandRequest):
         error = _site_required_error(_db_path(), inst, date, target, options)
     if not error and not hidden:
         error = _telescope_required_error(_db_path(), inst, date, target, options)
-    command = phot.command_str(inst, date, target, options=options, test_run=test_run)
+    try:
+        command = phot.command_str(inst, date, target, options=options, test_run=test_run)
+    except ValueError:
+        # An option build_command refuses; validate_run_options has already
+        # put the reason in ``error``.
+        command = ""
     return phot_api.response(phot_api.CommandResponse, {"command": command, "error": error})
 
 

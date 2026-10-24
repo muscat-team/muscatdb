@@ -111,3 +111,48 @@ def test_button_relabelled_as_optimize_test_run():
     html = TEMPLATE.read_text()
     assert "▶ Test run (optimize)" in html
     assert "Run Test Fit (steps=20)" not in html
+
+
+@pytest.fixture
+def fake_timer(monkeypatch):
+    """A stand-in ``timer.fit`` so ``_load`` runs without the timer env."""
+    import sys
+    import types
+
+    built = []
+
+    class TransitFit:
+        def __init__(self, sys_params, fit_params, **kwargs):
+            built.append((sys_params, fit_params, kwargs))
+
+    pkg = types.ModuleType("timer")
+    mod = types.ModuleType("timer.fit")
+    mod.TransitFit = TransitFit
+    pkg.fit = mod
+    monkeypatch.setitem(sys.modules, "timer", pkg)
+    monkeypatch.setitem(sys.modules, "timer.fit", mod)
+    return built
+
+
+def test_load_reads_the_run_configuration(tmp_path, fake_timer):
+    (tmp_path / "fit.yaml").write_text("planets: b\nchains: 2\n")
+    (tmp_path / "sys.yaml").write_text("planets:\n  b:\n    period: [1.5, 0.001]\n")
+    helper._load(str(tmp_path), str(tmp_path / "out"))
+    sys_params, fit_params, kwargs = fake_timer[0]
+    assert fit_params == {"planets": "b", "chains": 2}
+    assert sys_params == {"planets": {"b": {"period": [1.5, 0.001]}}}
+    assert kwargs == {"wd": str(tmp_path), "outdir": str(tmp_path / "out")}
+
+
+@pytest.mark.parametrize("name", ["fit.yaml", "sys.yaml"])
+def test_load_refuses_python_tags_in_the_run_configuration(tmp_path, fake_timer, name):
+    """#273 item 8: the run configuration is plain data, so safe_load. FullLoader
+    would build the tagged object."""
+    import yaml
+
+    (tmp_path / "fit.yaml").write_text("planets: b\n")
+    (tmp_path / "sys.yaml").write_text("planets: {}\n")
+    (tmp_path / name).write_text("planets: !!python/tuple [b, c]\n")
+    with pytest.raises(yaml.constructor.ConstructorError):
+        helper._load(str(tmp_path), str(tmp_path / "out"))
+    assert fake_timer == []
