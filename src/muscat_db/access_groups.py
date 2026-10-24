@@ -219,13 +219,15 @@ def _resolve_objects(
 ) -> dict[str, frozenset[str]]:
     """Raw ``object`` spellings matching each target name: equal with spaces
     and case ignored, or equal under *normalize* when one is supplied."""
-    objects = [o for o in objects if o]
+    # Each object's keys are computed once, not once per target: there are
+    # thousands of objects, and *normalize* may be far from free.
+    keyed = [(o, _compact(o), normalize(o) if normalize else None) for o in objects if o]
     out: dict[str, frozenset[str]] = {}
     for target in set(targets):
         want = _compact(target)
         norm = normalize(target) if normalize else None
         out[target] = frozenset(
-            o for o in objects if _compact(o) == want or (norm is not None and normalize(o) == norm)
+            o for o, compact, o_norm in keyed if compact == want or (norm is not None and o_norm == norm)
         )
     return out
 

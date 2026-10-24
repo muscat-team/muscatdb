@@ -441,6 +441,15 @@ def validate_ttv_options(options: dict | None) -> str | None:
         return "Planet letters are required"
     if not all(c.isalpha() and c.islower() for c in planet_letters):
         return "Planet letters must be lowercase letters"
+    # harmonic models TTVs per adjacent planet pair, so one letter has no TTV
+    # model (it fails deep in the fit); a non-transiting outer planet still
+    # needs a letter of its own.
+    if len(planet_letters) < 2:
+        return (
+            "A TTV fit needs at least two planet letters, e.g. bc. For one transiting "
+            "planet with an unseen perturber, add a letter for it and tick "
+            "Non-transiting outer planet."
+        )
 
     ini_lines_raw = (o.get("ini_content") or "").strip()
     if not ini_lines_raw:
@@ -454,12 +463,10 @@ def validate_ttv_options(options: dict | None) -> str | None:
     except Exception:
         return "Could not parse INI configuration"
 
-    if len(planet_letters) >= 2:
-        first_pair = planet_letters[:2]
-        expected_amp = f"a_{first_pair}"
-        has_any_amp = any(k.startswith("a_") for k in config["INIT"])
-        if not has_any_amp:
-            return f"INI [INIT] must contain at least one amplitude guess (e.g. {expected_amp})"
+    expected_amp = f"a_{planet_letters[:2]}"
+    has_any_amp = any(k.startswith("a_") for k in config["INIT"])
+    if not has_any_amp:
+        return f"INI [INIT] must contain at least one amplitude guess (e.g. {expected_amp})"
 
     return None
 
