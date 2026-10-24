@@ -21,6 +21,7 @@ as that string in a response.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import time
 from pathlib import Path
@@ -28,7 +29,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from muscat_db import database, web
+from muscat_db import access, database, web
 from muscat_db import product_record
 from muscat_db import photometry as phot
 from muscat_db import transit_fit as fit
@@ -75,11 +76,9 @@ def _build_db(db_path: str) -> None:
     )
     _insert_summary_rows(conn, _summary_rows(conn))
     _populate_targets(conn)
-    conn.execute(
-        "INSERT INTO restricted_proposals (proposal_id) VALUES (?)", (_RESTRICTED.lower(),)
-    )
     conn.commit()
     conn.close()
+    access.restrict(db_path, _RESTRICTED.lower())
 
 
 def _record(rdir: Path, level: str, inputs, author: str = "someone-else") -> None:
@@ -598,7 +597,8 @@ def test_exofop_cross_check_receives_viewer_denied_set(client, monkeypatch):
 
     monkeypatch.setattr(web.exofop, "build_time_series_report", fake_report)
     assert _get(client, "/api/lco/archive/exofop", user="alice", OBJECT="TOI-1").status_code == 200
-    assert seen["denied"] == DENIED
+    assert seen["denied"] == access.denied_proposal_ids_for(os.environ["MUSCAT_DB_PATH"], "alice")
+    assert access.is_denied(_RESTRICTED, seen["denied"])
     assert _get(client, "/api/lco/archive/exofop", user="root", OBJECT="TOI-1").status_code == 200
     assert seen["denied"] == frozenset()
 

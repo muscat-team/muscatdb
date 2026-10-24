@@ -14,6 +14,7 @@ import sqlite3
 
 import pytest
 
+from muscat_db import access
 from muscat_db.coord import CoordRepr
 from muscat_db.database import (
     SCHEMA,
@@ -98,14 +99,11 @@ def _build_db(db_path: str) -> None:
     _insert_summary_rows(conn, rows)
     _populate_targets(conn)
     conn.execute(
-        "INSERT INTO restricted_proposals (proposal_id, description) VALUES (?, ?)",
-        (_RESTRICTED_PROPOSAL, "embargoed key project"),
-    )
-    conn.execute(
         "INSERT OR REPLACE INTO db_meta (key, value) VALUES ('last_build_at', '1700000000')"
     )
     conn.commit()
     conn.close()
+    access.restrict(db_path, _RESTRICTED_PROPOSAL)
 
 
 @pytest.fixture
@@ -250,14 +248,11 @@ def test_mixed_night_hides_only_the_restricted_row(tmp_path):
     _insert_summary_rows(conn, rows)
     _populate_targets(conn)
     conn.execute(
-        "INSERT INTO restricted_proposals (proposal_id, description) VALUES (?, '')",
-        (_RESTRICTED_PROPOSAL,),
-    )
-    conn.execute(
         "INSERT OR REPLACE INTO db_meta (key, value) VALUES ('last_build_at', '1700000000')"
     )
     conn.commit()
     conn.close()
+    access.restrict(str(db), _RESTRICTED_PROPOSAL)
 
     out = tmp_path / "site"
     build_site(out, db_path=str(db), n_examples=1, include_figures=False, log=lambda _m: None)
@@ -283,3 +278,64 @@ def test_keep_notes_does_not_bypass_restriction(restricted_db, tmp_path):
     )
 
     assert "AAARestricted" not in _all_html(out)
+
+
+def _group_db(path: str, frames) -> None:
+    conn = sqlite3.connect(path)
+    conn.create_aggregate("coord_repr", 2, CoordRepr)
+    conn.executescript(SCHEMA)
+    _insert_frames(conn, frames)
+    _insert_summary_rows(conn, _summary_rows(conn))
+    _populate_targets(conn)
+    conn.execute(
+        "INSERT OR REPLACE INTO db_meta (key, value) VALUES ('last_build_at', '1700000000')"
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_frames_without_propid_stay_published_under_the_groups(tmp_path):
+    """muscat2 records no PROPID; `everyone` sees it through an instrument
+    grant. The build must keep that rule, not reduce the anonymous viewer to a
+    bare proposal set that hides every blank-PROPID frame."""
+    db = str(tmp_path / "muscat.db")
+    _group_db(db, [
+        ("muscat2", "260105", 0, "M2_2601050001", "M2Open", 1.0, ""),
+        ("sinistro", "260101", 0, "SIN0_2601010001", "OpenA", 2.0, _OPEN_PROPOSAL),
+        ("sinistro", "260102", 0, "SIN0_2601020001", "AAARestricted", 3.0, _RESTRICTED_PROPOSAL),
+    ])
+    access.restrict(db, _RESTRICTED_PROPOSAL)
+
+    out = tmp_path / "site"
+    build_site(out, db_path=db, n_examples=1, include_figures=False, log=lambda _m: None)
+
+    targets_html = _read(out / "targets" / "index.html")
+    assert "M2Open" in targets_html and "OpenA" in targets_html
+    assert "AAARestricted" not in targets_html
+    assert "M2Open" in _read(out / "muscat2" / "260105" / "index.html")
+
+
+def test_proposal_not_shared_with_everyone_stays_off_the_site(tmp_path):
+    """The site shows what an anonymous viewer sees: a proposal ingested after
+    the seed is hidden until an admin shares it with `everyone`."""
+    db = str(tmp_path / "muscat.db")
+    _group_db(db, [("sinistro", "260101", 0, "SIN0_2601010001", "OpenA", 1.0, _OPEN_PROPOSAL)])
+    access.restrict(db, _RESTRICTED_PROPOSAL)  # seeds the groups
+    conn = sqlite3.connect(db)
+    conn.create_aggregate("coord_repr", 2, CoordRepr)
+    _insert_frames(conn, [("sinistro", "260103", 0, "SIN0_2601030001", "LateProp", 2.0, "NEW2026B-099")])
+    conn.execute("DELETE FROM summaries")
+    _insert_summary_rows(conn, _summary_rows(conn))
+    conn.execute("DELETE FROM targets")
+    _populate_targets(conn)
+    conn.commit()
+    conn.close()
+
+    out = tmp_path / "site"
+    build_site(out, db_path=db, n_examples=1, include_figures=False, log=lambda _m: None)
+    assert "LateProp" not in _all_html(out)
+
+    access.unrestrict(db, "NEW2026B-099")
+    shared = tmp_path / "site2"
+    build_site(shared, db_path=db, n_examples=1, include_figures=False, log=lambda _m: None)
+    assert "LateProp" in _read(shared / "targets" / "index.html")
