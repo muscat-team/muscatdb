@@ -17,7 +17,7 @@ from contextlib import contextmanager
 
 from cryptography.fernet import Fernet, InvalidToken
 
-from muscat_db import db_backup
+from muscat_db import db_backup, target_keys
 from muscat_db.job_limits import JobLimitExceeded, queued_limit_message
 from muscat_db.instruments import INSTRUMENTS, OBSLOG_BASE
 from muscat_db.cache import clear_all_caches
@@ -412,7 +412,8 @@ CREATE TABLE IF NOT EXISTS group_exclusions (
 );
 
 -- One row = one rule; the fields are ANDed and NULL means "any". '' in
--- proposal_id matches frames with no PROPID.
+-- proposal_id matches frames with no PROPID. ``target`` is the name as the
+-- admin typed it; ``target_key`` is what matches (see target_keys.py).
 CREATE TABLE IF NOT EXISTS group_grants (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     groupname   TEXT NOT NULL COLLATE NOCASE,
@@ -424,10 +425,22 @@ CREATE TABLE IF NOT EXISTS group_grants (
     note        TEXT NOT NULL DEFAULT '',
     granted_by  TEXT NOT NULL DEFAULT '',
     granted_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    target_key  TEXT,
+    target_key_version INTEGER,
     CHECK (proposal_id IS NOT NULL OR instrument IS NOT NULL
            OR target IS NOT NULL OR date_from IS NOT NULL)
 );
 CREATE INDEX IF NOT EXISTS idx_group_grants_group ON group_grants(groupname);
+
+-- The access key of every observed OBJECT spelling (issue #228), written by
+-- target_keys.refresh() wherever summaries is written. Derived from summaries,
+-- so build_db rebuilds it rather than carrying it over.
+CREATE TABLE IF NOT EXISTS object_keys (
+    object     TEXT PRIMARY KEY,
+    target_key TEXT NOT NULL,
+    version    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_object_keys_key ON object_keys(target_key);
 
 -- Revoked grants, moved here from group_grants (issue #228, step 4) so the
 -- history of who could see what survives. A separate table rather than a
@@ -446,7 +459,9 @@ CREATE TABLE IF NOT EXISTS group_grants_revoked (
     granted_by  TEXT NOT NULL DEFAULT '',
     granted_at  TEXT NOT NULL DEFAULT '',
     revoked_by  TEXT NOT NULL DEFAULT '',
-    revoked_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    revoked_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    target_key  TEXT,
+    target_key_version INTEGER
 );
 """
 
@@ -485,6 +500,12 @@ _MIGRATIONS = [
     # PR #280: who created a test observation, for its ownership check. Rows
     # from before it stay ownerless ('' reads as the anonymous local user).
     "ALTER TABLE test_observations ADD COLUMN created_by TEXT NOT NULL DEFAULT ''",
+    # issue #228: a target grant matches by its stored key, not by re-normalizing
+    # its name on every request (target_keys.py). NULL until the next refresh.
+    "ALTER TABLE group_grants ADD COLUMN target_key TEXT",
+    "ALTER TABLE group_grants ADD COLUMN target_key_version INTEGER",
+    "ALTER TABLE group_grants_revoked ADD COLUMN target_key TEXT",
+    "ALTER TABLE group_grants_revoked ADD COLUMN target_key_version INTEGER",
 ]
 
 
@@ -1201,6 +1222,9 @@ def build_db(db_path: str, progress=None) -> int:
         for table in _APP_OWNED_TABLES:
             _restore_table(conn, table, preserved.get(table) or [])
         _restore_sequences(conn, preserved.get("sqlite_sequence") or [])
+        # After the restore: object_keys is rebuilt from the new summaries and
+        # the carried-over grants are re-keyed against the same rule.
+        target_keys.refresh(conn)
         conn.commit()
         conn.close()
 
@@ -1336,6 +1360,7 @@ def ingest_date(db_path: str, instrument: str, obsdate: str, progress=None) -> i
             if row[0] is not None
         }
         _replace_target_rows(conn, old_objects | new_objects)
+        target_keys.refresh(conn)
 
         now = datetime.datetime.now().isoformat()
         conn.execute(

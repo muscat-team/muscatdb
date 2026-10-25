@@ -918,7 +918,7 @@ def test_cli_grant_target_warns_when_target_matches_nothing(db, monkeypatch):
 def _product_viewer(db: str, tmp_path, user: str, normalize=None):
     from muscat_db.product_visibility import ProductVisibility
 
-    denied = access.denied_proposal_ids_for(db, user, normalize)
+    denied = access.denied_proposal_ids_for(db, user)
     return ProductVisibility(
         user,
         denied,

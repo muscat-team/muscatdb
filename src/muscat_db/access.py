@@ -33,7 +33,7 @@ import logging
 import sqlite3
 from collections.abc import Callable, Iterable
 
-from muscat_db import access_groups
+from muscat_db import access_groups, target_keys
 from muscat_db.database import ScopedDenied, get_conn, sql_not_denied
 
 logger = logging.getLogger(__name__)
@@ -83,11 +83,7 @@ def _observed_ids(conn: sqlite3.Connection) -> frozenset[str]:
     return frozenset((r[0] or "").upper() for r in rows)
 
 
-def denied_proposal_ids_for(
-    db_path: str,
-    username: str | None,
-    normalize: Callable[[str], str] | None = None,
-) -> frozenset[str]:
+def denied_proposal_ids_for(db_path: str, username: str | None) -> frozenset[str]:
     """Proposal ids (upper-cased) this viewer may not see, from their grants
     (:func:`_group_denied`). The result feeds :func:`is_denied`,
     :func:`muscat_db.database.sql_not_denied` and :class:`NightVisibility`.
@@ -98,7 +94,7 @@ def denied_proposal_ids_for(
         admin = bool(username) and _is_admin(conn, username)
         observed = _observed_ids(conn) if unmigrated and not admin else frozenset()
     if active:
-        return _group_denied(db_path, username, normalize)
+        return _group_denied(db_path, username)
     if not unmigrated or admin:
         return frozenset()
     logger.error(
@@ -109,16 +105,12 @@ def denied_proposal_ids_for(
     return ScopedDenied(observed | {""}, frozenset(), ())
 
 
-def _group_denied(
-    db_path: str,
-    username: str | None,
-    normalize: Callable[[str], str] | None,
-) -> frozenset[str]:
+def _group_denied(db_path: str, username: str | None) -> frozenset[str]:
     """The viewer's grants as a :class:`ScopedDenied`: plain proposal grants
     are its allowlist, every narrower grant (instrument, target, date) one of
     its rules. A proposal nobody granted, including one ingested after the
     seed, is therefore hidden. Admins are denied nothing."""
-    grants = access_groups.load_access(db_path, username, normalize)
+    grants = access_groups.load_access(db_path, username)
     if grants.is_admin:
         return frozenset()
     allowed = frozenset(g.proposal_id.upper() for g in grants.grants if g.is_proposal_only)
@@ -684,13 +676,11 @@ def revoke_group_grant(db_path: str, grant_id: int, revoked_by: str) -> dict | N
 
 
 def target_matches_observations(db_path: str, target: str) -> bool:
-    """Whether *target* names any observed object (spaces and case ignored)."""
-    want = _compact(target)
+    """Whether *target* names any observed object, by target key: the match
+    a target grant on it would make."""
+    want = target_keys.target_key(target)
     with get_conn(db_path) as conn:
-        return any(
-            _compact(r[0] or "") == want
-            for r in conn.execute("SELECT DISTINCT object FROM summaries")
-        )
+        return bool(want) and want in target_keys.objects_by_key(conn)
 
 
 def list_target_grants(db_path: str, username: str) -> list[dict]:
@@ -767,11 +757,12 @@ def explain_user(db_path: str, username: str) -> dict:
 
 
 def explain_target(db_path: str, username: str, target: str) -> list[dict]:
-    """Every summary row for *target* (spaces and case ignored, the same match
-    :class:`NightVisibility` uses) with whether *username* may see it."""
+    """Every summary row whose object shares *target*'s key (the match a
+    target grant makes) with whether *username* may see it."""
     denied = denied_proposal_ids_for(db_path, username)
-    want = _compact(target)
+    want = target_keys.target_key(target)
     with get_conn(db_path) as conn:
+        objects = target_keys.objects_by_key(conn).get(want, frozenset()) if want else frozenset()
         rows = conn.execute(
             "SELECT DISTINCT instrument, obsdate, object, COALESCE(proposal_id, '') "
             "FROM summaries ORDER BY instrument, obsdate"
@@ -787,5 +778,5 @@ def explain_target(db_path: str, username: str, target: str) -> list[dict]:
             ),
         }
         for inst, date, obj, pid in rows
-        if _compact(obj or "") == want
+        if obj in objects
     ]
