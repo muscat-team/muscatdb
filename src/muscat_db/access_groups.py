@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 
 from muscat_db import target_keys
 from muscat_db.database import _apply_schema, get_conn
+from muscat_db.grant_sql import compile_grants
 
 logger = logging.getLogger(__name__)
 
@@ -152,21 +153,7 @@ class Access:
         ``("0", [])``, so callers can always splice the clause in."""
         if self.is_admin:
             return "1", []
-        if not self.grants:
-            return "0", []
-        clauses: list[str] = []
-        params: list = []
-        for grant in self.grants:
-            clause, p = grant.sql(alias)
-            if clause == "0":
-                continue
-            if clause == "1":
-                return "1", []
-            clauses.append(clause)
-            params.extend(p)
-        if not clauses:
-            return "0", []
-        return "(" + " OR ".join(clauses) + ")", params
+        return compile_grants(self.grants, alias)
 
 
 # ── loading ─────────────────────────────────────────────────────────────

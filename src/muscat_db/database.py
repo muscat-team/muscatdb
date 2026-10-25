@@ -21,6 +21,7 @@ from muscat_db import db_backup, target_keys
 from muscat_db.job_limits import JobLimitExceeded, queued_limit_message
 from muscat_db.instruments import INSTRUMENTS, OBSLOG_BASE
 from muscat_db.cache import clear_all_caches
+from muscat_db.grant_sql import compile_grants
 from muscat_db.coord import (
     CoordRepr,
     pick_representative,
@@ -1564,10 +1565,10 @@ def _sql_scoped_allowed(denied: ScopedDenied, column: str) -> tuple[str, list]:
             alias = column[: -len(".proposal_id")]
         else:
             raise ValueError(f"cannot apply target grants to column {column!r}")
-        for rule in denied.rules:
-            clause, rule_params = rule.sql(alias)
-            if clause == "0":
-                continue
+        # One clause per grant shape, not per grant (issue #228): an OR term per
+        # grant hits SQLite's expression-depth limit at ~1,000 grants.
+        clause, rule_params = compile_grants(denied.rules, alias)
+        if clause != "0":
             parts.append(clause)
             params.extend(rule_params)
     if not parts:
