@@ -76,6 +76,50 @@ def objects_by_key(conn: sqlite3.Connection) -> dict[str, frozenset[str]]:
     return {k: frozenset(v) for k, v in out.items()}
 
 
+@dataclass(frozen=True)
+class OverrideGap:
+    """An object the target page shows under ``target`` (a name override) whose
+    own key differs, so a grant on ``target`` leaves its ``rows`` out."""
+
+    object: str
+    target: str
+    object_key: str
+    target_key: str
+    rows: int
+
+
+def override_gaps(conn: sqlite3.Connection, target: str | None = None) -> list[OverrideGap]:
+    """Observed objects overridden to a target with a different key.
+
+    Grants ignore overrides by design (a display rename never changes who sees
+    what), so these rows fail closed: a grant on the name the target page shows
+    does not cover them. Listed so an admin sees the gap before granting. With
+    *target*, only the overrides shown under that target's key.
+    """
+    try:
+        overrides = conn.execute(
+            "SELECT object, norm_name FROM target_overrides "
+            "WHERE norm_name IS NOT NULL AND trim(norm_name) != ''"
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        if not _missing(exc):
+            raise
+        return []
+    keys = object_key_map(conn)
+    rows = dict(conn.execute("SELECT object, COUNT(*) FROM summaries GROUP BY object"))
+    wanted = target_key(target) if target is not None else None
+    gaps = []
+    for obj, shown in sorted(overrides):
+        if not rows.get(obj):
+            continue
+        shown_key = target_key(shown)
+        obj_key = keys.get(obj, target_key(obj))
+        if obj_key == shown_key or (wanted is not None and shown_key != wanted):
+            continue
+        gaps.append(OverrideGap(obj, shown, obj_key, shown_key, rows[obj]))
+    return gaps
+
+
 def grant_key(stored: str | None, target: str | None) -> str:
     """A grant's key: the stored one, else computed from its target."""
     return stored if stored is not None else target_key(target)
