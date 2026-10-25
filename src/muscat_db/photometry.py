@@ -1431,10 +1431,24 @@ def forwarded_option_error(o: dict) -> str | None:
     ]
     if o.get("ref_select") == "time":  # the only time --ref_time is forwarded
         checks.append(("ref_time", text("ref_time"), is_valid_ref_time(text("ref_time"))))
+    # Mirrors build_command, which forwards the value verbatim in any mode but
+    # off/auto, an unknown one included. prose2 declares --avoid_nearby_star
+    # with nargs="?", so a flag-like value there is parsed as a new option, and
+    # the last one wins. The mode itself never reaches argv, so only the value
+    # is checked.
+    if o.get("avoid_nearby_star_mode") not in ("off", "auto"):
+        checks.append(("avoid_nearby_star", text("avoid_nearby_star"), _finite_number(o.get("avoid_nearby_star"))))
     for key, value, ok in checks:
         if value and not ok:
             return f"{key} {value!r}"
     return None
+
+
+def _finite_number(value) -> bool:
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
 
 
 def _list_items(value) -> list[str]:

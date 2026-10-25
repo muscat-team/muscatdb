@@ -131,6 +131,14 @@ FORWARDED_BAD = [
     ({"bands": ["gp"], "target_coord": "--data_dir /elsewhere"}, "target_coord"),
     ({"bands": ["gp"], "target_coord": "10.5 --results_dir"}, "target_coord"),
     ({"bands": ["gp"], "target_coord": "10.5 -45 --glob x"}, "target_coord"),
+    # --avoid_nearby_star takes an optional value (nargs="?"), so a flag-like
+    # value becomes a new option that overrides the real one (#312 review).
+    ({"bands": ["gp"], "avoid_nearby_star_mode": "custom", "avoid_nearby_star": "--results_dir=/elsewhere"},
+     "avoid_nearby_star"),
+    ({"bands": ["gp"], "avoid_nearby_star_mode": "custom", "avoid_nearby_star": "--data_dir=/elsewhere"},
+     "avoid_nearby_star"),
+    ({"bands": ["gp"], "avoid_nearby_star_mode": "unknown", "avoid_nearby_star": "--results_dir=/elsewhere"},
+     "avoid_nearby_star"),
 ]
 
 
@@ -139,6 +147,27 @@ def test_build_command_refuses_an_invalid_free_text_option(options, field, monke
     monkeypatch.setenv("MUSCAT_PROSE_DIR", str(tmp_path))
     with pytest.raises(ValueError, match=field):
         phot.build_command(INST, DATE, TARGET, options, test_run=False)
+
+
+@pytest.mark.parametrize(("mode", "value", "forwarded"), [
+    ("custom", "5", ["--avoid_nearby_star", "5.0"]),
+    ("custom", 2.5, ["--avoid_nearby_star", "2.5"]),
+    ("custom", "", ["--avoid_nearby_star"]),
+    ("auto", "--results_dir=/elsewhere", ["--avoid_nearby_star"]),
+    ("off", "--results_dir=/elsewhere", []),
+])
+def test_build_command_checks_avoid_nearby_star_only_where_it_forwards_it(
+    mode, value, forwarded, monkeypatch, tmp_path
+):
+    # Only a value build_command actually forwards is checked, so a queued run
+    # whose unused value is junk still launches.
+    monkeypatch.setenv("MUSCAT_PROSE_DIR", str(tmp_path))
+    options = {"bands": ["gp"], "avoid_nearby_star_mode": mode, "avoid_nearby_star": value}
+    argv = phot.build_command(INST, DATE, TARGET, options, test_run=False)
+    tail = argv[argv.index("--avoid_nearby_star"):][: len(forwarded)] if forwarded else []
+    assert tail == forwarded
+    assert ("--avoid_nearby_star" in argv) == bool(forwarded)
+    assert "--results_dir=/elsewhere" not in argv
 
 
 @pytest.mark.parametrize(("options", "field"), FORWARDED_BAD, ids=[f for _, f in FORWARDED_BAD])
