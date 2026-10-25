@@ -28,6 +28,14 @@ PINNED_KEYS = {
     "AU Mic": "AUMIC",
     "WASP-12": "WASP12",
     "K2-25 b": "K225",
+    # A trailing ".digits" is dropped for every name, not just TOIs, so these
+    # two share one key and a grant on either covers both (#311 review).
+    "XO-008.0242": "XO008",
+    "XO-008.1480": "XO008",
+    # Leading zeros are kept outside the TOI pattern: a grant on HAT-P-1 does
+    # not cover frames filed as HAT-P-01 (#311 review).
+    "HAT-P-01": "HATP01",
+    "HAT-P-1": "HATP1",
     "  ": "",
 }
 
@@ -234,3 +242,81 @@ def test_cli_grant_does_not_call_a_hyphenless_target_dead(db, monkeypatch):
         ("TOI-1234", True),
         ("TOI 01234.01", False),
     }
+
+
+
+# ── name overrides whose object key differs from the target's (#311 review) ──
+
+
+@pytest.fixture
+def overrides_db(db):
+    """The target page shows each object under its override; a target grant
+    follows the object's own key. Rows on the page that a grant on the shown
+    name leaves out are the gap an admin needs to see."""
+    with sqlite3.connect(db) as conn:
+        conn.executemany(
+            "INSERT INTO summaries (instrument, obsdate, ccd, object, proposal_id) VALUES (?, ?, ?, ?, ?)",
+            [
+                ("muscat3", "260201", 0, "TIC 354518617.02 (TOI 14.02)", "KEY-001"),
+                ("muscat3", "260201", 1, "TIC 354518617.02 (TOI 14.02)", "KEY-001"),
+                ("muscat3", "260202", 0, "TOI-2540", "KEY-001"),
+                ("muscat3", "260203", 0, "2010TV149", "KEY-001"),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO target_overrides (object, is_identified, norm_name) VALUES (?, ?, ?)",
+            [
+                ("TIC 354518617.02 (TOI 14.02)", 1, "TOI2540"),  # keys TOI14: a gap
+                ("TOI 01234.01", 1, "TOI1234"),  # same key: no gap
+                ("2010TV149", 0, None),  # marked not-a-target: no target to compare
+                ("NEVER-OBSERVED", 1, "TOI2540"),  # no rows: nothing left out
+            ],
+        )
+        conn.commit()
+    return db
+
+
+def test_override_gaps_lists_only_overrides_that_leave_rows_out(overrides_db):
+    with sqlite3.connect(overrides_db) as conn:
+        gaps = target_keys.override_gaps(conn)
+    assert gaps == [
+        target_keys.OverrideGap(
+            object="TIC 354518617.02 (TOI 14.02)", target="TOI2540",
+            object_key="TOI14", target_key="TOI2540", rows=2,
+        )
+    ]
+
+
+def test_override_gaps_for_one_target(overrides_db):
+    with sqlite3.connect(overrides_db) as conn:
+        assert [g.object for g in target_keys.override_gaps(conn, target="TOI-2540")] == [
+            "TIC 354518617.02 (TOI 14.02)"
+        ]
+        assert target_keys.override_gaps(conn, target="TOI-1234") == []
+
+
+def test_override_gaps_on_a_database_without_the_table(tmp_path):
+    path = str(tmp_path / "old.db")
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE summaries (object TEXT)")
+        assert target_keys.override_gaps(conn) == []
+
+
+def test_cli_target_keys_lists_override_gaps(overrides_db, monkeypatch):
+    monkeypatch.setenv("MUSCAT_DB_PATH", overrides_db)
+    result = CliRunner().invoke(cli_app, ["access", "target-keys", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    out = " ".join(result.output.split())
+    assert "TIC 354518617.02 (TOI 14.02)" in out
+    assert "shown under TOI2540" in out and "keys as TOI14" in out and "2 summary row(s)" in out
+
+
+def test_cli_explain_target_names_what_a_grant_on_it_leaves_out(overrides_db, monkeypatch):
+    monkeypatch.setenv("MUSCAT_DB_PATH", overrides_db)
+    result = CliRunner().invoke(cli_app, ["access", "explain", "alice", "--target", "TOI-2540"])
+    assert result.exit_code == 0, result.output
+    out = " ".join(result.output.split())
+    assert "TIC 354518617.02 (TOI 14.02)" in out and "not covered by a grant on TOI-2540" in out
+
+    other = CliRunner().invoke(cli_app, ["access", "explain", "alice", "--target", "TOI-1234"])
+    assert "not covered by a grant" not in " ".join(other.output.split())

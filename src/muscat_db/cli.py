@@ -1685,7 +1685,9 @@ def access_target_keys(
 
     Ingest and `build-db` already do this; run it by hand after deploying a
     change to the target-key rule, with --dry-run first, to see which grants it
-    re-keys before it does. Also lists target grants that match no object.
+    re-keys before it does. Also lists target grants that match no object, and
+    name overrides that show an object under a target whose key differs (a
+    grant on the shown name leaves those rows out).
     """
     from muscat_db import target_keys
     from muscat_db.database import _apply_schema, db_path, get_conn
@@ -1693,6 +1695,7 @@ def access_target_keys(
     with get_conn(db_path()) as conn:
         _apply_schema(conn)
         report = target_keys.refresh(conn)
+        gaps = target_keys.override_gaps(conn)
         if dry_run:
             conn.rollback()
         else:
@@ -1708,6 +1711,20 @@ def access_target_keys(
     for gid, group, target in report.dead_grants:
         console.print(
             f"[yellow]  grant #{gid} {group} target={target} matches no observed object[/]"
+        )
+    _print_override_gaps(gaps)
+
+
+def _print_override_gaps(gaps, granted_name: str | None = None) -> None:
+    """One line per override a target grant does not follow (#311 review)."""
+    for g in gaps:
+        covered = (
+            f"not covered by a grant on {granted_name}" if granted_name
+            else f"a grant on {g.target} leaves it out"
+        )
+        console.print(
+            f"[yellow]  {g.object}: shown under {g.target} but keys as {g.object_key}; "
+            f"{covered} ({g.rows} summary row(s)). Grant it by its own name to include it.[/]"
         )
 
 
@@ -1967,6 +1984,11 @@ def access_explain(
         )
 
     if target is not None:
+        from muscat_db import target_keys
+        from muscat_db.database import get_conn
+
+        with get_conn(db) as conn:
+            _print_override_gaps(target_keys.override_gaps(conn, target=target), target)
         rows = access.explain_target(db, username, target)
         if not rows:
             console.print(f"[yellow]No observation of {target!r} (spaces and case ignored).[/]")
