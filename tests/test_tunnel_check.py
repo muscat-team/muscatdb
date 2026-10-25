@@ -49,18 +49,26 @@ class _Quiet(http.server.BaseHTTPRequestHandler):
 
 
 @pytest.fixture
-def slack():
-    """A webhook stand-in that records every posted message."""
+def slack_server():
+    """A webhook stand-in that records every posted message and answers with
+    ``status["code"]``."""
     received: list[bytes] = []
+    status = {"code": 200}
 
     class Handler(_Quiet):
         def do_POST(self):
             received.append(self.rfile.read(int(self.headers.get("Content-Length", 0))))
-            self.send_response(200)
+            self.send_response(status["code"])
             self.end_headers()
 
     with _server(Handler) as port:
-        yield port, received
+        yield port, received, status
+
+
+@pytest.fixture
+def slack(slack_server):
+    port, received, _status = slack_server
+    return port, received
 
 
 @pytest.fixture
@@ -164,3 +172,54 @@ def test_a_different_problem_alerts_again(tmp_path, slack, origin):
     state["ready"], state["public"] = 200, 200
     _run(tmp_path, slack_port, metrics, public)
     assert len(received) == 2
+
+
+def test_an_undelivered_alert_is_sent_again_on_the_next_run(tmp_path, slack_server, origin):
+    """notify-slack.sh normally exits 0 even when the post fails; the check asks
+    for strict mode and advances its state only once the alert got through."""
+    slack_port, received, status = slack_server
+    port, state = origin
+    url = f"http://127.0.0.1:{port}/ready"
+
+    state["ready"] = 503
+    status["code"] = 500
+    first = _run(tmp_path, slack_port, url)
+    assert first.returncode != 0 and len(received) == 1
+    assert not (tmp_path / "tunnel-check.state").exists()
+
+    status["code"] = 200
+    _run(tmp_path, slack_port, url)
+    _run(tmp_path, slack_port, url)
+    assert len(received) == 2  # resent once, then quiet
+
+
+def test_a_mixed_case_access_redirect_is_recognised(tmp_path, slack, origin):
+    slack_port, received = slack
+    port, state = origin
+    state["location"] = "https://Team.CloudflareAccess.COM/cdn-cgi/access/login"
+    result = _run(tmp_path, slack_port, f"http://127.0.0.1:{port}/ready", f"http://127.0.0.1:{port}/")
+    assert result.returncode == 0, result.stdout
+    assert received == []
+
+
+NOTIFY = SCRIPT.parents[1] / "notify-slack.sh"
+
+
+@pytest.mark.parametrize(("strict", "expected"), [(None, 0), ("1", 1)])
+def test_notify_slack_fails_only_in_strict_mode(tmp_path, slack_server, strict, expected):
+    """The nightly relies on the default always exiting 0."""
+    slack_port, _received, status = slack_server
+    status["code"] = 500
+    webhook = tmp_path / "slack-webhook-url"
+    webhook.write_text(f"http://127.0.0.1:{slack_port}/hook")
+    env = {"PATH": "/usr/bin:/bin", "SLACK_WEBHOOK_FILE": str(webhook)}
+    if strict:
+        env["NOTIFY_SLACK_STRICT"] = strict
+    result = subprocess.run(["bash", str(NOTIFY), "msg"], env=env, capture_output=True, text=True, timeout=30)
+    assert result.returncode == expected
+
+
+def test_notify_slack_strict_fails_without_a_webhook(tmp_path):
+    env = {"PATH": "/usr/bin:/bin", "SLACK_WEBHOOK_FILE": str(tmp_path / "missing"), "NOTIFY_SLACK_STRICT": "1"}
+    result = subprocess.run(["bash", str(NOTIFY), "msg"], env=env, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 1

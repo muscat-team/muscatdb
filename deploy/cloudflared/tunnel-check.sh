@@ -14,8 +14,12 @@
 #      valid JWT, but Access is then no longer doing its part.
 #
 # Alerts Slack (deploy/notify-slack.sh) only when the state changes -- a new
-# problem, a different problem, or recovery -- never on every run. Exits 1
-# while a problem persists so the cron log shows it.
+# problem, a different problem, or recovery -- never on every run. The state
+# advances only once the alert was delivered, so a lost alert is sent again on
+# the next run. Exits 1 while a problem persists so the cron log shows it, and
+# 2 when an alert could not be delivered.
+#
+# Plain bash 3.2 (no ${var,,}), so it behaves the same on a macOS checkout.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,7 +30,7 @@ STATE_FILE="${TUNNEL_CHECK_STATE:-$ROOT/logs/tunnel-check.state}"
 mkdir -p "$(dirname "$STATE_FILE")"
 
 alert() {
-  bash "$ROOT/deploy/notify-slack.sh" "$1"
+  NOTIFY_SLACK_STRICT=1 bash "$ROOT/deploy/notify-slack.sh" "$1"
 }
 
 # Stable keys decide whether the state changed; the details only go in the
@@ -45,7 +49,7 @@ if [ -n "$PUBLIC_URL" ]; then
   host="${location#*://}"
   host="${host%%/*}"
   host="${host%%:*}"
-  host="${host,,}"
+  host="$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')"
   case "$pcode" in
     301|302|303|307) ;;
     *) host="" ;;
@@ -66,14 +70,19 @@ fi
 previous="$(cat "$STATE_FILE" 2>/dev/null || echo ok)"
 message="$(IFS=';'; echo "${details[*]:-}")"
 
+echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') ${current}${message:+: ${message}}"
+
 if [ "$current" != "$previous" ]; then
   if [ "$current" = "ok" ]; then
-    alert ":white_check_mark: muscat-db tunnel on $(hostname) recovered (was: ${previous})"
+    text=":white_check_mark: muscat-db tunnel on $(hostname) recovered (was: ${previous})"
   else
-    alert ":rotating_light: muscat-db tunnel on $(hostname): ${message}. External collaborators may be locked out. See notes/DEPLOYMENT.md, Cloudflare Access tunnel."
+    text=":rotating_light: muscat-db tunnel on $(hostname): ${message}. External collaborators may be locked out. See notes/DEPLOYMENT.md, Cloudflare Access tunnel."
+  fi
+  if ! alert "$text"; then
+    echo "alert not delivered; the state stays '${previous}' so the next run sends it again"
+    exit 2
   fi
   printf '%s\n' "$current" > "$STATE_FILE"
 fi
 
-echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') ${current}${message:+: ${message}}"
 [ "$current" = "ok" ]

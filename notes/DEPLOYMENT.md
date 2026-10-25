@@ -245,6 +245,10 @@ login` never runs on this host and no `cert.pem` tied to a personal account
 exists.
 
 **Bring-up**, in order. Steps 1–2 are in the Cloudflare dashboard; the rest on ut2.
+Steps 5–8 need #310 (security headers, and `X-Forwarded-Proto https` so chat
+connects through the tunnel) and #315 (the admin and unknown-email refusals step 8
+checks) released and deployed: step 5 copies `nginx-access.conf` from the deploy
+checkout, so it must be the post-#310 file.
 
 1. **Access application.** Zero Trust → Access → Applications → Self-hosted, on
    the public hostname. Login method: one-time PIN only. Policy: Allow, Include →
@@ -307,10 +311,12 @@ exists.
    - `systemctl stop muscat-db-tunnel` raises the Slack alert within 5 minutes,
      and `start` reports the recovery
 
-**Adding a collaborator**, one at a time:
-`muscat-db htpasswd set-email <user> <email>`, then `access groups-check` (exit 0),
-the grants (`access group …` or `access grant-target`), `access explain <user>`,
-and only then the email on the Access policy. Remove it from the policy first
+**Adding a collaborator.** Not before #310, #312 (re-validated photometry
+options, `safe_load`, per-user chat rate limit) and #315 are on `main` and
+deployed, and step 8 has passed. Then one at a time:
+`muscat-db htpasswd set-email <user> <email>`, the grants (`access group …` or
+`access grant-target`), `access explain <user>` to confirm the user sees exactly
+what was granted, and only then the email on the Access policy. Remove it from the policy first
 when someone leaves. Review the policy against `users.email` every few months.
 
 **Patching.** cloudflared runs with `--no-autoupdate`; it updates with
