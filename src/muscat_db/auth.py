@@ -54,14 +54,19 @@ def configured_proxy_secret() -> str | None:
 ANONYMOUS = "anonymous"  # no X-Forwarded-User header
 UNTRUSTED = "untrusted"  # header present but peer/secret did not validate
 UNKNOWN_EMAIL = "unknown_email"  # a valid email with no users row
+ADMIN_EMAIL = "admin_email"  # a valid email whose users row is an admin
 OK = "ok"
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def normalize_email(value: str | None) -> str | None:
-    """Lower-cased, stripped email, or ``None`` when *value* is not one."""
-    email = (value or "").strip().casefold()
+    """Lower-cased, stripped email, or ``None`` when *value* is not one.
+
+    ``lower()``, not ``casefold()``: casefold maps "ß" to "ss", which would put
+    two different mailboxes (straße@, strasse@) on one account.
+    """
+    email = (value or "").strip().lower()
     return email if _EMAIL_RE.match(email) else None
 
 
@@ -71,8 +76,9 @@ def is_email_identity(value: str | None) -> bool:
     return bool(value) and "@" in value
 
 
-def username_for_email(email: str) -> str | None:
-    """The stable username whose ``users.email`` is *email* (case-insensitive).
+def account_for_email(email: str) -> tuple[str, bool] | None:
+    """``(username, is_admin)`` of the row whose ``users.email`` is *email*
+    (case-insensitive).
 
     ``None`` for an unknown or malformed email, and when the lookup cannot be
     made at all: an identity that cannot be mapped must never be admitted.
@@ -85,11 +91,17 @@ def username_for_email(email: str) -> str | None:
     try:
         with get_conn(db_path()) as conn:
             row = conn.execute(
-                "SELECT username FROM users WHERE lower(email) = ?", (normalized,)
+                "SELECT username, is_admin FROM users WHERE lower(email) = ?", (normalized,)
             ).fetchone()
     except sqlite3.Error:
         return None
-    return row[0] if row else None
+    return (row[0], bool(row[1])) if row else None
+
+
+def username_for_email(email: str) -> str | None:
+    """The stable username for *email*, admin or not (see :func:`account_for_email`)."""
+    account = account_for_email(email)
+    return account[0] if account else None
 
 
 def resolve_forwarded_identity(
@@ -104,6 +116,8 @@ def resolve_forwarded_identity(
     (nginx copies it from a validated ``Cf-Access-Jwt-Assertion``) is then
     mapped to the stable username on ``users.email``; an email with no row is
     :data:`UNKNOWN_EMAIL` and is never auto-provisioned or treated as anonymous.
+    An email that maps to an admin is :data:`ADMIN_EMAIL`: admins sign in over
+    SSH + htpasswd only, so a one-time PIN to their mailbox is not admin rights.
     """
     user = forwarded_user or None
     if user is not None and client_host not in TRUSTED_PROXY_HOSTS:
@@ -118,10 +132,13 @@ def resolve_forwarded_identity(
     if user is None:
         return None, ANONYMOUS
     if is_email_identity(user):
-        mapped = username_for_email(user)
-        if mapped is None:
+        account = account_for_email(user)
+        if account is None:
             return None, UNKNOWN_EMAIL
-        return mapped, OK
+        username, is_admin = account
+        if is_admin:
+            return None, ADMIN_EMAIL
+        return username, OK
     return user, OK
 
 
@@ -198,6 +215,14 @@ def unauthenticated_message(forwarded_user: str | None) -> str:
     return (
         "You are not logged in. Open MuSCAT-DB through the address that asks you to "
         "log in, not the server's port directly, and try again."
+    )
+
+
+def admin_email_message(identity_email: str) -> str:
+    """Why a validated identity that maps to an admin account was refused (403)."""
+    return (
+        f"You signed in as {identity_email}, which belongs to an admin account. Admin "
+        "accounts cannot sign in this way; use the SSH tunnel and your MuSCAT-DB password."
     )
 
 

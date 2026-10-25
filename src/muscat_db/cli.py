@@ -1115,6 +1115,35 @@ def _write_htpasswd(entries: dict[str, str]) -> None:
     tmp.rename(ht_path)  # atomic on same filesystem
 
 
+def _access_email_of(username: str) -> str | None:
+    """The Cloudflare Access email mapped to *username*, if any (``None`` also
+    when the database predates the column)."""
+    import sqlite3
+
+    from muscat_db.database import db_path, get_conn
+
+    try:
+        with get_conn(db_path()) as conn:
+            row = conn.execute(
+                "SELECT email FROM users WHERE username = ?", (username,)
+            ).fetchone()
+    except sqlite3.Error:
+        return None
+    return row[0] if row and row[0] else None
+
+
+def _refuse_admin_with_access_email(username: str) -> None:
+    """Admins sign in over SSH + htpasswd only (#50): an admin with an Access
+    email would let a one-time PIN to that mailbox stand in for admin rights."""
+    email = _access_email_of(username)
+    if email:
+        console.print(
+            f"[red]Error: '{username}' signs in through Cloudflare Access as {email}; "
+            f"admins cannot. Run `muscat-db htpasswd set-email {username} --clear` first[/]"
+        )
+        raise typer.Exit(1)
+
+
 htpasswd_app = typer.Typer(
     name="htpasswd",
     help="Manage nginx HTTP Basic Auth users",
@@ -1147,6 +1176,8 @@ def htpasswd_add(
             "treated as a Cloudflare Access email (see `htpasswd set-email`)[/]"
         )
         raise typer.Exit(1)
+    if admin:
+        _refuse_admin_with_access_email(username)
     if password_stdin:
         if password is not None:
             console.print("[red]Error: --password and --password-stdin are mutually exclusive[/]")
@@ -1226,6 +1257,15 @@ def htpasswd_set_email(
     with get_conn(db_path()) as conn:
         _apply_schema(conn)
         if normalized is not None:
+            admin_row = conn.execute(
+                "SELECT is_admin FROM users WHERE username = ?", (username,)
+            ).fetchone()
+            if admin_row and admin_row[0]:
+                console.print(
+                    f"[red]Error: '{username}' is an admin; admins sign in over SSH and "
+                    "htpasswd only, never through Cloudflare Access[/]"
+                )
+                raise typer.Exit(1)
             owner = conn.execute(
                 "SELECT username FROM users WHERE lower(email) = ?", (normalized,)
             ).fetchone()
@@ -1306,6 +1346,7 @@ def htpasswd_promote(
         if row is not None and row[0]:
             console.print(f"[yellow]'{username}' is already an admin[/]")
             return
+        _refuse_admin_with_access_email(username)
         # In the htpasswd file but never logged in: create the row the same
         # way `htpasswd add` does, then promote it.
         conn.execute(

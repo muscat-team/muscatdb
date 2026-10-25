@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>No access - MuSCAT-DB</title>
+<link rel="stylesheet" href="{{ static_url('styles.css') }}">
+</head>
+<body>
+{# Standalone, not base.html: the nav and chat would only make requests this
+   identity is refused for. #}
+<main class="container">
+  <h1>No access</h1>
+  <p class="page-lede">{{ message }}</p>
+</main>
+</body>
+</html>

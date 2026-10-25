@@ -28,6 +28,7 @@ from . import chat_agent
 from . import jobs
 from .auth import (
     PROXY_SECRET_HEADER,
+    ADMIN_EMAIL,
     UNKNOWN_EMAIL,
     authentication_required,
     resolve_forwarded_identity,
@@ -225,6 +226,9 @@ async def connect(sid, environ):
     if identity == UNKNOWN_EMAIL:
         logger.warning("rejected chat connection %s: unmapped Access identity", sid)
         raise SocketRefusedError("account not provisioned")
+    if identity == ADMIN_EMAIL:
+        logger.warning("rejected chat connection %s: Access identity of an admin", sid)
+        raise SocketRefusedError("admin accounts sign in over SSH")
     # Fail closed exactly like the HTTP middleware. socket.io is mounted as an
     # ASGI wrapper *in front of* the app, so /socket.io never passes through
     # that middleware: without this, a peer bypassing nginx (straight to the
