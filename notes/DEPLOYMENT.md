@@ -41,8 +41,8 @@ uv run muscat-db htpasswd list
 # Make an existing user admin without touching their password
 uv run muscat-db htpasswd promote <user>
 
-# Restrict an LCO proposal's observations and grant users access (issue #144)
-uv run muscat-db access restrict <proposal_id> [--description "..."]
+# Restrict an LCO proposal's observations and grant users access (issues #144, #228)
+uv run muscat-db access restrict <proposal_id>     # revokes the proposal's `everyone` grant
 uv run muscat-db access unrestrict <proposal_id>   # also shares a newly ingested proposal (groups are allow-only)
 uv run muscat-db access grant <user> <proposal_id>
 uv run muscat-db access revoke <user> <proposal_id>
@@ -59,6 +59,8 @@ uv run muscat-db access scope <user> [--off]
 # Scoped viewer + one target under any proposal (issue #228)
 uv run muscat-db access grant-target <user> <target>
 uv run muscat-db access revoke-target <user> <target>
+# Re-key objects and target grants with the current rule; lists dead target grants
+uv run muscat-db access target-keys [--dry-run]
 # Per-user job caps (issue #265): show, set (0 = unlimited) or clear a user's overrides
 uv run muscat-db access limit <user> [--running N] [--queued N] [--reset]
 ```
@@ -98,12 +100,23 @@ admins included.
   PostgreSQL each user's claims and enqueues take a transaction advisory lock.
 
 A scoped viewer can also be given single targets with `access grant-target
-<user> <target>` (spaces and case ignored, resolved to the raw `object`
-spellings): they then see every observation of that target under any proposal,
-and nothing else of the proposals it is in. Target grants apply to scoped
-viewers only; the command refuses anyone else. `access explain <user>` lists
-them. A target first observed under a new spelling after the viewer's grants
-were resolved is picked up on the next request.
+<user> <target>`: they then see every observation of that target under any
+proposal, and nothing else of the proposals it is in. Target grants apply to
+scoped viewers only; the command refuses anyone else. `access explain <user>`
+lists them. A target first observed under a new spelling after the viewer's
+grants were resolved is picked up on the next request.
+
+Target grants (`grant-target`, `group grant --target`) match by *target key*
+(`src/muscat_db/target_keys.py`): the host-level normalized name, so case,
+spaces, hyphens, leading zeros, candidate suffixes (`.01`) and planet letters
+(`b`) do not matter, and `TOI1234` covers an `OBJECT` of `TOI-1234` or
+`TOI 01234.01`. The key ignores the target page's name overrides: renaming a
+target regroups it for display and never changes who can see it. Keys are
+stored per object (`object_keys`) and per grant (`group_grants.target_key`),
+written by `ingest-date` and `build-db`. After deploying a change to the key
+rule, run `uv run muscat-db access target-keys --dry-run`: it lists every grant
+the new rule would re-key and every target grant that would match nothing.
+Then run it without `--dry-run`, or let the nightly `build-db` do it.
 
 Connect to production via SSH tunnel: `ssh -L 8000:localhost:8000 <user>@muscat-ut2` → http://localhost:8000. Staging's public port is `:8002` (`ssh -L 8002:localhost:8002`).
 
@@ -189,7 +202,7 @@ reader until the data step has run on production:
 | Writer (released first) | Data step on the host | Reader (released after) |
 |---|---|---|
 | Product records written per run (#208, #245) | `muscat-db backfill-products` | Visibility read from `_product.json` |
-| Group/grant tables (#228 step 1, #247) | `muscat-db access groups-seed`, then `access groups-check` must exit 0 | Call sites switched from the blocklist to groups (#228 step 2) |
+| Group/grant tables (#228 step 1, #247) | `muscat-db access groups-seed` | Call sites switched from the blocklist to groups (#228 step 2); blocklist retired (#228) |
 
 `backfill-products` first walks the `jobs` table, then the run directories on disk
 (`prose/<inst>/<date>/_runs/<target>/<run>` and `timer/<inst>/<date>/<target>[/<run>]`),
@@ -199,20 +212,148 @@ left without one. Check with a second `--dry-run`: it must report `would write 0
 record(s)`. Transit fits found on disk take their light curves from `fit.yaml`; an
 unreadable `fit.yaml` or a missing light curve leaves the fit undetermined.
 
-`groups-check` compares what the group model and the blocklist let every viewer
-see. Since #228 step 2 the groups decide on a seeded database and are allow-only:
-a proposal ingested after the seed is hidden from every non-admin until an admin
-runs `access unrestrict <proposal_id>` (everyone) or `access grant <user>
-<proposal_id>` (one user). `restrict`, `unrestrict`, `grant`, `revoke` and `scope`
-write both models, so `groups-check` stays at exit 0 except for such new
-proposals, which it lists. Its nonzero exit is then a to-do list, not a fault.
-Do not rerun `groups-seed` to share them: it would grant `everyone` every new
-proposal at once, so it refuses on a seeded database without `--force`.
+The access groups are the only source of visibility, and they are allow-only:
+a proposal ingested after the seed is hidden from every non-admin, and from the
+published static site, until an admin runs `access unrestrict <proposal_id>`
+(everyone) or `access grant <user> <proposal_id>` (one user). `restrict`,
+`unrestrict`, `grant`, `revoke` and `scope` write the groups only; the first of
+them on a fresh database seeds the groups. `access list` shows what `everyone`
+may not see. The old blocklist tables (`restricted_proposals`,
+`user_proposal_access`) are no longer read or written, except by `groups-seed`,
+the one-time migration of a database from before the groups; such a database
+fails closed for non-admins until it runs. The tables are dropped in a later
+release. Do not rerun `groups-seed` to share new proposals: it would grant
+`everyone` every new proposal at once, so it refuses on a seeded database
+without `--force` (a forced reseed keeps every proposal `everyone` has lost, and
+every user grant revoked since the migration).
+
+A viewer's grants reach SQL grouped by *shape* (`src/muscat_db/grant_sql.py`):
+which of proposal, instrument and target a grant sets, plus its date range.
+Grants of one shape share a single `IN (...)` test, so many target grants on one
+proposal cost about as much as one. Each distinct date range is its own shape.
+Above 500 shapes for one viewer, their pages fail with `GrantShapeLimitError`
+rather than sending SQLite a query it would reject; merge date ranges or grant
+the proposal instead.
 
 The files under `/etc/nginx/sites-available/` are root-owned copies, not links to
 `deploy/`. A change to `deploy/nginx*.conf` does not reach nginx on a deploy: diff
 the live file against the repo, copy it over, then `sudo nginx -t && sudo systemctl
 reload nginx`.
+
+### Cloudflare Access tunnel (#50)
+
+External collaborators reach production through Cloudflare Access and an
+outbound Cloudflare Tunnel. Nothing listens publicly on ut2:
+
+```
+browser → Cloudflare Access (email one-time PIN, allowlist)
+        → tunnel (cloudflared, outbound only) → nginx 127.0.0.1:8010
+        → auth_request /_auth/cf (JWT checked by the app) → uvicorn :8001
+```
+
+`:8010` (`deploy/nginx-access.conf`) has no Basic Auth: the identity is the
+email in the Access JWT, which the app validates (RS256, audience, issuer,
+expiry) and maps to a `users` row by `users.email`. An email with no row, and an
+email that belongs to an admin, get a 403. Admins sign in over `ssh -L` and
+htpasswd only; `htpasswd set-email` refuses an admin, and `promote` and
+`add --admin` refuse a user who has an email. The `ssh -L` + htpasswd listener on
+`:8000` is unchanged.
+
+In the repo: `deploy/cloudflared/muscat-db-tunnel.service` (systemd unit) and
+`deploy/cloudflared/tunnel-check.sh` (cron health check). The tunnel is managed
+from the Zero Trust dashboard and run from its token, so `cloudflared tunnel
+login` never runs on this host and no `cert.pem` tied to a personal account
+exists.
+
+**Bring-up**, in order. Steps 1–2 are in the Cloudflare dashboard; the rest on ut2.
+Steps 5–8 need #310 (security headers, and `X-Forwarded-Proto https` so chat
+connects through the tunnel) and #315 (the admin and unknown-email refusals step 8
+checks) released and deployed: step 5 copies `nginx-access.conf` from the deploy
+checkout, so it must be the post-#310 file.
+
+1. **Access application.** Zero Trust → Access → Applications → Self-hosted, on
+   the public hostname. Login method: one-time PIN only. Policy: Allow, Include →
+   Emails, listing each person (never *Everyone* or *Emails ending in*). Copy the
+   application's AUD tag; the team domain is `<team>.cloudflareaccess.com`.
+2. **Tunnel.** Zero Trust → Networks → Tunnels → Create (cloudflared). Copy the
+   token. Public hostname: the same hostname, service `http://127.0.0.1:8010`.
+   Under the hostname's Access settings, turn on *Protect with Access* (team name
+   and AUD tag) so cloudflared also refuses a request without a valid token.
+3. **Install cloudflared** from Cloudflare's apt repository (check
+   Cloudflare's current install page for the repository line), so it is patched
+   with the host:
+   ```bash
+   sudo mkdir -p --mode=0755 /usr/share/keyrings
+   curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | sudo tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null
+   echo 'deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main' | sudo tee /etc/apt/sources.list.d/cloudflared.list
+   sudo apt-get update && sudo apt-get install cloudflared
+   ```
+4. **User, token, unit:**
+   ```bash
+   sudo useradd --system --no-create-home --shell /usr/sbin/nologin cloudflared
+   sudo install -d -m 0700 /etc/cloudflared
+   sudo install -m 0600 /dev/null /etc/cloudflared/muscat-db.env
+   sudoedit /etc/cloudflared/muscat-db.env        # TUNNEL_TOKEN=<token>
+   sudo install -m 0644 deploy/cloudflared/muscat-db-tunnel.service /etc/systemd/system/
+   sudo systemctl daemon-reload && sudo systemctl enable --now muscat-db-tunnel
+   curl -s 127.0.0.1:20241/ready                  # 200 once connected
+   ```
+   Until step 5, the public hostname answers 502: nothing listens on `:8010` yet.
+5. **Enable the Access listener** (a copy, like the other sites, never a link
+   into a checkout):
+   ```bash
+   cd $HOME/deploy/main/app
+   sudo cp deploy/nginx-access.conf /etc/nginx/sites-available/muscat-db-access
+   sudo ln -sf /etc/nginx/sites-available/muscat-db-access /etc/nginx/sites-enabled/
+   sudo nginx -t && sudo systemctl reload nginx
+   ```
+6. **Configure the app.** Add to production's `.web-env` (`pull-deploy.sh`
+   sources it before every relaunch, so the values survive deploys):
+   ```bash
+   export MUSCAT_CF_TEAM_DOMAIN=<team>.cloudflareaccess.com
+   export MUSCAT_CF_AUD=<AUD tag>
+   ```
+   Restart `:8001` in its pane, tracing the process to its pane first as
+   *Switching an instance over* below describes.
+   Until both are set `/_auth/cf` answers 503 and the listener refuses everyone.
+7. **Health check cron**, with the public URL so a hostname served without the
+   Access login is caught too:
+   ```
+   */5 * * * * TUNNEL_PUBLIC_URL=https://<hostname>/ bash $MUSCATDB_ROOT/deploy/cloudflared/tunnel-check.sh >> $MUSCATDB_ROOT/logs/tunnel-check.log 2>&1
+   ```
+   It alerts Slack on a change of state only (down, a different problem,
+   recovered).
+8. **Verify, team only**, before any collaborator email goes on the allowlist:
+   - an unknown email gets the "no MuSCAT-DB account" page; an admin's email gets
+     the admin refusal; a mapped non-admin sees what `access explain <user>` says
+   - chat connects (Socket.IO) and a running photometry log streams
+   - `/var/log/nginx/muscat-db-access.log` shows each request's email and
+     `Cf-Connecting-IP`
+   - `systemctl stop muscat-db-tunnel` raises the Slack alert within 5 minutes,
+     and `start` reports the recovery
+
+**Adding a collaborator.** Not before #310, #312 (re-validated photometry
+options, `safe_load`, per-user chat rate limit) and #315 are on `main` and
+deployed, and step 8 has passed. Then one at a time:
+`muscat-db htpasswd set-email <user> <email>`, the grants (`access group …` or
+`access grant-target`), `access explain <user>` to confirm the user sees exactly
+what was granted, and only then the email on the Access policy. Remove it from the policy first
+when someone leaves. Review the policy against `users.email` every few months.
+
+**Patching.** cloudflared runs with `--no-autoupdate`; it updates with
+`sudo apt-get update && sudo apt-get install --only-upgrade cloudflared`, then
+`sudo systemctl restart muscat-db-tunnel` and `curl -s 127.0.0.1:20241/ready`.
+Do it monthly and on any Cloudflare security advisory for cloudflared; Cloudflare
+supports a release for about a year. Record the version in this file when it
+changes.
+
+**Rotating the token** (leak, or someone with dashboard access leaves): refresh
+the tunnel's token in the dashboard, replace it in
+`/etc/cloudflared/muscat-db.env`, restart the unit.
+
+**Rollback** (cuts off every external collaborator, leaves `:8000` alone):
+`sudo systemctl disable --now muscat-db-tunnel`, then
+`sudo rm /etc/nginx/sites-enabled/muscat-db-access && sudo systemctl reload nginx`.
 
 ---
 
@@ -634,12 +775,14 @@ section](../README.md#cron-daily) of the README), but that override never
 covered manual CLI runs or the `muscatdbgui` session, which only read `.env`.
 The cron now runs from the **production checkout** (`$HOME/deploy/main/app`),
 not the dev tree, so it has no dependency on a dev branch switch (see issue
-#26): it does the nightly prod `scan-yesterday` + `build-db`, then reseeds
-`muscat_test.db` from prod via SQLite's backup API and runs an isolated staging
-`scan-yesterday` against staging's own `MUSCAT_OBSLOG_DIR`. The README's [Cron
-section](../README.md#cron-daily) gives the generic, host-agnostic three-step
-form for anyone else deploying this repo; the literal line actually installed
-on this host, staging refresh included, is:
+#26): it runs `deploy/nightly.sh run` (catalogs, prod `scan-yesterday`,
+`build-db`, control-plane backup), then reseeds `muscat_test.db` from prod via
+SQLite's backup API and runs an isolated staging `scan-yesterday` against
+staging's own `MUSCAT_OBSLOG_DIR`. A failed catalog download does not stop that
+chain: `nightly.sh run` posts it as a warning and still exits 0. The README's
+[Cron section](../README.md#cron-daily) gives the generic, host-agnostic form
+for anyone else deploying this repo; the literal nightly entries installed on
+this host, staging refresh included, are (`crontab -l`, 2026-10-25):
 
 ```
 MUSCAT_OBSLOG_DIR=/ut2/muscat/obslog
@@ -647,7 +790,8 @@ MUSCATDB_ROOT=/ut2/jerome/deploy/main/app
 MUSCAT_TEST_ROOT=/ut2/jerome/deploy/test/app
 MUSCAT_TEST_DB=/ut2/jerome/deploy/test/muscat_test.db
 MUSCAT_TEST_OBSLOG_DIR=/ut2/jerome/deploy/test/obslog
-30 17 * * * cd $MUSCATDB_ROOT && bash scripts/download_catalogs.sh >> $MUSCATDB_ROOT/logs/download_catalogs.log 2>&1 && /ut2/jerome/.local/bin/uv run muscat-db scan-yesterday >> $MUSCATDB_ROOT/logs/scan.log 2>&1 && /ut2/jerome/.local/bin/uv run muscat-db build-db >> $MUSCATDB_ROOT/logs/build-db.log 2>&1 && /usr/bin/python3 -c "import sqlite3; s=sqlite3.connect('file:/ut2/jerome/github/research/project/muscat-db/muscat.db?mode=ro',uri=True); d=sqlite3.connect('$MUSCAT_TEST_DB'); s.backup(d); d.close(); s.close()" >> $MUSCAT_TEST_ROOT/logs/staging-refresh.log 2>&1 && cd $MUSCAT_TEST_ROOT && MUSCAT_OBSLOG_DIR=$MUSCAT_TEST_OBSLOG_DIR /ut2/jerome/.local/bin/uv run muscat-db scan-yesterday >> $MUSCAT_TEST_ROOT/logs/scan.log 2>&1
+30 17 * * * cd $MUSCATDB_ROOT && UV_BIN=/ut2/jerome/.local/bin/uv bash deploy/nightly.sh run && /usr/bin/python3 -c "import sqlite3; s=sqlite3.connect('file:/ut2/jerome/github/research/project/muscat-db/muscat.db?mode=ro',uri=True); d=sqlite3.connect('$MUSCAT_TEST_DB'); s.backup(d); d.close(); s.close()" >> $MUSCAT_TEST_ROOT/logs/staging-refresh.log 2>&1 && cd $MUSCAT_TEST_ROOT && MUSCAT_OBSLOG_DIR=$MUSCAT_TEST_OBSLOG_DIR /ut2/jerome/.local/bin/uv run muscat-db scan-yesterday >> $MUSCAT_TEST_ROOT/logs/scan.log 2>&1
+30 21 * * * cd $MUSCATDB_ROOT && UV_BIN=/ut2/jerome/.local/bin/uv MAX_BUILD_AGE_HOURS=24 bash deploy/nightly.sh check
 ```
 
 `cronjob.txt` itself is not tracked (it was a root-level file that only ever
@@ -768,10 +912,11 @@ The current pins are:
 
 The 2026-10-18 audit below covered prose2 `6029ea87` and timer. prose2
 v3.4.0 (`3daed56b`) adds jpdeleon/prose2#16 (read-only configuration loading) and
-leaves telescope definitions unchanged; `harmonic-prod-a32fb8e3` is new. Both
-need `install` and `verify`, and the dependency records below, before rollout.
+leaves telescope definitions unchanged; `harmonic-prod-a32fb8e3` is new. Both were
+installed and verified on 2026-10-24 (see the activation record below).
 
-These retain the working baseline's Python (prose 3.10.15, timer 3.13.13) and
+These retain the working baseline's Python (prose 3.10.15, timer 3.13.13,
+harmonic 3.12.13) and
 science dependencies. Prose's one explicit dependency override is
 `matplotlib==3.8.4`: the working environment's 3.9.3 violates the current
 owner package's `matplotlib<3.9` constraint (the old editable metadata did not
@@ -784,15 +929,35 @@ installer: a later clone of a changed development environment may have different
 dependencies even at the same engine commit. Compare dependency records before
 accepting any rebuilt environment.
 
-Prepared on ut2 on 2026-10-18; **not activated** in the web app or fleet.
-Both installations pass metadata/import-location checks and `pip check` on ut2
-and ut3–ut7. The dependency records are also checked in under
-`deploy/conda/production/{prose,timer}.json`. The baseline/pinned comparisons in
-`tests/test_pinned_engines_slow.py` passed for photometry preview and full reduction
-and for timer optimize-only and seeded sampling. The real Sinistro/260624
-TIC88297141 light curve is identical (311 rows), and timer's real KIC multi-band
-smoke fit has identical posterior means. The sampling check uses only 20 tuning
-and 20 draws; it tests migration compatibility, not scientific convergence.
+**Activated on 2026-10-24** for the production web app (`:8001`) and the fleet
+(ut3–ut7), with `main` at `5220fef1`:
+
+- `deploy/engines.py install prose harmonic` provisioned `prose-prod-3daed56b` and
+  `harmonic-prod-a32fb8e3` on ut2; `timer-prod-b8428258` was reused. `verify` passes
+  for all three on ut2 and ut3–ut7, which share `/ut2/jerome/miniconda3`.
+- The dependency records are checked in under
+  `deploy/conda/production/{prose,timer,harmonic}.json`.
+- `tests/test_pinned_engines_slow.py` passed for photometry preview and full
+  reduction (the pinned run launched frozen, through the same job environment and
+  log header as production) and for timer optimize-only and seeded sampling. The
+  real Sinistro/260624 TIC88297141 light curve is identical, and timer's real KIC
+  multi-band smoke fit has identical posterior means. The sampling check uses only
+  20 tuning and 20 draws; it tests migration compatibility, not scientific
+  convergence.
+- harmonic has no slow comparison yet. A replay of the recorded TOI7504 two-planet
+  fit (`-l bc`, seed 42) against the dev env gave the same ΔBIC (−12.40), χ² equal to
+  about 1e-7, and every posterior median within 0.064 posterior SD; the remaining
+  difference is the owner's parameter order. A single planet letter without
+  `--non-transiting-outer` has no planet pair and so no TTV model; the owner's
+  commit fails it with `KeyError: 't0_<letter>'`.
+- `deploy/workers.py --profile prod up` rendered the engine selections into the
+  worker env files, and the four engine lines from `web-env` were added to
+  production's `.web-env` before the web process was restarted in `muscatdbgui`.
+  Pinned engines now report `version+git.<SHA>`.
+
+The pre-activation `.web-env` and worker env files are kept in
+`~/temp/rollout-20261024/` for the Rollback below; the dev and earlier `-prod`
+environments are untouched.
 
 **Production photometry uses a frozen effective telescope configuration.**
 With `MUSCAT_PROSE_FROZEN_CONFIG=1`, reductions and postprocessing run

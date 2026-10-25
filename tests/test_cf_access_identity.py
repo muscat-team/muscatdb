@@ -152,3 +152,137 @@ def test_htpasswd_add_refuses_usernames_with_an_at_sign(db, tmp_path, monkeypatc
     r = CliRunner().invoke(cli_app, ["htpasswd", "add", "bob@univ.edu", "--password", "pw"])
     assert r.exit_code == 1
     assert "@" in r.output
+
+
+# ── normalization (#221) ────────────────────────────────────────────────
+
+
+def test_normalization_keeps_distinct_mailboxes_distinct(db):
+    """casefold() folds "ß" onto "ss", so straße@ and strasse@ -- two mailboxes --
+    would map to one account. lower() keeps them apart."""
+    from muscat_db import cf_access
+
+    assert auth.normalize_email(" Straße@Univ.DE ") == "straße@univ.de"
+    assert cf_access.normalize_email(" Straße@Univ.DE ") == "straße@univ.de"
+    r = CliRunner().invoke(cli_app, ["htpasswd", "set-email", "anna", "Straße@univ.de"])
+    assert r.exit_code == 0, r.output
+    assert _resolve("STRASSE@univ.de") == (None, auth.UNKNOWN_EMAIL)
+    assert _resolve("straße@UNIV.de") == ("anna", auth.OK)
+
+
+# ── admins stay on SSH + htpasswd ───────────────────────────────────────
+
+
+@pytest.fixture
+def admin_with_email(db):
+    """Written straight to the table: the CLI refuses it, but a row like this
+    can still arrive by hand or from an older version."""
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "INSERT INTO users (username, display_name, is_admin, email) "
+            "VALUES ('boss', 'boss', 1, 'boss@univ.edu')"
+        )
+    return db
+
+
+def test_an_email_mapped_to_an_admin_is_refused(admin_with_email):
+    """A one-time PIN to the admin's mailbox must not be a way to admin rights."""
+    assert _resolve("boss@univ.edu") == (None, auth.ADMIN_EMAIL)
+    assert _resolve("boss") == ("boss", auth.OK)  # the htpasswd path still works
+    r = _client().get("/whoami", headers=_headers("boss@univ.edu"))
+    assert r.status_code == 403
+    assert "admin" in r.json()["error"]
+
+
+def test_chat_refuses_an_email_mapped_to_an_admin(admin_with_email):
+    env = {
+        "HTTP_X_FORWARDED_USER": "boss@univ.edu",
+        "HTTP_X_MUSCAT_PROXY_SECRET": SECRET,
+        "asgi.scope": {"client": ("127.0.0.1", 5)},
+    }
+    with pytest.raises(socketio.exceptions.ConnectionRefusedError, match="admin"):
+        asyncio.run(chat.connect("sid-y", env))
+
+
+def _set_admin(db, username):
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO users (username, display_name) VALUES (?, ?)", (username, username)
+        )
+        conn.execute("UPDATE users SET is_admin = 1 WHERE username = ?", (username,))
+
+
+def test_set_email_refuses_an_admin(db):
+    _set_admin(db, "jerome")
+    r = CliRunner().invoke(cli_app, ["htpasswd", "set-email", "jerome", "jerome@univ.edu"])
+    assert r.exit_code == 1
+    assert "admin" in r.output
+    assert _emails(db)["jerome"] is None
+
+
+def test_promote_refuses_a_user_with_an_access_email(db, tmp_path, monkeypatch):
+    monkeypatch.setenv("MUSCAT_HTPASSWD_FILE", str(tmp_path / "htpasswd"))
+    (tmp_path / "htpasswd").write_text("andrew:$apr1$x$y\n")
+    r = CliRunner().invoke(cli_app, ["htpasswd", "promote", "andrew"])
+    assert r.exit_code == 1
+    assert "set-email andrew --clear" in r.output
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT is_admin FROM users WHERE username='andrew'").fetchone()[0] == 0
+
+
+def test_add_admin_refuses_a_user_with_an_access_email(db, tmp_path, monkeypatch):
+    monkeypatch.setenv("MUSCAT_HTPASSWD_FILE", str(tmp_path / "htpasswd"))
+    r = CliRunner().invoke(cli_app, ["htpasswd", "add", "andrew", "--admin", "--password", "pw"])
+    assert r.exit_code == 1
+    assert "set-email andrew --clear" in r.output
+    assert not (tmp_path / "htpasswd").exists() or "andrew" not in (tmp_path / "htpasswd").read_text()
+
+
+# ── what a refused collaborator sees, and what the log records ─────────
+
+
+def test_a_browser_gets_a_readable_page_for_an_unmapped_email(db):
+    r = _client().get("/", headers={**_headers("<b>x</b>@univ.edu"), "Accept": "text/html"})
+    assert r.status_code == 403
+    assert r.headers["content-type"].startswith("text/html")
+    assert "no MuSCAT-DB account" in r.text
+    assert "&lt;b&gt;x&lt;/b&gt;@univ.edu" in r.text and "<b>x</b>" not in r.text
+
+
+def test_api_clients_still_get_json_for_an_unmapped_email(db):
+    r = _client().get(
+        "/api/photometry/status", headers={**_headers("stranger@univ.edu"), "Accept": "text/html"}
+    )
+    assert r.status_code == 403
+    assert "no MuSCAT-DB account" in r.json()["error"]
+
+
+def test_a_refused_identity_is_logged_once_not_on_every_request(db, caplog, monkeypatch):
+    monkeypatch.setattr(web, "_REFUSALS_LOGGED", set())
+    c = _client()
+    with caplog.at_level("WARNING", logger=web.logger.name):
+        for _ in range(3):
+            c.get("/whoami", headers=_headers("stranger@univ.edu"))
+    assert sum("stranger@univ.edu" in rec.getMessage() for rec in caplog.records) == 1
+
+
+def test_public_paths_skip_the_identity_lookup(db, monkeypatch):
+    """Every page asset arrives with the Access email; mapping it means a
+    database connection per asset, for paths that serve anyone."""
+    def no_lookup(*_a, **_k):
+        pytest.fail("public path resolved the identity")
+
+    monkeypatch.setattr(auth, "account_for_email", no_lookup, raising=False)
+    monkeypatch.setattr(web, "resolve_forwarded_identity", no_lookup)
+    c = _client()
+    assert c.get("/healthz", headers=_headers("andrew.example@univ.edu")).status_code == 200
+    assert c.get("/static/styles.css", headers=_headers("andrew.example@univ.edu")).status_code == 200
+
+
+def test_the_admin_guard_reads_an_old_database_as_no_email(tmp_path, monkeypatch):
+    from muscat_db import cli
+
+    path = str(tmp_path / "old.db")
+    sqlite3.connect(path).executescript("CREATE TABLE users (username TEXT PRIMARY KEY);")
+    monkeypatch.setenv("MUSCAT_DB_PATH", path)
+    assert cli._access_email_of("jerome") is None

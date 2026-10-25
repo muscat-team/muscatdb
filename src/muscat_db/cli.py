@@ -1115,6 +1115,35 @@ def _write_htpasswd(entries: dict[str, str]) -> None:
     tmp.rename(ht_path)  # atomic on same filesystem
 
 
+def _access_email_of(username: str) -> str | None:
+    """The Cloudflare Access email mapped to *username*, if any (``None`` also
+    when the database predates the column)."""
+    import sqlite3
+
+    from muscat_db.database import db_path, get_conn
+
+    try:
+        with get_conn(db_path()) as conn:
+            row = conn.execute(
+                "SELECT email FROM users WHERE username = ?", (username,)
+            ).fetchone()
+    except sqlite3.Error:
+        return None
+    return row[0] if row and row[0] else None
+
+
+def _refuse_admin_with_access_email(username: str) -> None:
+    """Admins sign in over SSH + htpasswd only (#50): an admin with an Access
+    email would let a one-time PIN to that mailbox stand in for admin rights."""
+    email = _access_email_of(username)
+    if email:
+        console.print(
+            f"[red]Error: '{username}' signs in through Cloudflare Access as {email}; "
+            f"admins cannot. Run `muscat-db htpasswd set-email {username} --clear` first[/]"
+        )
+        raise typer.Exit(1)
+
+
 htpasswd_app = typer.Typer(
     name="htpasswd",
     help="Manage nginx HTTP Basic Auth users",
@@ -1147,6 +1176,8 @@ def htpasswd_add(
             "treated as a Cloudflare Access email (see `htpasswd set-email`)[/]"
         )
         raise typer.Exit(1)
+    if admin:
+        _refuse_admin_with_access_email(username)
     if password_stdin:
         if password is not None:
             console.print("[red]Error: --password and --password-stdin are mutually exclusive[/]")
@@ -1226,6 +1257,15 @@ def htpasswd_set_email(
     with get_conn(db_path()) as conn:
         _apply_schema(conn)
         if normalized is not None:
+            admin_row = conn.execute(
+                "SELECT is_admin FROM users WHERE username = ?", (username,)
+            ).fetchone()
+            if admin_row and admin_row[0]:
+                console.print(
+                    f"[red]Error: '{username}' is an admin; admins sign in over SSH and "
+                    "htpasswd only, never through Cloudflare Access[/]"
+                )
+                raise typer.Exit(1)
             owner = conn.execute(
                 "SELECT username FROM users WHERE lower(email) = ?", (normalized,)
             ).fetchone()
@@ -1306,6 +1346,7 @@ def htpasswd_promote(
         if row is not None and row[0]:
             console.print(f"[yellow]'{username}' is already an admin[/]")
             return
+        _refuse_admin_with_access_email(username)
         # In the htpasswd file but never logged in: create the row the same
         # way `htpasswd add` does, then promote it.
         conn.execute(
@@ -1373,12 +1414,14 @@ def _warn_restriction_gaps(db: str, proposal_id: str) -> None:
 @access_app.command("restrict")
 def access_restrict(
     proposal_id: str = typer.Argument(..., help="LCO proposal id, e.g. KEY2026B-001"),
-    description: str = typer.Option("", "--description", "-d", help="Free-text note"),
     revoked_by: str = typer.Option(
         None, "--by", help="Recorded as the revoking admin (default: your OS user)"
     ),
 ):
-    """Hide a proposal's observations from everyone without a grant."""
+    """Hide a proposal's observations from everyone without a grant.
+
+    Revokes the proposal's `everyone` grant; grants to other groups and users
+    are kept."""
     from muscat_db import access
     from muscat_db.database import db_path
 
@@ -1395,9 +1438,10 @@ def access_restrict(
         )
     else:
         proposal_id = observed
-    created = access.restrict(db, proposal_id, description, revoked_by or getpass.getuser())
-    verb = "restricted" if created else "already restricted; description updated"
-    console.print(f"[green]{proposal_id} {verb}[/]")
+    if access.restrict(db, proposal_id, revoked_by or getpass.getuser()):
+        console.print(f"[green]{proposal_id} restricted[/]")
+    else:
+        console.print(f"[yellow]{proposal_id} was already hidden from everyone[/]")
     _warn_restriction_gaps(db, proposal_id)
 
 
@@ -1407,8 +1451,8 @@ def access_unrestrict(
 ):
     """Make a proposal's observations visible to everyone (grants are kept).
 
-    Once the access groups are seeded this is also how a newly ingested
-    proposal is shared: until then it is hidden from every non-admin."""
+    This is also how a newly ingested proposal is shared: the groups are
+    allow-only, so until then it is hidden from every non-admin."""
     from muscat_db import access
     from muscat_db.database import db_path
 
@@ -1430,8 +1474,8 @@ def access_grant(
     ),
 ):
     """Let a user see a restricted proposal's observations."""
-    from muscat_db import access, access_groups
-    from muscat_db.database import db_path, get_conn
+    from muscat_db import access
+    from muscat_db.database import db_path
 
     db = db_path()
     proposal_id = proposal_id.strip()
@@ -1439,18 +1483,6 @@ def access_grant(
         console.print(
             f"[yellow]{username} has no users row yet (not added via `muscat-db "
             "htpasswd add`, or has never logged in). Granting anyway.[/]"
-        )
-    restricted = {r["proposal_id"].upper() for r in access.list_restrictions(db)}
-    with get_conn(db) as conn:
-        groups_active = access_groups.is_active(conn)
-    if (
-        not groups_active
-        and proposal_id.upper() not in restricted
-        and not access.is_scoped(db, username)
-    ):
-        console.print(
-            f"[yellow]{proposal_id} is not restricted, so this grant has no effect "
-            "until it is.[/]"
         )
     if access.grant(db, username, proposal_id, granted_by or getpass.getuser()):
         console.print(f"[green]{username} granted {proposal_id}[/]")
@@ -1481,7 +1513,7 @@ def access_revoke(
 @access_app.command("scope")
 def access_scope(
     username: str = typer.Argument(..., help="nginx username"),
-    off: bool = typer.Option(False, "--off", help="Return the user to blocklist behaviour"),
+    off: bool = typer.Option(False, "--off", help="Return the user to `everyone`"),
 ):
     """Make a user a scoped viewer: they see only the proposals granted to them
     (`access grant`), and nothing else, including frames with no PROPID."""
@@ -1534,10 +1566,16 @@ def access_limit(
     )
 
 
+_TARGET_HELP = (
+    "Target name, matched by target key: case, spaces, hyphens, leading zeros, "
+    "candidate suffixes (.01) and planet letters (b) are ignored"
+)
+
+
 @access_app.command("grant-target")
 def access_grant_target(
     username: str = typer.Argument(..., help="nginx username (must be a scoped viewer)"),
-    target: str = typer.Argument(..., help="Target name; spaces and case are ignored"),
+    target: str = typer.Argument(..., help=_TARGET_HELP),
     granted_by: str = typer.Option(
         None, "--by", help="Recorded as the granting admin (default: your OS user)"
     ),
@@ -1616,14 +1654,13 @@ def access_list(
     if not rows:
         console.print("[yellow]No proposals are restricted[/]")
         return
-    table = Table(title="Restricted proposals")
+    table = Table(title="Proposals hidden from everyone")
     table.add_column("Proposal", style="cyan")
-    table.add_column("Description")
-    table.add_column("Since")
+    table.add_column("Hidden since")
     table.add_column("Granted to")
     for r in rows:
         table.add_row(
-            r["proposal_id"], r["description"], r["created_at"],
+            r["proposal_id"], r["since"] or "never shared",
             ", ".join(r["grantees"]) or "-",
         )
     console.print(table)
@@ -1638,9 +1675,10 @@ def access_groups_seed(
 ) -> None:
     """Express the proposal blocklist as allow-only groups and grants (#228).
 
-    The first run switches visibility onto the groups without changing what
-    anyone sees; run `access groups-check` afterwards to confirm parity. After
-    that the groups are allow-only, and seeding again would grant `everyone`
+    This is the one-time migration of a database that predates the groups:
+    the first run switches visibility onto them without changing what anyone
+    sees, and is the only reader of the old blocklist tables. After that the
+    groups are allow-only, and seeding again would grant `everyone`
     every proposal ingested since, so it needs --force. Share one new proposal
     with `access unrestrict <PROPOSAL>` instead.
     """
@@ -1680,29 +1718,38 @@ def access_groups_seed(
         console.print("[green]Already seeded; nothing to do.[/]")
 
 
-@access_app.command("groups-check")
-def access_groups_check(
-    limit: int = typer.Option(20, "--limit", help="Mismatches to print"),
+@access_app.command("target-keys")
+def access_target_keys(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Report what would change, write nothing"),
 ) -> None:
-    """Compare what the group model and the blocklist each let every viewer see.
+    """Re-key observed objects and target grants with the current rule (#228).
 
-    Exits 1 on any mismatch, so it can gate the call-site switch (#228).
+    Ingest and `build-db` already do this; run it by hand after deploying a
+    change to the target-key rule, with --dry-run first, to see which grants it
+    re-keys before it does. Also lists target grants that match no object.
     """
-    from muscat_db import access_groups
-    from muscat_db.database import db_path
+    from muscat_db import target_keys
+    from muscat_db.database import _apply_schema, db_path, get_conn
 
-    mismatches = access_groups.parity(db_path())
-    if not mismatches:
-        console.print("[green]Group model and blocklist agree for every viewer.[/]")
-        return
-    users = sorted({m["user"] or "(anonymous)" for m in mismatches})
-    console.print(f"[red]{len(mismatches)} mismatch(es) across: {', '.join(users)}[/]")
-    for m in mismatches[:limit]:
+    with get_conn(db_path()) as conn:
+        _apply_schema(conn)
+        report = target_keys.refresh(conn)
+        if dry_run:
+            conn.rollback()
+        else:
+            conn.commit()
+    verb = "Would" if dry_run else "Did"
+    console.print(
+        f"{verb} add {report.objects_added}, re-key {len(report.objects_rekeyed)} and drop "
+        f"{report.objects_removed} object key(s); re-key {len(report.grants_rekeyed)} grant(s) "
+        f"(rule v{target_keys.TARGET_KEY_VERSION})"
+    )
+    for gid, group, target, old, new in report.grants_rekeyed:
+        console.print(f"  grant #{gid} {group} target={target}: {old or '(none)'} -> {new}")
+    for gid, group, target in report.dead_grants:
         console.print(
-            f"  {m['user'] or '(anonymous)'}: {m['instrument']} {m['obsdate']} "
-            f"{m['object']} [{m['proposal_id'] or '-'}] blocklist={m['blocklist']} groups={m['groups']}"
+            f"[yellow]  grant #{gid} {group} target={target} matches no observed object[/]"
         )
-    raise typer.Exit(1)
 
 
 def _refuse_implicit_group(group: str, action: str) -> None:
@@ -1795,7 +1842,7 @@ def access_group_grant(
     group: str = typer.Argument(..., help="Group name, `everyone`, or `user:<name>` for one user"),
     proposal_id: str | None = typer.Option(None, "--proposal", help="LCO proposal id"),
     instrument: str | None = typer.Option(None, "--instrument", help="Instrument, e.g. sinistro"),
-    target: str | None = typer.Option(None, "--target", help="Target name (spaces and case ignored)"),
+    target: str | None = typer.Option(None, "--target", help=_TARGET_HELP),
     date: str | None = typer.Option(None, "--date", help="One obsdate, YYMMDD"),
     date_from: str | None = typer.Option(None, "--from", help="First obsdate, YYMMDD (inclusive)"),
     date_to: str | None = typer.Option(None, "--to", help="Last obsdate, YYMMDD (inclusive)"),

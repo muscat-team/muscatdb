@@ -1,0 +1,59 @@
+# Cloudflare Tunnel for muscat-db's Access listener (issue #50).
+#
+# A dashboard-managed tunnel run from its token: the public hostname, its
+# ingress to http://127.0.0.1:8010 and the Access protection are configured in
+# Cloudflare Zero Trust, so no `cloudflared tunnel login` (and no cert.pem tied
+# to a personal account) ever happens on this host. The token is the only
+# secret; it lives in /etc/cloudflared/muscat-db.env (root:root 0600, read by
+# systemd before it drops to the unprivileged user):
+#
+#   TUNNEL_TOKEN=<token from Zero Trust > Networks > Tunnels>
+#
+# Install (see notes/DEPLOYMENT.md, Cloudflare Access tunnel):
+#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin cloudflared
+#   sudo install -m 0644 deploy/cloudflared/muscat-db-tunnel.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now muscat-db-tunnel
+#
+# --metrics serves /ready on loopback for deploy/cloudflared/tunnel-check.sh.
+# --no-autoupdate: cloudflared is patched through apt with the rest of the host.
+
+[Unit]
+Description=Cloudflare Tunnel for muscat-db (Access listener 127.0.0.1:8010)
+After=network-online.target nginx.service
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=cloudflared
+Group=cloudflared
+EnvironmentFile=/etc/cloudflared/muscat-db.env
+ExecStart=/usr/bin/cloudflared --no-autoupdate tunnel --metrics 127.0.0.1:20241 run
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=60s
+
+# The tunnel only makes outbound connections and talks to nginx on loopback.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

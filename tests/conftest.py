@@ -114,6 +114,27 @@ def _isolate_proxy_auth_config(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _restore_static_site_env():
+    """Undo ``static_site._prepare_env`` after each test.
+
+    ``build_site`` points the process at its database and switches it into
+    snapshot mode through ``os.environ``, which a CLI build can leave set but a
+    test must not: every later test would read the last build's database
+    (issue #228: an anonymous viewer there can be denied rows another test
+    expects to see). Snapshotted by hand because ``monkeypatch.delenv`` records
+    nothing for a variable that is absent, so it would not undo a later set.
+    """
+    names = ("MUSCAT_DB_PATH", "MUSCAT_STATIC_SITE", "MUSCAT_LCO_MONITOR_ENABLED")
+    saved = {name: os.environ.get(name) for name in names}
+    yield
+    for name, value in saved.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+
+
+@pytest.fixture(autouse=True)
 def _isolate_db_backup_dir(monkeypatch, tmp_path_factory):
     """Keep build_db()'s pre-rebuild snapshots out of the real ``~/temp``.
 

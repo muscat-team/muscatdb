@@ -92,7 +92,10 @@ from muscat_db.access import (
 from muscat_db.product_visibility import ProductVisibility, default_run_dir
 from muscat_db import run_ownership
 from muscat_db.auth import (
+    ADMIN_EMAIL,
     PROXY_SECRET_HEADER,
+    UNKNOWN_EMAIL,
+    admin_email_message,
     authentication_required as _authentication_required,
     resolve_forwarded_identity,
     unauthenticated_message,
@@ -509,17 +512,65 @@ async def _api_validation_exception_handler(request: Request, exc: RequestValida
     )
 
 
+# Validated identities refused once per process, so a refused collaborator's
+# every page load and asset does not log another WARNING. Capped: an Access
+# allowlist is short, and the set starts over rather than grow without bound.
+_REFUSALS_LOGGED: set[tuple[str, str]] = set()
+_REFUSALS_LOGGED_MAX = 1024
+
+
+def _log_identity_refusal(identity: str, forwarded: str) -> None:
+    key = (identity, forwarded)
+    if key in _REFUSALS_LOGGED:
+        return
+    if len(_REFUSALS_LOGGED) >= _REFUSALS_LOGGED_MAX:
+        _REFUSALS_LOGGED.clear()
+    _REFUSALS_LOGGED.add(key)
+    logger.warning("rejecting Access identity %r (%s)", forwarded, identity)
+
+
+def _identity_refusal(request: Request, raw_path: str, message: str):
+    """403 for a validated identity the app will not admit: a page a person can
+    read in the browser, JSON for API clients and scripts."""
+    wants_html = "text/html" in request.headers.get("accept", "")
+    if wants_html and not raw_path.startswith("/api/"):
+        page = jinja.get_template("access_refused.html").render(message=message)
+        return HTMLResponse(page, status_code=403)
+    return JSONResponse({"ok": False, "error": message}, status_code=403)
+
+
 # Middleware: extract the authenticated user from the nginx reverse proxy.
 # The trust rule (only honor X-Forwarded-User from a loopback proxy peer) lives
 # in muscat_db.auth so the companion-app gateway applies it identically.
 @app.middleware("http")
 async def _nginx_auth_middleware(request: Request, call_next):
+    # Decide public vs protected from the raw ASGI path, never from
+    # request.url.path. Starlette builds request.url from the Host header
+    # (GHSA-86qp-5c8j-p5mr), so a Host of "evil/static/" collapses
+    # url.path to "/static/" and would flip this flag off while routing
+    # still dispatches on the real path, skipping both gates below.
+    # scope["path"] is set by the ASGI server and the Host header cannot
+    # reach it. The starlette>=1.0.1 floor in pyproject.toml fixes the URL
+    # parsing itself; this keeps the decision correct regardless.
+    raw_path = request.scope.get("path", "")
+    protected = not (
+        raw_path == "/healthz"
+        or raw_path.startswith("/static/")
+        # nginx auth_request target: it carries no user yet (it produces the
+        # identity) and does its own loopback + shared-secret check.
+        or raw_path == _CF_AUTH_PATH
+    )
+    if not protected:
+        # Served to anyone, so no identity: behind Access every asset carries
+        # an email, and mapping it would cost a database connection each.
+        request.state.user = None
+        return await call_next(request)
     client_host = request.client.host if request.client else None
     forwarded = request.headers.get("X-Forwarded-User")
     user, identity = resolve_forwarded_identity(
         forwarded, client_host, request.headers.get(PROXY_SECRET_HEADER)
     )
-    if forwarded and user is None and identity != "unknown_email":
+    if forwarded and user is None and identity not in (UNKNOWN_EMAIL, ADMIN_EMAIL):
         logger.warning(
             "ignoring untrusted X-Forwarded-User=%r from peer %s "
             "(proxy address or shared secret did not validate)",
@@ -528,37 +579,23 @@ async def _nginx_auth_middleware(request: Request, call_next):
     request.state.user = user
     token = _CURRENT_USER.set(user)
     try:
-        # Decide public vs protected from the raw ASGI path, never from
-        # request.url.path. Starlette builds request.url from the Host header
-        # (GHSA-86qp-5c8j-p5mr), so a Host of "evil/static/" collapses
-        # url.path to "/static/" and would flip this flag off while routing
-        # still dispatches on the real path, skipping both gates below.
-        # scope["path"] is set by the ASGI server and the Host header cannot
-        # reach it. The starlette>=1.0.1 floor in pyproject.toml fixes the URL
-        # parsing itself; this keeps the decision correct regardless.
-        raw_path = request.scope.get("path", "")
-        protected = not (
-            raw_path == "/healthz"
-            or raw_path.startswith("/static/")
-            # nginx auth_request target: it carries no user yet (it produces the
-            # identity) and does its own loopback + shared-secret check.
-            or raw_path == _CF_AUTH_PATH
-        )
-        if protected and identity == "unknown_email":
-            # A validated Access identity with no users row: refuse it rather
-            # than fall through as anonymous, and never auto-provision (#50).
-            logger.warning("rejecting unmapped Access identity %r", forwarded)
-            return JSONResponse(
-                {"ok": False, "error": unprovisioned_message(forwarded)}, status_code=403
+        if identity in (UNKNOWN_EMAIL, ADMIN_EMAIL):
+            # A validated Access identity with no users row, or one that maps
+            # to an admin: refuse it rather than fall through as anonymous,
+            # and never auto-provision (#50).
+            _log_identity_refusal(identity, forwarded)
+            message = (
+                unprovisioned_message(forwarded) if identity == UNKNOWN_EMAIL
+                else admin_email_message(forwarded)
             )
-        if _authentication_required() and protected and not user:
+            return _identity_refusal(request, raw_path, message)
+        if _authentication_required() and not user:
             return JSONResponse(
                 {"ok": False, "error": unauthenticated_message(forwarded)},
                 status_code=401,
             )
         if (
-            protected
-            and request.method.upper() not in {"GET", "HEAD", "OPTIONS", "TRACE"}
+            request.method.upper() not in {"GET", "HEAD", "OPTIONS", "TRACE"}
             and not _is_same_origin(request)
         ):
             return _csrf_error()
@@ -716,13 +753,9 @@ _CURRENT_USER: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 def _viewer_denied() -> frozenset[str]:
     """Restricted proposals the current request's viewer may not see (issue
     #144); empty for admins and whenever nothing is restricted."""
-    db = _db_path()
-
-    def normalize(name: str) -> str:
-        # Called only when a scoped viewer has target grants to resolve.
-        return _normalize_target_name(name, _get_norm_name_overrides(db))
-
-    return denied_proposal_ids_for(db, _CURRENT_USER.get(), normalize)
+    # Target grants match by stored target key (issue #228), never through the
+    # name overrides: a rename on the target page does not change access.
+    return denied_proposal_ids_for(_db_path(), _CURRENT_USER.get())
 
 
 def _night_visibility(denied: frozenset[str] | None = None) -> NightVisibility:
@@ -7733,7 +7766,12 @@ def photometry_command(payload: phot_api.CommandRequest):
         error = _site_required_error(_db_path(), inst, date, target, options)
     if not error and not hidden:
         error = _telescope_required_error(_db_path(), inst, date, target, options)
-    command = phot.command_str(inst, date, target, options=options, test_run=test_run)
+    try:
+        command = phot.command_str(inst, date, target, options=options, test_run=test_run)
+    except ValueError:
+        # An option build_command refuses; validate_run_options has already
+        # put the reason in ``error``.
+        command = ""
     return phot_api.response(phot_api.CommandResponse, {"command": command, "error": error})
 
 

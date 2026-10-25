@@ -114,14 +114,15 @@ def run(work_dir: str, outdir: str = "out") -> None:
 
 
 def _load(work_dir: str, outdir: str):
-    """Build a TransitFit exactly as the ``timer-fit`` CLI does."""
+    """Build a TransitFit exactly as the ``timer-fit`` CLI does, except that the
+    run configuration is read with ``safe_load``: it is plain data (#273)."""
     import yaml
     from timer.fit import TransitFit
 
     with open(os.path.join(work_dir, "fit.yaml")) as f:
-        fit_params = yaml.load(f, Loader=yaml.FullLoader)
+        fit_params = yaml.safe_load(f)
     with open(os.path.join(work_dir, "sys.yaml")) as f:
-        sys_params = yaml.load(f, Loader=yaml.FullLoader)
+        sys_params = yaml.safe_load(f)
     return TransitFit(sys_params, fit_params, wd=work_dir, outdir=outdir)
 
 

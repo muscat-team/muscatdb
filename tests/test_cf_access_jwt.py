@@ -212,6 +212,28 @@ def test_access_listener_logs_the_validated_email():
 
 
 
+def test_access_listener_forwards_https_as_the_scheme():
+    """cloudflared reaches nginx over plain HTTP, so $scheme is "http" while the
+    browser is on https://. Socket.IO's default origin check compares Origin with
+    the forwarded scheme and would refuse the chat connection."""
+    conf = (Path(__file__).resolve().parents[1] / "deploy" / "nginx-access.conf").read_text()
+    code = "\n".join(l for l in conf.splitlines() if not l.lstrip().startswith("#"))
+    assert "X-Forwarded-Proto $scheme" not in code
+    assert code.count("proxy_set_header X-Forwarded-Proto https;") == 2
+
+
+@pytest.mark.parametrize(("proto", "allowed"), [("https", True), ("http", False)])
+def test_socketio_origin_check_follows_the_forwarded_scheme(proto, allowed):
+    """Pins the engine.io behaviour the test above relies on."""
+    environ = {
+        "wsgi.url_scheme": "http",
+        "HTTP_HOST": "muscat.example.org",
+        "HTTP_X_FORWARDED_PROTO": proto,
+    }
+    origins = web.sio.eio._cors_allowed_origins(environ)
+    assert ("https://muscat.example.org" in origins) is allowed
+
+
 @pytest.mark.parametrize("name", ["nginx.conf", "nginx-staging.conf"])
 def test_htpasswd_listeners_do_not_expose_the_jwt_check(name):
     """These listeners proxy every path with the proxy secret, so without an

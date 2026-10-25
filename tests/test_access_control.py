@@ -76,16 +76,13 @@ def _build_db(db_path: str, *, restrict: bool = True) -> None:
     ])
     _insert_summary_rows(conn, _summary_rows(conn))
     _populate_targets(conn)
-    if restrict:
-        conn.execute(
-            "INSERT INTO restricted_proposals (proposal_id) VALUES (?)",
-            (_RESTRICTED.lower(),),
-        )
     conn.execute(
         "INSERT OR REPLACE INTO db_meta (key, value) VALUES ('last_build_at', '1700000000')"
     )
     conn.commit()
     conn.close()
+    if restrict:
+        access.restrict(db_path, _RESTRICTED.lower())
 
 
 def _set_admin(db: str, user: str) -> None:
@@ -524,12 +521,13 @@ def test_cli_restrict_uses_observed_spelling_and_warns_about_blank_propid(tmp_pa
     path = tmp_path / "cli.db"
     _build_db(str(path), restrict=False)
     monkeypatch.setenv("MUSCAT_DB_PATH", str(path))
-    result = CliRunner().invoke(cli_app, ["access", "restrict", _OPEN.lower(), "-d", "embargo"])
+    result = CliRunner().invoke(cli_app, ["access", "restrict", _OPEN.lower()])
     assert result.exit_code == 0, result.output
     assert "no PROPID" in result.output
     assert "muscat3: 1" in result.output
     rows = access.list_restrictions(str(path))
-    assert [(r["proposal_id"], r["description"]) for r in rows] == [(_OPEN, "embargo")]
+    assert [r["proposal_id"] for r in rows] == [_OPEN]
+    assert rows[0]["since"]  # when `everyone` lost it
 
 
 def test_cli_restrict_warns_about_blank_propid_even_when_checkpoint_is_complete(
@@ -920,7 +918,7 @@ def test_cli_grant_target_warns_when_target_matches_nothing(db, monkeypatch):
 def _product_viewer(db: str, tmp_path, user: str, normalize=None):
     from muscat_db.product_visibility import ProductVisibility
 
-    denied = access.denied_proposal_ids_for(db, user, normalize)
+    denied = access.denied_proposal_ids_for(db, user)
     return ProductVisibility(
         user,
         denied,
@@ -1002,18 +1000,30 @@ def test_target_grant_run_resolves_job_spelling_through_the_normalizer(db, tmp_p
     assert not viewer.hidden("photometry", "muscat3", "260201", "TGT-HIDDEN", "r1")
 
 
-def test_groups_parity_covers_target_grants(db):
-    from muscat_db import access_groups
-
+def test_target_grant_agrees_between_python_and_sql(db):
+    # A scoped viewer's target grant must open the same rows in the Python
+    # check (is_denied with row detail) and the SQL filter: without row detail
+    # the Python side would hide the granted night.
     _scope(db, "andrew", _OPEN)
-    access_groups.seed_from_blocklist(db)
     _grant_target(db, "andrew", "HIDDENTGT")
-    assert access_groups.parity(db) == []
-
-    # Without row detail the blocklist side would hide the granted night and
-    # the check would report a mismatch for it, so this fails if detail is lost.
-    nights = {(m["instrument"], m["obsdate"]) for m in access_groups.parity(db)}
-    assert ("muscat3", "260201") not in nights
+    denied = access.denied_proposal_ids_for(db, "andrew")
+    clause, params = sql_not_denied(denied)
+    with sqlite3.connect(db) as conn:
+        keys = conn.execute(
+            "SELECT instrument, obsdate, object, proposal_id FROM summaries"
+        ).fetchall()
+        in_sql = set(
+            conn.execute(
+                f"SELECT instrument, obsdate, object, proposal_id FROM summaries WHERE {clause}",
+                params,
+            ).fetchall()
+        )
+    in_python = {
+        k for k in keys
+        if not access.is_denied(k[3], denied, instrument=k[0], obsdate=k[1], obj=k[2])
+    }
+    assert in_python == in_sql
+    assert ("muscat3", "260201") in {(k[0], k[1]) for k in in_python}
 
 
 # --- LCO test observations ---------------------------------------------------

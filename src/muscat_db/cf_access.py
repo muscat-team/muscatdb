@@ -51,12 +51,13 @@ _JWKS_TIMEOUT_S = 5
 router = APIRouter()
 
 # Kept local so this module does not depend on the email->username mapping
-# (#248); both use the same rule: stripped, case-folded, one @ and a dotted host.
+# (#248); both use the same rule: stripped, lower-cased (not case-folded, see
+# auth.normalize_email), one @ and a dotted host.
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def normalize_email(value) -> str | None:
-    email = value.strip().casefold() if isinstance(value, str) else ""
+    email = value.strip().lower() if isinstance(value, str) else ""
     return email if _EMAIL_RE.match(email) else None
 
 

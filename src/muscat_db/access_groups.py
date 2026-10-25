@@ -1,12 +1,12 @@
 """Allow-only, group-based data visibility (issue #228).
 
-This module holds the group/grant model and its evaluator. Step 1 proved that
-the model, seeded from the #144/#202 blocklist, gives every viewer what the
-blocklist does (:func:`parity`). Step 2 made it authoritative: once the
-``everyone`` group exists (:func:`is_active`),
+This module holds the group/grant model and its evaluator, the only source of
+visibility. Once the ``everyone`` group exists (:func:`is_active`),
 :func:`muscat_db.access.denied_proposal_ids_for` builds each viewer's denied
-set from their grants, so every call site of the blocklist helpers reads the
-groups. Before that, the blocklist still decides.
+set from their grants. Every access writer seeds the groups first
+(:func:`ensure_seeded`), so a database without them has no rule at all. The
+#144/#202 blocklist tables are read only by :func:`seed_from_blocklist`, the
+one-time migration of a database that predates the groups.
 
 Model (design: issue #228):
 
@@ -18,10 +18,12 @@ Model (design: issue #228):
 * a grant to one nginx user is stored as a grant to the hidden single-member
   group ``user:<name>``, so there is one mechanism and one evaluator.
 
-Target names cannot be normalized in SQL (the rule lives in Python and honours
-manual overrides), so a target grant is *resolved* to the raw ``object``
-spellings it matches when an :class:`Access` is built. An object first seen
-after that is hidden until the next build: it fails closed, like #202.
+A target grant matches by *target key* (:mod:`muscat_db.target_keys`): the
+grant's stored key against each object's key in ``object_keys``. It is
+resolved to the raw ``object`` spellings carrying that key when an
+:class:`Access` is built, so SQL can filter on ``object IN (...)``. An object
+first seen after that is hidden until the next build: it fails closed, like
+#202.
 """
 
 from __future__ import annotations
@@ -29,10 +31,12 @@ from __future__ import annotations
 import logging
 import re
 import sqlite3
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
+from muscat_db import target_keys
 from muscat_db.database import _apply_schema, get_conn
+from muscat_db.grant_sql import compile_grants
 
 logger = logging.getLogger(__name__)
 
@@ -50,18 +54,14 @@ def user_group(username: str) -> str:
     return f"{USER_PREFIX}{username}"
 
 
-def _compact(name: str) -> str:
-    return (name or "").replace(" ", "").casefold()
-
-
 # ── grant + evaluator ───────────────────────────────────────────────────
 
 
 @dataclass(frozen=True)
 class Grant:
-    """One rule. ``None`` fields match anything. ``objects`` is the resolved
-    set of raw ``object`` spellings for a target grant (``None`` = no target
-    constraint)."""
+    """One rule. ``None`` fields match anything. For a target grant,
+    ``target_key`` is what matches and ``objects`` the raw ``object``
+    spellings carrying that key (``None`` = no target constraint)."""
 
     id: int | None = None
     group: str = ""
@@ -71,6 +71,7 @@ class Grant:
     date_from: str | None = None
     date_to: str | None = None
     objects: frozenset[str] | None = None
+    target_key: str | None = None
 
     @property
     def is_proposal_only(self) -> bool:
@@ -152,21 +153,7 @@ class Access:
         ``("0", [])``, so callers can always splice the clause in."""
         if self.is_admin:
             return "1", []
-        if not self.grants:
-            return "0", []
-        clauses: list[str] = []
-        params: list = []
-        for grant in self.grants:
-            clause, p = grant.sql(alias)
-            if clause == "0":
-                continue
-            if clause == "1":
-                return "1", []
-            clauses.append(clause)
-            params.extend(p)
-        if not clauses:
-            return "0", []
-        return "(" + " OR ".join(clauses) + ")", params
+        return compile_grants(self.grants, alias)
 
 
 # ── loading ─────────────────────────────────────────────────────────────
@@ -212,29 +199,52 @@ def _group_names_for(conn: sqlite3.Connection, user: str | None, is_admin: bool)
     return frozenset(groups - excluded)
 
 
-def _resolve_objects(
-    targets: Iterable[str],
-    objects: Iterable[str],
-    normalize: Callable[[str], str] | None,
-) -> dict[str, frozenset[str]]:
-    """Raw ``object`` spellings matching each target name: equal with spaces
-    and case ignored, or equal under *normalize* when one is supplied."""
-    objects = [o for o in objects if o]
-    out: dict[str, frozenset[str]] = {}
-    for target in set(targets):
-        want = _compact(target)
-        norm = normalize(target) if normalize else None
-        out[target] = frozenset(
-            o for o in objects if _compact(o) == want or (norm is not None and normalize(o) == norm)
+_SELECT_FIELDS = "id, groupname, proposal_id, instrument, target, date_from, date_to"
+
+
+def _select_grants(conn: sqlite3.Connection, where: str, params: Iterable) -> list[tuple]:
+    """Live grant rows, each ending in its stored ``target_key``. *where* is a
+    trusted literal. A database whose schema predates the key column reads
+    as having no stored keys, which :func:`_build_grants` computes."""
+    params = tuple(params)
+    try:
+        return conn.execute(
+            f"SELECT {_SELECT_FIELDS}, target_key FROM group_grants WHERE {where} ORDER BY id",
+            params,
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        if "no such column: target_key" not in str(exc):
+            raise
+    return conn.execute(
+        f"SELECT {_SELECT_FIELDS}, NULL FROM group_grants WHERE {where} ORDER BY id", params
+    ).fetchall()
+
+
+def _build_grants(conn: sqlite3.Connection, rows: list[tuple]) -> tuple[Grant, ...]:
+    """Grants from :func:`_select_grants` rows, each target grant resolved to
+    the ``object`` spellings carrying its key. A key no object carries
+    resolves to nothing, so the grant shows nothing (fails closed)."""
+    by_key = target_keys.objects_by_key(conn) if any(r[4] is not None for r in rows) else {}
+    grants = []
+    for r in rows:
+        key = target_keys.grant_key(r[7], r[4]) if r[4] is not None else None
+        grants.append(
+            Grant(
+                id=r[0],
+                group=r[1],
+                proposal_id=r[2],
+                instrument=r[3],
+                target=r[4],
+                date_from=r[5],
+                date_to=r[6],
+                objects=by_key.get(key, frozenset()) if key is not None else None,
+                target_key=key,
+            )
         )
-    return out
+    return tuple(grants)
 
 
-def load_access(
-    db_path: str,
-    user: str | None,
-    normalize: Callable[[str], str] | None = None,
-) -> Access:
+def load_access(db_path: str, user: str | None) -> Access:
     """The :class:`Access` for *user* (``None`` = anonymous, who is in
     ``everyone`` only). A database with no group tables yet grants nothing,
     which is the safe reading; any other error propagates, because failing
@@ -246,85 +256,20 @@ def load_access(
             admin = bool(row and row[0])
         try:
             groups = _group_names_for(conn, user, admin)
-            rows = conn.execute(
-                "SELECT id, groupname, proposal_id, instrument, target, date_from, date_to "
-                f"FROM group_grants WHERE groupname IN ({','.join('?' for _ in groups)}) "
-                "ORDER BY id",
-                sorted(groups),
-            ).fetchall()
+            rows = _select_grants(
+                conn, f"groupname IN ({','.join('?' for _ in groups)})", sorted(groups)
+            )
         except sqlite3.OperationalError as exc:
             if _missing_table(exc):
                 return Access(user, admin, frozenset())
             raise
-        targets = {r[4] for r in rows if r[4] is not None}
-        resolved: dict[str, frozenset[str]] = {}
-        if targets:
-            objects = [r[0] for r in conn.execute("SELECT DISTINCT object FROM summaries")]
-            resolved = _resolve_objects(targets, objects, normalize)
-    grants = tuple(
-        Grant(
-            id=r[0],
-            group=r[1],
-            proposal_id=r[2],
-            instrument=r[3],
-            target=r[4],
-            date_from=r[5],
-            date_to=r[6],
-            objects=resolved.get(r[4]) if r[4] is not None else None,
-        )
-        for r in rows
-    )
+        grants = _build_grants(conn, rows)
     return Access(user, admin, groups, grants)
-
-
-def scoped_target_rules(
-    conn: sqlite3.Connection,
-    user: str,
-    normalize: Callable[[str], str] | None = None,
-) -> tuple[Grant, ...]:
-    """Target grants that widen a *scoped* viewer's proposal allowlist.
-
-    Only grants that name a target, from the viewer's own groups other than
-    ``everyone`` and ``admin``: a scoped viewer is outside ``everyone`` by
-    definition, and plain proposal grants already live in their allowlist
-    (#202). Missing group tables mean no grants.
-    """
-    try:
-        groups = _group_names_for(conn, user, False) - {EVERYONE, ADMIN}
-        if not groups:
-            return ()
-        rows = conn.execute(
-            "SELECT id, groupname, proposal_id, instrument, target, date_from, date_to "
-            f"FROM group_grants WHERE target IS NOT NULL AND groupname IN "
-            f"({','.join('?' for _ in groups)}) ORDER BY id",
-            sorted(groups),
-        ).fetchall()
-    except sqlite3.OperationalError as exc:
-        if _missing_table(exc):
-            return ()
-        raise
-    if not rows:
-        return ()
-    objects = [r[0] for r in conn.execute("SELECT DISTINCT object FROM summaries")]
-    resolved = _resolve_objects({r[4] for r in rows}, objects, normalize)
-    return tuple(
-        Grant(
-            id=r[0],
-            group=r[1],
-            proposal_id=r[2],
-            instrument=r[3],
-            target=r[4],
-            date_from=r[5],
-            date_to=r[6],
-            objects=resolved[r[4]],
-        )
-        for r in rows
-    )
 
 
 _GRANT_COLUMNS = (
     "id, groupname, proposal_id, instrument, target, date_from, date_to, "
-    "note, granted_by, granted_at"
+    "note, granted_by, granted_at, target_key, target_key_version"
 )
 
 
@@ -342,13 +287,17 @@ def _archive_grants(conn: sqlite3.Connection, where: str, params: tuple, revoked
 def remove_target_grants(
     conn: sqlite3.Connection, group: str, target: str, revoked_by: str = ""
 ) -> int:
-    """Revoke *group*'s grants on *target* (case-insensitive). Returns the count."""
-    return _archive_grants(
-        conn,
-        "groupname = ? AND target IS NOT NULL AND lower(target) = lower(?)",
-        (group, target),
-        revoked_by,
-    )
+    """Revoke *group*'s grants on *target*, matched by target key, so any
+    spelling of the target revokes it. Returns the count."""
+    want = target_keys.target_key(target)
+    ids = [
+        g.id
+        for g in _build_grants(conn, _select_grants(conn, "groupname = ? AND target IS NOT NULL", (group,)))
+        if want and g.target_key == want
+    ]
+    if not ids:
+        return 0
+    return _archive_grants(conn, f"id IN ({','.join('?' for _ in ids)})", tuple(ids), revoked_by)
 
 
 def revoke_grant(conn: sqlite3.Connection, grant_id: int, revoked_by: str = "") -> dict | None:
@@ -438,24 +387,32 @@ def add_grant(
     note: str = "",
     granted_by: str = "",
 ) -> bool:
-    """Insert a grant unless an identical one exists. Returns whether it did."""
+    """Insert a grant unless an equivalent one exists. Returns whether it did.
+
+    Two target grants are equivalent when their targets share a key: a grant
+    on ``TOI1234`` duplicates one on ``TOI-1234``."""
     if date_to is not None and date_from is None:
         raise ValueError("date_to needs date_from")
     if date_from is not None and date_to is None:
         date_to = date_from
-    existing = conn.execute(
-        "SELECT 1 FROM group_grants WHERE groupname = ? "
-        "AND proposal_id IS ? AND instrument IS ? AND target IS ? "
-        "AND date_from IS ? AND date_to IS ?",
-        (group, proposal_id, instrument, target, date_from, date_to),
-    ).fetchone()
-    if existing:
+    key = target_keys.target_key(target) if target is not None else None
+    same_fields = conn.execute(
+        "SELECT target FROM group_grants WHERE groupname = ? "
+        "AND proposal_id IS ? AND instrument IS ? AND date_from IS ? AND date_to IS ? "
+        "AND (target IS NULL) = ?",
+        (group, proposal_id, instrument, date_from, date_to, target is None),
+    ).fetchall()
+    if any(r[0] is None or target_keys.target_key(r[0]) == key for r in same_fields):
         return False
     conn.execute(
         "INSERT INTO group_grants "
-        "(groupname, proposal_id, instrument, target, date_from, date_to, note, granted_by) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (group, proposal_id, instrument, target, date_from, date_to, note, granted_by),
+        "(groupname, proposal_id, instrument, target, date_from, date_to, note, granted_by, "
+        "target_key, target_key_version) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            group, proposal_id, instrument, target, date_from, date_to, note, granted_by,
+            key, target_keys.TARGET_KEY_VERSION if key is not None else None,
+        ),
     )
     return True
 
@@ -477,85 +434,26 @@ class SeedReport:
 
 def seed_from_blocklist(db_path: str, dry_run: bool = False) -> SeedReport:
     """Express the #144/#202 blocklist as groups and grants, so the new model
-    gives every viewer what they have today. Idempotent: it only adds rows that
-    are missing, and never removes or edits one an admin made by hand.
+    gives every viewer what they had under it. Idempotent: it only adds rows
+    that are missing, and never removes or edits one an admin made by hand.
 
     * ``everyone`` gets a ``proposal_id`` grant for every observed proposal that
       is not restricted, an instrument grant for each no-PROPID instrument, and
       a blank-``proposal_id`` grant if an LCO instrument has frames without one
       (the blocklist never hid those);
-    * each ``user_proposal_access`` row becomes a grant to ``user:<name>``;
+    * each ``user_proposal_access`` row becomes a grant to ``user:<name>``,
+      unless the revoke history shows that grant was revoked since;
     * a scoped user is excluded from ``everyone``, so only their own grants
       apply -- the #202 allowlist.
 
-    Proposals ingested after this run are not in ``everyone`` until it is run
-    again; that is the allow-only default, and :func:`parity` reports them.
+    The legacy tables are read here only, as the input of this one-time
+    migration; nothing writes them any more. Proposals ingested after this run
+    are not in ``everyone`` until an admin shares them (``access unrestrict``):
+    that is the allow-only default.
     """
-    report = SeedReport()
     with get_conn(db_path) as conn:
         _apply_schema(conn)
-        restricted = {
-            r[0].upper()
-            for r in conn.execute("SELECT proposal_id FROM restricted_proposals")
-            if r[0]
-        }
-        observed = [
-            r[0]
-            for r in conn.execute(
-                "SELECT DISTINCT proposal_id FROM summaries WHERE proposal_id <> '' "
-                "ORDER BY proposal_id"
-            )
-        ]
-        blank_lco = [
-            r[0]
-            for r in conn.execute(
-                "SELECT DISTINCT instrument FROM summaries WHERE proposal_id = '' ORDER BY 1"
-            )
-            if r[0].lower() not in NO_PROPID_INSTRUMENTS
-        ]
-        report.blank_lco_instruments = blank_lco
-
-        for name, desc in (
-            (EVERYONE, "every user, unless excluded"),
-            (ADMIN, "mirrors users.is_admin"),
-        ):
-            if ensure_group(conn, name, desc, builtin=True):
-                report.groups += 1
-
-        seen_ids: set[str] = set()
-        for pid in observed:
-            if pid.upper() in restricted or pid.upper() in seen_ids:
-                continue
-            seen_ids.add(pid.upper())
-            if add_grant(conn, EVERYONE, proposal_id=pid, note=SEED_NOTE, granted_by=SEED_BY):
-                report.everyone_grants.append(f"proposal_id={pid}")
-        for inst in NO_PROPID_INSTRUMENTS:
-            if add_grant(conn, EVERYONE, instrument=inst, note=SEED_NOTE, granted_by=SEED_BY):
-                report.everyone_grants.append(f"instrument={inst}")
-        if blank_lco and add_grant(
-            conn, EVERYONE, proposal_id="", note=SEED_NOTE, granted_by=SEED_BY
-        ):
-            report.everyone_grants.append("proposal_id='' (blank PROPID on LCO frames)")
-
-        for username, pid, by in conn.execute(
-            "SELECT username, proposal_id, granted_by FROM user_proposal_access "
-            "ORDER BY username, proposal_id"
-        ).fetchall():
-            group = user_group(username)
-            if ensure_group(conn, group, f"direct grants for {username}", builtin=True):
-                report.groups += 1
-            add_member(conn, group, username, SEED_BY)
-            if add_grant(conn, group, proposal_id=pid, note=SEED_NOTE, granted_by=by or SEED_BY):
-                report.user_grants.append((username, pid))
-
-        for (username,) in conn.execute("SELECT username FROM users WHERE scoped = 1").fetchall():
-            cur = conn.execute(
-                "INSERT OR IGNORE INTO group_exclusions (groupname, username) VALUES (?, ?)",
-                (EVERYONE, username),
-            )
-            if cur.rowcount:
-                report.exclusions.append(username)
-
+        report = _seed(conn)
         if dry_run:
             conn.rollback()
         else:
@@ -563,50 +461,138 @@ def seed_from_blocklist(db_path: str, dry_run: bool = False) -> SeedReport:
     return report
 
 
-# ── parity with the blocklist ───────────────────────────────────────────
+def ensure_seeded(conn: sqlite3.Connection) -> None:
+    """Seed the groups on *conn* (uncommitted) unless they already decide.
+
+    Every access writer calls this first, so a grant, restriction or scope
+    made on a fresh database lands in the group model rather than in tables
+    nothing reads. A fresh database has no legacy rows, so this only shares
+    every observed proposal with ``everyone``, which is what the viewer saw
+    before any rule existed."""
+    if not is_active(conn):
+        _seed(conn)
 
 
-def parity(db_path: str, normalize: Callable[[str], str] | None = None) -> list[dict]:
-    """Every (viewer, night, object, proposal) where the group model disagrees
-    with the blocklist. Viewers are every user known to ``users`` or
-    ``user_proposal_access``, plus the anonymous viewer.
+def legacy_rules_unmigrated(conn: sqlite3.Connection) -> bool:
+    """Whether an unseeded database still holds #144/#202 blocklist rules.
 
-    The groups decide once seeded, and the blocklist CLI writes both, so the
-    expected mismatch is a proposal ingested after the seed: visible under the
-    blocklist, hidden under the groups until someone grants it."""
-    from muscat_db import access
-
-    with get_conn(db_path) as conn:
-        keys = conn.execute(
-            "SELECT DISTINCT instrument, obsdate, object, proposal_id FROM summaries"
-        ).fetchall()
-        users: set[str | None] = {None}
-        users.update(r[0] for r in conn.execute("SELECT username FROM users"))
+    Such a database predates the group model and was never migrated with
+    ``access groups-seed``. Its rules are no longer read, so visibility must
+    fail closed rather than silently drop them."""
+    probes = (
+        "SELECT 1 FROM restricted_proposals LIMIT 1",
+        "SELECT 1 FROM user_proposal_access LIMIT 1",
+        "SELECT 1 FROM users WHERE scoped = 1 LIMIT 1",
+    )
+    for sql in probes:
         try:
-            users.update(r[0] for r in conn.execute("SELECT username FROM user_proposal_access"))
+            if conn.execute(sql).fetchone():
+                return True
         except sqlite3.OperationalError as exc:
-            if not _missing_table(exc):
+            if not (_missing_table(exc) or "no such column" in str(exc)):
                 raise
-    mismatches: list[dict] = []
-    for user in sorted(users, key=lambda u: (u is not None, u or "")):
-        denied = access.blocklist_denied_proposal_ids_for(db_path, user, normalize)
-        grants = load_access(db_path, user, normalize)
-        for inst, date, obj, pid in keys:
-            old = not access.is_denied(pid, denied, instrument=inst, obsdate=date, obj=obj)
-            new = grants.frame_visible(inst, date, obj, pid)
-            if old != new:
-                mismatches.append(
-                    {
-                        "user": user,
-                        "instrument": inst,
-                        "obsdate": date,
-                        "object": obj,
-                        "proposal_id": pid,
-                        "blocklist": old,
-                        "groups": new,
-                    }
-                )
-    return mismatches
+    return False
+
+
+def _legacy_rows(conn: sqlite3.Connection, sql: str) -> list[tuple]:
+    try:
+        return conn.execute(sql).fetchall()
+    except sqlite3.OperationalError as exc:
+        if _missing_table(exc):
+            return []
+        raise
+
+
+def _revoked_proposal_ids(conn: sqlite3.Connection, group: str) -> set[str]:
+    """Proposals whose plain grant *group* lost, upper-cased, from the revoke
+    history."""
+    return {
+        r[0].upper()
+        for r in conn.execute(
+            "SELECT proposal_id FROM group_grants_revoked WHERE groupname = ? "
+            "AND proposal_id IS NOT NULL AND instrument IS NULL AND target IS NULL "
+            "AND date_from IS NULL AND date_to IS NULL",
+            (group,),
+        )
+        if r[0]
+    }
+
+
+def _seed(conn: sqlite3.Connection) -> SeedReport:
+    report = SeedReport()
+    # A proposal `everyone` lost is restricted too: the legacy table stopped
+    # recording restrictions, so without this a reseed (`groups-seed --force`)
+    # would share again every proposal restricted since.
+    restricted = {
+        r[0].upper()
+        for r in _legacy_rows(conn, "SELECT proposal_id FROM restricted_proposals")
+        if r[0]
+    } | _revoked_proposal_ids(conn, EVERYONE)
+    observed = [
+        r[0]
+        for r in conn.execute(
+            "SELECT DISTINCT proposal_id FROM summaries WHERE proposal_id <> '' "
+            "ORDER BY proposal_id"
+        )
+    ]
+    blank_lco = [
+        r[0]
+        for r in conn.execute(
+            "SELECT DISTINCT instrument FROM summaries WHERE proposal_id = '' ORDER BY 1"
+        )
+        if r[0].lower() not in NO_PROPID_INSTRUMENTS
+    ]
+    report.blank_lco_instruments = blank_lco
+
+    for name, desc in (
+        (EVERYONE, "every user, unless excluded"),
+        (ADMIN, "mirrors users.is_admin"),
+    ):
+        if ensure_group(conn, name, desc, builtin=True):
+            report.groups += 1
+
+    seen_ids: set[str] = set()
+    for pid in observed:
+        if pid.upper() in restricted or pid.upper() in seen_ids:
+            continue
+        seen_ids.add(pid.upper())
+        if add_grant(conn, EVERYONE, proposal_id=pid, note=SEED_NOTE, granted_by=SEED_BY):
+            report.everyone_grants.append(f"proposal_id={pid}")
+    for inst in NO_PROPID_INSTRUMENTS:
+        if add_grant(conn, EVERYONE, instrument=inst, note=SEED_NOTE, granted_by=SEED_BY):
+            report.everyone_grants.append(f"instrument={inst}")
+    if blank_lco and add_grant(
+        conn, EVERYONE, proposal_id="", note=SEED_NOTE, granted_by=SEED_BY
+    ):
+        report.everyone_grants.append("proposal_id='' (blank PROPID on LCO frames)")
+
+    # Likewise a migrated user grant revoked since: `revoke` leaves its legacy
+    # row, so a reseed would grant it again.
+    revoked: dict[str, set[str]] = {}
+    for username, pid, by in _legacy_rows(
+        conn,
+        "SELECT username, proposal_id, granted_by FROM user_proposal_access "
+        "ORDER BY username, proposal_id",
+    ):
+        group = user_group(username)
+        if group not in revoked:
+            revoked[group] = _revoked_proposal_ids(conn, group)
+        if (pid or "").upper() in revoked[group]:
+            continue
+        if ensure_group(conn, group, f"direct grants for {username}", builtin=True):
+            report.groups += 1
+        add_member(conn, group, username, SEED_BY)
+        if add_grant(conn, group, proposal_id=pid, note=SEED_NOTE, granted_by=by or SEED_BY):
+            report.user_grants.append((username, pid))
+
+    for (username,) in conn.execute("SELECT username FROM users WHERE scoped = 1").fetchall():
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO group_exclusions (groupname, username) VALUES (?, ?)",
+            (EVERYONE, username),
+        )
+        if cur.rowcount:
+            report.exclusions.append(username)
+    return report
 
 
 # ── admin CLI support (rollout step 4) ──────────────────────────────────
@@ -673,6 +659,8 @@ def check_selector(
     known = sorted(instruments)
     if instrument is not None and instrument not in known:
         raise ValueError(f"unknown instrument '{instrument}' (known: {', '.join(known)}).")
+    if target is not None and not target_keys.target_key(target):
+        raise ValueError(f"target '{target}' has no name left once normalized.")
     if not (proposal_id or instrument or target or date_from):
         raise ValueError("Give at least one of --proposal, --instrument, --target or --date/--from.")
     return Selector(proposal_id, instrument, target, date_from, date_to)
@@ -751,23 +739,15 @@ def matching_summaries(db_path: str, grant: Grant) -> int:
         return conn.execute(f"SELECT COUNT(*) FROM summaries WHERE {clause}", params).fetchone()[0]
 
 
-def dead_grants(db_path: str, user: str | None, normalize: Callable[[str], str] | None = None) -> list[Grant]:
+def dead_grants(db_path: str, user: str | None) -> list[Grant]:
     """The grants reaching *user* that match no observation."""
-    return [g for g in load_access(db_path, user, normalize).grants if not matching_summaries(db_path, g)]
+    return [g for g in load_access(db_path, user).grants if not matching_summaries(db_path, g)]
 
 
-def load_grant(db_path: str, grant_id: int, normalize: Callable[[str], str] | None = None) -> Grant:
+def load_grant(db_path: str, grant_id: int) -> Grant:
     """One live grant by id, its target resolved as :func:`load_access` does."""
     with get_conn(db_path) as conn:
-        r = conn.execute(
-            "SELECT id, groupname, proposal_id, instrument, target, date_from, date_to "
-            "FROM group_grants WHERE id = ?",
-            (grant_id,),
-        ).fetchone()
-        if r is None:
+        rows = _select_grants(conn, "id = ?", (grant_id,))
+        if not rows:
             raise KeyError(grant_id)
-        objects = None
-        if r[4] is not None:
-            names = [o[0] for o in conn.execute("SELECT DISTINCT object FROM summaries")]
-            objects = _resolve_objects([r[4]], names, normalize)[r[4]]
-    return Grant(*r, objects=objects)
+        return _build_grants(conn, rows)[0]

@@ -359,7 +359,13 @@ def _install_scrub(
         datasets, last = orig["_get_datasets_for_normalized_target"](
             db, normalized_name, denied
         )
-        datasets = [d for d in datasets if not is_denied(d.get("proposal_id"), restricted_proposals)]
+        datasets = [
+            d for d in datasets
+            if not is_denied(
+                d.get("proposal_id"), restricted_proposals,
+                instrument=d.get("instrument"), obsdate=d.get("date"), obj=d.get("object"),
+            )
+        ]
         if scrub_notes:
             datasets = [{**d, "note": ""} for d in datasets]
         return datasets, last
@@ -377,11 +383,12 @@ def _install_scrub(
             selected.append({**job, "user_name": ""} if scrub_notes else job)
         return selected
 
-    # The obslog readers filter by proposal in SQL (issue #144 PR6); the build
-    # denies every restricted proposal on top of whatever the live handler
-    # passes for its (anonymous) viewer.
+    # The obslog readers filter by proposal in SQL (issue #144 PR6). The build's
+    # anonymous viewer is authoritative over whatever the live handler passes.
+    # A union would turn a ScopedDenied into a plain set and drop its
+    # instrument/target rules, hiding every frame without a PROPID.
     def _build_denied(denied: frozenset[str]) -> frozenset[str]:
-        return frozenset(denied) | restricted_proposals
+        return restricted_proposals or denied
 
     def summaries_scrubbed(db, instrument, obsdate, *, denied=frozenset()):
         return orig["_get_summaries"](db, instrument, obsdate, denied=_build_denied(denied))
@@ -473,7 +480,13 @@ def _drilldown_urls(
         visible_summaries: list[dict] = []
         for d in dates:
             summaries = database.get_summaries(db, inst, d["obsdate"])
-            visible = [s for s in summaries if not is_denied(s.get("proposal_id"), restricted_proposals)]
+            visible = [
+                s for s in summaries
+                if not is_denied(
+                    s.get("proposal_id"), restricted_proposals,
+                    instrument=inst, obsdate=d["obsdate"], obj=s.get("object"),
+                )
+            ]
             if visible:
                 chosen_date = d["obsdate"]
                 visible_summaries = visible
@@ -928,15 +941,15 @@ def build_site(
     _prior_static_site = os.environ.get("MUSCAT_STATIC_SITE")
     _prepare_env(resolved_db)
 
-    # Opt-in-restricted proposals (issue #144): computed once up front and
-    # threaded through both the capture-list enumeration and the render-layer
-    # scrub below. The static site has no per-viewer identity, so it is treated
-    # as a zero-grants viewer -- every restricted proposal is denied, with no
-    # exceptions.
-    # Upper-cased to match access.is_denied's case-insensitive comparison.
-    restricted_proposals = frozenset(
-        p.upper() for p in database.restricted_proposal_ids(resolved_db)
-    )
+    # What the static site may show (issues #144, #228): computed once up front
+    # and threaded through both the capture-list enumeration and the
+    # render-layer scrub below. The site has no per-viewer identity, so it
+    # shows what an anonymous viewer -- `everyone` and nothing else -- sees.
+    # A proposal not shared with `everyone`, including one ingested after the
+    # seed, stays off the published site.
+    from muscat_db.access import denied_proposal_ids_for
+
+    restricted_proposals = denied_proposal_ids_for(resolved_db, None)
     restricted_object_slugs = frozenset(
         _slug(o)
         for o in database.objects_with_restricted_proposal(resolved_db, restricted_proposals)
