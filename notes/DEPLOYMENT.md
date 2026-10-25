@@ -214,6 +214,14 @@ release. Do not rerun `groups-seed` to share new proposals: it would grant
 without `--force` (a forced reseed keeps every proposal `everyone` has lost, and
 every user grant revoked since the migration).
 
+A viewer's grants reach SQL grouped by *shape* (`src/muscat_db/grant_sql.py`):
+which of proposal, instrument and target a grant sets, plus its date range.
+Grants of one shape share a single `IN (...)` test, so many target grants on one
+proposal cost about as much as one. Each distinct date range is its own shape.
+Above 500 shapes for one viewer, their pages fail with `GrantShapeLimitError`
+rather than sending SQLite a query it would reject; merge date ranges or grant
+the proposal instead.
+
 The files under `/etc/nginx/sites-available/` are root-owned copies, not links to
 `deploy/`. A change to `deploy/nginx*.conf` does not reach nginx on a deploy: diff
 the live file against the repo, copy it over, then `sudo nginx -t && sudo systemctl
