@@ -219,6 +219,115 @@ The files under `/etc/nginx/sites-available/` are root-owned copies, not links t
 the live file against the repo, copy it over, then `sudo nginx -t && sudo systemctl
 reload nginx`.
 
+### Cloudflare Access tunnel (#50)
+
+External collaborators reach production through Cloudflare Access and an
+outbound Cloudflare Tunnel. Nothing listens publicly on ut2:
+
+```
+browser → Cloudflare Access (email one-time PIN, allowlist)
+        → tunnel (cloudflared, outbound only) → nginx 127.0.0.1:8010
+        → auth_request /_auth/cf (JWT checked by the app) → uvicorn :8001
+```
+
+`:8010` (`deploy/nginx-access.conf`) has no Basic Auth: the identity is the
+email in the Access JWT, which the app validates (RS256, audience, issuer,
+expiry) and maps to a `users` row by `users.email`. An email with no row, and an
+email that belongs to an admin, get a 403. Admins sign in over `ssh -L` and
+htpasswd only; `htpasswd set-email` refuses an admin, and `promote` and
+`add --admin` refuse a user who has an email. The `ssh -L` + htpasswd listener on
+`:8000` is unchanged.
+
+In the repo: `deploy/cloudflared/muscat-db-tunnel.service` (systemd unit) and
+`deploy/cloudflared/tunnel-check.sh` (cron health check). The tunnel is managed
+from the Zero Trust dashboard and run from its token, so `cloudflared tunnel
+login` never runs on this host and no `cert.pem` tied to a personal account
+exists.
+
+**Bring-up**, in order. Steps 1–2 are in the Cloudflare dashboard; the rest on ut2.
+
+1. **Access application.** Zero Trust → Access → Applications → Self-hosted, on
+   the public hostname. Login method: one-time PIN only. Policy: Allow, Include →
+   Emails, listing each person (never *Everyone* or *Emails ending in*). Copy the
+   application's AUD tag; the team domain is `<team>.cloudflareaccess.com`.
+2. **Tunnel.** Zero Trust → Networks → Tunnels → Create (cloudflared). Copy the
+   token. Public hostname: the same hostname, service `http://127.0.0.1:8010`.
+   Under the hostname's Access settings, turn on *Protect with Access* (team name
+   and AUD tag) so cloudflared also refuses a request without a valid token.
+3. **Install cloudflared** from Cloudflare's apt repository (check
+   Cloudflare's current install page for the repository line), so it is patched
+   with the host:
+   ```bash
+   sudo mkdir -p --mode=0755 /usr/share/keyrings
+   curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | sudo tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null
+   echo 'deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main' | sudo tee /etc/apt/sources.list.d/cloudflared.list
+   sudo apt-get update && sudo apt-get install cloudflared
+   ```
+4. **User, token, unit:**
+   ```bash
+   sudo useradd --system --no-create-home --shell /usr/sbin/nologin cloudflared
+   sudo install -d -m 0700 /etc/cloudflared
+   sudo install -m 0600 /dev/null /etc/cloudflared/muscat-db.env
+   sudoedit /etc/cloudflared/muscat-db.env        # TUNNEL_TOKEN=<token>
+   sudo install -m 0644 deploy/cloudflared/muscat-db-tunnel.service /etc/systemd/system/
+   sudo systemctl daemon-reload && sudo systemctl enable --now muscat-db-tunnel
+   curl -s 127.0.0.1:20241/ready                  # 200 once connected
+   ```
+   Until step 5, the public hostname answers 502: nothing listens on `:8010` yet.
+5. **Enable the Access listener** (a copy, like the other sites, never a link
+   into a checkout):
+   ```bash
+   cd $HOME/deploy/main/app
+   sudo cp deploy/nginx-access.conf /etc/nginx/sites-available/muscat-db-access
+   sudo ln -sf /etc/nginx/sites-available/muscat-db-access /etc/nginx/sites-enabled/
+   sudo nginx -t && sudo systemctl reload nginx
+   ```
+6. **Configure the app.** Add to production's `.web-env` (`pull-deploy.sh`
+   sources it before every relaunch, so the values survive deploys):
+   ```bash
+   export MUSCAT_CF_TEAM_DOMAIN=<team>.cloudflareaccess.com
+   export MUSCAT_CF_AUD=<AUD tag>
+   ```
+   Restart `:8001` in its pane, tracing the process to its pane first as
+   *Switching an instance over* below describes.
+   Until both are set `/_auth/cf` answers 503 and the listener refuses everyone.
+7. **Health check cron**, with the public URL so a hostname served without the
+   Access login is caught too:
+   ```
+   */5 * * * * TUNNEL_PUBLIC_URL=https://<hostname>/ bash $MUSCATDB_ROOT/deploy/cloudflared/tunnel-check.sh >> $MUSCATDB_ROOT/logs/tunnel-check.log 2>&1
+   ```
+   It alerts Slack on a change of state only (down, a different problem,
+   recovered).
+8. **Verify, team only**, before any collaborator email goes on the allowlist:
+   - an unknown email gets the "no MuSCAT-DB account" page; an admin's email gets
+     the admin refusal; a mapped non-admin sees what `access explain <user>` says
+   - chat connects (Socket.IO) and a running photometry log streams
+   - `/var/log/nginx/muscat-db-access.log` shows each request's email and
+     `Cf-Connecting-IP`
+   - `systemctl stop muscat-db-tunnel` raises the Slack alert within 5 minutes,
+     and `start` reports the recovery
+
+**Adding a collaborator**, one at a time:
+`muscat-db htpasswd set-email <user> <email>`, then `access groups-check` (exit 0),
+the grants (`access group …` or `access grant-target`), `access explain <user>`,
+and only then the email on the Access policy. Remove it from the policy first
+when someone leaves. Review the policy against `users.email` every few months.
+
+**Patching.** cloudflared runs with `--no-autoupdate`; it updates with
+`sudo apt-get update && sudo apt-get install --only-upgrade cloudflared`, then
+`sudo systemctl restart muscat-db-tunnel` and `curl -s 127.0.0.1:20241/ready`.
+Do it monthly and on any Cloudflare security advisory for cloudflared; Cloudflare
+supports a release for about a year. Record the version in this file when it
+changes.
+
+**Rotating the token** (leak, or someone with dashboard access leaves): refresh
+the tunnel's token in the dashboard, replace it in
+`/etc/cloudflared/muscat-db.env`, restart the unit.
+
+**Rollback** (cuts off every external collaborator, leaves `:8000` alone):
+`sudo systemctl disable --now muscat-db-tunnel`, then
+`sudo rm /etc/nginx/sites-enabled/muscat-db-access && sudo systemctl reload nginx`.
+
 ---
 
 ## Cluster inventory
