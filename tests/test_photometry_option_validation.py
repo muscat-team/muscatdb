@@ -104,3 +104,105 @@ def test_build_command_ignores_a_requested_calibration_directory(monkeypatch, tm
     value = argv[argv.index("--calib_dir") + 1]
     assert value == str(phot.results_dir("muscat2", DATE)) + "_calibrated"
     assert "/home/victim/calibrated" not in argv
+
+
+# ── free-text options at build time (#273 item 7) ─────────────────────────
+# Each of these reaches prose2 as an argv element. validate_run_options refuses
+# a bad value on the form, but queued and stored options reach build_command
+# without it (fleet worker, sync_jobs), so build_command checks them itself.
+
+_TIME = {"bands": ["gp"], "ref_select": "time"}
+_APER = {"bands": ["gp"], "aper_radii": "10,20,2", "annulus": "25,40", "cutout_size": 90}
+FORWARDED_BAD = [
+    ({"bands": ["gp", "--data_dir"]}, "bands"),
+    ({"bands": ["gp"], "ref_band": "--glob"}, "ref_band"),
+    ({**_TIME, "ref_time": "--data_dir"}, "ref_time"),
+    ({**_APER, "aper_unit": "--data_dir"}, "aper_unit"),
+    ({**_APER, "aper_radii": "--data_dir"}, "aper_radii"),
+    ({**_APER, "annulus": "--data_dir"}, "annulus"),
+    ({"bands": ["gp"], "ccd_trim": "--data_dir"}, "ccd_trim"),
+    ({"bands": ["gp"], "wcs_method": "--data_dir"}, "wcs_method"),
+    ({"bands": ["gp"], "centroid_method": "--data_dir"}, "centroid_method"),
+    ({"bands": ["gp"], "site": "--data_dir"}, "site"),
+    ({"bands": ["gp"], "telescope": "--data_dir"}, "telescope"),
+    ({"bands": ["gp"], "mode": "--data_dir"}, "mode"),
+    ({"bands": ["gp"], "cmap": "--data_dir"}, "cmap"),
+    ({"bands": ["gp"], "nan_imputation_method": "--data_dir"}, "nan_imputation_method"),
+    ({"bands": ["gp"], "target_coord": "--data_dir /elsewhere"}, "target_coord"),
+    ({"bands": ["gp"], "target_coord": "10.5 --results_dir"}, "target_coord"),
+    ({"bands": ["gp"], "target_coord": "10.5 -45 --glob x"}, "target_coord"),
+    # --avoid_nearby_star takes an optional value (nargs="?"), so a flag-like
+    # value becomes a new option that overrides the real one (#312 review).
+    ({"bands": ["gp"], "avoid_nearby_star_mode": "custom", "avoid_nearby_star": "--results_dir=/elsewhere"},
+     "avoid_nearby_star"),
+    ({"bands": ["gp"], "avoid_nearby_star_mode": "custom", "avoid_nearby_star": "--data_dir=/elsewhere"},
+     "avoid_nearby_star"),
+    ({"bands": ["gp"], "avoid_nearby_star_mode": "unknown", "avoid_nearby_star": "--results_dir=/elsewhere"},
+     "avoid_nearby_star"),
+]
+
+
+@pytest.mark.parametrize(("options", "field"), FORWARDED_BAD, ids=[f for _, f in FORWARDED_BAD])
+def test_build_command_refuses_an_invalid_free_text_option(options, field, monkeypatch, tmp_path):
+    monkeypatch.setenv("MUSCAT_PROSE_DIR", str(tmp_path))
+    with pytest.raises(ValueError, match=field):
+        phot.build_command(INST, DATE, TARGET, options, test_run=False)
+
+
+@pytest.mark.parametrize(("mode", "value", "forwarded"), [
+    ("custom", "5", ["--avoid_nearby_star", "5.0"]),
+    ("custom", 2.5, ["--avoid_nearby_star", "2.5"]),
+    ("custom", "", ["--avoid_nearby_star"]),
+    ("auto", "--results_dir=/elsewhere", ["--avoid_nearby_star"]),
+    ("off", "--results_dir=/elsewhere", []),
+])
+def test_build_command_checks_avoid_nearby_star_only_where_it_forwards_it(
+    mode, value, forwarded, monkeypatch, tmp_path
+):
+    # Only a value build_command actually forwards is checked, so a queued run
+    # whose unused value is junk still launches.
+    monkeypatch.setenv("MUSCAT_PROSE_DIR", str(tmp_path))
+    options = {"bands": ["gp"], "avoid_nearby_star_mode": mode, "avoid_nearby_star": value}
+    argv = phot.build_command(INST, DATE, TARGET, options, test_run=False)
+    tail = argv[argv.index("--avoid_nearby_star"):][: len(forwarded)] if forwarded else []
+    assert tail == forwarded
+    assert ("--avoid_nearby_star" in argv) == bool(forwarded)
+    assert "--results_dir=/elsewhere" not in argv
+
+
+@pytest.mark.parametrize(("options", "field"), FORWARDED_BAD, ids=[f for _, f in FORWARDED_BAD])
+def test_the_form_refuses_whatever_build_command_refuses(options, field):
+    """Otherwise a run the form accepted would fail at launch."""
+    assert _error(options) is not None
+
+
+@pytest.mark.parametrize("coord", [
+    "159.157968 -64.798231",
+    "63.928339 29.166542",
+    "19:34:55.87 +36:48:55.78",
+    "15:13:47.515 -45:00:42.12",
+    "12h34m56.7s -45d00m42s",
+    "1.2e-05 +3.4E+01",
+])
+def test_build_command_forwards_the_coordinates_the_form_accepts(coord, monkeypatch, tmp_path):
+    monkeypatch.setenv("MUSCAT_PROSE_DIR", str(tmp_path))
+    options = {"bands": ["gp"], "target_coord": coord}
+    assert _error(options) is None
+    argv = phot.build_command(INST, DATE, TARGET, options, test_run=False)
+    ra, dec = coord.split()
+    i = argv.index("--target_coord")
+    assert argv[i + 1] == ra and argv[i + 2].strip() == dec
+
+
+def test_build_command_still_accepts_every_valid_choice(monkeypatch, tmp_path):
+    monkeypatch.setenv("MUSCAT_PROSE_DIR", str(tmp_path))
+    options = {
+        **_APER, "aper_unit": "fwhm", "ccd_trim": "10, 10", "wcs_method": "twirl",
+        "centroid_method": phot.CENTROID_METHODS[-1], "site": phot.SINISTRO_SITES[0].upper(),
+        "telescope": "1m0-05", "mode": phot.SINISTRO_MODES[0], "cmap": phot.CMAP_CHOICES[-1],
+        "nan_imputation_method": phot.NAN_IMPUTATION_METHODS[-1],
+    }
+    assert _error(options) is None
+    argv = phot.build_command(INST, DATE, TARGET, options, test_run=False)
+    assert argv[argv.index("--aper_unit") + 1] == "fwhm"
+    assert argv[argv.index("--site") + 1] == phot.SINISTRO_SITES[0].upper()

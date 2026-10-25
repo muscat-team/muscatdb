@@ -62,6 +62,9 @@ def test_filters_and_sort_survive_reload(page):
     page.fill("#target-search", "toi")
     page.click('.instrument-badge[data-instrument="muscat3"]')
     page.click('#targets-table th[data-sort-attr="name"]')
+    # index.html saves the sort on the next animation frame, after base.html's
+    # sort handler has run; a reload issued before that frame loses it.
+    page.wait_for_function("localStorage.getItem('home:sort:targets-table') !== null")
     page.reload()
     assert page.input_value("#target-search") == "toi"
     assert "active" in page.get_attribute('.instrument-badge[data-instrument="muscat3"]', "class")

@@ -718,6 +718,53 @@ def test_message_rate_limit_drops_the_burst(sio_harness, monkeypatch):
     assert len(saved) == chat._RATE_MAX, "rate limit did not cap the burst"
 
 
+def _count_saved(monkeypatch) -> list:
+    saved = []
+    monkeypatch.setattr(
+        chat.db,
+        "save_chat_message",
+        lambda user, text, **k: (
+            saved.append((user, text)) or {"id": len(saved), "user": user, "text": text}
+        ),
+    )
+    return saved
+
+
+def _users_by_sid(monkeypatch, mapping):
+    async def _session_user(sid):
+        return mapping[sid]
+
+    monkeypatch.setattr(chat, "_session_user", _session_user)
+
+
+def test_message_rate_limit_survives_a_reconnect(sio_harness, monkeypatch):
+    """#273 item 5: the budget is the user's, so a fresh socket does not reset it."""
+    import asyncio
+
+    _users_by_sid(monkeypatch, {"sid-1": "alice", "sid-2": "alice"})
+    monkeypatch.setattr(chat, "_broadcast_presence", _async_noop)
+    monkeypatch.setattr(chat, "_cancel_agent_requests", _async_noop)
+    saved = _count_saved(monkeypatch)
+    for i in range(chat._RATE_MAX):
+        asyncio.run(chat.message("sid-1", {"text": f"m{i}"}))
+    asyncio.run(chat.disconnect("sid-1"))
+    asyncio.run(chat.message("sid-2", {"text": "after reconnect"}))
+    assert len(saved) == chat._RATE_MAX, "reconnecting reset the rate limit"
+
+
+def test_message_rate_limit_is_per_user_and_per_anonymous_socket(sio_harness, monkeypatch):
+    import asyncio
+
+    _users_by_sid(monkeypatch, {"a": "alice", "b": "bob", "anon-1": None, "anon-2": None})
+    saved = _count_saved(monkeypatch)
+    for sid in ("a", "anon-1"):
+        for i in range(chat._RATE_MAX):
+            asyncio.run(chat.message(sid, {"text": f"m{i}"}))
+    for sid in ("b", "anon-2"):
+        asyncio.run(chat.message(sid, {"text": "own budget"}))
+    assert [u for u, t in saved if t == "own budget"] == ["bob", "Anonymous"]
+
+
 def test_test_prefixed_message_is_ephemeral_and_never_persisted(sio_harness, monkeypatch):
     """@test broadcasts live but must never reach the database."""
     import asyncio

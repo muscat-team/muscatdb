@@ -152,6 +152,15 @@ def test_existing_validation_remains_authoritative(client, options, error):
     assert error in response.json()["error"]
 
 
+def test_command_preview_reports_an_option_build_command_refuses(client):
+    """#273: build_command raises for such a value; the live preview must
+    answer with the reason, not a 500, while the user is still typing."""
+    response = client.post("/api/photometry/command", json={**DATASET, "options": {"ccd_trim": "--data_dir"}})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["command"] == "" and "CCD trim" in body["error"]
+
+
 def test_invalid_option_shape_is_rejected_before_launch(client, monkeypatch):
     def unexpected(*args, **kwargs):
         pytest.fail("invalid shape reached the launcher")

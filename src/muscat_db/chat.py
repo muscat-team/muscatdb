@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 _MAX_TEXT_LEN = 2000
 _MAX_EMOJI_LEN = 16
 _RATE_MAX = 12  # messages ...
-_RATE_WINDOW_S = 10.0  # ... per this many seconds, per connection
+_RATE_WINDOW_S = 10.0  # ... per this many seconds, per user (anonymous: per connection)
 # @-tokens that are commands or noise, never real usernames to notify. The
 # codebase assistant's name is reserved too: @bot triggers the agent (below) and
 # must never be resolved as a person to nudge.
@@ -172,8 +172,14 @@ def _nudge_targets(names, sender: str | None) -> list[str]:
     return _unscoped(n for n in names if n != sender)
 
 
-def _rate_ok(sid: str) -> bool:
-    dq = _rate.setdefault(sid, deque())
+def _rate_key(sid: str, user: str | None) -> str:
+    """A signed-in user's budget follows them across sockets, so reconnecting
+    does not reset it (#273); an anonymous one is per connection."""
+    return f"user:{user}" if user else f"sid:{sid}"
+
+
+def _rate_ok(key: str) -> bool:
+    dq = _rate.setdefault(key, deque())
     now = time.time()
     while dq and now - dq[0] > _RATE_WINDOW_S:
         dq.popleft()
@@ -270,7 +276,8 @@ async def connect(sid, environ):
 @sio.event
 async def disconnect(sid):
     _users_by_sid.pop(sid, None)
-    _rate.pop(sid, None)
+    # Only the anonymous budget goes; a user's outlives the socket on purpose.
+    _rate.pop(_rate_key(sid, None), None)
     # Anonymous @bot context is per-connection; drop it so it can't leak. A
     # signed-in user's context is keyed by name (shared across tabs) and kept
     # until the idle-gap TTL expires, so a reload doesn't wipe their thread.
@@ -283,7 +290,10 @@ async def disconnect(sid):
 # ----- messaging -----------------------------------------------------------
 @sio.on("message")
 async def message(sid, data):
-    if not isinstance(data, dict) or not _rate_ok(sid):
+    if not isinstance(data, dict):
+        return
+    user = await _session_user(sid)
+    if not _rate_ok(_rate_key(sid, user)):
         return
     text = data.get("text")
     if not isinstance(text, str):
@@ -293,7 +303,6 @@ async def message(sid, data):
         return
     text = text[:_MAX_TEXT_LEN]
 
-    user = await _session_user(sid)
     display = _display(user)
 
     # A scoped viewer has no part in the shared room; only the private @bot
