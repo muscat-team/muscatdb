@@ -885,13 +885,33 @@
   window.reRunJob = function(btn, key) {
     btn.disabled = true;
     btn.innerText = 'Launching…';
-    MuscatFetch.fetchJson('/api/jobs/rerun', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ key: key })
+    // Re-running writes over the job's run, so the server asks first (#317):
+    // "Save as" re-runs the job under the suggested name instead.
+    var newName = '';
+    MuscatRunConflict.launch(function(extra) {
+      var body = Object.assign({ key: key }, newName ? { run_name: newName } : {}, extra);
+      return MuscatFetch.fetchJson('/api/jobs/rerun', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+    }, function(name) { newName = name; })
+    .then(function(res) {
+      if (res.cancelled) return res;
+      if (!res.ok) throw new Error(res.error || 'The server refused the re-run without giving a reason.');
+      return res;
     })
-    .then(function(res) { if (!res.ok) throw new Error(res.error || 'The server refused the re-run without giving a reason.'); })
-    .then(function() {
+    .then(function(res) {
+      if (res.cancelled) {
+        btn.disabled = false;
+        btn.innerText = '⟳ Re-run';
+        return;
+      }
+      if (newName) {
+        // A new run has its own row; reload so it shows.
+        window.location.reload();
+        return;
+      }
       var row = rowByKey(key);
       if (row) {
         row.setAttribute('data-status', 'running');

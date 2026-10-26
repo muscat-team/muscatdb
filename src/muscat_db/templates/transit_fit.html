@@ -2506,10 +2506,24 @@
     logEl.textContent = 'Launching transit fitting run…';
     MuscatStorage.remove(logKey());
 
-    MuscatFetch.fetchJson('/api/transit-fit/run', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ inst: inst, date: date, target: target, test_run: !!testRun, options: collectOptions(), selected_csvs: getSelectedCsvs() })
+    // A run name already in use asks before overwriting it (#317); "Save as"
+    // puts the suggested name in the form and launches under it.
+    MuscatRunConflict.launch(function (extra) {
+      var body = Object.assign({ inst: inst, date: date, target: target, test_run: !!testRun, options: collectOptions(), selected_csvs: getSelectedCsvs() }, extra);
+      return MuscatFetch.fetchJson('/api/transit-fit/run', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+    }, function (name) {
+      document.getElementById('opt-run_name').value = name;
+      saveOptions();
     }).then(function (res) {
+      if (res.cancelled) {
+        clearJob();
+        setRunning(false);
+        logEl.textContent = 'Launch cancelled: the run was not overwritten.';
+        return;
+      }
       if (!res.ok) {
         clearJob();
         setRunning(false);

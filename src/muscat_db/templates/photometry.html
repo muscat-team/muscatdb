@@ -1870,10 +1870,24 @@
     var opts = collectOptions();
     console.log('[photometry] launch: overwrite=' + opts.overwrite + ' test_run=' + testRun);
 
-    MuscatFetch.fetchJson('/api/photometry/run', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ inst: inst, date: date, target: target, test_run: testRun, options: opts })
+    // A run name already in use asks before overwriting it (#317); "Save as"
+    // puts the suggested name in the form and launches under it.
+    MuscatRunConflict.launch(function (extra) {
+      var body = Object.assign({ inst: inst, date: date, target: target, test_run: testRun, options: collectOptions() }, extra);
+      return MuscatFetch.fetchJson('/api/photometry/run', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+    }, function (name) {
+      document.getElementById('opt-run_name').value = name;
+      saveOptions();
     }).then(function (res) {
+      if (res.cancelled) {
+        setRunning(false);
+        renderRunStatus('', '');
+        logEl.textContent = 'Launch cancelled: the run was not overwritten.';
+        return;
+      }
       if (!res.ok) {
         clearJob();
         setRunning(false);

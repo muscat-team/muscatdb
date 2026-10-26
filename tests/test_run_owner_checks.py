@@ -347,9 +347,14 @@ def test_launch_over_another_users_run_is_refused_and_the_files_stay(lax, route)
 def test_owner_admin_and_group_mate_may_relaunch_a_run(lax, env, route):
     _own_all("alice")
     _make_group(env, "lab", "alice", "carol")
+    payload, _, path = LAUNCHES[route]
     for user in ("alice", "root", "carol"):
-        _own_all("alice")  # a launch rewrites the record with its own author
-        assert _launch(lax, route, user)[0].status_code != 403, user
+        _own_all("alice")
+        # A taken run id asks first (#317); confirming it passes the owner check.
+        asked = _launch(lax, route, user)[0]
+        assert asked.status_code == 409, user
+        confirmed = {**payload, "confirm_overwrite": asked.json()["confirm_token"]}
+        assert _post(lax, path, confirmed, user=user).status_code not in (403, 409), user
 
 
 @_LAUNCH

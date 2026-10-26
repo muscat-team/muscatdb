@@ -12,6 +12,7 @@
 <script src="{{ static_url('js/fetchJson.js') }}"></script>
 <script src="{{ static_url('js/format.js') }}"></script>
 <script src="{{ static_url('js/jobPolling.js') }}"></script>
+<script src="{{ static_url('js/runConflict.js') }}"></script>
 <script>
   // Global fetch-activity tracker. Installed in <head> so it wraps window.fetch
   // before any page script runs, giving every page a consistent loading
@@ -169,8 +170,13 @@
   <div class="modal-box">
     <p id="message-modal-title" class="modal-title"></p>
     <p id="message-modal-text" class="modal-text"></p>
+    <label id="message-modal-field" class="modal-field" hidden>
+      <span id="message-modal-input-label"></span>
+      <input id="message-modal-input" type="text" autocomplete="off" spellcheck="false">
+    </label>
     <div class="modal-actions">
       <button class="btn" id="message-modal-cancel" type="button" hidden>Cancel</button>
+      <button class="btn" id="message-modal-alt" type="button" hidden></button>
       <button class="btn" id="message-modal-ok" type="button">OK</button>
     </div>
   </div>
@@ -841,7 +847,12 @@
     var textEl = document.getElementById('message-modal-text');
     var okBtn = document.getElementById('message-modal-ok');
     var cancelBtn = document.getElementById('message-modal-cancel');
+    var altBtn = document.getElementById('message-modal-alt');
+    var field = document.getElementById('message-modal-field');
+    var fieldLabel = document.getElementById('message-modal-input-label');
+    var input = document.getElementById('message-modal-input');
     var pendingResolve = null;
+    var withInput = false;
 
     function modalOptions(opts) {
       if (typeof opts === 'string') return { kind: opts };
@@ -854,16 +865,25 @@
       textEl.textContent = text || '';
       modal.dataset.kind = opts.kind || 'default';
       modal.classList.add('visible');
-      okBtn.focus();
+      if (withInput) {
+        input.focus();
+        input.select();
+      } else {
+        okBtn.focus();
+      }
     }
 
     window.showMessageModal = function(title, text, opts) {
       opts = modalOptions(opts);
       pendingResolve = null;
+      withInput = false;
       modal.dataset.mode = 'message';
       okBtn.textContent = 'OK';
       okBtn.className = 'btn';
+      okBtn.disabled = false;
       cancelBtn.hidden = true;
+      altBtn.hidden = true;
+      field.hidden = true;
       showModal(title, text, opts);
     };
     window.closeMessageModal = function(result) {
@@ -873,26 +893,56 @@
       if (pendingResolve) {
         var resolve = pendingResolve;
         pendingResolve = null;
-        resolve(!!result);
+        if (withInput) {
+          var choice = result === 'alt' ? 'alt' : (result ? 'ok' : 'cancel');
+          resolve({ choice: choice, value: input.value.trim() });
+        } else {
+          resolve(result === 'alt' ? 'alt' : !!result);
+        }
       }
     };
+    // Resolves true (confirm), false (cancel), or 'alt' when opts.altLabel
+    // adds a third button between the two. With opts.inputValue (a string) the
+    // modal also shows a text field (labelled opts.inputLabel), focused and
+    // selected, and resolves {choice: 'ok'|'alt'|'cancel', value} instead;
+    // confirm stays disabled while the field is blank.
     window.showConfirmModal = function(title, text, opts) {
       opts = opts || {};
       return new Promise(function (resolve) {
         pendingResolve = resolve;
+        withInput = typeof opts.inputValue === 'string';
         modal.dataset.mode = 'confirm';
         okBtn.textContent = opts.confirmLabel || 'Confirm';
         okBtn.className = opts.confirmClass || 'btn primary';
         cancelBtn.textContent = opts.cancelLabel || 'Cancel';
         cancelBtn.hidden = false;
+        altBtn.hidden = !opts.altLabel;
+        altBtn.textContent = opts.altLabel || '';
+        altBtn.className = opts.altClass || 'btn';
+        field.hidden = !withInput;
+        fieldLabel.textContent = opts.inputLabel || '';
+        input.value = withInput ? opts.inputValue : '';
+        okBtn.disabled = withInput && !input.value.trim();
         showModal(title, text, opts);
       });
     };
+    input.addEventListener('input', function () {
+      okBtn.disabled = !input.value.trim();
+    });
+    input.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' && !okBtn.disabled) {
+        e.preventDefault();
+        okBtn.click();
+      }
+    });
     okBtn.addEventListener('click', function () {
       window.closeMessageModal(pendingResolve ? true : false);
     });
     cancelBtn.addEventListener('click', function () {
       window.closeMessageModal(false);
+    });
+    altBtn.addEventListener('click', function () {
+      window.closeMessageModal('alt');
     });
   })();
 </script>
