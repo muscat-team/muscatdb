@@ -95,9 +95,10 @@ def test_save_as_is_the_default_and_launches_under_the_suggested_name(page, laun
     page.click("#run-test-btn")
 
     expect(page.locator("#message-modal-title")).to_have_text(f'You already have a run named "{RUN_ID}"')
-    expect(page.locator("#message-modal-ok")).to_have_text(f'Save as "{RUN_ID}_2"')
+    expect(page.locator("#message-modal-input")).to_have_value(f"{RUN_ID}_2")
+    expect(page.locator("#message-modal-input")).to_be_focused()
+    expect(page.locator("#message-modal-ok")).to_have_text("Save as")
     expect(page.locator("#message-modal-alt")).to_have_text("Overwrite")
-    expect(page.locator("#message-modal-ok")).to_be_focused()
     assert launched == []
 
     with page.expect_response("**/api/photometry/run"):
@@ -107,6 +108,49 @@ def test_save_as_is_the_default_and_launches_under_the_suggested_name(page, laun
     assert launched == [f"{RUN_ID}_2"]
     assert page.input_value("#opt-run_name") == f"{RUN_ID}_2"
     assert [b["options"]["run_name"] for b in _bodies(requests)] == [RUN_ID, f"{RUN_ID}_2"]
+
+
+def test_a_typed_run_name_is_used_instead_of_the_suggestion(page, launched):
+    requests = _recording(page, "/api/photometry/run")
+    _open_photometry(page)
+    page.click("#run-test-btn")
+    expect(page.locator("#message-modal-input")).to_be_focused()
+
+    page.keyboard.type("wider-apertures")  # replaces the selected suggestion
+    with page.expect_response("**/api/photometry/run"):
+        page.keyboard.press("Enter")
+
+    assert launched == ["wider_apertures"]
+    assert page.input_value("#opt-run_name") == "wider-apertures"
+    assert _bodies(requests)[-1]["options"]["run_name"] == "wider-apertures"
+
+
+def test_a_typed_name_that_is_also_taken_asks_again(page, launched):
+    _open_photometry(page)
+    page.click("#run-test-btn")
+    page.fill("#message-modal-input", RUN_ID)  # the same taken name
+
+    with page.expect_response("**/api/photometry/run") as resp:
+        page.click("#message-modal-ok")
+
+    assert resp.value.status == 409
+    expect(page.locator("#message-modal")).to_have_class("visible")
+    expect(page.locator("#message-modal-input")).to_have_value(f"{RUN_ID}_2")
+    assert launched == []
+    page.click("#message-modal-cancel")
+
+
+def test_save_as_is_disabled_while_the_name_is_blank(page, launched):
+    _open_photometry(page)
+    page.click("#run-test-btn")
+    page.fill("#message-modal-input", "   ")
+    expect(page.locator("#message-modal-ok")).to_be_disabled()
+    page.keyboard.press("Enter")
+    expect(page.locator("#message-modal")).to_have_class("visible")
+    page.fill("#message-modal-input", "x")
+    expect(page.locator("#message-modal-ok")).to_be_enabled()
+    page.click("#message-modal-cancel")
+    assert launched == []
 
 
 def test_overwrite_relaunches_with_the_confirmation(page, launched):
@@ -144,7 +188,7 @@ def test_someone_elses_run_names_its_owner_and_suggests_the_viewers_name(page, l
     page.click("#run-test-btn")
     expect(page.locator("#message-modal-title")).to_have_text("This run belongs to alice")
     expect(page.locator("#message-modal-text")).to_contain_text("Overwriting replaces alice's results")
-    expect(page.locator("#message-modal-ok")).to_have_text(f'Save as "{RUN_ID}_admin"')
+    expect(page.locator("#message-modal-input")).to_have_value(f"{RUN_ID}_admin")
     expect(page.locator("#message-modal-alt")).to_have_text("Overwrite alice's run")
 
     with page.expect_response("**/api/photometry/run"):
@@ -170,7 +214,7 @@ def test_transit_fit_save_as_launches_under_the_suggested_name(page, launched):
     page.fill("#opt-run_name", FIT_RUN_ID)
 
     page.click("#run-test-btn")
-    expect(page.locator("#message-modal-ok")).to_have_text(f'Save as "{FIT_RUN_ID}_2"')
+    expect(page.locator("#message-modal-input")).to_have_value(f"{FIT_RUN_ID}_2")
     with page.expect_response("**/api/transit-fit/run"):
         page.click("#message-modal-ok")
 
@@ -184,7 +228,7 @@ def test_jobs_rerun_asks_and_save_as_reruns_under_a_new_name(page, launched):
     button = page.locator(f'tr.job-row[data-key="{DONE_KEY}"] [data-job-action="rerun"]')
 
     button.click()
-    expect(page.locator("#message-modal-ok")).to_have_text(f'Save as "{RUN_ID}_2"')
+    expect(page.locator("#message-modal-input")).to_have_value(f"{RUN_ID}_2")
     with page.expect_navigation():
         page.click("#message-modal-ok")
 
@@ -197,6 +241,7 @@ def test_other_modals_do_not_show_the_third_button(page):
     page.evaluate("window.showMessageModal('Note', 'plain message')")
     expect(page.locator("#message-modal-ok")).to_be_visible()
     expect(page.locator("#message-modal-alt")).to_be_hidden()
+    expect(page.locator("#message-modal-field")).to_be_hidden()
     page.click("#message-modal-ok")
 
     # Not returning the modal's promise: evaluate would wait for an answer.
