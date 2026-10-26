@@ -134,9 +134,10 @@ def test_a_malformed_request_says_which_field_is_wrong(client):
 
 def test_a_failed_engine_launch_says_it_is_a_server_problem(lax):
     # Only photometry gets as far as Popen here: the fixture night has no light
-    # curves for a transit fit and no fits for a TTV run.
+    # curves for a transit fit and no fits for a TTV run. A new run name, so the
+    # launch is not stopped first by the overwrite confirmation (#317).
     _own_all("alice")
-    body = _launch(lax, "photometry/run", "alice")[0].json()
+    body = _launch(lax, "photometry/run", "alice", name="fresh-run")[0].json()
     assert body["ok"] is False
     assert "launch stubbed" in body["error"]
     assert "not a problem with your settings" in body["error"]

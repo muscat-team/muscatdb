@@ -12,6 +12,7 @@
 <script src="{{ static_url('js/fetchJson.js') }}"></script>
 <script src="{{ static_url('js/format.js') }}"></script>
 <script src="{{ static_url('js/jobPolling.js') }}"></script>
+<script src="{{ static_url('js/runConflict.js') }}"></script>
 <script>
   // Global fetch-activity tracker. Installed in <head> so it wraps window.fetch
   // before any page script runs, giving every page a consistent loading
@@ -171,6 +172,7 @@
     <p id="message-modal-text" class="modal-text"></p>
     <div class="modal-actions">
       <button class="btn" id="message-modal-cancel" type="button" hidden>Cancel</button>
+      <button class="btn" id="message-modal-alt" type="button" hidden></button>
       <button class="btn" id="message-modal-ok" type="button">OK</button>
     </div>
   </div>
@@ -841,6 +843,7 @@
     var textEl = document.getElementById('message-modal-text');
     var okBtn = document.getElementById('message-modal-ok');
     var cancelBtn = document.getElementById('message-modal-cancel');
+    var altBtn = document.getElementById('message-modal-alt');
     var pendingResolve = null;
 
     function modalOptions(opts) {
@@ -864,6 +867,7 @@
       okBtn.textContent = 'OK';
       okBtn.className = 'btn';
       cancelBtn.hidden = true;
+      altBtn.hidden = true;
       showModal(title, text, opts);
     };
     window.closeMessageModal = function(result) {
@@ -873,9 +877,11 @@
       if (pendingResolve) {
         var resolve = pendingResolve;
         pendingResolve = null;
-        resolve(!!result);
+        resolve(result === 'alt' ? 'alt' : !!result);
       }
     };
+    // Resolves true (confirm), false (cancel), or 'alt' when opts.altLabel
+    // adds a third button between the two.
     window.showConfirmModal = function(title, text, opts) {
       opts = opts || {};
       return new Promise(function (resolve) {
@@ -885,6 +891,9 @@
         okBtn.className = opts.confirmClass || 'btn primary';
         cancelBtn.textContent = opts.cancelLabel || 'Cancel';
         cancelBtn.hidden = false;
+        altBtn.hidden = !opts.altLabel;
+        altBtn.textContent = opts.altLabel || '';
+        altBtn.className = opts.altClass || 'btn';
         showModal(title, text, opts);
       });
     };
@@ -893,6 +902,9 @@
     });
     cancelBtn.addEventListener('click', function () {
       window.closeMessageModal(false);
+    });
+    altBtn.addEventListener('click', function () {
+      window.closeMessageModal('alt');
     });
   })();
 </script>

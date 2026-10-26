@@ -385,7 +385,7 @@ def _write_ttv_product(rdir: pathlib.Path, options: dict, user_name: str | None)
         note = "client did not submit inputs"
     # csv_content / ini_content are the staged data inputs, already in meta.yaml.
     settings = {k: v for k, v in options.items() if k not in ("csv_content", "ini_content", "inputs")}
-    product_record.write_record(rdir, product_record.build_record(
+    product_record.write_rerun_record(rdir, product_record.build_record(
         "ttv_fit",
         author=user_name,
         inputs=inputs,

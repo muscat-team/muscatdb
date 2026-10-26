@@ -1027,6 +1027,8 @@ th.drag-over-right {
 #create-project-overlay.visible {
   display: flex;
 }
+/* .btn's display beats the UA [hidden] rule; the third choice is opt-in */
+#message-modal-alt[hidden] { display: none; }
 #message-modal[data-mode="message"] #message-modal-cancel {
   display: none !important;
 }

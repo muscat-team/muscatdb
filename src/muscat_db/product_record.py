@@ -16,8 +16,17 @@ Record layout (``_product.json`` in the run directory)::
       "backfilled": false,
       "inputs": [ {kind: "frames", ...}, {kind: "product", ...}, ... ] | null,
       "settings": {...},
-      "tool_versions": {"muscat_db": ..., "prose": ..., "timer": ..., "harmonic": ...}
+      "tool_versions": {"muscat_db": ..., "prose": ..., "timer": ..., "harmonic": ...},
+      "modified_by": "<nginx user>",   # only after someone else re-ran it
+      "modified_at": "<iso utc>"
     }
+
+``author`` is the run's owner. When someone other than the author re-runs the
+run under the same run id, the new record keeps the author and ``created_at``
+and names the re-runner in ``modified_by`` (:func:`carry_authorship`, issue
+#307), so the run stays its author's. Visibility's author rule follows the
+person who made the current contents (``modified_by``, else ``author``), since
+the re-runner chose its inputs.
 
 ``inputs`` is an exact manifest. ``null`` means *undetermined*: the record is
 there but the inputs could not be established, so the product must be treated
@@ -88,6 +97,41 @@ def build_record(
     if note:
         record["note"] = note
     return record
+
+
+def carry_authorship(record: dict, prior: dict | None) -> dict:
+    """*record* for a re-run of the run *prior* describes (issue #307).
+
+    A re-run by the author, or of a run with no author or of another level,
+    is a fresh record. A re-run by anyone else keeps *prior*'s ``author`` and
+    ``created_at`` and records the re-runner as ``modified_by`` at the new
+    record's time. Returns a new dict; neither argument is changed.
+    """
+    if not prior or prior.get("level") != record.get("level"):
+        return record
+    author = str(prior.get("author") or "").strip()
+    rerunner = str(record.get("author") or "").strip()
+    if not author or author.casefold() == rerunner.casefold():
+        return record
+    return {
+        **record,
+        "author": author,
+        "created_at": prior.get("created_at") or record.get("created_at"),
+        "modified_by": rerunner,
+        "modified_at": record.get("created_at") or now_iso(),
+    }
+
+
+def maker(record: dict) -> str:
+    """Who made the record's current contents: ``modified_by`` after a re-run
+    by someone else, else the author."""
+    return str(record.get("modified_by") or record.get("author") or "").strip()
+
+
+def write_rerun_record(rdir: Path, record: dict) -> bool:
+    """Write *record* over whatever record *rdir* holds, keeping its author
+    (:func:`carry_authorship`). For launches, which may replace a run."""
+    return write_record(rdir, carry_authorship(record, read_record(rdir)))
 
 
 def write_record(rdir: Path, record: dict) -> bool:

@@ -741,10 +741,16 @@ def on_job_finished(
         if owner is None:
             logger.warning("no owner found for job %s; dropping its chat notification", job_key)
             return
+    _deliver_system_message(text, owner)
+
+
+def _deliver_system_message(text: str, owner: str) -> None:
+    """Persist a system message visible to *owner* (the public room when
+    blank) and schedule its delivery."""
     try:
         msg = db.save_chat_message("system", text, kind="system", visible_to=owner or None)
     except Exception:
-        logger.exception("failed to persist job-finished chat message")
+        logger.exception("failed to persist system chat message")
         return
     loop = _valid_loop()
     if loop is None:
@@ -756,6 +762,34 @@ def on_job_finished(
         asyncio.run_coroutine_threadsafe(
             sio.emit("message", payload, room=_PUBLIC_ROOM), loop
         )
+
+
+_RUN_LABELS = {**_JOB_LABELS, "ttv_fit": "TTV fit"}
+_RUN_VERBS = {"overwrite": "overwrote", "delete": "deleted", "cancel": "cancelled"}
+
+
+def notify_run_changed(
+    *, owner: str, actor: str | None, action: str, level: str,
+    target: str, inst: str = "", date: str = "", run_id: str = "",
+) -> None:
+    """Tell a run's owner, privately, that someone else overwrote, deleted or
+    cancelled it (issue #307). Nothing is sent for the owner's own change or a
+    run with no owner, which has nobody to tell."""
+    owner = (owner or "").strip()
+    actor = (actor or "").strip()
+    if not owner or owner.casefold() == actor.casefold():
+        return
+    label = _RUN_LABELS.get(level, level)
+    where = " ".join(p for p in (inst, date) if p)
+    text = (
+        f"{actor or 'Someone'} {_RUN_VERBS.get(action, action)} your {label} run "
+        f"'{run_id or 'default'}' for {target}" + (f" ({where})" if where else "")
+    )
+    # A deleted run has no page of its own left to open.
+    link = _job_result_link(level, target, inst, date, "" if action == "delete" else run_id, "")
+    if link:
+        text += f" {link}"
+    _deliver_system_message(text, owner)
 
 
 # Register once at import so both pipelines' sync loops notify chat.

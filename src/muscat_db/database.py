@@ -62,6 +62,24 @@ CREATE TABLE IF NOT EXISTS exposure_models (
 );
 """
 
+# Who overwrote, deleted or cancelled a run (issue #307; muscat_db.run_events).
+# Append-only and app-owned, so a delete's row outlives the run it removed.
+RUN_EVENTS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS run_events (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    at      TEXT NOT NULL,
+    action  TEXT NOT NULL,
+    level   TEXT NOT NULL,
+    inst    TEXT NOT NULL DEFAULT '',
+    date    TEXT NOT NULL DEFAULT '',
+    target  TEXT NOT NULL DEFAULT '',
+    run_id  TEXT NOT NULL DEFAULT '',
+    actor   TEXT NOT NULL DEFAULT '',
+    owner   TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_run_events_run ON run_events(level, target, run_id);
+"""
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS frames (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -196,7 +214,7 @@ CREATE TABLE IF NOT EXISTS exposure_coeffs (
     updated_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (instrument, band, focus_mm)
 );
-""" + EXPOSURE_MODELS_SCHEMA + """
+""" + EXPOSURE_MODELS_SCHEMA + RUN_EVENTS_SCHEMA + """
 CREATE TABLE IF NOT EXISTS exposure_jobs (
     id          TEXT PRIMARY KEY,
     instrument  TEXT NOT NULL,
@@ -970,6 +988,7 @@ _APP_OWNED_TABLES = (
     "group_exclusions",
     "group_grants",
     "group_grants_revoked",
+    "run_events",
 )
 
 

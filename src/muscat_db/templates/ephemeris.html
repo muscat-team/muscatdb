@@ -3744,15 +3744,32 @@
           logEl.style.display = 'block';
           logEl.textContent = 'Launching TTV fitting run…';
           localStorage.setItem(JOB_KEY, JSON.stringify({ target: target, run_name: runNameVal }));
-          return MuscatFetch.fetchJson('/api/ttv-fit/start', {
+          // A run name already in use asks before overwriting it (#317);
+          // "Save as" puts the suggested name in the form and launches under it.
+          return MuscatRunConflict.launch(extra => MuscatFetch.fetchJson('/api/ttv-fit/start', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ target: target, options: options })
+            body: JSON.stringify(Object.assign({ target: target, options: options }, extra))
+          }), name => {
+            const nameEl = document.getElementById('opt-run_name');
+            if (nameEl) {
+              nameEl.value = name;
+              nameEl.dispatchEvent(new Event('input', { bubbles: true }));
+              nameEl.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            options.run_name = name;
+            localStorage.setItem(JOB_KEY, JSON.stringify({ target: target, run_name: name }));
           });
         })
         .then(res => {
           if (!res) return;
           const logEl = document.getElementById('run-log');
+          if (res.cancelled) {
+            localStorage.removeItem(JOB_KEY);
+            if (runBtn) runBtn.disabled = false;
+            logEl.textContent = 'Launch cancelled: the run was not overwritten.';
+            return;
+          }
           if (!res.ok) {
             localStorage.removeItem(JOB_KEY);
             if (runBtn) runBtn.disabled = false;

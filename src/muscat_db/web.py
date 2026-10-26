@@ -90,7 +90,7 @@ from muscat_db.access import (
     sql_not_denied as _sql_not_denied,
 )
 from muscat_db.product_visibility import ProductVisibility, default_run_dir
-from muscat_db import run_ownership
+from muscat_db import product_record, run_events, run_overwrite, run_ownership
 from muscat_db.auth import (
     ADMIN_EMAIL,
     PROXY_SECRET_HEADER,
@@ -494,6 +494,12 @@ async def _api_http_exception_handler(request: Request, exc: StarletteHTTPExcept
     )
 
 
+@app.exception_handler(run_overwrite.RunConflict)
+async def _run_conflict_handler(request: Request, exc: run_overwrite.RunConflict):
+    """409 for a launch over an existing run that was not confirmed (#317)."""
+    return JSONResponse(exc.payload, status_code=409)
+
+
 def _describe_validation_errors(errors: list) -> str:
     parts = []
     for err in errors:
@@ -858,17 +864,35 @@ def _viewer_may_modify_run(level: str, inst: str, date: str, target: str, run_id
 def _require_may_modify_run(
     level: str, inst: str, date: str, target: str, run_id: str = "",
     *, action: str = "change", offer_new_run: bool = False,
-) -> None:
+) -> str:
     """403 a delete or cancel of a run the viewer neither owns nor shares a
     group with the owner of. Call after the run is known to be visible. The
     message says who the viewer was taken to be and whose run it is; see
-    :func:`muscat_db.run_ownership.refusal_message`."""
-    if not _viewer_may_modify_run(level, inst, date, target, run_id):
-        user = _CURRENT_USER.get()
+    :func:`muscat_db.run_ownership.refusal_message`. Returns the run's owner
+    (``""`` if unowned), read before the change so a delete can still name it."""
+    user = _CURRENT_USER.get()
+    owner = run_ownership.run_owner(level, inst, date, target, run_id)
+    if not run_ownership.may_modify_run(_db_path(), user, _jobs_user_is_admin(user), owner):
         raise HTTPException(403, run_ownership.refusal_message(
-            user, run_ownership.viewer_groups(_db_path(), user),
-            run_ownership.run_owner(level, inst, date, target, run_id), action, offer_new_run,
+            user, run_ownership.viewer_groups(_db_path(), user), owner, action, offer_new_run,
         ))
+    return owner
+
+
+def _record_run_change(
+    action: str, level: str, inst: str, date: str, target: str, run_id: str, owner: str,
+) -> None:
+    """Audit a change to a run and tell its owner when someone else made it
+    (issue #307). Call once the change has happened."""
+    actor = _CURRENT_USER.get()
+    run_events.record(
+        _db_path(), action=action, level=level, inst=inst, date=date, target=target,
+        run_id=run_id, actor=actor, owner=owner,
+    )
+    chat.notify_run_changed(
+        owner=owner, actor=actor, action=action, level=level,
+        target=target, inst=inst, date=date, run_id=run_id,
+    )
 
 
 def _run_id_taken(level: str, inst: str, date: str, target: str, run_id: str = "") -> bool:
@@ -886,19 +910,70 @@ def _run_id_taken(level: str, inst: str, date: str, target: str, run_id: str = "
         return False
 
 
-def _require_may_replace_run(level: str, inst: str, date: str, target: str, run_id: str = "") -> None:
-    """403 a launch, re-run or in-place rewrite over a run the viewer may not
-    change (issue #272). A run id nobody has used yet stays open to everyone who
-    can see the night, so starting a new run needs no ownership."""
-    if _run_id_taken(level, inst, date, target, run_id):
-        _require_may_modify_run(level, inst, date, target, run_id, action="overwrite", offer_new_run=True)
+def _run_created_at(level: str, inst: str, date: str, target: str, run_id: str) -> str:
+    try:
+        record = product_record.read_record(default_run_dir(level, inst, date, target, run_id))
+    except ValueError:
+        record = None
+    return str((record or {}).get("created_at") or "")
 
 
-def _replace_guard(level: str, inst: str, date: str, target: str) -> Callable[[str], None]:
+def _require_may_replace_run(
+    level: str, inst: str, date: str, target: str, run_id: str = "", confirm: str = "",
+) -> str | None:
+    """Refuse a launch over an existing run unless it may and was meant to replace it.
+
+    A run id nobody has used yet stays open to everyone who can see the night,
+    so starting a new run needs no ownership: returns None. Over a taken run id
+    the viewer must be allowed to change the run (403 otherwise, issue #272)
+    and must have confirmed the overwrite of this run and owner (409 with
+    :class:`~muscat_db.run_overwrite.RunConflict` otherwise, issue #317).
+    Returns the owner of the run being replaced (``""`` if unowned).
+    """
+    if not _run_id_taken(level, inst, date, target, run_id):
+        return None
+    owner = _require_may_modify_run(level, inst, date, target, run_id, action="overwrite", offer_new_run=True)
+    if confirm == run_overwrite.confirm_token(run_id, owner):
+        return owner
+    viewer = _CURRENT_USER.get()
+    suggested = run_overwrite.suggest_run_name(
+        level, run_id, viewer, owner,
+        lambda candidate: _run_id_taken(level, inst, date, target, candidate),
+    )
+    raise run_overwrite.RunConflict(run_overwrite.conflict_payload(
+        level=level, run_id=run_id, viewer=viewer, owner=owner,
+        created_at=_run_created_at(level, inst, date, target, run_id), suggested=suggested,
+    ))
+
+
+class _ReplaceGuard:
     """Callback for ``start_run`` / ``start_fit`` / ``start_ttv_fit``: they call it
     with the run id they derived, so the check covers the directory they will
-    clear and not a second derivation of it here."""
-    return lambda run_id: _require_may_replace_run(level, inst, date, target, run_id)
+    clear and not a second derivation of it here. *confirm* is the request's
+    ``confirm_overwrite``. Call :meth:`after` with the launch result to audit
+    an overwrite that went ahead."""
+
+    def __init__(self, level: str, inst: str, date: str, target: str, confirm: str = ""):
+        self.level, self.inst, self.date, self.target = level, inst, date, target
+        self.confirm = (confirm or "").strip()
+        self.replaced: tuple[str, str] | None = None
+
+    def __call__(self, run_id: str) -> None:
+        owner = _require_may_replace_run(self.level, self.inst, self.date, self.target, run_id, self.confirm)
+        self.replaced = None if owner is None else (run_id, owner)
+
+    def after(self, result: dict) -> dict:
+        """Audit the overwrite when *result* says the launch went ahead; a
+        relaunch of a live run is ignored by the launcher, so it changed
+        nothing. Returns *result*."""
+        if self.replaced and result.get("ok") and not result.get("already_running"):
+            run_id, owner = self.replaced
+            _record_run_change("overwrite", self.level, self.inst, self.date, self.target, run_id, owner)
+        return result
+
+
+def _confirm_of(payload: dict) -> str:
+    return str(payload.get("confirm_overwrite") or "")
 
 
 # What a job-status poll returns for a run that does not exist; a hidden run
@@ -3599,9 +3674,10 @@ def transit_fit_run(request: Request, payload: dict = Body(...)):
     user_name = request.state.user
     _require_visible_night(inst, date, target)
     selected_csvs = _restrict_csv_selection(inst, date, target, selected_csvs)
+    guard = _ReplaceGuard("transit_fit", inst, date, target, _confirm_of(payload))
     result = fit.start_fit(inst, date, target, options, test_run=test_run, selected_csvs=selected_csvs, user_name=user_name,
-                           authorize_run=_replace_guard("transit_fit", inst, date, target))
-    return _launch_response(result)
+                           authorize_run=guard)
+    return _launch_response(guard.after(result))
 
 
 @transit_fit_router.post("/logp")
@@ -3626,10 +3702,11 @@ def transit_fit_cancel(payload: dict = Body(...)):
     target = (payload.get("target") or "").strip()
     run_id = (payload.get("run_id") or payload.get("run") or "").strip()
     _require_visible_run("transit_fit", inst, date, target, run_id)
-    _require_may_modify_run("transit_fit", inst, date, target, run_id, action="cancel")
+    owner = _require_may_modify_run("transit_fit", inst, date, target, run_id, action="cancel")
     result = fit.cancel_fit(inst, date, target, run_id=run_id)
     if not result.get("ok"):
         return JSONResponse(result, status_code=400)
+    _record_run_change("cancel", "transit_fit", inst, date, target, run_id, owner)
     return JSONResponse(result)
 
 
@@ -3646,8 +3723,10 @@ def transit_fit_delete(payload: dict = Body(...)):
     if not (target or "").strip():
         return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
     _require_visible_run("transit_fit", inst, date, target, run_id)
-    _require_may_modify_run("transit_fit", inst, date, target, run_id, action="delete")
+    owner = _require_may_modify_run("transit_fit", inst, date, target, run_id, action="delete")
     result = fit.delete_fit(inst, date, target, run_id=run_id)
+    if result.get("ok"):
+        _record_run_change("delete", "transit_fit", inst, date, target, run_id, owner)
     return JSONResponse(result, status_code=500 if result.get("delete_failed") else 200)
 
 
@@ -7511,20 +7590,25 @@ def jobs_rerun(request: Request, payload: dict = Body(...)):
             value = None
         if value and not options.get(field):
             options[field] = value
+    # "Save as" in the overwrite popup (#317) re-runs the job under a new name.
+    new_name = str(payload.get("run_name") or "").strip()
+    if new_name:
+        options = {**options, "run_name": new_name}
     user_name = request.state.user
+    if job["type"] not in ("photometry", "transit_fit", "ttv_fit"):
+        raise HTTPException(400, "unknown job type")
+    guard_place = ("", "") if job["type"] == "ttv_fit" else (inst, date)
+    guard = _ReplaceGuard(job["type"], *guard_place, target, _confirm_of(payload))
     if job["type"] == "photometry":
         result = phot.start_run(inst, date, target, options=options, test_run=p.get("test_run", True), user_name=user_name,
-                                authorize_run=_replace_guard("photometry", inst, date, target))
+                                authorize_run=guard)
     elif job["type"] == "transit_fit":
         result = fit.start_fit(inst, date, target, options=options, test_run=p.get("test_run", False), selected_csvs=_restrict_csv_selection(inst, date, target, p.get("selected_csvs")), user_name=user_name,
-                               authorize_run=_replace_guard("transit_fit", inst, date, target))
-    elif job["type"] == "ttv_fit":
-        from muscat_db.ttv_fit import start_ttv_fit
-        result = start_ttv_fit(target, options, user_name,
-                               authorize_run=_replace_guard("ttv_fit", "", "", target))
+                               authorize_run=guard)
     else:
-        raise HTTPException(400, "unknown job type")
-    return _launch_response(result)
+        from muscat_db.ttv_fit import start_ttv_fit
+        result = start_ttv_fit(target, options, user_name, authorize_run=guard)
+    return _launch_response(guard.after(result))
 
 
 def _ref_time_frames(inst: str, date: str, target: str) -> dict[int, list[dict]]:
@@ -7738,8 +7822,9 @@ def photometry_run(request: Request, payload: phot_api.RunRequest):
     telescope_err = _telescope_required_error(_db_path(), inst, date, target, options)
     if telescope_err:
         return phot_api.response(phot_api.ActionResponse, {"ok": False, "error": telescope_err}, status_code=400)
-    result = phot.start_run(inst, date, target, options=options, test_run=test_run, user_name=user_name,
-                            authorize_run=_replace_guard("photometry", inst, date, target))
+    guard = _ReplaceGuard("photometry", inst, date, target, _confirm_of(payload))
+    result = guard.after(phot.start_run(inst, date, target, options=options, test_run=test_run, user_name=user_name,
+                                        authorize_run=guard))
     if result.get("ok"):
         return phot_api.response(phot_api.ActionResponse, result)
     # 429 when a per-user job cap refused the launch (issue #265), 400 otherwise.
@@ -7944,10 +8029,11 @@ def photometry_cancel(payload: phot_api.CancelRequest):
     target = (payload.get("target") or "").strip()
     run_id = (payload.get("run_id") or payload.get("run") or "").strip()
     _require_visible_run("photometry", inst, date, target, run_id)
-    _require_may_modify_run("photometry", inst, date, target, run_id, action="cancel")
+    owner = _require_may_modify_run("photometry", inst, date, target, run_id, action="cancel")
     result = phot.cancel_run(inst, date, target, run_id=run_id)
     if not result.get("ok"):
         return phot_api.response(phot_api.ActionResponse, result, status_code=400)
+    _record_run_change("cancel", "photometry", inst, date, target, run_id, owner)
     return phot_api.response(phot_api.ActionResponse, result)
 
 
@@ -7966,8 +8052,10 @@ def photometry_delete(payload: phot_api.CancelRequest):
         return phot_api.response(phot_api.ActionResponse, {"ok": False, "error": "target is required"}, status_code=400)
     run_id = (payload.get("run_id") or payload.get("run") or "").strip()
     _require_visible_run("photometry", inst, date, target, run_id)
-    _require_may_modify_run("photometry", inst, date, target, run_id, action="delete")
+    owner = _require_may_modify_run("photometry", inst, date, target, run_id, action="delete")
     result = phot.delete_reduction(inst, date, target, run_id=run_id)
+    if result.get("ok"):
+        _record_run_change("delete", "photometry", inst, date, target, run_id, owner)
     return phot_api.response(phot_api.ActionResponse, result)
 
 
@@ -8304,8 +8392,8 @@ def api_start_ttv_fit(request: Request, payload: dict = Body(...)):
     options, err = _resolve_ttv_options(options)
     if err:
         return JSONResponse({"ok": False, "error": err}, status_code=400)
-    result = ttv.start_ttv_fit(target, options, request.state.user,
-                               authorize_run=_replace_guard("ttv_fit", "", "", target))
+    guard = _ReplaceGuard("ttv_fit", "", "", target, _confirm_of(payload))
+    result = guard.after(ttv.start_ttv_fit(target, options, request.state.user, authorize_run=guard))
     if result.get("limit_exceeded"):
         return _launch_response(result)
     return JSONResponse(result)
@@ -8318,8 +8406,10 @@ def api_cancel_ttv_fit(payload: dict = Body(...)):
     if not target:
         return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
     _require_visible_ttv_run(target, run_name)
-    _require_may_modify_run("ttv_fit", "", "", target, run_name, action="cancel")
+    owner = _require_may_modify_run("ttv_fit", "", "", target, run_name, action="cancel")
     res = ttv.cancel_ttv_fit(target, run_name)
+    if res.get("ok"):
+        _record_run_change("cancel", "ttv_fit", "", "", target, run_name, owner)
     return JSONResponse(res)
 
 
@@ -8330,8 +8420,10 @@ def api_delete_ttv_fit(payload: dict = Body(...)):
     if not target:
         return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
     _require_visible_ttv_run(target, run_name)
-    _require_may_modify_run("ttv_fit", "", "", target, run_name, action="delete")
+    owner = _require_may_modify_run("ttv_fit", "", "", target, run_name, action="delete")
     res = ttv.delete_ttv_fit(target, run_name)
+    if res.get("ok"):
+        _record_run_change("delete", "ttv_fit", "", "", target, run_name, owner)
     return JSONResponse(res, status_code=500 if res.get("delete_failed") else 200)
 
 

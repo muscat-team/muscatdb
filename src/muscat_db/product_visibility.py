@@ -6,7 +6,9 @@ was made from. One rule applies at every level:
 
 * nothing is restricted for this viewer (admins, or no restricted proposal):
   visible, as before;
-* the product's author always sees it;
+* the product's maker always sees it: the author, or ``modified_by`` once
+  someone else has re-run it (#307), since the re-runner chose its inputs and
+  the author may not be allowed to see them;
 * no readable record, or ``inputs: null`` (undetermined): admin-only;
 * otherwise visible only when *every* input is. A frames input is visible when
   all of its PROPIDs are, and a blank PROPID counts as denied for a scoped
@@ -165,8 +167,8 @@ class ProductVisibility:
         return not (owner and owner.strip().casefold() == self.username)
 
     def _record_visible(self, record: dict, depth: int) -> bool:
-        author = str(record.get("author") or "").strip().casefold()
-        if author and author == self.username:
+        made_by = product_record.maker(record).casefold()
+        if made_by and made_by == self.username:
             return True
         inputs = record.get("inputs")
         if inputs is None:
