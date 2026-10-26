@@ -3,14 +3,15 @@
 # while workers may still be using it.
 [engines.prose]
 repository = "https://github.com/jpdeleon/prose2"
-# Release v3.4.0. Includes jpdeleon/prose2#16 (read-only PROSE_CONFIG_FILE
+# Release v3.5.0 (tag; tree equal to release commit 03a3572b). Includes jpdeleon/prose2#16 (read-only PROSE_CONFIG_FILE
 # loading), which replaces muscat-db's import adapter.
-commit = "3daed56b8b4bf23b6cf3a19f8f17d898b8c15785"
-environment = "prose-prod-3daed56b"
+commit = "14ca3be83128e3b912a66a2d399055134d5e4e82"
+environment = "prose-prod-14ca3be8"
 source_environment = "prose"
 module = "prose"
-# Captured at 6029ea87; telescope definitions are unchanged through this pin.
-frozen_config_sha256 = "39503fce597e2d5fd349fa8009ed5068222fc6e31f098cf50e62f2a17f314a08"
+# Captured at prose2 v3.5.0 from the approved commit; adds MuSCAT3/4 camera-ID aliases
+# (ep02-ep09) and drops a stray dev-home builtin stub. Review before merging.
+frozen_config_sha256 = "eea1de5458d32f1fff05f0ce35b24527d78d67bd327ea8dfa448a8d313bdd82d"
 # The working editable metadata predates prose2's matplotlib<3.9 requirement.
 # Pin the newest compatible 3.8 release rather than bypassing pip check.
 [engines.prose.dependency_overrides]

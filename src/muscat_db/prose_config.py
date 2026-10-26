@@ -13,7 +13,7 @@ import hashlib
 from pathlib import Path
 
 SNAPSHOT = Path(__file__).with_name("_prose_telescopes.yaml")
-SNAPSHOT_SHA256 = "39503fce597e2d5fd349fa8009ed5068222fc6e31f098cf50e62f2a17f314a08"
+SNAPSHOT_SHA256 = "eea1de5458d32f1fff05f0ce35b24527d78d67bd327ea8dfa448a8d313bdd82d"
 
 
 def snapshot_bytes(config_file: Path | None = None) -> bytes:

@@ -906,13 +906,18 @@ The current pins are:
 
 | Engine | Repository | Commit | Candidate environment |
 |---|---|---|---|
-| prose2 | `jpdeleon/prose2` | `3daed56b8b4bf23b6cf3a19f8f17d898b8c15785` (v3.4.0) | `prose-prod-3daed56b` |
+| prose2 | `jpdeleon/prose2` | `14ca3be83128e3b912a66a2d399055134d5e4e82` (v3.5.0) | `prose-prod-14ca3be8` (not yet installed) |
 | timer | `john-livingston/timer` | `b8428258c9b62266532173af4abd7fbafee6dcef` | `timer-prod-b8428258` |
 | harmonic | `john-livingston/harmonic` | `a32fb8e32ca776e0e6e7dc92ad4232cef1f12194` | `harmonic-prod-a32fb8e3` |
 
 The 2026-10-18 audit below covered prose2 `6029ea87` and timer. prose2
-v3.4.0 (`3daed56b`) adds jpdeleon/prose2#16 (read-only configuration loading) and
-leaves telescope definitions unchanged; `harmonic-prod-a32fb8e3` is new. Both were
+v3.4.0 (`3daed56b`) is the installed prose engine (`prose-prod-3daed56b`). The
+pending pin is v3.5.0 (`14ca3be8`, tree equal to release commit `03a3572b`),
+which adds MuSCAT3/4 camera-ID telescope aliases (ep02-ep09) and per-band
+telescope-file matching. Its frozen snapshot changes only those aliases and
+the file list; review before merging. Do not merge until `prose-prod-14ca3be8`
+is installed and `deploy/engines.py verify` passes, because `workers.toml`
+now names that environment. `harmonic-prod-a32fb8e3` is new. Both were
 installed and verified on 2026-10-24 (see the activation record below).
 
 These retain the working baseline's Python (prose 3.10.15, timer 3.13.13,
