@@ -35,8 +35,10 @@ A launch under a run name that is already taken answers **409** with
 `owner`, whether it is your own (`own_run`), a free `suggested_run_name`, and a
 `confirm_token`. Either launch again under a new run name, or send the same
 body with `"confirm_overwrite": "<confirm_token>"` to overwrite that run. The
-token names the run's owner, so it stops working if someone else re-runs the
-run in between. The transit-fit (`/api/transit-fit/run`), TTV-fit
+token names the run's owner and when its record was last written, so it stops
+working if anyone re-runs the run in between. A run you may not see answers
+409 with only `suggested_run_name` and `"can_overwrite": false`: no owner,
+date or token, and it cannot be overwritten. The transit-fit (`/api/transit-fit/run`), TTV-fit
 (`/api/ttv-fit/start`) and Jobs re-run (`/api/jobs/rerun`, which also takes a
 `run_name` to re-run under a new name) routes answer the same way. A viewer who
 may not change the run at all still gets 403.

@@ -166,7 +166,7 @@ def test_overwrite_relaunches_with_the_confirmation(page, launched):
     assert launched == [RUN_ID]
     assert page.input_value("#opt-run_name") == RUN_ID
     second = _bodies(requests)[-1]
-    assert second["confirm_overwrite"] == f"{RUN_ID}:admin"
+    assert second["confirm_overwrite"].startswith(f"{RUN_ID}:admin:")
 
 
 def test_cancel_launches_nothing_and_recovers_the_buttons(page, launched):
@@ -195,7 +195,37 @@ def test_someone_elses_run_names_its_owner_and_suggests_the_viewers_name(page, l
         page.click("#message-modal-alt")
 
     assert launched == [RUN_ID]
-    assert _bodies(requests)[-1]["confirm_overwrite"] == f"{RUN_ID}:alice"
+    assert _bodies(requests)[-1]["confirm_overwrite"].startswith(f"{RUN_ID}:alice:")
+
+
+def test_a_hidden_run_offers_only_a_new_name(page, launched, monkeypatch):
+    """The server answers a run the viewer may not see with can_overwrite false
+    and no token; the popup then has no Overwrite button."""
+    from muscat_db import web
+
+    real = web._product_visibility
+
+    class _R1Hidden:
+        """The real visibility, except that the r1 run counts as hidden."""
+
+        def __init__(self, products):
+            self._products = products
+
+        def __getattr__(self, name):
+            return getattr(self._products, name)
+
+        def job_hidden(self, level, inst, date, target, run_id):
+            return run_id == RUN_ID or self._products.job_hidden(level, inst, date, target, run_id)
+
+    monkeypatch.setattr(web, "_product_visibility", lambda *a, **k: _R1Hidden(real(*a, **k)))
+    _open_photometry(page)
+    page.click("#run-test-btn")
+
+    expect(page.locator("#message-modal-title")).to_have_text(f'The run name "{RUN_ID}" is taken')
+    expect(page.locator("#message-modal-text")).not_to_contain_text("Overwrit")
+    expect(page.locator("#message-modal-alt")).to_be_hidden()
+    expect(page.locator("#message-modal-input")).to_have_value(f"{RUN_ID}_admin")
+    assert launched == []
 
 
 def test_a_free_run_name_launches_without_a_popup(page, launched):

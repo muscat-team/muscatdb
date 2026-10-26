@@ -103,7 +103,7 @@ def test_relaunching_your_own_run_asks_first_and_changes_nothing(lax, route):
     body = resp.json()
     assert body["conflict"] == "run_exists" and body["own_run"] is True
     assert body["suggested_run_name"] == f"{RUN}_2"
-    assert body["confirm_token"] == run_overwrite.confirm_token(RUN, "alice")
+    assert body["confirm_token"].startswith(run_overwrite.confirm_token(RUN, "alice", ""))
     assert _tree(rdir) == before
 
 
@@ -146,6 +146,24 @@ def test_a_confirmation_for_another_owner_does_not_count(lax, env, route):
 
 
 @_LAUNCH
+def test_a_confirmation_from_before_someone_else_reran_the_run_does_not_count(lax, env, route):
+    _own_all("alice")
+    _make_group(env, "lab", "alice", "carol")
+    token = _launch(lax, route, "carol")[0].json()["confirm_token"]
+    rdir = LAUNCHES[route][1]()
+    # dave re-runs it meanwhile: the record keeps alice as author.
+    prior = product_record.read_record(rdir)
+    rerun = product_record.carry_authorship(
+        {**prior, "author": "dave", "created_at": "2099-01-01T00:00:00+00:00"}, prior)
+    assert product_record.write_record(rdir, rerun) and rerun["author"] == "alice"
+
+    resp, _ = _launch_with(lax, route, "carol", confirm_overwrite=token)
+
+    assert resp.status_code == 409
+    assert resp.json()["confirm_token"] != token
+
+
+@_LAUNCH
 def test_viewer_who_may_not_change_the_run_gets_403_not_a_popup(lax, route):
     _own_all("alice")
     token = run_overwrite.confirm_token(RUN, "alice")
@@ -165,6 +183,58 @@ def test_suggested_name_skips_a_run_that_already_exists(lax):
     phot.run_output_dir(INST, DATE, TARGET, f"{RUN}_2").mkdir(parents=True)
     body = _launch(lax, "photometry/run", "alice")[0].json()
     assert body["suggested_run_name"] == f"{RUN}_3"
+
+
+# ── a run the viewer may not see ────────────────────────────────────────
+
+# Inputs the fixture's viewers are denied: the restricted HIDDENTGT night.
+_HIDDEN_INPUTS = {
+    "photometry/run": lambda env: product_record.frames_inputs(env, INST, DATE, "HIDDENTGT")[0],
+    "transit-fit/run": lambda env: [{"kind": "product", "level": "photometry", "instrument": INST,
+                                     "obsdate": DATE, "target": "HIDDENTGT", "run_id": RUN}],
+    "ttv-fit/start": lambda env: [{"kind": "product", "level": "transit_fit", "instrument": INST,
+                                   "obsdate": DATE, "target": "HIDDENTGT", "run_id": RUN}],
+}
+
+
+def _hide_alices_run(env, route):
+    """alice's run under RUN, on the open night, built from restricted inputs:
+    absent from a group-mate's run list, though its name is taken."""
+    rdir = LAUNCHES[route][1]()
+    record = {**product_record.read_record(rdir), "author": "alice", "inputs": _HIDDEN_INPUTS[route](env)}
+    assert product_record.write_record(rdir, record)
+    return rdir
+
+
+@_LAUNCH
+@pytest.mark.parametrize("viewer", ["carol", "bob"], ids=["group-mate", "outsider"])
+def test_a_hidden_run_is_only_a_taken_name(lax, env, route, viewer):
+    _make_group(env, "lab", "alice", "carol")
+    rdir = _hide_alices_run(env, route)
+    before = _tree(rdir)
+
+    resp, _ = _launch(lax, route, viewer)
+
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["can_overwrite"] is False and "confirm_token" not in body
+    assert body["suggested_run_name"] == f"{RUN}_{viewer}"
+    assert "alice" not in resp.text
+    assert _tree(rdir) == before
+
+
+@_LAUNCH
+def test_a_hidden_run_is_not_overwritten_even_with_its_owners_token(lax, env, route):
+    _make_group(env, "lab", "alice", "carol")
+    rdir = _hide_alices_run(env, route)
+    token = _launch(lax, route, "alice")[0].json()["confirm_token"]  # alice sees her own run
+    before = _tree(rdir)
+
+    resp, _ = _launch_with(lax, route, "carol", confirm_overwrite=token)
+
+    assert resp.status_code == 409 and resp.json()["can_overwrite"] is False
+    assert _tree(rdir) == before
+    assert _events(env, LEVEL[route]) == []
 
 
 # ── Jobs page re-run ────────────────────────────────────────────────────
@@ -250,6 +320,32 @@ def test_a_confirmed_launch_that_did_not_go_ahead_is_not_audited(lax, env, monke
 
     assert _events(env, "photometry") == []
     assert _messages_to(env, "alice") == []
+
+
+@_LAUNCH
+def test_a_queued_overwrite_is_audited_as_queued(lax, env, monkeypatch, route):
+    """A queued launch has replaced nothing yet and may be cancelled before it
+    starts, so neither the audit nor the owner's message may call it done."""
+    def queued(run_id, authorize_run):
+        authorize_run(run_id)
+        return {"ok": True, "key": f"k/{run_id}", "queued": True, "run_id": run_id}
+
+    monkeypatch.setattr(phot, "start_run",
+                        lambda inst, date, target, *, options, authorize_run, **k: queued(options["run_name"], authorize_run))
+    monkeypatch.setattr(fit, "start_fit",
+                        lambda inst, date, target, options, *, authorize_run, **k: queued(options["run_name"], authorize_run))
+    monkeypatch.setattr(ttv, "start_ttv_fit",
+                        lambda target, options, user_name, authorize_run: queued(options["run_name"], authorize_run))
+    _own_all("alice")
+    _make_group(env, "lab", "alice", "carol")
+    token = _launch(lax, route, "carol")[0].json()["confirm_token"]
+
+    assert _launch_with(lax, route, "carol", confirm_overwrite=token)[0].status_code == 200
+
+    rows = _events(env, LEVEL[route])
+    assert [(r["action"], r["actor"], r["owner"]) for r in rows] == [("overwrite_queued", "carol", "alice")]
+    messages = _messages_to(env, "alice")
+    assert len(messages) == 1 and messages[0].startswith("carol queued an overwrite of your ")
 
 
 @_LAUNCH

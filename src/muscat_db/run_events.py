@@ -20,7 +20,10 @@ from muscat_db.product_record import now_iso
 
 logger = logging.getLogger(__name__)
 
-ACTIONS = ("overwrite", "delete", "cancel")
+# ``overwrite_queued``: a confirmed overwrite that was queued rather than
+# started. Nothing has been replaced yet, and a cancel of the queued job is
+# its own row, so the trail never claims an overwrite that did not happen.
+ACTIONS = ("overwrite", "overwrite_queued", "delete", "cancel")
 
 
 def record(

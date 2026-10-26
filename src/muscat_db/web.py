@@ -910,12 +910,12 @@ def _run_id_taken(level: str, inst: str, date: str, target: str, run_id: str = "
         return False
 
 
-def _run_created_at(level: str, inst: str, date: str, target: str, run_id: str) -> str:
+def _run_record(level: str, inst: str, date: str, target: str, run_id: str) -> dict:
     try:
         record = product_record.read_record(default_run_dir(level, inst, date, target, run_id))
     except ValueError:
         record = None
-    return str((record or {}).get("created_at") or "")
+    return record or {}
 
 
 def _require_may_replace_run(
@@ -924,25 +924,36 @@ def _require_may_replace_run(
     """Refuse a launch over an existing run unless it may and was meant to replace it.
 
     A run id nobody has used yet stays open to everyone who can see the night,
-    so starting a new run needs no ownership: returns None. Over a taken run id
-    the viewer must be allowed to change the run (403 otherwise, issue #272)
-    and must have confirmed the overwrite of this run and owner (409 with
-    :class:`~muscat_db.run_overwrite.RunConflict` otherwise, issue #317).
-    Returns the owner of the run being replaced (``""`` if unowned).
+    so starting a new run needs no ownership: returns None. A taken run id
+    whose run the viewer may not see answers 409 with only a free name to use
+    instead, and is never overwritten, whatever *confirm* says. Over a visible
+    run the viewer must be allowed to change it (403 otherwise, issue #272)
+    and must have confirmed the overwrite of this run, owner and record
+    version (409 with :class:`~muscat_db.run_overwrite.RunConflict` otherwise,
+    issue #317). Returns the owner of the run being replaced (``""`` if unowned).
     """
     if not _run_id_taken(level, inst, date, target, run_id):
         return None
-    owner = _require_may_modify_run(level, inst, date, target, run_id, action="overwrite", offer_new_run=True)
-    if confirm == run_overwrite.confirm_token(run_id, owner):
-        return owner
     viewer = _CURRENT_USER.get()
-    suggested = run_overwrite.suggest_run_name(
-        level, run_id, viewer, owner,
-        lambda candidate: _run_id_taken(level, inst, date, target, candidate),
-    )
+
+    def suggest(owner: str | None) -> str | None:
+        return run_overwrite.suggest_run_name(
+            level, run_id, viewer, owner,
+            lambda candidate: _run_id_taken(level, inst, date, target, candidate),
+        )
+
+    if _product_visibility().job_hidden(level, inst, date, target, run_id):
+        raise run_overwrite.RunConflict(run_overwrite.hidden_conflict_payload(
+            level=level, run_id=run_id, suggested=suggest(None),
+        ))
+    owner = _require_may_modify_run(level, inst, date, target, run_id, action="overwrite", offer_new_run=True)
+    record = _run_record(level, inst, date, target, run_id)
+    version = run_overwrite.record_version(record)
+    if confirm == run_overwrite.confirm_token(run_id, owner, version):
+        return owner
     raise run_overwrite.RunConflict(run_overwrite.conflict_payload(
         level=level, run_id=run_id, viewer=viewer, owner=owner,
-        created_at=_run_created_at(level, inst, date, target, run_id), suggested=suggested,
+        created_at=str(record.get("created_at") or ""), suggested=suggest(owner), version=version,
     ))
 
 
@@ -951,7 +962,7 @@ class _ReplaceGuard:
     with the run id they derived, so the check covers the directory they will
     clear and not a second derivation of it here. *confirm* is the request's
     ``confirm_overwrite``. Call :meth:`after` with the launch result to audit
-    an overwrite that went ahead."""
+    an overwrite that went ahead or was queued."""
 
     def __init__(self, level: str, inst: str, date: str, target: str, confirm: str = ""):
         self.level, self.inst, self.date, self.target = level, inst, date, target
@@ -965,10 +976,12 @@ class _ReplaceGuard:
     def after(self, result: dict) -> dict:
         """Audit the overwrite when *result* says the launch went ahead; a
         relaunch of a live run is ignored by the launcher, so it changed
-        nothing. Returns *result*."""
+        nothing. A queued launch has replaced nothing yet and may still be
+        cancelled, so it is recorded as ``overwrite_queued``. Returns *result*."""
         if self.replaced and result.get("ok") and not result.get("already_running"):
             run_id, owner = self.replaced
-            _record_run_change("overwrite", self.level, self.inst, self.date, self.target, run_id, owner)
+            action = "overwrite_queued" if result.get("queued") else "overwrite"
+            _record_run_change(action, self.level, self.inst, self.date, self.target, run_id, owner)
         return result
 
 

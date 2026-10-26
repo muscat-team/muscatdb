@@ -765,7 +765,10 @@ def _deliver_system_message(text: str, owner: str) -> None:
 
 
 _RUN_LABELS = {**_JOB_LABELS, "ttv_fit": "TTV fit"}
-_RUN_VERBS = {"overwrite": "overwrote", "delete": "deleted", "cancel": "cancelled"}
+_RUN_VERBS = {
+    "overwrite": "overwrote", "overwrite_queued": "queued an overwrite of",
+    "delete": "deleted", "cancel": "cancelled",
+}
 
 
 def notify_run_changed(

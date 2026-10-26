@@ -75,6 +75,20 @@ def test_confirm_token_names_run_and_owner_ignoring_case():
     assert ro.confirm_token("r1", "alice") != ro.confirm_token("r2", "alice")
 
 
+def test_confirm_token_changes_when_the_record_is_rewritten():
+    v1 = "2026-10-01T00:00:00+00:00"
+    assert ro.confirm_token("r1", "alice", v1) != ro.confirm_token("r1", "alice", "2026-10-20T00:00:00+00:00")
+
+
+def test_record_version_follows_a_rerun_by_someone_else():
+    prior = _record("alice", created_at="2026-10-01T00:00:00+00:00")
+    rerun = pr.carry_authorship(_record("carol", created_at="2026-10-20T00:00:00+00:00"), prior)
+    assert ro.record_version(prior) == "2026-10-01T00:00:00+00:00"
+    assert rerun["author"] == "alice"  # so the owner alone could not tell the runs apart
+    assert ro.record_version(rerun) == "2026-10-20T00:00:00+00:00"
+    assert ro.record_version(None) == ""
+
+
 def test_conflict_payload_says_whose_run_it_is():
     own = ro.conflict_payload(level="photometry", run_id="r1", viewer="alice", owner="alice",
                               created_at="2026-10-20T00:00:00+00:00", suggested="r1_2")
@@ -84,6 +98,14 @@ def test_conflict_payload_says_whose_run_it_is():
     assert other["own_run"] is False and other["owner"] == "alice"
     assert "alice's run" in other["error"]
     assert other["confirm_token"] == ro.confirm_token("r1", "alice")
+    assert other["can_overwrite"] is True
+
+
+def test_hidden_conflict_payload_says_only_that_the_name_is_taken():
+    body = ro.hidden_conflict_payload(level="photometry", run_id="r1", suggested="r1_bob")
+    assert body["conflict"] == "run_exists" and body["can_overwrite"] is False
+    assert (body["owner"], body["created_at"], body["suggested_run_name"]) == ("", "", "r1_bob")
+    assert "confirm_token" not in body
 
 
 # ── the record a re-run writes ──────────────────────────────────────────

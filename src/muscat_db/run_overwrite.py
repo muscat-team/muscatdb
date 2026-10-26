@@ -8,12 +8,14 @@ replaced another run, the viewer's own or someone else's.
 The server now refuses such a launch with :class:`RunConflict` (HTTP 409) unless
 the request carries the conflict's :func:`confirm_token`. The page shows the
 conflict as a popup offering a free run name (:func:`suggest_run_name`) or the
-overwrite. The token names the run and its owner, so a confirmation given for
-one owner does not cover the run after someone else has re-run it.
+overwrite. The token names the run, its owner and the version of its record,
+so a confirmation does not cover the run after anyone has re-run it.
 
-Who may overwrite at all is still :func:`muscat_db.run_ownership.may_modify_run`
-and is checked first: a viewer who may not change the run gets the 403, not a
-popup offering to overwrite it.
+A run the viewer may not see is only reported as a taken name with a free one
+to use instead (:func:`hidden_conflict_payload`): no owner, date or token, and
+no overwrite. Who may overwrite a visible run is still
+:func:`muscat_db.run_ownership.may_modify_run` and is checked next: a viewer
+who may not change the run gets the 403, not a popup offering to overwrite it.
 """
 
 from __future__ import annotations
@@ -41,9 +43,18 @@ def _same_user(a: str | None, b: str | None) -> bool:
     return bool(a) and a.casefold() == b.casefold()
 
 
-def confirm_token(run_id: str, owner: str) -> str:
-    """What a request echoes back to confirm overwriting *run_id* owned by *owner*."""
-    return f"{run_id}:{(owner or '').strip().casefold()}"
+def confirm_token(run_id: str, owner: str, version: str = "") -> str:
+    """What a request echoes back to confirm overwriting *run_id* owned by
+    *owner* as it stood at *version* (see :func:`record_version`)."""
+    return f"{run_id}:{(owner or '').strip().casefold()}:{(version or '').strip()}"
+
+
+def record_version(record: dict | None) -> str:
+    """When the run's record was last written: ``modified_at`` after a re-run by
+    someone else, else ``created_at``. A re-run by anyone changes it, which the
+    owner alone does not, since a re-run by someone else keeps the author."""
+    record = record or {}
+    return str(record.get("modified_at") or record.get("created_at") or "")
 
 
 def run_name_of(level: str, run_id: str) -> str:
@@ -103,6 +114,7 @@ def conflict_payload(
     owner: str | None,
     created_at: str,
     suggested: str | None,
+    version: str = "",
 ) -> dict:
     """The 409 body: what the page needs to ask, and the token to confirm."""
     owner = (owner or "").strip()
@@ -124,5 +136,26 @@ def conflict_payload(
         "own_run": own,
         "created_at": created_at or "",
         "suggested_run_name": suggested,
-        "confirm_token": confirm_token(run_id, owner),
+        "can_overwrite": True,
+        "confirm_token": confirm_token(run_id, owner, version),
+    }
+
+
+def hidden_conflict_payload(*, level: str, run_id: str, suggested: str | None) -> dict:
+    """The 409 body for a taken run name whose run the viewer may not see: the
+    name is taken and here is a free one. Nothing about the run itself, and no
+    token, so it cannot be overwritten from here."""
+    name = run_name_of(level, run_id)
+    return {
+        "ok": False,
+        "conflict": "run_exists",
+        "error": f"The run name {name!r} is already taken: choose a new run name.",
+        "level": level,
+        "run_id": run_id,
+        "run_name": name,
+        "owner": "",
+        "own_run": False,
+        "created_at": "",
+        "suggested_run_name": suggested,
+        "can_overwrite": False,
     }

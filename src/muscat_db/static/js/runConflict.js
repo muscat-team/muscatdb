@@ -15,7 +15,8 @@
 // page can put it in its run-name field, then sends again; a name that is
 // taken too just asks again. Overwrite sends again with the conflict's
 // `confirm_token`. Cancel resolves to `{ok: false, cancelled: true}` and
-// launches nothing.
+// launches nothing. A run the viewer may not see comes back with
+// `can_overwrite: false` and no token: the popup then offers only a new name.
 window.MuscatRunConflict = (function () {
   // Another conflict can follow (the typed name was taken too, or the run
   // changed owner meanwhile); stop asking after a few.
@@ -27,6 +28,13 @@ window.MuscatRunConflict = (function () {
 
   function describe(c) {
     var name = '"' + c.run_name + '"';
+    if (c.can_overwrite === false) {
+      return {
+        title: 'The run name ' + name + ' is taken',
+        text: 'A run named ' + name + ' already exists for this target. Choose a new run name.',
+        overwriteLabel: ''
+      };
+    }
     var made = '';
     if (c.created_at) {
       made = ', made by ' + (c.own_run ? 'you' : (c.owner || 'an unknown user')) + ' on ' + day(c.created_at);
@@ -63,7 +71,7 @@ window.MuscatRunConflict = (function () {
       return send(extra).then(function (res) {
         if (!res || res.conflict !== 'run_exists' || round >= MAX_ROUNDS) return res;
         return ask(res).then(function (answer) {
-          if (answer && answer.action === 'overwrite') {
+          if (answer && answer.action === 'overwrite' && res.confirm_token) {
             return attempt({ confirm_overwrite: res.confirm_token }, round + 1);
           }
           if (answer && answer.action === 'new') {
