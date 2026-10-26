@@ -268,17 +268,34 @@ exists.
 **Bring-up**, in order. Steps 1–2 are in the Cloudflare dashboard; the rest on ut2.
 Steps 5–8 need #310 (security headers, and `X-Forwarded-Proto https` so chat
 connects through the tunnel) and #315 (the admin and unknown-email refusals step 8
-checks) released and deployed: step 5 copies `nginx-access.conf` from the deploy
-checkout, so it must be the post-#310 file.
+checks) released and deployed, and #319 (nginx forwards itself, not the
+browser, as `X-Forwarded-For`; without it every sign-in gets a 403): step 5
+copies `nginx-access.conf` from the deploy checkout, so it must be the post-#319
+file. Dashboard menu names below are as of 2026-10 and Cloudflare renames them;
+match on the page, not the path.
 
-1. **Access application.** Zero Trust → Access → Applications → Self-hosted, on
-   the public hostname. Login method: one-time PIN only. Policy: Allow, Include →
-   Emails, listing each person (never *Everyone* or *Emails ending in*). Copy the
-   application's AUD tag; the team domain is `<team>.cloudflareaccess.com`.
-2. **Tunnel.** Zero Trust → Networks → Tunnels → Create (cloudflared). Copy the
-   token. Public hostname: the same hostname, service `http://127.0.0.1:8010`.
-   Under the hostname's Access settings, turn on *Protect with Access* (team name
-   and AUD tag) so cloudflared also refuses a request without a valid token.
+1. **Access application.** On first entry Zero Trust asks for a team name (it
+   becomes `<team>.cloudflareaccess.com`) and a plan; Free covers 50 users, and
+   may still ask for a payment method. Add the one-time PIN login method first:
+   Settings → Authentication → Login methods (or Integrations → Identity
+   providers) → Add new → One-time PIN. Then Access controls → Applications →
+   Add → Self-hosted, on the public hostname. Under Login methods, turn off
+   *Accept all available identity providers* and tick One-time PIN only. With
+   the *Cloudflare* method left on, the login page sends people to
+   `dash.cloudflare.com/login` and anyone with a Cloudflare account under an
+   allowed email gets in that way. Policy: Allow, Include → Emails, listing each
+   person (never *Everyone* or *Emails ending in*). Copy the application's
+   *Application Audience (AUD) Tag* from its overview.
+2. **Tunnel.** Networks → Tunnels (or Connectors) → Create → Cloudflared. The
+   install screen shows `cloudflared service install <token>`: copy only the
+   token (it starts with `eyJ` and is about 180 characters; the 36-character
+   UUID shown elsewhere is the tunnel ID, and cloudflared rejects it with
+   `Provided Tunnel token is not valid`). Never run that command: it installs a
+   root `cloudflared.service` with its own auto-update timer, which step 4
+   replaces. Public hostname: the same hostname, service HTTP `127.0.0.1:8010`
+   (not `localhost`: nginx listens on IPv4 loopback only). Under the hostname's
+   Access settings, turn on *Protect with Access* (team name and AUD tag) so
+   cloudflared also refuses a request without a valid token.
 3. **Install cloudflared** from Cloudflare's apt repository (check
    Cloudflare's current install page for the repository line), so it is patched
    with the host:
@@ -293,12 +310,27 @@ checkout, so it must be the post-#310 file.
    sudo useradd --system --no-create-home --shell /usr/sbin/nologin cloudflared
    sudo install -d -m 0700 /etc/cloudflared
    sudo install -m 0600 /dev/null /etc/cloudflared/muscat-db.env
-   sudoedit /etc/cloudflared/muscat-db.env        # TUNNEL_TOKEN=<token>
+   sudoedit /etc/cloudflared/muscat-db.env        # one line: TUNNEL_TOKEN=eyJ... (no quotes, no export)
+   # shape only, never the token: expect key=TUNNEL_TOKEN, first_char=e, length > 150
+   sudo awk -F= '{print NR": key="$1", value_length="length($2)", first_char="substr($2,1,1)}' /etc/cloudflared/muscat-db.env
    sudo install -m 0644 deploy/cloudflared/muscat-db-tunnel.service /etc/systemd/system/
    sudo systemctl daemon-reload && sudo systemctl enable --now muscat-db-tunnel
    curl -s 127.0.0.1:20241/ready                  # 200 once connected
    ```
-   Until step 5, the public hostname answers 502: nothing listens on `:8010` yet.
+   If the dashboard's `service install` was run anyway, the unit fails with
+   `bind: address already in use` on `127.0.0.1:20241`: the root service holds
+   the metrics port. Remove it and its second copy of the token, then restart
+   ours:
+   ```bash
+   sudo systemctl disable --now cloudflared.service cloudflared-update.timer cloudflared-update.service
+   sudo rm /etc/systemd/system/cloudflared.service /etc/systemd/system/cloudflared-update.{service,timer}
+   sudo shred -u /etc/cloudflared/token
+   sudo systemctl daemon-reload && sudo systemctl reset-failed
+   sudo systemctl restart muscat-db-tunnel
+   ```
+   `ps -eo user,args | grep cloudflared` should then show one process, as user
+   `cloudflared`. Until step 5, the public hostname answers 502: nothing listens
+   on `:8010` yet.
 5. **Enable the Access listener** (a copy, like the other sites, never a link
    into a checkout):
    ```bash
@@ -307,8 +339,11 @@ checkout, so it must be the post-#310 file.
    sudo ln -sf /etc/nginx/sites-available/muscat-db-access /etc/nginx/sites-enabled/
    sudo nginx -t && sudo systemctl reload nginx
    ```
-6. **Configure the app.** Add to production's `.web-env` (`pull-deploy.sh`
-   sources it before every relaunch, so the values survive deploys):
+   `pull-deploy.sh` does not touch `/etc/nginx`: repeat this copy whenever a
+   release changes `nginx-access.conf` (#319 did).
+6. **Configure the app.** Add to production's `.web-env`,
+   `$HOME/deploy/main/app/.web-env` (`pull-deploy.sh` sources it before every
+   relaunch, so the values survive deploys):
    ```bash
    export MUSCAT_CF_TEAM_DOMAIN=<team>.cloudflareaccess.com
    export MUSCAT_CF_AUD=<AUD tag>
@@ -324,8 +359,14 @@ checkout, so it must be the post-#310 file.
    It alerts Slack on a change of state only (down, a different problem,
    recovered).
 8. **Verify, team only**, before any collaborator email goes on the allowlist:
-   - an unknown email gets the "no MuSCAT-DB account" page; an admin's email gets
-     the admin refusal; a mapped non-admin sees what `access explain <user>` says
+   - an unknown email (on the policy, mapped to no user) gets the "no MuSCAT-DB
+     account" page; a mapped non-admin sees what `access explain <user>` says.
+     There is no admin-email case to try by hand: `set-email` never lets an
+     admin hold an email, and CI covers the refusal. An admin who wants to test
+     through the tunnel maps their email to a separate non-admin account (there
+     is no `demote`, and admin rights are per row, so demoting would also drop
+     them on `:8000`). Run the CLI from the deploy checkout with
+     `unset VIRTUAL_ENV` first, or uv warns about the dev venv
    - chat connects (Socket.IO) and a running photometry log streams
    - `/var/log/nginx/muscat-db-access.log` shows each request's email and
      `Cf-Connecting-IP`
@@ -354,6 +395,11 @@ the tunnel's token in the dashboard, replace it in
 **Rollback** (cuts off every external collaborator, leaves `:8000` alone):
 `sudo systemctl disable --now muscat-db-tunnel`, then
 `sudo rm /etc/nginx/sites-enabled/muscat-db-access && sudo systemctl reload nginx`.
+
+**Deployed (2026-10-27).** Hostname `db.muscat-team.jp` (zone `muscat-team.jp`,
+registered at スタードメイン, nameservers on Cloudflare), Zero Trust team
+`green-mouse-b7d3.cloudflareaccess.com`, tunnel route to `:8010`,
+cloudflared 2026.10.4 from apt.
 
 ---
 
