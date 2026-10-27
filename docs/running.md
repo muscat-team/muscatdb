@@ -29,6 +29,20 @@ To preview a command, POST to `/api/photometry/command` with a JSON body such as
 
 Use the same body at `/api/photometry/run` to start the job. Set `test_run`
 explicitly: it defaults to `true` for `/run` and `false` for `/command`.
+
+A launch under a run name that is already taken answers **409** with
+`"conflict": "run_exists"` and starts nothing. The body names the run's
+`owner`, whether it is your own (`own_run`), a free `suggested_run_name`, and a
+`confirm_token`. Either launch again under a new run name, or send the same
+body with `"confirm_overwrite": "<confirm_token>"` to overwrite that run. The
+token names the run's owner and when its record was last written, so it stops
+working if anyone re-runs the run in between. A run you may not see answers
+409 with only `suggested_run_name` and `"can_overwrite": false`: no owner,
+date or token, and it cannot be overwritten. The transit-fit (`/api/transit-fit/run`), TTV-fit
+(`/api/ttv-fit/start`) and Jobs re-run (`/api/jobs/rerun`, which also takes a
+`run_name` to re-run under a new name) routes answer the same way. A viewer who
+may not change the run at all still gets 403.
+
 Poll `/api/photometry/status` with `inst`, `date`, `target`, and the returned
 `run_id` as the `run` query parameter. `pending`, `running`, `cancelling`, and
 `finalizing` are live states; `done`, `error`, and `cancelled` are terminal.

@@ -1499,7 +1499,7 @@ def _write_fit_product(
     inputs = [
         product_record.lightcurve_input(inst, date, target, c, runs_root) for c in csvs
     ]
-    product_record.write_record(rdir, product_record.build_record(
+    product_record.write_rerun_record(rdir, product_record.build_record(
         "transit_fit",
         author=user_name,
         inputs=inputs,

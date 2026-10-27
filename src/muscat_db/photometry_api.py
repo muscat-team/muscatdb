@@ -106,6 +106,9 @@ class DatasetRequest(RequestModel):
 class RunRequest(DatasetRequest):
     test_run: bool = True
     options: PhotometryOptions | None = Field(default_factory=PhotometryOptions)
+    confirm_overwrite: str = Field(
+        "", description="The confirm_token of a 409 run_exists answer, to overwrite that run (#317)"
+    )
 
 
 class CommandRequest(RunRequest):

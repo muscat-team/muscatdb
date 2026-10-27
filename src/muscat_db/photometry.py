@@ -474,7 +474,12 @@ def _write_run_product(
         },
         tool_versions=tool_versions,
     )
-    product_record.write_record(rdir, record)
+    # A re-run keeps the run's author (#307). A legacy run's directory is the
+    # night's, shared with other targets, so its record is never inherited.
+    if Path(rdir) == results_dir(inst, date):
+        product_record.write_record(rdir, record)
+    else:
+        product_record.write_rerun_record(rdir, record)
 
 
 def _prose_prefix(module: str = _MODULE, console_script: str | None = "photometry") -> list[str]:
@@ -1938,8 +1943,16 @@ def _reduction_products_exist(
     return any(p.suffix.lower() in _PROSE_PRODUCT_SUFFIXES for p in _target_product_paths(rdir, inst, target))
 
 
-def _delete_reduction_files(inst: str, date: str, target: str, run_id: str = "") -> tuple[bool, int, str | None]:
-    """Delete on-disk products for one photometry run without touching job state."""
+def _delete_reduction_files(
+    inst: str, date: str, target: str, run_id: str = "", *, keep_record: bool = False,
+) -> tuple[bool, int, str | None]:
+    """Delete on-disk products for one photometry run without touching job state.
+
+    *keep_record* leaves a named run's ``_product.json`` in place, for a re-run
+    that must keep the run's author (#307); a delete removes everything.
+    """
+    from muscat_db.product_record import RECORD_NAME
+
     try:
         rdir = run_output_dir(inst, date, target, run_id or None)
     except ValueError as exc:
@@ -1949,6 +1962,13 @@ def _delete_reduction_files(inst: str, date: str, target: str, run_id: str = "")
 
     removed = 0
     if run_id:
+        record_path = rdir / RECORD_NAME
+        kept = None
+        if keep_record:
+            try:
+                kept = record_path.read_bytes()
+            except OSError:
+                kept = None
         try:
             for p in rdir.rglob("*"):
                 if p.is_file():
@@ -1956,6 +1976,12 @@ def _delete_reduction_files(inst: str, date: str, target: str, run_id: str = "")
             shutil.rmtree(rdir)
         except OSError as exc:
             return False, removed, f"failed to delete run: {exc}"
+        if kept is not None:
+            try:
+                rdir.mkdir(parents=True, exist_ok=True)
+                record_path.write_bytes(kept)
+            except OSError:
+                logger.warning("could not keep the product record of %s for its re-run", rdir, exc_info=True)
         return True, removed, None
 
     for p in _target_product_paths(rdir, inst, target):
@@ -2106,7 +2132,7 @@ def start_run(
                 get_job_store().release_slot("photometry", key)
             return {"ok": False, "error": str(exc)}
         if overwrite:
-            ok, removed, delete_error = _delete_reduction_files(inst, date, target, run_id)
+            ok, removed, delete_error = _delete_reduction_files(inst, date, target, run_id, keep_record=True)
             if not ok:
                 if claimed_slot:
                     get_job_store().release_slot("photometry", key)
