@@ -40,7 +40,6 @@ from muscat_db.database import (
 from muscat_db.target_names import (  # noqa: F401 -- re-exported for web.py, photometry.py, exofop.py
     _DECORATED_TOI_OBJECT_RE,
     _LCO_KEY_PROJECT_ALIAS_RE,
-    _LETTER_SUFFIX_EXCEPTIONS,
     _TOI_SHAPE_RE,
     _normalize_target_name,
     resolve_lco_key_project_name,
