@@ -235,3 +235,39 @@ def test_invalid_rank_by_is_rejected(tmp_path, monkeypatch):
     monkeypatch.setenv("MUSCAT_TTV_DIR", str(tmp_path))
     assert ttv_fit.get_ttv_ranking("HIP 67522", "default", "2025-11-01", "2025-12-31",
                                    rank_by="bogus")["ok"] is False
+
+
+@pytest.mark.parametrize("bad_sigma", [float("nan"), float("inf"), 0.0, -0.001])
+def test_invalid_ranking_precision_keeps_windows_and_can_retry(tmp_path, monkeypatch, bad_sigma):
+    import json
+    import subprocess
+    from unittest.mock import Mock
+    from muscat_db import ttv_fit
+
+    monkeypatch.setenv("MUSCAT_TTV_DIR", str(tmp_path))
+    rdir = ttv_fit.ttv_output_dir(_BASE["target"])
+    rdir.mkdir(parents=True)
+    for name in ("samples.csv.gz", "data.csv", "config.ini", "fit_config.json"):
+        (rdir / name).write_text("x")
+    monkeypatch.setattr(ttv_fit, "get_ttv_model", lambda *a, **k: _MODEL)
+    monkeypatch.setattr(ttv_fit, "_conda_env_python", lambda env: "/fake/python")
+    bad = {**_RANKING, "sigmas": {"b": bad_sigma}}
+    run = Mock(side_effect=[subprocess.CompletedProcess([], 0, json.dumps(r), "")
+                            for r in (bad, _RANKING)])
+    monkeypatch.setattr(ttv_fit.subprocess, "run", run)
+    ttv_fit._ttv_model_cache.clear()
+    try:
+        response = _post({**_BASE, "rank": True})
+        assert response.status_code == 200
+        body = response.json()
+        assert body["ok"] is True
+        assert len(body["windows"]) == 3
+        assert "rank_error" in body
+        assert "sigmas" not in body
+        assert all("rank" not in w for w in body["windows"])
+        recovered = _post({**_BASE, "rank": True}).json()
+        assert "rank_error" not in recovered
+        assert recovered["sigmas"] == _RANKING["sigmas"]
+        assert run.call_count == 2
+    finally:
+        ttv_fit._ttv_model_cache.clear()

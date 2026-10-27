@@ -72,3 +72,14 @@ def test_ttv_fit_refuses_when_disabled(monkeypatch):
     result = ttv_fit.start_ttv_fit("TOI-123", options={"run_name": "r1"})
     assert result["ok"] is False
     assert "MUSCAT_MAX_FULL_JOBS=0" in result["error"]
+
+
+@pytest.mark.parametrize("module", [photometry, transit_fit, ttv_fit])
+@pytest.mark.parametrize("raw, expected", [("", 1), ("  ", 1), ("oops", 1), ("1.5", 1), ("3", 3), ("-2", 0)])
+def test_cap_handles_invalid_values_without_breaking_import(module, raw, expected, monkeypatch):
+    monkeypatch.setenv("MUSCAT_MAX_FULL_JOBS", raw)
+    try:
+        assert importlib.reload(module)._MAX_FULL_JOBS == expected
+    finally:
+        monkeypatch.delenv("MUSCAT_MAX_FULL_JOBS", raising=False)
+        importlib.reload(module)

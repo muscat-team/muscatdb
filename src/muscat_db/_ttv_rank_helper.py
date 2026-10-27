@@ -81,6 +81,9 @@ def evaluate(run_dir: Path, window: list[str], rank_by: str) -> dict:
         p: float(ttv.times[ttv.times.planet == p].tc_unc.median()) for p in letters
     }
 
+    if any(not math.isfinite(sigma) or sigma <= 0 for sigma in sigmas.values()):
+        raise ValueError("each planet needs a finite, positive timing uncertainty")
+
     ranked = rank_transits(
         ttv.flatchain,
         list(ttv.spec.names),
