@@ -5,7 +5,6 @@ whenever the body raised between the two. get_conn() is a contextmanager that
 guarantees close on every path and standardizes timeout/row_factory.
 """
 
-import contextlib
 import os
 import sqlite3
 
@@ -103,17 +102,10 @@ def test_build_db_preserves_destination_file(tmp_path, monkeypatch, no_real_obsl
 
 
 def test_build_db_never_removes_destination_file_itself(tmp_path, monkeypatch, no_real_obslog_scan):
-    """The pre-swap sidecar cleanup must only ever touch -wal/-shm, never the
-    destination path itself.
+    """Publication must keep the live inode and let SQLite own its sidecars.
 
-    ``os.replace`` is what makes the swap atomic -- a reader always sees the
-    old inode or the new one, never neither. Removing the destination file
-    ahead of the replace (as ``_remove_sqlite_tmp``'s ``("", "-wal", "-shm",
-    "-journal")`` suffix list would, since "" is the bare path) throws that
-    guarantee away and opens a window where the database doesn't exist at
-    all. A before/after existence check can't catch that window because the
-    file exists again by the time the assertion runs; asserting the bare
-    path is never passed to ``os.remove`` can.
+    Removing it even briefly can strand open connections on an unlinked file;
+    checking only the path's existence after the rebuild misses that window.
     """
     from muscat_db.database import build_db
 
@@ -246,82 +238,6 @@ def test_migrations_surface_real_failures(tmp_path, monkeypatch):
             database._apply_schema(conn)
 
 
-class _LockedReads:
-    """Connection proxy whose app-owned table SELECTs fail as if the database
-    were locked. Everything else passes through to the real connection."""
-
-    def __init__(self, conn):
-        self._conn = conn
-
-    def __getattr__(self, name):
-        return getattr(self._conn, name)
-
-    def execute(self, sql, *args):
-        if sql.startswith("SELECT * FROM"):
-            raise sqlite3.OperationalError("database is locked")
-        return self._conn.execute(sql, *args)
-
-
-def _fail_reads_of(monkeypatch, live_path):
-    import muscat_db.database as database
-
-    real_get_conn = database.get_conn
-
-    @contextlib.contextmanager
-    def get_conn(path=None, **kwargs):
-        if path != live_path:
-            with real_get_conn(path, **kwargs) as conn:
-                yield conn
-            return
-        with real_get_conn(path, **kwargs) as conn:
-            yield _LockedReads(conn)
-
-    monkeypatch.setattr(database, "get_conn", get_conn)
-
-
-def _seed_live_notes(path):
-    from muscat_db.database import SCHEMA
-
-    with sqlite3.connect(path) as c:
-        c.executescript(SCHEMA)
-        c.execute(
-            "INSERT INTO target_notes(object, obsdate, instrument, note) "
-            "VALUES ('KEEP', '', '', 'x')"
-        )
-
-
-def test_read_app_owned_tables_raises_when_the_read_fails(tmp_path, monkeypatch):
-    """A failed read of the live file must not read as "every app-owned table
-    is empty". build_db would then restore nothing and copy the empty image
-    over the live file (#204)."""
-    from muscat_db.database import _read_app_owned_tables
-
-    target = str(tmp_path / "muscat.db")
-    _seed_live_notes(target)
-    _fail_reads_of(monkeypatch, target)
-    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
-        _read_app_owned_tables(target)
-
-
-def test_build_db_aborts_and_keeps_live_notes_when_the_read_fails(
-    tmp_path, monkeypatch, no_real_obslog_scan,
-):
-    """End to end: a failed read of the live file aborts the rebuild and the
-    live file keeps its notes (#204)."""
-    from muscat_db.database import build_db
-
-    target = str(tmp_path / "muscat.db")
-    monkeypatch.setenv("MUSCAT_DB_PATH", target)
-    _seed_live_notes(target)
-    _fail_reads_of(monkeypatch, target)
-    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
-        build_db(target)
-    with sqlite3.connect(target) as c:
-        assert c.execute(
-            "SELECT COUNT(*) FROM target_notes WHERE object = 'KEEP'"
-        ).fetchone()[0] == 1
-
-
 def test_build_db_writes_on_a_connection_open_across_the_swap_are_kept(
     tmp_path, monkeypatch, no_real_obslog_scan,
 ):
@@ -385,9 +301,8 @@ def test_build_db_keeps_app_writes_made_while_the_build_runs(
         ).fetchone()[0] == 1
 
 
-def test_build_db_matches_a_non_default_page_size(tmp_path, monkeypatch, no_real_obslog_scan):
-    """The backup API cannot change a WAL destination's page size, so the
-    rebuilt image has to be built with the live file's."""
+def test_build_db_preserves_a_non_default_page_size(tmp_path, monkeypatch, no_real_obslog_scan):
+    """Publishing rows from a default-page-size stage keeps the live page size."""
     from muscat_db.database import build_db
 
     target = tmp_path / "muscat.db"
@@ -416,11 +331,11 @@ def test_build_db_leaves_no_tmp_image_behind(tmp_path, monkeypatch, no_real_obsl
     assert sorted(p.name for p in tmp_path.iterdir() if ".tmp" in p.name) == []
 
 
-def test_build_db_copies_into_live_through_the_connection_policy(
+def test_build_db_publishes_through_the_connection_policy(
     tmp_path, monkeypatch, no_real_obslog_scan,
 ):
-    """The copy writes the whole database into the live file, so it must use
-    the same WAL + synchronous=NORMAL connection as every other writer."""
+    """Publication must use the same WAL + synchronous=NORMAL connection
+    policy as every other writer."""
     import muscat_db.database as database
 
     target = tmp_path / "muscat.db"
@@ -457,59 +372,6 @@ def _add_request_with_frame(path, request_id):
         )
 
 
-def test_app_owned_tables_are_read_as_one_snapshot(tmp_path, monkeypatch):
-    """The LCO monitor can save a request and its frames between the rebuild's
-    read of lco_observation_requests and its read of lco_observation_frames.
-    Read without one transaction, that captures the frame but not its request;
-    restoring the orphan then fails under foreign_keys=ON and aborts the
-    nightly rebuild."""
-    import muscat_db.database as database
-
-    path = str(tmp_path / "live.db")
-    with get_conn(path) as conn:
-        database._apply_schema(conn)
-    _add_request_with_frame(path, 1)
-
-    real_get_conn = database.get_conn
-    injected = []
-
-    def trace(statement):
-        if not injected and "FROM lco_observation_frames" in statement:
-            injected.append(True)
-            _add_request_with_frame(path, 2)
-
-    from contextlib import contextmanager
-
-    @contextmanager
-    def tracing_get_conn(*args, **kwargs):
-        with real_get_conn(*args, **kwargs) as conn:
-            conn.set_trace_callback(trace)
-            yield conn
-
-    monkeypatch.setattr(database, "get_conn", tracing_get_conn)
-    preserved = database._read_app_owned_tables(path)
-
-    assert injected, "the concurrent write was never injected"
-    request_ids = {r["request_id"] for r in preserved["lco_observation_requests"]}
-    frame_parents = {f["request_id"] for f in preserved["lco_observation_frames"]}
-    assert frame_parents <= request_ids
-
-
-def test_app_owned_tables_restore_parents_before_children():
-    """build_db restores app-owned tables in _APP_OWNED_TABLES order; with
-    foreign keys enforced every parent table has to come first."""
-    import muscat_db.database as database
-
-    conn = sqlite3.connect(":memory:")
-    database._apply_schema(conn)
-    order = list(database._APP_OWNED_TABLES)
-    for child in order:
-        for fk in conn.execute(f"PRAGMA foreign_key_list('{child}')"):
-            parent = fk[2]
-            assert parent in order, f"{child} references non-preserved {parent}"
-            assert order.index(parent) < order.index(child), f"{parent} restored after {child}"
-
-
 def test_connect_rejects_an_orphan_frame(tmp_path):
     from muscat_db.database import _apply_schema, connect
 
@@ -529,7 +391,7 @@ def test_connect_rejects_an_orphan_frame(tmp_path):
 def test_build_db_keeps_lco_requests_and_frames_under_foreign_keys(
     tmp_path, monkeypatch, no_real_obslog_scan,
 ):
-    """The rebuild restores LCO requests and their frames intact with
+    """The rebuild leaves LCO requests and their frames intact with
     enforcement on, and the rebuilt image has no FK violations."""
     from muscat_db.database import _apply_schema, build_db
 

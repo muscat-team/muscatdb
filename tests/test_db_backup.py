@@ -327,8 +327,7 @@ def test_a_slow_snapshot_is_warned_about(tmp_path, backups, caplog, monkeypatch)
 
 
 def test_build_db_rebuilds_over_leaked_pages_and_drops_them(tmp_path, backups, no_real_obslog_scan):
-    """The rebuild copies a fresh image over the live file page for page, so
-    unreferenced pages go with the old image and no row is at risk."""
+    """A rebuild reclaims accepted leaked pages without restoring stale rows."""
     db = tmp_path / "muscat.db"
     _make_db(db, notes=500)
     _leak_pages(db)

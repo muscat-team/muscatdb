@@ -1,6 +1,6 @@
 """Pre-rebuild snapshot and integrity gate for ``muscat.db`` (issue #182, finding 1).
 
-``build_db`` replaces the live database wholesale every night. Before that swap
+``build_db`` replaces the derived catalog tables every night. Before publication
 the live file is copied with SQLite's online backup API (safe while the web
 server holds WAL connections: the copy is taken under a read transaction, so it
 is a consistent snapshot rather than a byte copy of a file mid-write), and the
@@ -8,10 +8,11 @@ copy is checked with ``PRAGMA integrity_check``. Checking the copy instead of
 the live file validates both at once -- the backup is page-for-page the source
 at snapshot time -- without a second full scan of the live database.
 
-``integrity_check`` output that is only ``Page N: never used`` is leaked page
-accounting, not damage (issue #237): every row, index and table is intact, and
-the rebuild replaces the live file page for page, so it does not stop the build.
-Anything else does, and the failed copy is kept for forensics.
+``integrity_check`` output that is only ``Page N: never used`` can be leaked
+page accounting (issue #237). The row-count gate below checks known application
+tables against a clean baseline before accepting it; a marker and alert retain
+the warning. The rebuild reclaims accepted leaked pages with VACUUM. Other
+integrity failures stop the build, and the failed copy is kept for forensics.
 
 Only snapshots this module wrote (``<name>.nightly-<stamp>.sqlite``) are ever
 pruned; hand-named backups sitting in the same directory are left alone.
@@ -137,6 +138,11 @@ def _nightly_snapshots(dest_dir: Path, prefix: str) -> list[Path]:
         p for p in dest_dir.glob(f"{prefix}*.sqlite")
         if p.is_file() and p.name.startswith(prefix)
     )
+
+
+def has_leaked_pages(snapshot_path: str | os.PathLike) -> bool:
+    """Whether a verified snapshot was accepted with leaked-page warnings."""
+    return _marker(Path(snapshot_path)).exists()
 
 
 def newest_clean_snapshot(db_path: str | os.PathLike, dest_dir: Path | None = None) -> Path | None:

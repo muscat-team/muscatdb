@@ -715,8 +715,9 @@ the step name and the end of `logs/build-db.log`.
   leaked accounting, but a subtree that lost its parent pointer is reported the
   same way and its rows are gone. The rebuild regenerates `frames`, `summaries`
   and `targets` only; the app-owned tables (users, access, groups, jobs, LCO
-  requests) are copied forward as they are. So the build carries on, Slack gets
-  an alert, the snapshot is marked (`<snapshot>.leaked-pages`), and the newest
+  requests) remain in the live database. Accepted leaked pages are reclaimed
+  with a live `VACUUM` before catalog publication; this takes SQLite's write
+  lock. So the build carries on, Slack gets an alert, the snapshot is marked (`<snapshot>.leaked-pages`), and the newest
   clean snapshot is kept however many leaked ones follow it. A leaked copy with
   fewer rows in any app-owned table than that clean snapshot is refused as
   damage. After an alert, compare the app tables against the clean snapshot

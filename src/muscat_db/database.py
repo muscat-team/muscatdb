@@ -49,7 +49,7 @@ def format_elapsed(seconds: int) -> str:
 
 
 # Fitted exposure models written by Calibrate (exposure_model.save_models).
-# Part of SCHEMA so build_db creates it in the fresh image it restores into.
+# Part of SCHEMA so fresh databases and existing installations both have it.
 EXPOSURE_MODELS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS exposure_models (
     instrument  TEXT NOT NULL,
@@ -959,13 +959,10 @@ def _set_temp_store_dir(conn: sqlite3.Connection, db_file: str) -> None:
     conn.execute("PRAGMA temp_store_directory = '%s'" % tmp_dir.replace("'", "''"))
 
 
-# Tables owned by the app rather than derived from the obslog CSVs. build_db
-# rebuilds the observation tables (frames/summaries/targets) from scratch, so
-# these must be copied across the atomic swap or the daily cron silently wipes
-# user notes, manual identification overrides, exposure calibration coefficients
-# and fitted exposure models, job history, saved ephemeris views, closed-loop test observations, and LCO
-# request-monitoring state on every successful build.  Monitor leases are
-# deliberately excluded because they are process-local and must be reacquired.
+# Application tables counted by the pre-rebuild integrity gate. Publication
+# leaves them in place: copying a snapshot of them over the live file would
+# discard commits made after the snapshot (#325). This list is not a publish
+# allowlist; tables added by other application features are preserved too.
 _APP_OWNED_TABLES = (
     "jobs",
     "users",
@@ -992,144 +989,63 @@ _APP_OWNED_TABLES = (
 )
 
 
-def _restore_table(conn: sqlite3.Connection, table: str, rows: list[dict]) -> None:
-    """Re-insert preserved app-owned rows into the freshly rebuilt database.
+# Only these derived tables are replaced. Application state, leases, job
+# reservations and their AUTOINCREMENT counters stay in the live database.
+_REBUILT_TABLES = ("frames", "summaries", "targets", "db_meta")
+_PUBLISH_BUSY_TIMEOUT_S = 120.0
 
-    Copies whatever columns each row carries (``INSERT OR REPLACE``), intersected
-    with the columns the new table actually has, so nothing is silently dropped
-    and a schema that has gained/lost columns since the row was written still
-    round-trips. *table* is a trusted module constant, never user input.
+
+def _publish_catalog(src_path: str, db_path: str) -> None:
+    """Publish a validated catalog without replacing live application state.
+
+    The staging database is attached as the copy source. Transactional DDL
+    replaces only derived tables and builds indexes after the bulk inserts. BEGIN IMMEDIATE
+    serializes writers through publication; WAL readers keep their old
+    snapshot until commit. No application table is snapshotted or restored,
+    so commits made at any point during staging survive (#325).
     """
-    if not rows:
-        return
-    valid_cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
-    for row in rows:
-        cols = [c for c in row.keys() if c in valid_cols]
-        if not cols:
-            continue
-        placeholders = ",".join("?" for _ in cols)
-        conn.execute(
-            f"INSERT OR REPLACE INTO {table} ({','.join(cols)}) VALUES ({placeholders})",
-            tuple(row[c] for c in cols),
-        )
-
-
-def _restore_sequences(conn: sqlite3.Connection, sequences: list[dict]) -> None:
-    """Keep app-owned AUTOINCREMENT IDs above every previously issued ID.
-
-    Restoring rows only advances SQLite's sequence to the largest surviving
-    ID. Deleted or archived IDs must not become available again after a build.
-    sqlite_sequence has no unique constraint on name, so update before insert.
-    """
-    for row in sequences:
-        cur = conn.execute(
-            "UPDATE sqlite_sequence SET seq = MAX(seq, ?) WHERE name = ?",
-            (row["seq"], row["name"]),
-        )
-        if cur.rowcount == 0:
-            conn.execute(
-                "INSERT INTO sqlite_sequence (name, seq) VALUES (?, ?)",
-                (row["name"], row["seq"]),
-            )
-
-
-def _page_size(db_path: str) -> int:
-    """Page size of the existing database at *db_path*, or SQLite's default."""
-    if not os.path.exists(db_path):
-        return 4096
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=30)
-    try:
-        return int(conn.execute("PRAGMA page_size").fetchone()[0])
-    finally:
-        conn.close()
-
-
-def _read_app_owned_tables(db_path: str) -> dict[str, list[dict]]:
-    """Every row of every app-owned table in *db_path*. Rows are copied
-    verbatim (all columns) so nothing is silently dropped; a missing table or
-    an absent file reads as empty, for older or fresh databases.
-
-    Any other error propagates. Reporting it as "empty" would let build_db
-    restore nothing and copy an empty image over the live file (#204).
-
-    All tables are read inside one read transaction, so they come from a single
-    snapshot. Read one by one, the server could save a parent row and its
-    children between two reads (an LCO request and its frames, #184), and the
-    rebuild would restore the children without their parent.
-
-    The schema is not migrated here. _restore_table keeps only the columns the
-    rebuilt schema has, so an older table reads fine, and skipping the
-    migration keeps this read from taking the live file's write lock.
-    """
-    preserved: dict[str, list[dict]] = {t: [] for t in _APP_OWNED_TABLES}
-    if not os.path.exists(db_path):
-        return preserved
-    with get_conn(db_path, row_factory=sqlite3.Row) as old_conn:
-        if old_conn.in_transaction:
-            old_conn.commit()
-        old_conn.execute("BEGIN")
+    with get_conn(db_path, timeout=_PUBLISH_BUSY_TIMEOUT_S) as conn:
+        # Schema helpers may commit, so run migrations before the publication
+        # transaction. Existing application rows are migrated in place.
+        _apply_schema(conn)
+        conn.commit()
+        _set_temp_store_dir(conn, db_path)
+        conn.execute("ATTACH DATABASE ? AS rebuilt", (os.path.abspath(src_path),))
+        conn.execute("BEGIN IMMEDIATE")
+        started = time.monotonic()
         try:
-            existing = {
-                r[0] for r in old_conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                )
-            }
-            for table in _APP_OWNED_TABLES:
-                if table not in existing:
-                    continue
-                rows = old_conn.execute(f"SELECT * FROM {table}").fetchall()
-                preserved[table] = [dict(r) for r in rows]
-            # Read sequence counters in the same snapshot as their rows. The
-            # ingest tables are rebuilt, so preserve only app-owned counters.
-            if "sqlite_sequence" in existing:
-                preserved["sqlite_sequence"] = [
-                    dict(r) for r in old_conn.execute("SELECT name, seq FROM sqlite_sequence")
-                    if r["name"] in _APP_OWNED_TABLES
-                ]
-        finally:
-            old_conn.rollback()
-    return preserved
-
-
-# Busy timeout for the swap connection's own statements (the journal_mode
-# probe). The copy itself is retried by sqlite3's backup() every 250 ms for as
-# long as another connection holds the write lock; readers never block it (WAL).
-_SWAP_BUSY_TIMEOUT_S = 120.0
-
-
-def _copy_into_live(src_path: str, db_path: str) -> None:
-    """Make *db_path*'s content identical to *src_path*, in place, as a single
-    SQLite write transaction.
-
-    The previous swap deleted the live file's ``-wal``/``-shm`` and then
-    ``os.replace``d the new image over it while the server still had it open.
-    Connections holding the old inode kept writing into an unlinked WAL (writes
-    lost), and a connection opening between the delete and the rename created
-    fresh sidecars for the *old* image that then sat beside the *new* one and
-    were replayed into it -- the corruption vector implicated in #157.
-
-    Copying through the backup API never renames the file or touches its
-    sidecars: SQLite writes the new pages through the destination's own WAL
-    under its normal locking, so every open connection simply sees the new
-    content at its next read transaction, exactly as after any other commit.
-    Writers wait (busy timeout) for the ~seconds the copy holds the write lock.
-    """
-    src = sqlite3.connect(f"file:{src_path}?mode=ro", uri=True)
-    try:
-        dst = connect(db_path, timeout=_SWAP_BUSY_TIMEOUT_S)
-        try:
-            src.backup(dst)
-            # The copy lands in the WAL (as large as the database). Fold it
-            # back now if no reader is pinning an older snapshot; otherwise
-            # the regular auto-checkpoint finishes the job later.
-            dst.execute("PRAGMA busy_timeout=2000;")
-            busy = dst.execute("PRAGMA wal_checkpoint(TRUNCATE);").fetchone()[0]
-            if busy:
-                logger.info("build_db: post-swap checkpoint deferred (readers active)")
-        finally:
-            dst.close()
-    finally:
-        src.close()
+            for table in _REBUILT_TABLES:
+                # The staged schema is generated by this module. Recreate its
+                # exact column order before copying; no per-row Python work or
+                # live index maintenance is needed during the bulk insert.
+                ddl = conn.execute(
+                    "SELECT sql FROM rebuilt.sqlite_schema WHERE type = 'table' AND name = ?",
+                    (table,),
+                ).fetchone()[0]
+                indexes = conn.execute(
+                    "SELECT sql FROM rebuilt.sqlite_schema "
+                    "WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL ORDER BY name",
+                    (table,),
+                ).fetchall()
+                conn.execute(f'DROP TABLE main."{table}"')
+                conn.execute(ddl)
+                conn.execute(f'INSERT INTO main."{table}" SELECT * FROM rebuilt."{table}"')
+                for (sql,) in indexes:
+                    conn.execute(sql)
+            # Resolve current live grants against the newly published summaries
+            # in the same transaction, including grants changed during staging.
+            target_keys.refresh(conn)
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        logger.info("build_db: catalog published (write transaction %.2f s)", time.monotonic() - started)
+        conn.execute("DETACH DATABASE rebuilt")
+        # Publication can leave a large WAL. Readers may pin an old snapshot;
+        # defer its truncation rather than blocking them indefinitely.
+        conn.execute("PRAGMA busy_timeout=2000;")
+        if conn.execute("PRAGMA wal_checkpoint(TRUNCATE);").fetchone()[0]:
+            logger.info("build_db: post-publication checkpoint deferred (readers active)")
 
 
 def build_db(db_path: str, progress=None) -> int:
@@ -1138,10 +1054,10 @@ def build_db(db_path: str, progress=None) -> int:
     If ``progress`` is a ``rich.progress.Progress`` instance, three tasks are
     reported: CSV ingestion, summary aggregation, and targets aggregation.
 
-    Builds to a temporary file first so a concurrently-running web server is
-    never blocked by ``DROP TABLE``, then copies it into the target with
-    SQLite's online backup API (:func:`_copy_into_live`) instead of renaming it
-    over the live file -- see that function for why (issue #182, finding 2).
+    Builds and validates a temporary catalog before publishing only its
+    derived tables in one transaction (:func:`_publish_catalog`). Application
+    tables stay live throughout; WAL readers retain their existing snapshot
+    while other writers wait for publication to commit.
     """
     tmp_path = db_path + ".tmp"
 
@@ -1152,12 +1068,14 @@ def build_db(db_path: str, progress=None) -> int:
     _remove_sqlite_tmp(tmp_path)
 
     # Snapshot the live database before touching anything, and refuse to
-    # rebuild over one that fails integrity_check: the copy below would carry
-    # its app-owned rows forward and destroy the last good copy's context
+    # rebuild over one that fails integrity_check: publishing a new catalog
+    # could destroy the last good copy's context
     # (issue #182, finding 1). The snapshot is the disaster-recovery point for
     # a rebuild that goes wrong after this point.
+    leaked_pages = False
     if os.path.exists(db_path):
-        db_backup.snapshot(db_path, app_tables=_APP_OWNED_TABLES)
+        snapshot = db_backup.snapshot(db_path, app_tables=_APP_OWNED_TABLES)
+        leaked_pages = db_backup.has_leaked_pages(snapshot)
         db_backup.prune(db_path)
 
     # Phase 1: discover all CSVs (cheap walk so we can size the progress bar).
@@ -1168,14 +1086,9 @@ def build_db(db_path: str, progress=None) -> int:
         # Robust coordinate picker (filters malformed strings, keeps RA/Dec
         # paired, takes the median) — replaces the old MAX() string aggregation.
         conn.create_aggregate("coord_repr", 2, CoordRepr)
-        # The backup API cannot change a WAL-mode destination's page size, so
-        # the image must be built with the live file's. Only settable before
-        # the first table exists and before WAL is enabled.
-        conn.execute(f"PRAGMA page_size={_page_size(db_path)};")
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA synchronous=OFF;")
-        # Restoring the app-owned tables must not write an orphan into the
-        # image that gets copied into the live file (#184).
+        # Apply the same foreign-key policy as live database connections.
         conn.execute("PRAGMA foreign_keys=ON;")
         conn.execute("PRAGMA cache_size=100000;")
         # Keep GROUP BY / sort spills on the DB's own (roomy) volume, not /tmp.
@@ -1233,19 +1146,6 @@ def build_db(db_path: str, progress=None) -> int:
 
         conn.commit()
 
-        # Carry every app-owned table (user notes, identification overrides,
-        # exposure calibration, job history, chat, ...) over verbatim. Read as
-        # late as possible: the rebuild above takes minutes, and anything the
-        # running server wrote before this read is kept, whereas the old
-        # read-at-start dropped every write made during the build.
-        preserved = _read_app_owned_tables(db_path)
-        for table in _APP_OWNED_TABLES:
-            _restore_table(conn, table, preserved.get(table) or [])
-        _restore_sequences(conn, preserved.get("sqlite_sequence") or [])
-        # After the restore: object_keys is rebuilt from the new summaries and
-        # the carried-over grants are re-keyed against the same rule.
-        target_keys.refresh(conn)
-        conn.commit()
         conn.close()
 
         # Never copy in a rebuilt image that is itself malformed.
@@ -1255,7 +1155,14 @@ def build_db(db_path: str, progress=None) -> int:
                 f"{db_path} left untouched"
             )
 
-        _copy_into_live(tmp_path, db_path)
+        if leaked_pages:
+            # The old whole-file copy also reclaimed leaked pages (#237).
+            # VACUUM reads current live rows under SQLite's writer lock; it
+            # cannot overwrite commits with a stale application snapshot.
+            with get_conn(db_path, timeout=_PUBLISH_BUSY_TIMEOUT_S) as live:
+                _set_temp_store_dir(live, db_path)
+                live.execute("VACUUM")
+        _publish_catalog(tmp_path, db_path)
     finally:
         _remove_sqlite_tmp(tmp_path)
 
@@ -2358,8 +2265,8 @@ def db_path() -> str:
 # * foreign_keys=ON (#184). The only declared key is lco_observation_frames ->
 #   lco_observation_requests ON DELETE CASCADE. Production had no orphans when
 #   this was enabled, nothing deletes or INSERT OR REPLACEs a request (the
-#   monitor upserts with ON CONFLICT DO UPDATE), and build_db restores
-#   _APP_OWNED_TABLES parents first from one read snapshot. Keep it that way:
+#   monitor upserts with ON CONFLICT DO UPDATE), and build_db leaves these
+#   application tables in place. Keep it that way:
 #   with enforcement on, INSERT OR REPLACE on a parent row deletes its
 #   children. It is a per-connection setting, so build_db's .tmp connection
 #   sets it too.
