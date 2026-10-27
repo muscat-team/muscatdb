@@ -50,7 +50,8 @@ from muscat_db.instruments import INSTRUMENTS
 from muscat_db.cache import register_cache
 from muscat_db.engine_identity import is_pinned_version, require_selected_env
 from muscat_db.band_utils import DEFAULT_BANDS, NARROW_BANDS, _FILTER_BAND_ALIAS, bands_from_filters  # noqa: F401
-from muscat_db.catalog import _resolve_archive_coords, resolve_lco_key_project_name
+from muscat_db.catalog import _resolve_archive_coords
+from muscat_db.target_names import strip_planet_letter
 
 logger = logging.getLogger(__name__)
 
@@ -524,13 +525,65 @@ def _prose_prefix(module: str = _MODULE, console_script: str | None = "photometr
             "python", "-m", module]
 
 
-def _write_log_header(logf, cmd: list[str]) -> None:
-    """Start a run log with the command and, in production, the snapshot digest."""
+def _write_log_header(logf, cmd: list[str], coord_note: str = "") -> None:
+    """Start a run log with the command, in production the snapshot digest,
+    and where the target coordinates came from (:func:`target_coord_note`)."""
     logf.write(f"$ {shlex.join(cmd)}\n\n")
     if _prose_frozen_config():
         from muscat_db.prose_config import SNAPSHOT_SHA256
         logf.write(f"MuSCAT prose telescope snapshot sha256: {SNAPSHOT_SHA256}\n")
+    if coord_note:
+        logf.write(f"{coord_note}\n")
     logf.flush()
+
+
+_COORD_SOURCE_LABELS = {
+    "nasa": "the NASA Exoplanet Archive catalog",
+    "toi": "the TOI catalog",
+    "simbad": "SIMBAD",
+}
+
+
+def _coord_names(target: str) -> list[str]:
+    """Names to resolve a run's target by: the host star first, then as given."""
+    return list(dict.fromkeys([strip_planet_letter(target), target.strip()]))
+
+
+def _auto_target_coord(target: str) -> tuple[float, float, str, str] | None:
+    """``(ra_deg, dec_deg, source, resolved name)`` for a run's target, or None.
+
+    prose2 resolves --target_name through MAST then SIMBAD, which place neither
+    a planet-lettered OBJECT name ("DS Tuc b") nor an LCO key-project one
+    ("TIC245728942.01(TOI5012.01)"); both are muscat-db/LCO conventions, so
+    every such run aborted before photometry. muscat-db resolves every target
+    itself instead (offline catalogs, then SIMBAD) and passes --target_coord.
+    The host star goes first, as a planet's position is its host's.
+    """
+    for name in _coord_names(target):
+        resolved = _resolve_archive_coords(name)
+        if resolved is not None:
+            ra_deg, dec_deg, source = resolved
+            return float(ra_deg), float(dec_deg), source, name
+    return None
+
+
+def target_coord_note(target: str, options: dict | None = None) -> str:
+    """The run-log line saying where a run's target coordinates came from."""
+    given = (normalize_run_options(options).get("target_coord") or "").strip()
+    if given:
+        return f"target coordinates: {given} (entered on the photometry page)"
+    resolved = _auto_target_coord(target)
+    if resolved is None:
+        tried = ", ".join(repr(name) for name in _coord_names(target))
+        return (
+            f"target coordinates: not resolved by muscat-db (tried {tried}); "
+            "prose resolves --target_name itself"
+        )
+    ra_deg, dec_deg, source, name = resolved
+    note = f"target coordinates: {ra_deg:.6f} {dec_deg:.6f} deg from {_COORD_SOURCE_LABELS.get(source, source)}"
+    if name != target.strip():
+        note += f", resolved as {name!r} for OBJECT {target.strip()!r}"
+    return note
 
 
 def _frozen_prose_prefix(explicit: str | None, module: str) -> list[str]:
@@ -1707,21 +1760,11 @@ def build_command(
         args += ["--aper_unit", o["aper_unit"]]
 
     target_coord = (o.get("target_coord") or "").strip()
-    if not target_coord and resolve_lco_key_project_name(target) != target.strip():
-        # An LCO key-project OBJECT name decorates a primary designation with
-        # a parenthesized alias (e.g. "TIC245728942.01(TOI5012.01)"). Neither
-        # MAST nor Simbad -- prose2's own name resolvers -- can resolve that
-        # compound string, so every run for such a target aborted with an
-        # uncaught ResolverError. prose2 has no way to know about this
-        # LCO/muscat-db-specific convention, so resolve coordinates here
-        # instead (the same offline-catalog-first path used elsewhere) and
-        # pass them explicitly, bypassing name resolution rather than
-        # widening prose2 to understand it. Falls through to --target_name
-        # only, unchanged from before, when even that resolution fails.
-        resolved = _resolve_archive_coords(target)
+    if not target_coord:
+        resolved = _auto_target_coord(target)
         if resolved is not None:
-            ra_deg, dec_deg, _source = resolved
-            target_coord = f"{ra_deg} {dec_deg}"
+            ra_deg, dec_deg, _source, _name = resolved
+            target_coord = f"{ra_deg:.6f} {dec_deg:.6f}"
 
     if target_coord:
         parts = target_coord.split(None, 1)
@@ -2146,7 +2189,7 @@ def start_run(
         cmd = build_command(inst, date, target, opts, test_run=test_run, run_id=run_id)
         log_path = _run_log_path(rdir, inst, date, target, run_id)
         logf = open(log_path, "w")
-        _write_log_header(logf, cmd)
+        _write_log_header(logf, cmd, target_coord_note(target, opts))
         try:
             env = _job_env()
             proc = subprocess.Popen(
@@ -2888,7 +2931,7 @@ def sync_jobs() -> None:
                 pending_log_path = _run_log_path(rdir, inst, date, target, run_id)
                 try:
                     logf = open(pending_log_path, "w")
-                    _write_log_header(logf, cmd)
+                    _write_log_header(logf, cmd, target_coord_note(target, opts))
                     proc_env = _job_env()
                     proc = subprocess.Popen(cmd, cwd=str(rdir), stdout=logf, stderr=subprocess.STDOUT, text=True, start_new_session=True, env=proc_env)
                     try:

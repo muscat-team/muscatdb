@@ -3649,13 +3649,13 @@ class TestKeyProjectDecoratedTargetCoord:
         i = cmd.index("--target_coord")
         assert cmd[i + 1] == "159.157968"
 
-    def test_plain_name_never_triggers_auto_resolve(self, monkeypatch):
-        def _boom(name):
-            raise AssertionError("must not auto-resolve a plain (undecorated) name")
-
-        monkeypatch.setattr(phot, "_resolve_archive_coords", _boom)
-        cmd = phot.build_command("muscat3", "260101", "TOI-1")
-        assert "--target_coord" not in cmd
+    def test_decorated_name_is_resolved_as_given(self, monkeypatch):
+        # A decoration is not a planet letter: the whole name goes to the
+        # resolver, which tries each of its halves.
+        calls = []
+        monkeypatch.setattr(phot, "_resolve_archive_coords", lambda name: calls.append(name))
+        phot.build_command("sinistro", "240417", self.DECORATED)
+        assert calls == [self.DECORATED]
 
     def test_unresolvable_decorated_name_falls_back_to_name_only(self, monkeypatch):
         monkeypatch.setattr(phot, "_resolve_archive_coords", lambda name: None)
