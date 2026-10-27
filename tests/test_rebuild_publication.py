@@ -188,3 +188,45 @@ def test_publication_keys_current_live_grants_against_new_catalog(catalogs):
             ('TOI-1234', expected)
         ]
         assert conn.execute('SELECT target_key FROM group_grants').fetchall() == [(expected,)]
+
+
+def test_rebuild_keeps_commit_during_legacy_notes_migration(tmp_path, monkeypatch):
+    live = str(tmp_path / 'legacy.db')
+    monkeypatch.setattr(database, '_discover_csv_jobs', lambda: [])
+    with database.get_conn(live) as conn:
+        conn.execute('CREATE TABLE target_notes(object TEXT PRIMARY KEY, note TEXT, updated_at TEXT)')
+        conn.execute("INSERT INTO target_notes VALUES ('OLD', 'before', '2020-01-01')")
+        conn.commit()
+    real_migrate = database._migrate_target_notes
+    injected = []
+
+    def migrate_with_concurrent_commit(conn):
+        path = conn.execute('PRAGMA database_list').fetchone()[2]
+        if path != live:
+            return real_migrate(conn)
+
+        def commit_before_drop(sql):
+            if not injected and sql.startswith('DROP TABLE IF EXISTS target_notes'):
+                with sqlite3.connect(live) as writer:
+                    writer.execute("INSERT INTO target_notes VALUES ('NEW', 'committed', '2026-10-27')")
+                injected.append(True)
+
+        conn.set_trace_callback(commit_before_drop)
+        try:
+            return real_migrate(conn)
+        finally:
+            conn.set_trace_callback(None)
+
+    monkeypatch.setattr(database, '_migrate_target_notes', migrate_with_concurrent_commit)
+    try:
+        database.build_db(live)
+    except sqlite3.OperationalError as exc:
+        # A read snapshot invalidated by another writer must abort, not replace
+        # the newer table contents with the rows read before that commit.
+        assert 'locked' in str(exc)
+    assert injected == [True]
+    with database.get_conn(live) as conn:
+        assert conn.execute('SELECT object, note FROM target_notes ORDER BY object').fetchall() == [
+            ('NEW', 'committed'), ('OLD', 'before')
+        ]
+        assert conn.execute('PRAGMA integrity_check').fetchone() == ('ok',)

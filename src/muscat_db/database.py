@@ -529,32 +529,41 @@ _MIGRATIONS = [
 
 
 def _migrate_target_notes(conn: sqlite3.Connection) -> None:
-    """Recreate target_notes with per-dataset primary key if needed."""
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(target_notes)").fetchall()}
-    if "obsdate" in cols:
-        return  # already migrated
-    # Preserve existing rows
+    """Recreate legacy notes atomically, preserving the caller's transaction.
+
+    A savepoint makes the metadata check, row read, and replacement one read/
+    write transaction. If another WAL writer commits after the read, SQLite
+    rejects the stale snapshot's write instead of discarding that commit.
+    Read failures must propagate, never masquerade as an empty notes table.
+    """
+    conn.execute("SAVEPOINT migrate_target_notes")
     try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(target_notes)").fetchall()}
+        if "obsdate" in cols:
+            conn.execute("RELEASE migrate_target_notes")
+            return  # already migrated
         rows = conn.execute("SELECT object, note, updated_at FROM target_notes").fetchall()
-    except sqlite3.OperationalError:
-        rows = []
-    conn.execute("DROP TABLE IF EXISTS target_notes")
-    conn.execute("""
-        CREATE TABLE target_notes (
-            object     TEXT NOT NULL,
-            obsdate    TEXT NOT NULL DEFAULT '',
-            instrument TEXT NOT NULL DEFAULT '',
-            note       TEXT NOT NULL,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (object, obsdate, instrument)
-        )
-    """)
-    for obj, note, updated in rows:
-        conn.execute(
-            "INSERT INTO target_notes(object, obsdate, instrument, note, updated_at) VALUES (?, '', '', ?, ?)",
-            (obj, note, updated),
-        )
-    conn.commit()
+        conn.execute("DROP TABLE IF EXISTS target_notes")
+        conn.execute("""
+            CREATE TABLE target_notes (
+                object     TEXT NOT NULL,
+                obsdate    TEXT NOT NULL DEFAULT '',
+                instrument TEXT NOT NULL DEFAULT '',
+                note       TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (object, obsdate, instrument)
+            )
+        """)
+        for obj, note, updated in rows:
+            conn.execute(
+                "INSERT INTO target_notes(object, obsdate, instrument, note, updated_at) VALUES (?, '', '', ?, ?)",
+                (obj, note, updated),
+            )
+        conn.execute("RELEASE migrate_target_notes")
+    except BaseException:
+        conn.execute("ROLLBACK TO migrate_target_notes")
+        conn.execute("RELEASE migrate_target_notes")
+        raise
 
 
 def _migrate_schema(conn: sqlite3.Connection) -> None:
