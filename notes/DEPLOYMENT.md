@@ -906,19 +906,60 @@ The current pins are:
 
 | Engine | Repository | Commit | Candidate environment |
 |---|---|---|---|
-| prose2 | `jpdeleon/prose2` | `14ca3be83128e3b912a66a2d399055134d5e4e82` (v3.5.0) | `prose-prod-14ca3be8` (not yet installed) |
+| prose2 | `jpdeleon/prose2` | `14ca3be83128e3b912a66a2d399055134d5e4e82` (v3.5.0) | `prose-prod-14ca3be8` |
 | timer | `john-livingston/timer` | `b8428258c9b62266532173af4abd7fbafee6dcef` | `timer-prod-b8428258` |
 | harmonic | `john-livingston/harmonic` | `a32fb8e32ca776e0e6e7dc92ad4232cef1f12194` | `harmonic-prod-a32fb8e3` |
 
 The 2026-10-18 audit below covered prose2 `6029ea87` and timer. prose2
-v3.4.0 (`3daed56b`) is the installed prose engine (`prose-prod-3daed56b`). The
-pending pin is v3.5.0 (`14ca3be8`, tree equal to release commit `03a3572b`),
-which adds MuSCAT3/4 camera-ID telescope aliases (ep02-ep09) and per-band
-telescope-file matching. Its frozen snapshot changes only those aliases and
-the file list; review before merging. Do not merge until `prose-prod-14ca3be8`
-is installed and `deploy/engines.py verify` passes, because `workers.toml`
-now names that environment. `harmonic-prod-a32fb8e3` is new. Both were
+v3.4.0 (`3daed56b`, `prose-prod-3daed56b`) is the active prose engine until the
+v3.5.0 rollout below. `harmonic-prod-a32fb8e3` and `prose-prod-3daed56b` were
 installed and verified on 2026-10-24 (see the activation record below).
+
+**prose2 v3.5.0 (`14ca3be8`, tree equal to release commit `03a3572b`)** is
+installed as `prose-prod-14ca3be8` and verified on 2026-10-27:
+
+- `deploy/engines.py verify prose --record` passes on ut2 and ut3–ut7 (shared
+  `/ut2/jerome/miniconda3`): non-editable install of `14ca3be8`, frozen snapshot
+  loaded read-only, digest `03dc9e56…`, 102 telescope aliases. The record is
+  `deploy/conda/production/prose.json`. `lib/python3.1` in the environment is
+  conda's compatibility symlink to `python3.10`, as in `prose-prod-3daed56b`.
+- The snapshot was captured from `prose-prod-14ca3be8` with `capture_config`, its
+  config folder a copy of `~/.prose` without the 14-byte `builtin.telescope` stub
+  (`name: Builtin`, written 2026-10-18 and not part of any prose release). The
+  18 instrument telescope files in it equal prose2 v3.5.0 `data/*.telescope` byte
+  for byte. Against the active snapshot it adds the MuSCAT3/4 camera-ID aliases
+  (`ep02`–`ep09`) and records `engine_version: 3.5.0`.
+- Full reductions with both environments (each frozen on its own snapshot,
+  explicit `--target_coord`, default options) of MuSCAT3 230605 and MuSCAT2
+  230421 (TOI-3884) give identical fluxes, times, comparison stars and target
+  index in every band. Only `Err` changes:
+  - MuSCAT3 errors rise by 1.6–2.4% in g/r/i and 25% in zs. v3.4.0 matches no
+    telescope for MuSCAT3 frames and falls back to prose's defaults (gain 1, read
+    noise 9); v3.5.0 matches `LCO-2m/MuSCAT3_<band>` by camera ID, whose
+    `keyword_read_noise` takes the header `RDNOISE` (12 e⁻; 18 e⁻ for zs). The new
+    errors use the camera's measured read noise; the old ones underestimated it.
+  - MuSCAT2 g, r and zs errors move by +0.2%, −0.2% and +0.4%: each band now uses
+    its own telescope file (gain 1.04/0.96/1.02, read noise 4.08/3.96/4.48)
+    instead of `MuSCAT2_i` (1.03, 4.02); i is bit-identical. MuSCAT2 now also
+    gets a 62000 ADU saturation limit from that file (none before), which changed
+    no comparison star or frame on this night.
+
+Roll out v3.5.0 right after the release containing it reaches `main`: the deploy
+host takes it within 5 minutes, and until step 3 the web process would run
+v3.4.0 against the v3.5.0 snapshot.
+
+1. Confirm no photometry jobs are running or queued on `:8001` and the fleet.
+2. `deploy/workers.py --profile prod up` from the deploy checkout, so ut3–ut7
+   render `MUSCAT_PROSE_CONDA_ENV=prose-prod-14ca3be8`; re-run after busy workers
+   drain and check every unit.
+3. In production's `.web-env`, change `MUSCAT_PROSE_CONDA_ENV=prose-prod-3daed56b`
+   to `prose-prod-14ca3be8`, keeping every other line.
+4. Restart `:8001` in `muscatdbgui`, check `/healthz`, then run one MuSCAT3 job
+   and check that its log shows `snapshot sha256: 03dc9e56…` and `_product.json`
+   reports prose `3.5.0+git.14ca3be8…`.
+
+Rollback: set both back to `prose-prod-3daed56b` and revert the release commit's
+snapshot; `prose-prod-3daed56b` stays installed.
 
 These retain the working baseline's Python (prose 3.10.15, timer 3.13.13,
 harmonic 3.12.13) and

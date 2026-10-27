@@ -9,9 +9,9 @@ commit = "14ca3be83128e3b912a66a2d399055134d5e4e82"
 environment = "prose-prod-14ca3be8"
 source_environment = "prose"
 module = "prose"
-# Captured at prose2 v3.5.0 from the approved commit; adds MuSCAT3/4 camera-ID aliases
-# (ep02-ep09) and drops a stray dev-home builtin stub. Review before merging.
-frozen_config_sha256 = "eea1de5458d32f1fff05f0ce35b24527d78d67bd327ea8dfa448a8d313bdd82d"
+# Captured from prose-prod-14ca3be8 (see notes/DEPLOYMENT.md); adds the MuSCAT3/4
+# camera-ID aliases (ep02-ep09).
+frozen_config_sha256 = "03dc9e56b06e17e7428b56b959b0eb6e6a604b89c1abc2de7f90aa17c9727dd1"
 # The working editable metadata predates prose2's matplotlib<3.9 requirement.
 # Pin the newest compatible 3.8 release rather than bypassing pip check.
 [engines.prose.dependency_overrides]
