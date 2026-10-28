@@ -17,6 +17,7 @@ entirely, so it has to recompute the trusted user from the handshake itself.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 import hmac
 import os
 import re
@@ -58,6 +59,18 @@ ADMIN_EMAIL = "admin_email"  # a valid email whose users row is an admin
 OK = "ok"
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def reject_username_collision(username: str, existing_names: Iterable[str]) -> None:
+    """Keep account names distinct under run/product ownership's casefold rule.
+
+    Exact-name updates remain valid, but never create or update a case alias
+    of another account. Use Python casefold, since SQLite NOCASE is ASCII-only.
+    """
+    folded = username.casefold()
+    for existing in existing_names:
+        if existing != username and existing.casefold() == folded:
+            raise ValueError("Username conflicts with an existing account (case-insensitive)")
 
 
 def normalize_email(value: str | None) -> str | None:

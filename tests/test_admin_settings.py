@@ -93,3 +93,17 @@ def test_groups_grants_and_revocation_history(setup):
     assert post(client, 'leave', group='team', username='viewer').status_code == 200
     assert post(client, 'grant', group='user:viewer', proposal_id='TEST').status_code == 200
     assert post(client, 'grant', group='user:missing', proposal_id='TEST').status_code == 400
+
+
+@pytest.mark.parametrize('existing, alias', [('admin', 'ADMIN'), ('viewer', 'VIEWER')])
+def test_account_rejects_casefold_collision(setup, existing, alias):
+    path, client = setup
+    with sqlite3.connect(path) as conn:
+        before = conn.execute('SELECT * FROM users ORDER BY username').fetchall()
+    response = post(client, 'account', username=alias, email='alias@univ.edu')
+    assert response.status_code == 400
+    assert 'case' in response.json()['detail'].lower()
+    assert auth.username_for_email('alias@univ.edu') is None
+    with sqlite3.connect(path) as conn:
+        assert conn.execute('SELECT * FROM users ORDER BY username').fetchall() == before
+        assert not conn.execute('SELECT 1 FROM group_exclusions WHERE username=?', (alias,)).fetchone()

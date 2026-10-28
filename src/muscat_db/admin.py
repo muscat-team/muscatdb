@@ -69,6 +69,8 @@ def change(body: Change, actor: str = Depends(require_admin)):
                 if user and user[0]:
                     raise ValueError("Admin accounts must be managed through the CLI")
             if body.action == "account":
+                auth.reject_username_collision(
+                    body.username, (row[0] for row in conn.execute("SELECT username FROM users")))
                 email = auth.normalize_email(body.email)
                 if email is None:
                     raise ValueError("Enter a valid email address")

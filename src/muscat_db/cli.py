@@ -1196,35 +1196,32 @@ def htpasswd_add(
         console.print("[red]Error: password cannot be empty[/]")
         raise typer.Exit(1)
 
-    hashed = _openssl_apr1(password)
-    entries = _read_htpasswd()
-    entries[username] = hashed
-    ht_path = _htpasswd_path()
-    _write_htpasswd(entries)
+    from muscat_db import auth
+    from muscat_db.database import _apply_schema, db_path, get_conn
 
-    # Ensure SQLite users table row exists for settings storage (Phase 3).
+    hashed = _openssl_apr1(password)
+    ht_path = _htpasswd_path()
     try:
-        from muscat_db.database import db_path, get_conn
         with get_conn(db_path()) as conn:
-            conn.executescript(
-                "CREATE TABLE IF NOT EXISTS users ("
-                "  username TEXT PRIMARY KEY,"
-                "  password_hash TEXT NOT NULL DEFAULT '',"
-                "  display_name TEXT NOT NULL DEFAULT '',"
-                "  is_admin INTEGER NOT NULL DEFAULT 0,"
-                "  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,"
-                "  last_login TEXT,"
-                "  settings TEXT NOT NULL DEFAULT '{}')"
-            )
+            _apply_schema(conn)
+            # Serialize account creation with dashboard and set-email writes.
+            conn.execute("BEGIN IMMEDIATE")
+            entries = _read_htpasswd()
+            auth.reject_username_collision(username, entries)
+            auth.reject_username_collision(
+                username, (row[0] for row in conn.execute("SELECT username FROM users")))
             conn.execute(
                 "INSERT OR IGNORE INTO users (username, display_name, is_admin) VALUES (?, ?, ?)",
                 (username, username, 1 if admin else 0),
             )
             if admin:
                 conn.execute("UPDATE users SET is_admin = 1 WHERE username = ?", (username,))
+            entries[username] = hashed
+            _write_htpasswd(entries)
             conn.commit()
     except Exception as exc:
-        console.print(f"[yellow]Warning: could not update users table: {exc}[/]")
+        console.print(f"[red]Error: could not update account: {exc}[/]")
+        raise typer.Exit(1) from exc
 
     console.print(f"[green]User '{username}' added to {ht_path}[/]")
 
@@ -1256,6 +1253,13 @@ def htpasswd_set_email(
             raise typer.Exit(1)
     with get_conn(db_path()) as conn:
         _apply_schema(conn)
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            auth.reject_username_collision(
+                username, (row[0] for row in conn.execute("SELECT username FROM users")))
+        except ValueError as exc:
+            console.print(f"[red]Error: {exc}[/]")
+            raise typer.Exit(1) from exc
         if normalized is not None:
             admin_row = conn.execute(
                 "SELECT is_admin FROM users WHERE username = ?", (username,)

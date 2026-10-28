@@ -62,3 +62,16 @@ def test_nonadmin_has_no_dashboard(page, live_server):
     page.context.set_extra_http_headers({'X-Forwarded-User': 'ordinary', 'X-MuSCAT-Proxy-Secret': PROXY_SECRET})
     page.goto('/settings')
     expect(page.locator('#admin-dashboard')).to_have_count(0)
+
+
+def test_admin_account_form_rejects_case_alias(page):
+    page.problems.allowed += ['HTTP 400: POST /api/admin/change', 'status of 400']
+    page.goto('/settings')
+    expect(page.locator('#admin-message')).to_have_text('Administration loaded.')
+    page.fill('#admin-username', 'ADMIN')
+    page.fill('#admin-email', 'alias@univ.edu')
+    page.get_by_role('button', name='Save email mapping').click()
+    expect(page.locator('#admin-message')).to_contain_text('case-insensitive')
+    page.reload()
+    expect(page.locator('#admin-message')).to_have_text('Administration loaded.')
+    expect(page.locator('#admin-users')).not_to_contain_text('alias@univ.edu')
