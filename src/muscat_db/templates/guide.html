@@ -879,7 +879,7 @@ graph TD
             Codebase Chat Assistant (@bot)
           </h2>
           <p style="color: var(--text-dim); font-size: 0.95rem; margin-bottom: 0;">
-            A read-only Gemma assistant embedded in team chat that answers questions about this codebase, grounded in the project docs and the relevant pipeline repositories.
+            A private, read-only Gemma assistant in team chat that answers with the access of a regular user, grounded in this guide and the relevant pipeline repositories.
           </p>
         </div>
         <span class="toggle-icon">▼</span>
@@ -891,23 +891,25 @@ graph TD
 graph TD
     %% Trigger & routing
     A["Team Chat Message\n(@bot your question)"]:::default --> B["Mention Parser\n(addressed / extract_question)"]:::pipeline
-    B -->|"@bot /reset or /clear"| RS["Post Reset Divider\n(system message = hard context cutoff)"]:::db
+    B -->|"@bot /reset or /clear"| RS["Clear Conversation Context\n(private note, no model call)"]:::default
     B -->|question| C["Concurrency Guard\n(MUSCAT_OLLAMA_MAX_CONCURRENT, default 2)"]:::default
-    C -->|at capacity| BUSY["Ephemeral busy note\n(ask again shortly)"]:::default
+    C -->|at capacity| BUSY["Private busy note\n(ask again shortly)"]:::default
 
     %% Context assembly (read-only grounding)
     C -->|slot reserved| D["Assemble Context"]:::pipeline
-    D --> E["System Prompt\n(CLAUDE.md + module map, read-only rules)"]:::default
-    D --> F["Topic-Gated Grounding\nphotometry to prose2, transit to timer, TTV to harmonic\n(README + CLAUDE.md; EN + Japanese keywords)"]:::default
-    D --> G["Shared Room History\n(last 8 turns; TTL auto-clear + reset cutoff)"]:::db
+    D --> E["System Prompt\n(role, regular-user access, read-only rules, module map)"]:::default
+    D --> UG["User-Guide Grounding\n(best-matching sections of this guide; admin sections excluded)"]:::default
+    D --> F["Topic-Gated Grounding\nphotometry to prose2, transit to timer, TTV to harmonic\n(README; EN + Japanese keywords)"]:::default
+    D --> G["Private Per-User History\n(last 8 turns, in memory; TTL auto-clear + reset)"]:::db
 
     %% Model call over the tunnel
     E --> H["POST /api/chat\n(non-streaming, no tools, num_ctx = MUSCAT_OLLAMA_NUM_CTX)"]:::pipeline
+    UG --> H
     F --> H
     G --> H
     H --> I["SSH Tunnel\nlocalhost:11434 to muscat-ut4 (scripts/ollama_tunnel.sh)"]:::pipeline
     I --> J["ollama / gemma4\n(replies in the asker's language)"]:::default
-    J --> K["Post Reply to Chat\n(persisted agent message)"]:::default
+    J --> K["Private Reply to the Asker\n(Markdown rendered; kept in the asker's browser)"]:::default
           </pre>
         </div>
         <div style="margin-top: 1.5rem;">
@@ -916,9 +918,11 @@ graph TD
           </p>
           <ul>
             <li><strong>Read-only by design:</strong> the request carries no <code>tools</code>/<code>functions</code> field, so the model cannot act on the system. It can explain what a human would change and where, but cannot edit files, run jobs, or touch the database.</li>
-            <li><strong>Topic-gated grounding:</strong> beyond the base context (<code>CLAUDE.md</code> + module map), a photometry question folds in <code>prose2</code>'s docs, a transit-fit question <code>timer</code>'s, and a TTV question <code>harmonic</code>'s (each repo's <code>README</code> + <code>CLAUDE.md</code>). Routing keywords cover both English and Japanese phrasing. Repo paths resolve from <code>MUSCAT_PROSE_PROJECT</code> / <code>MUSCAT_TIMER_PROJECT</code> / <code>MUSCAT_HARMONIC_PROJECT</code>.</li>
-            <li><strong>Concurrency:</strong> up to <code>MUSCAT_OLLAMA_MAX_CONCURRENT</code> (default 2) questions run at once on the single-worker server; a further concurrent request receives an ephemeral &ldquo;busy&rdquo; note rather than queueing.</li>
-            <li><strong>Shared context &amp; auto-clear:</strong> team chat is one shared room, so the assistant sees the last 8 turns of the <em>shared</em> conversation (each turn prefixed with the speaker's name), not a private per-user session. Context clears itself after an idle gap of <code>MUSCAT_AGENT_HISTORY_TTL_S</code> (default 900&nbsp;s); posting <code>@bot /reset</code> (or <code>/clear</code>) drops it immediately via a persisted system divider.</li>
+            <li><strong>Regular-user access:</strong> the assistant answers as a regular (non-admin) user. It is grounded in the sections of this guide that best match the question, never in <code>CLAUDE.md</code> (the developers' handbook), and the &ldquo;Multi-User Auth &amp; Deployment&rdquo; material is excluded. Questions about servers, deployment, accounts, access grants, credentials or backups are referred to an administrator.</li>
+            <li><strong>Topic-gated grounding:</strong> beyond the guide, a photometry question folds in <code>prose2</code>'s <code>README</code>, a transit-fit question <code>timer</code>'s, and a TTV question <code>harmonic</code>'s. Routing keywords cover both English and Japanese phrasing. Repo paths resolve from <code>MUSCAT_PROSE_PROJECT</code> / <code>MUSCAT_TIMER_PROJECT</code> / <code>MUSCAT_HARMONIC_PROJECT</code>.</li>
+            <li><strong>Concurrency:</strong> up to <code>MUSCAT_OLLAMA_MAX_CONCURRENT</code> (default 2) questions run at once on the single-worker server; a further concurrent request receives a private &ldquo;busy&rdquo; note rather than queueing.</li>
+            <li><strong>Private conversation &amp; auto-clear:</strong> the question and the reply are shown only to the asker (badged &ldquo;only you&rdquo;) and are never saved on the server. The assistant remembers the asker's last 8 turns in memory; that context clears itself after an idle gap of <code>MUSCAT_AGENT_HISTORY_TTL_S</code> (default 900&nbsp;s), and <code>@bot /reset</code> (or <code>/clear</code>) drops it immediately.</li>
+            <li><strong>Formatting, refresh and delete:</strong> replies are rendered as Markdown (headings, lists, bold, code, links). The asker's browser keeps the exchange (up to 200 messages per user), so it survives a page refresh; the &times; button on a message deletes it from that browser. It does not follow the user to another browser or device.</li>
             <li><strong>Context window:</strong> ollama otherwise defaults to a ~4096-token window regardless of the model's capacity, silently truncating the prompt; the assistant requests an explicit <code>MUSCAT_OLLAMA_NUM_CTX</code> (default 8192).</li>
             <li><strong>Connectivity:</strong> ollama on <code>muscat-ut4</code> binds <code>127.0.0.1</code> (no auth), so <code>scripts/ollama_tunnel.sh</code> forwards it over SSH to a local port; set <code>MUSCAT_OLLAMA_URL</code> to the local tunnel end (<code>http://127.0.0.1:11434</code>). The model tag is <code>MUSCAT_OLLAMA_MODEL</code> (default <code>gemma4:latest</code>).</li>
           </ul>
