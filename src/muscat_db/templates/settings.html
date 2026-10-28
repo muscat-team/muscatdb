@@ -43,6 +43,7 @@
   }
 </style>
 <h1>Settings</h1>
+{% if is_admin %}{% include "_admin_settings.html" %}{% endif %}
 
 <div class="settings-section collapsed">
   <h3>LCO API Token</h3>
