@@ -46,6 +46,24 @@ A comprehensive scientific platform for managing and analyzing multi-band astron
 
 ---
 
+## Photometry target coordinates
+
+Coordinates entered on the photometry page take precedence. Otherwise, muscat-db
+checks the offline NASA/TOI catalogs, trying the host-star name before the original
+OBJECT name (for example, `DS Tuc` before `DS Tuc b`). Local positions remain
+available even when the remote resolver is busy. Remote resolution has one
+three-second wait budget across names and spelling variants. Successful remote
+positions are cached; misses are not, because the resolver cannot distinguish an
+unknown name from a transport failure reliably.
+
+Concurrent requests for the same target share one lookup. Each process admits at
+most four remote lookup workers, with no backlog. An in-flight third-party call
+can finish after the deadline, but further name/spelling attempts stop. If no
+position is available in time, the original OBJECT name still goes to prose for
+its existing fallback; the launch log does not repeat the failed lookup or claim
+that a late coordinate result was passed to prose. Enter explicit coordinates
+when a reduction must proceed without external name resolution.
+
 ## Scientific Validation & Reproducibility
 
 | Aspect | Method / Tool | Description |

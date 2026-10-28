@@ -99,13 +99,17 @@ def test_unresolvable_name_leaves_resolution_to_prose(monkeypatch):
 
 
 def test_coordinates_entered_on_the_page_are_never_overridden(monkeypatch):
+    calls = []
+
     def _boom(name):
+        calls.append(name)
         raise AssertionError("must not resolve when target_coord is given")
 
     monkeypatch.setattr(phot, "_resolve_archive_coords", _boom)
     cmd = phot.build_command("qhy600", "260825", "DS Tuc b", {"target_coord": "1.5 -2.5"})
     i = cmd.index("--target_coord")
     assert cmd[i + 1 : i + 3] == ["1.5", " -2.5"]
+    assert calls == []
 
 
 @pytest.mark.parametrize(

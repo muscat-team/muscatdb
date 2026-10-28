@@ -24,6 +24,7 @@ This module never trusts user input for filesystem access: see
 from __future__ import annotations
 
 from collections.abc import Callable
+from concurrent.futures import Future, TimeoutError as FutureTimeoutError
 import csv as _csv
 import datetime
 import hashlib
@@ -42,7 +43,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from muscat_db import jobs, database
+from muscat_db import jobs, database, exposure as exp_calc, catalog as catalog_lookup
 from muscat_db.job_store import current_instance_id, current_owner, get_job_store
 from muscat_db.job_limits import JobLimitExceeded, claim_caps, claim_caps_for_row, enqueue_caps, limit_refusal, params_with_running_cap
 from muscat_db.ref_time import is_valid_ref_time
@@ -549,30 +550,89 @@ def _coord_names(target: str) -> list[str]:
     return list(dict.fromkeys([strip_planet_letter(target), target.strip()]))
 
 
+# One total budget covers host/as-given names and all Sesame spelling variants.
+# Threads are daemonized because an in-flight third-party resolver cannot be
+# cancelled. Never queue more work behind them during a network outage.
+_COORD_LOOKUP_TIMEOUT_S = 3.0
+_COORD_LOOKUP_LIMIT = 4
+_COORD_LOOKUPS: dict[str, tuple[Future, float]] = {}
+_COORD_LOOKUP_LOCK = threading.Lock()
+
+
 def _auto_target_coord(target: str) -> tuple[float, float, str, str] | None:
-    """``(ra_deg, dec_deg, source, resolved name)`` for a run's target, or None.
+    """Resolve host first within one bounded wait; preserve prose's fallback.
 
-    prose2 resolves --target_name through MAST then SIMBAD, which place neither
-    a planet-lettered OBJECT name ("DS Tuc b") nor an LCO key-project one
-    ("TIC245728942.01(TOI5012.01)"); both are muscat-db/LCO conventions, so
-    every such run aborted before photometry. muscat-db resolves every target
-    itself instead (offline catalogs, then SIMBAD) and passes --target_coord.
-    The host star goes first, as a planet's position is its host's.
+    Same-target callers share in-flight work. Successful remote results are
+    cached by catalog.py; a timeout/miss is never stored here as a result.
+    An already-running socket operation may finish after the deadline, but no
+    further spelling/host attempts start and at most four workers can exist.
     """
+    deadline = time.monotonic() + _COORD_LOOKUP_TIMEOUT_S
+    # Local and cached positions remain available even when every network
+    # worker is occupied. This pass never initiates a remote request.
     for name in _coord_names(target):
-        resolved = _resolve_archive_coords(name)
-        if resolved is not None:
-            ra_deg, dec_deg, source = resolved
-            return float(ra_deg), float(dec_deg), source, name
-    return None
+        coords = catalog_lookup.resolve_target_astrometry(name, allow_remote=False)
+        if coords is not None:
+            return float(coords["ra"]), float(coords["dec"]), str(coords.get("source") or "catalog"), name
+    key = target.strip()
+    with _COORD_LOOKUP_LOCK:
+        pending = _COORD_LOOKUPS.get(key)
+        if pending is None:
+            if len(_COORD_LOOKUPS) >= _COORD_LOOKUP_LIMIT:
+                logger.warning("coordinate resolver busy; leaving %r to prose", target)
+                return None
+            future = Future()
+            _COORD_LOOKUPS[key] = future, deadline
+            # Capture the callable: tests and configuration must not change a
+            # running lookup's dependencies after its caller times out.
+            resolver = _resolve_archive_coords
+
+            def resolve():
+                token = exp_calc._COORD_RESOLUTION_DEADLINE.set(deadline)
+                result = None
+                try:
+                    for name in _coord_names(target):
+                        if time.monotonic() >= deadline:
+                            break
+                        resolved = resolver(name)
+                        if resolved is not None:
+                            ra, dec, source = resolved
+                            result = float(ra), float(dec), source, name
+                            break
+                except Exception:
+                    logger.warning("coordinate resolution failed for %r", target, exc_info=True)
+                finally:
+                    exp_calc._COORD_RESOLUTION_DEADLINE.reset(token)
+                    # Remove completed work before waking callers, so an
+                    # immediate retry after a failure can reach the service.
+                    with _COORD_LOOKUP_LOCK:
+                        _COORD_LOOKUPS.pop(key, None)
+                    future.set_result(result)
+
+            try:
+                threading.Thread(target=resolve, name="photometry-coordinates", daemon=True).start()
+            except Exception:
+                _COORD_LOOKUPS.pop(key, None)
+                logger.warning("could not start coordinate lookup for %r", target, exc_info=True)
+                return None
+        else:
+            future, deadline = pending
+    try:
+        return future.result(timeout=max(0.0, deadline - time.monotonic()))
+    except FutureTimeoutError:
+        logger.warning("coordinate lookup exceeded %.1f s for %r", _COORD_LOOKUP_TIMEOUT_S, target)
+        return None
 
 
-def target_coord_note(target: str, options: dict | None = None) -> str:
+def target_coord_note(target: str, options: dict | None = None, *, command: list[str] | None = None) -> str:
     """The run-log line saying where a run's target coordinates came from."""
     given = (normalize_run_options(options).get("target_coord") or "").strip()
     if given:
         return f"target coordinates: {given} (entered on the photometry page)"
-    resolved = _auto_target_coord(target)
+    # A timed-out command must not trigger another lookup while writing its
+    # log, or claim a late result was passed to prose when it was not.
+    resolved = (_auto_target_coord(target)
+                if command is None or "--target_coord" in command else None)
     if resolved is None:
         tried = ", ".join(repr(name) for name in _coord_names(target))
         return (
@@ -2189,7 +2249,7 @@ def start_run(
         cmd = build_command(inst, date, target, opts, test_run=test_run, run_id=run_id)
         log_path = _run_log_path(rdir, inst, date, target, run_id)
         logf = open(log_path, "w")
-        _write_log_header(logf, cmd, target_coord_note(target, opts))
+        _write_log_header(logf, cmd, target_coord_note(target, opts, command=cmd))
         try:
             env = _job_env()
             proc = subprocess.Popen(
@@ -2931,7 +2991,7 @@ def sync_jobs() -> None:
                 pending_log_path = _run_log_path(rdir, inst, date, target, run_id)
                 try:
                     logf = open(pending_log_path, "w")
-                    _write_log_header(logf, cmd, target_coord_note(target, opts))
+                    _write_log_header(logf, cmd, target_coord_note(target, opts, command=cmd))
                     proc_env = _job_env()
                     proc = subprocess.Popen(cmd, cwd=str(rdir), stdout=logf, stderr=subprocess.STDOUT, text=True, start_new_session=True, env=proc_env)
                     try:

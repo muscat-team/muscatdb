@@ -23,6 +23,7 @@ import re
 import threading
 import uuid
 from collections.abc import Callable
+from contextvars import ContextVar
 
 import numpy as np
 from astropy.io import fits
@@ -771,6 +772,11 @@ def _target_name_variants(name: str) -> list[str]:
     return variants
 
 
+# Request-scoped deadline: never mutate Astropy's process-wide timeout config.
+# The photometry caller bounds its wait separately, including an in-flight I/O.
+_COORD_RESOLUTION_DEADLINE = ContextVar("coordinate_resolution_deadline", default=None)
+
+
 def resolve_target_coords(target_name: str) -> tuple[float, float] | None:
     """Resolve a target name to (ra, dec) in degrees using SIMBAD via astropy.
 
@@ -784,6 +790,9 @@ def resolve_target_coords(target_name: str) -> tuple[float, float] | None:
 
     last_exc: Exception | None = None
     for attempt in attempts:
+        deadline = _COORD_RESOLUTION_DEADLINE.get()
+        if deadline is not None and time.monotonic() >= deadline:
+            return None
         try:
             coord = SkyCoord.from_name(attempt)
         except Exception as exc:
