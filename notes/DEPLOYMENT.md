@@ -1086,16 +1086,77 @@ Validation on ut2:
 - Frozen-config, deployment, product-record, and timer CSV tests: 151 passed.
   The new consistency test was first observed failing against the old snapshot.
 - Ruff and the strict MkDocs build pass.
-- MuSCAT3/230605 TOI-3884, g band: the 3.5.1 full reduction and the recorded
-  3.5.0 reduction both contain 219 rows with the same CSV columns. The reference
-  header has `EXPTIME=45` and a start timestamp. `GJD_UTC` advances by 22.5 s;
-  the BJD shift is about 22.4979 s after barycentric conversion. Median `Err`
-  increases by 22.11%; maximum absolute normalized-flux change is 0.0000654.
-  All output times, fluxes, and uncertainties are finite, errors are positive,
-  times increase, and timer staging preserves the three science columns exactly.
-  This comparison used two workers and disabled plots/GIFs in isolated outputs.
-- Remote verification is still required before rollout: `ssh ut3` could not
-  resolve that hostname from this session. No remote service was modified.
+- Production-baseline comparison (2026-10-29): full g-band reductions of
+  MuSCAT3/230605 TOI-3884 and MuSCAT2/200227 WASP104b use `prose-prod-3daed56b`
+  (3.4.0), **not** the unreleased 3.5.0 candidate. The baseline uses production's
+  original telescope snapshot (`39503fce…`, preserved in
+  `tests/data/prose_340_telescopes.yaml`); the candidate uses the packaged
+  `54955f39…` snapshot. Commands supply catalog coordinates and
+  `--avoid_nearby_star`, with no clipping options. MuSCAT3 uses automatic
+  comparison selection; MuSCAT2 fixes reference frame 417 and comparison IDs
+  2 and 3, the ensemble from its recorded successful reduction. Production
+  3.4.0's automatic selector returns no comparison stars for this night, so
+  the controlled numerical comparison must use an explicit common ensemble.
+  MuSCAT2 uses 138 calibrated g frames (137 at `EXPTIME=30`, plus one
+  20 s frame). Both engines reject one 30 s frame during alignment; MuSCAT3
+  uses BANZAI frames (`EXPTIME=45`). Outputs and logs are isolated under
+  `~/temp/pr328-review/`. Both engines are restricted to two CPU cores; 3.5.1
+  also uses `--workers 2 --plots none`. No engine installation was modified.
+- `tests/test_pinned_engines_slow.py::test_photometry_pinned_matches_production`
+  restores baseline-versus-pin checks for both nights. It uses private copies of
+  the MuSCAT2 calibration cache, matches retained rows against the expected
+  midpoint using each frame's `MJD-STRT` and `EXPTIME` metadata, and requires unique matches, at least 99% frame
+  retention, finite timer inputs, positive errors, and increasing times. It
+  also fails on target-localization/brightest-star fallback warnings. The
+  allowed UTC offset error is 1 ms and BJD offset error is 10 ms (barycentric
+  correction changes over an exposure). Absolute normalized-flux tolerance is
+  0.001 (1000 ppm), a migration-regression bound, not a science precision claim.
+  The check rejects an exposure-start candidate and an injected 2000 ppm flux
+  change before passing on both actual 3.5.1 outputs. The default fast suite
+  passes: 3615 tests, 80 skips, 2 expected failures, and 22 passing subtests.
+- Remote verification completed on 2026-10-29 for `muscat-ut3` through
+  `muscat-ut7`: `deploy/engines.py verify prose --conda
+  /ut2/jerome/miniconda3/bin/conda` passes on every host, confirming the
+  non-editable `dd19c2e2` installation, Matplotlib 3.8.4, read-only snapshot
+  `54955f39…`, and 102 aliases. Use the `muscat-utN` SSH names; `utN` aliases
+  are not configured. No remote service was modified.
+
+Per-column differences below are **3.5.1 minus production 3.4.0** on matched
+rows: 219/219 for MuSCAT3 and 137/137 for MuSCAT2. Median signed difference and
+maximum absolute difference use finite pairs; flux differences are in ppm of
+normalized flux. No rows are silently dropped from the timing/flux checks.
+
+| CSV column (delta units) | MuSCAT3 median / max absolute | MuSCAT2 median / max absolute |
+| --- | ---: | ---: |
+| BJD_TDB (s) | 22.497886 / 22.497967 | 15.000039 / 15.000120 |
+| Flux (ppm) | -0.370246 / 65.403970 | 0.000000 / 0.000000 |
+| Err | 0.004420 / 0.123819 | -0.000337 / 0.000383 |
+| Bkg(ADU) | 5.406221 / 143.782413 | 0.000000 / 0.000000 |
+| Airmass | 0.000000 / 0.000000 | 0.000000 / 0.000000 |
+| Dx(pix) | 0.000000 / 0.000000 | 0.000000 / 0.000000 |
+| Dy(pix) | 0.000000 / 0.000000 | 0.000000 / 0.000000 |
+| Peak(ADU) | 0.000000 / 0.000000 | 0.000000 / 0.000000 |
+| FWHM(pix) | 0.000000 / 0.000000 | 0.000000 / 0.000000 |
+| GJD_UTC (s) | 22.500019 / 22.500059 | 14.999999 / 15.000039 |
+
+MuSCAT3's UTC shift is 22.5 s. MuSCAT2 retains one 20 s exposure (10 s shift)
+and 136 exposures of 30 s (15 s shift); the regression checks both, rather than
+assuming the reference frame's exposure applies to the whole night. Median
+`Err` changes by +22.335007% (MuSCAT3) and -20.491283% (MuSCAT2). MuSCAT2 fluxes
+are identical. Times, fluxes and uncertainties are finite, uncertainties are
+positive, and times increase in both accepted comparisons. MuSCAT3's candidate
+has six missing `Bkg(ADU)` diagnostics, versus zero in production; its background
+statistics above cover the 213 finite pairs. All MuSCAT2 columns are finite.
+
+Fixture screening matters: the default KIC/260810 trial had missing uncertainties
+in 1094/1185 production rows and 1097/1185 candidate rows. In the Kepler-45b/260425
+trial, neither engine localized the catalog target; both fell back to the brightest star.
+Neither trial is used as acceptance evidence; the regression rejects both cases.
+On WASP104b/200227, production's automatic comparison selection returned an empty
+ensemble and 137 NaN flux/error rows. The explicit common ensemble above avoids
+that production failure without modifying either engine. These findings and the
+six missing MuSCAT3 background values are retained as limitations, not filled
+with synthetic values to make the checks pass.
 
 For rollout, use the coordinated activation procedure below after the release
 reaches `main`. Provision and verify `prose-prod-dd19c2e2` on every worker host
@@ -1107,7 +1168,16 @@ the job log and `_product.json`. Coordinate the web export with the deployed
 snapshot so the old engine does not run against the new configuration.
 
 Rerun photometry and its dependent transit/TTV fits under new run names to obtain
-the science corrections while retaining old results for comparison. Rollback
+the science corrections while retaining old results for comparison. **Do not mix
+3.4.0 exposure-start products with 3.5.1 midpoint products in one transit fit,
+ephemeris, or TTV analysis.** The convention changes by half of each frame's
+`EXPTIME` (22.5 s for 45 s exposures; 15 s for 30 s exposures). muscat-db
+applies no additional exposure correction. Before combining epochs, inspect
+`tool_versions.prose` in every input's `_product.json` and re-reduce all selected
+nights with the same midpoint engine, then regenerate their transit times.
+Different run names preserve provenance but do not make mixed epochs safe.
+Legacy products without recorded versions need their logs checked or must be
+re-reduced; an automatic mixed-version input flag remains follow-up work. Rollback
 restores both the previous engine selections and the previous packaged snapshot
 and digest; changing the environment alone is insufficient. No database migration
 is required.
