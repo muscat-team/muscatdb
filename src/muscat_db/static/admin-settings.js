@@ -52,8 +52,8 @@
       const fields = ['proposal_id', 'instrument', 'target', 'date_from', 'date_to'].filter(key => grant[key] != null).map(key => `${key}=${grant[key]}`).join(', ');
       const tr = row(grants, [group.name, fields || 'All observations', grant.granted_by, grant.note]);
       const button = document.createElement('button'); button.type = 'button'; button.className = 'btn'; button.textContent = 'Revoke';
-      button.addEventListener('click', () => {
-        if (confirm(`Revoke grant #${grant.id} from ${group.name}? Other grants may still provide access.`)) save({action: 'revoke', grant_id: grant.id});
+      button.addEventListener('click', async () => {
+        if (await window.showConfirmModal('Revoke grant', `Revoke grant #${grant.id} from ${group.name}? Other grants may still provide access.`)) save({action: 'revoke', grant_id: grant.id});
       }); tr.insertCell().append(button);
     }));
     content.hidden = false;
@@ -70,13 +70,13 @@
     } catch (error) { message.textContent = (saved ? 'Saved, but refresh failed: ' : '') + error.message; }
     finally { busy = false; root.querySelectorAll('button').forEach(button => button.disabled = false); }
   }
-  root.querySelectorAll('form').forEach(form => form.addEventListener('submit', event => {
+  root.querySelectorAll('form').forEach(form => form.addEventListener('submit', async event => {
     event.preventDefault();
     const body = Object.fromEntries(new FormData(form));
     body.action = event.submitter.value || form.dataset.adminAction;
     if (body.action === 'scope') body.scoped = body.scoped === 'true';
-    if (['clear_email', 'scope', 'leave'].includes(body.action) && !confirm('Apply this access change to ' + body.username + '?')) return;
-    if (body.action === 'grant' && body.group === 'everyone' && !confirm('Grant these observations to everyone, except accounts limited to explicit grants?')) return;
+    if (['clear_email', 'scope', 'leave'].includes(body.action) && !await window.showConfirmModal('Change account access', 'Apply this access change to ' + body.username + '?')) return;
+    if (body.action === 'grant' && body.group === 'everyone' && !await window.showConfirmModal('Grant shared access', 'Grant these observations to everyone, except accounts limited to explicit grants?')) return;
     save(body);
   }));
   document.getElementById('admin-refresh').addEventListener('click', () => refresh().then(() => { message.textContent = 'Updated.'; }).catch(error => { message.textContent = error.message; }));
