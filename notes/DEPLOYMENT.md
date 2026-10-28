@@ -715,13 +715,18 @@ the step name and the end of `logs/build-db.log`.
   leaked accounting, but a subtree that lost its parent pointer is reported the
   same way and its rows are gone. The rebuild regenerates `frames`, `summaries`
   and `targets` only; the app-owned tables (users, access, groups, jobs, LCO
-  requests) remain in the live database. Accepted leaked pages are reclaimed
-  with a live `VACUUM` before catalog publication; this takes SQLite's write
-  lock. So the build carries on, Slack gets an alert, the snapshot is marked (`<snapshot>.leaked-pages`), and the newest
+  requests) remain in the live database. Online builds retain accepted leaked
+  pages and log `schedule VACUUM during maintenance`: a live `VACUUM` would
+  hold the writer lock for the entire database. The build carries on, Slack
+  gets an alert, the snapshot is marked (`<snapshot>.leaked-pages`), and the newest
   clean snapshot is kept however many leaked ones follow it. A leaked copy with
   fewer rows in any app-owned table than that clean snapshot is refused as
   damage. After an alert, compare the app tables against the clean snapshot
-  and restore from it if rows are missing.
+  and restore from it if rows are missing. If all application rows are accounted
+  for, schedule a maintenance window, pause application writers and the nightly
+  job, take another verified backup, and run `VACUUM` before resuming writers.
+  Verify `PRAGMA integrity_check` returns `ok` afterward. Do not remove the last
+  clean snapshot merely because a rebuild completed.
 - **Anything else** is damage. The copy is kept as
   `muscat.db.nightly-<stamp>.sqlite.INTEGRITY-FAILED` in `$MUSCAT_DB_BACKUP_DIR`
   (default `~/temp`). Nothing was changed, but no rebuild will run until the file

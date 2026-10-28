@@ -11,7 +11,7 @@ at snapshot time -- without a second full scan of the live database.
 ``integrity_check`` output that is only ``Page N: never used`` can be leaked
 page accounting (issue #237). The row-count gate below checks known application
 tables against a clean baseline before accepting it; a marker and alert retain
-the warning. The rebuild reclaims accepted leaked pages with VACUUM. Other
+the warning. Online rebuilds retain accepted leaked pages; VACUUM is deferred to a maintenance window. Other
 integrity failures stop the build, and the failed copy is kept for forensics.
 
 Only snapshots this module wrote (``<name>.nightly-<stamp>.sqlite``) are ever

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import fcntl
 import base64
 import hashlib
 import json
@@ -484,6 +485,27 @@ CREATE TABLE IF NOT EXISTS group_grants_revoked (
 );
 """
 
+# Published indexes alternate names because SQLite cannot rename an index.
+# Schema initialization must recognize the equivalent index on the active table,
+# rather than rebuilding a duplicate over millions of rows after publication.
+_CATALOG_INDEX_TABLES = {
+    "idx_frames_inst_date": "frames",
+    "idx_frames_object": "frames",
+    "idx_frames_proposal": "frames",
+    "idx_summaries_inst_date": "summaries",
+}
+
+
+def _catalog_index_needed(conn: sqlite3.Connection, sql: str) -> bool:
+    for name, table in _CATALOG_INDEX_TABLES.items():
+        if re.search(r"\b" + name + r"\b", sql):
+            return not conn.execute(
+                "SELECT 1 FROM sqlite_schema WHERE type='index' AND tbl_name=? "
+                "AND name IN (?, ?)", (table, name, "_next_" + name),
+            ).fetchone()
+    return True
+
+
 # Idempotent schema migrations for columns added after initial deployment.
 # Each migration is attempted unconditionally; "duplicate column" errors are
 # silently swallowed so the function is safe to call multiple times.
@@ -570,6 +592,8 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     """Apply any pending schema migrations idempotently."""
     _migrate_target_notes(conn)
     for sql in _MIGRATIONS:
+        if not _catalog_index_needed(conn, sql):
+            continue
         try:
             conn.execute(sql)
         except sqlite3.OperationalError as exc:
@@ -582,7 +606,9 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
 
 def _apply_schema(conn: sqlite3.Connection) -> None:
     """Create all tables (idempotent) then apply any pending column migrations."""
-    conn.executescript(SCHEMA)
+    conn.executescript(";".join(
+        sql for sql in SCHEMA.split(";") if _catalog_index_needed(conn, sql)
+    ))
     _migrate_schema(conn)
 
 
@@ -1004,45 +1030,104 @@ _REBUILT_TABLES = ("frames", "summaries", "targets", "db_meta")
 _PUBLISH_BUSY_TIMEOUT_S = 120.0
 
 
-def _publish_catalog(src_path: str, db_path: str) -> None:
-    """Publish a validated catalog without replacing live application state.
+_PUBLISH_BATCH_ROWS = 10_000
 
-    The staging database is attached as the copy source. Transactional DDL
-    replaces only derived tables and builds indexes after the bulk inserts. BEGIN IMMEDIATE
-    serializes writers through publication; WAL readers keep their old
-    snapshot until commit. No application table is snapshotted or restored,
-    so commits made at any point during staging survive (#325).
+
+@contextmanager
+def _catalog_build_lock(db_path: str):
+    # Serialize builders, including stale shadow cleanup. Application writers
+    # never acquire this lock. The kernel releases it after a killed rebuild.
+    with open(db_path + ".build.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def _retire_catalog_table(conn: sqlite3.Connection, table: str) -> None:
+    if not conn.execute("SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?",
+                        (table,)).fetchone():
+        return
+    # DROP of a populated table (and its indexes) can also monopolize the
+    # writer lock. Free its rows/index entries in bounded transactions first.
+    while True:
+        rows = conn.execute(
+            f'SELECT rowid FROM "{table}" ORDER BY rowid LIMIT ?', (_PUBLISH_BATCH_ROWS,)
+        ).fetchall()
+        if not rows:
+            break
+        conn.execute(f'DELETE FROM "{table}" WHERE rowid <= ?', (rows[-1][0],))
+        conn.commit()
+        time.sleep(0.005)
+    conn.execute(f'DROP TABLE "{table}"')
+    conn.commit()
+
+
+def _copy_catalog_table(conn: sqlite3.Connection, table: str) -> None:
+    shadow = "_catalog_new_" + table
+    ddl = conn.execute(
+        "SELECT sql FROM rebuilt.sqlite_schema WHERE type='table' AND name=?", (table,)
+    ).fetchone()[0]
+    ddl = re.sub(r'CREATE TABLE\s+(?:IF NOT EXISTS\s+)?(?:"[^"]+"|\w+)',
+                 f'CREATE TABLE main."{shadow}"', ddl, count=1, flags=re.IGNORECASE)
+    conn.execute(ddl)
+    # Build empty indexes first: each batch maintains them incrementally, so
+    # there is no full-catalog CREATE INDEX holding the live writer lock.
+    for name, sql in conn.execute(
+        "SELECT name, sql FROM rebuilt.sqlite_schema "
+        "WHERE type='index' AND tbl_name=? AND sql IS NOT NULL", (table,)
+    ).fetchall():
+        index = "_next_" + name if conn.execute(
+            "SELECT 1 FROM main.sqlite_schema WHERE name=?", (name,)
+        ).fetchone() else name
+        sql = re.sub(r'CREATE INDEX\s+(?:IF NOT EXISTS\s+)?(?:"[^"]+"|\w+)\s+ON\s+(?:"[^"]+"|\w+)',
+                     f'CREATE INDEX "{index}" ON "{shadow}"', sql, count=1, flags=re.IGNORECASE)
+        conn.execute(sql)
+    conn.commit()
+    last = None
+    while True:
+        condition = "" if last is None else "WHERE rowid > ?"
+        args = () if last is None else (last,)
+        rows = conn.execute(
+            f'SELECT rowid FROM rebuilt."{table}" {condition} ORDER BY rowid LIMIT ?',
+            (*args, _PUBLISH_BATCH_ROWS),
+        ).fetchall()
+        if not rows:
+            break
+        upper = rows[-1][0]
+        condition = "rowid <= ?" if last is None else "rowid > ? AND rowid <= ?"
+        conn.execute(f'INSERT INTO main."{shadow}" SELECT * FROM rebuilt."{table}" WHERE {condition}',
+                     (upper,) if last is None else (last, upper))
+        conn.commit()
+        last = upper
+        time.sleep(0.005)
+
+
+def _publish_catalog(src_path: str, db_path: str) -> None:
+    """Copy/index shadows in batches, then atomically switch derived tables.
+
+    Application tables are never copied. Commits during staging, copying, and
+    cleanup survive; only the final name switch and target-key refresh require
+    a single writer transaction. A killed copy leaves the old catalog active;
+    the next builder removes abandoned shadows before retrying.
     """
     with get_conn(db_path, timeout=_PUBLISH_BUSY_TIMEOUT_S) as conn:
-        # Schema helpers may commit, so run migrations before the publication
-        # transaction. Existing application rows are migrated in place.
         _apply_schema(conn)
         conn.commit()
         _set_temp_store_dir(conn, db_path)
+        for table in _REBUILT_TABLES:
+            _retire_catalog_table(conn, "_catalog_old_" + table)
+            _retire_catalog_table(conn, "_catalog_new_" + table)
         conn.execute("ATTACH DATABASE ? AS rebuilt", (os.path.abspath(src_path),))
+        for table in _REBUILT_TABLES:
+            _copy_catalog_table(conn, table)
         conn.execute("BEGIN IMMEDIATE")
         started = time.monotonic()
         try:
             for table in _REBUILT_TABLES:
-                # The staged schema is generated by this module. Recreate its
-                # exact column order before copying; no per-row Python work or
-                # live index maintenance is needed during the bulk insert.
-                ddl = conn.execute(
-                    "SELECT sql FROM rebuilt.sqlite_schema WHERE type = 'table' AND name = ?",
-                    (table,),
-                ).fetchone()[0]
-                indexes = conn.execute(
-                    "SELECT sql FROM rebuilt.sqlite_schema "
-                    "WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL ORDER BY name",
-                    (table,),
-                ).fetchall()
-                conn.execute(f'DROP TABLE main."{table}"')
-                conn.execute(ddl)
-                conn.execute(f'INSERT INTO main."{table}" SELECT * FROM rebuilt."{table}"')
-                for (sql,) in indexes:
-                    conn.execute(sql)
-            # Resolve current live grants against the newly published summaries
-            # in the same transaction, including grants changed during staging.
+                conn.execute(f'ALTER TABLE "{table}" RENAME TO "_catalog_old_{table}"')
+                conn.execute(f'ALTER TABLE "_catalog_new_{table}" RENAME TO "{table}"')
             target_keys.refresh(conn)
             conn.commit()
         except BaseException:
@@ -1050,23 +1135,29 @@ def _publish_catalog(src_path: str, db_path: str) -> None:
             raise
         logger.info("build_db: catalog published (write transaction %.2f s)", time.monotonic() - started)
         conn.execute("DETACH DATABASE rebuilt")
-        # Publication can leave a large WAL. Readers may pin an old snapshot;
-        # defer its truncation rather than blocking them indefinitely.
+        for table in _REBUILT_TABLES:
+            _retire_catalog_table(conn, "_catalog_old_" + table)
         conn.execute("PRAGMA busy_timeout=2000;")
         if conn.execute("PRAGMA wal_checkpoint(TRUNCATE);").fetchone()[0]:
             logger.info("build_db: post-publication checkpoint deferred (readers active)")
 
 
 def build_db(db_path: str, progress=None) -> int:
+    """Rebuild from CSVs, serializing builders without locking app writers."""
+    with _catalog_build_lock(db_path):
+        return _build_db(db_path, progress)
+
+
+def _build_db(db_path: str, progress=None) -> int:
     """Rebuild the SQLite database from obslog CSVs.
 
     If ``progress`` is a ``rich.progress.Progress`` instance, three tasks are
     reported: CSV ingestion, summary aggregation, and targets aggregation.
 
-    Builds and validates a temporary catalog before publishing only its
-    derived tables in one transaction (:func:`_publish_catalog`). Application
-    tables stay live throughout; WAL readers retain their existing snapshot
-    while other writers wait for publication to commit.
+    Builds and validates a temporary catalog, copies/indexes shadow tables in
+    bounded transactions, then switches the derived tables atomically.
+    Application writes proceed between batches; WAL readers retain their
+    existing snapshot. Leaked-page compaction is deferred to maintenance.
     """
     tmp_path = db_path + ".tmp"
 
@@ -1165,12 +1256,9 @@ def build_db(db_path: str, progress=None) -> int:
             )
 
         if leaked_pages:
-            # The old whole-file copy also reclaimed leaked pages (#237).
-            # VACUUM reads current live rows under SQLite's writer lock; it
-            # cannot overwrite commits with a stale application snapshot.
-            with get_conn(db_path, timeout=_PUBLISH_BUSY_TIMEOUT_S) as live:
-                _set_temp_store_dir(live, db_path)
-                live.execute("VACUUM")
+            # VACUUM holds an unbounded writer lock over the entire database.
+            # Keep the verified snapshot and defer compaction to maintenance.
+            logger.warning("build_db: leaked pages retained; schedule VACUUM during maintenance")
         _publish_catalog(tmp_path, db_path)
     finally:
         _remove_sqlite_tmp(tmp_path)

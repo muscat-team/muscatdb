@@ -230,3 +230,84 @@ def test_rebuild_keeps_commit_during_legacy_notes_migration(tmp_path, monkeypatc
             ('NEW', 'committed'), ('OLD', 'before')
         ]
         assert conn.execute('PRAGMA integrity_check').fetchone() == ('ok',)
+
+
+def test_publication_allows_app_commits_between_copy_and_cleanup_batches(catalogs, monkeypatch):
+    from contextlib import contextmanager
+
+    live, staged = catalogs
+    monkeypatch.setattr(database, '_PUBLISH_BATCH_ROWS', 2, raising=False)
+    for path in (live, staged):
+        with database.get_conn(path) as conn:
+            for i in range(5):
+                conn.execute("INSERT INTO frames(instrument, obsdate, ccd, filename, object) "
+                             "VALUES ('muscat3', '261027', 0, ?, ?)",
+                             (str(i), 'OLD' if path == live else 'TOI-1234'))
+            conn.commit()
+    real_conn = database.get_conn
+    phases = []
+
+    class ObservedConnection:
+        def __init__(self, conn):
+            self.conn = conn
+
+        def __getattr__(self, name):
+            return getattr(self.conn, name)
+
+        def commit(self):
+            self.conn.commit()
+            for table, phase in [('_catalog_new_frames', 'copy'), ('_catalog_old_frames', 'cleanup')]:
+                if not self.conn.execute("SELECT 1 FROM sqlite_schema WHERE name=?", (table,)).fetchone():
+                    continue
+                count = self.conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+                if not 0 < count < 6:
+                    continue
+                # Independent, zero-timeout writer proves the batch lock has
+                # actually been released, not just that reads can proceed.
+                with sqlite3.connect(live, timeout=0) as writer:
+                    writer.execute("INSERT INTO target_notes(object,note) VALUES (?,?)",
+                                   (f'{phase}-{count}', 'committed between batches'))
+                    expected = 'OLD' if phase == 'copy' else 'TOI-1234'
+                    assert _catalog_values(writer) == [expected] * 4
+                phases.append(phase)
+
+    @contextmanager
+    def observed(path=None, **kwargs):
+        with real_conn(path, **kwargs) as conn:
+            yield ObservedConnection(conn) if path == live else conn
+
+    monkeypatch.setattr(database, 'get_conn', observed)
+    database._publish_catalog(staged, live)
+    assert phases.count('copy') >= 2
+    assert phases.count('cleanup') >= 2
+    with sqlite3.connect(live) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM target_notes WHERE note='committed between batches'").fetchone()[0] == len(phases)
+
+
+def test_publication_retries_abandoned_shadows_without_duplicate_indexes(catalogs, monkeypatch):
+    live, staged = catalogs
+    original = database._copy_catalog_table
+
+    def fail_after_copy(conn, table):
+        original(conn, table)
+        raise RuntimeError('interrupted copy')
+
+    with monkeypatch.context() as patch:
+        patch.setattr(database, '_copy_catalog_table', fail_after_copy)
+        with pytest.raises(RuntimeError, match='interrupted copy'):
+            database._publish_catalog(staged, live)
+    with database.get_conn(live) as conn:
+        assert _catalog_values(conn) == ['OLD'] * 4
+        conn.execute("INSERT INTO target_notes(object,note) VALUES ('DURING', 'survives retry')")
+        conn.commit()
+    # Exercise both index name generations and idempotent schema application.
+    for _ in range(3):
+        database._publish_catalog(staged, live)
+        with database.get_conn(live) as conn:
+            database._apply_schema(conn)
+            conn.commit()
+            assert _catalog_values(conn) == ['TOI-1234'] * 4
+            assert len(conn.execute('PRAGMA index_list(frames)').fetchall()) == 3
+            assert not conn.execute("SELECT name FROM sqlite_schema WHERE name GLOB '_catalog_*'").fetchall()
+            assert conn.execute("SELECT note FROM target_notes WHERE object='DURING'").fetchone() == ('survives retry',)
+            assert conn.execute('PRAGMA integrity_check').fetchone() == ('ok',)

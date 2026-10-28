@@ -451,6 +451,22 @@ overrides, jobs, saved ephemeris views) are preserved; the observation-derived
 ones are not. **An edit made directly to an observation-derived table is erased
 by the next nightly cron run.**
 
+Publication copies rows and maintains indexes in batches of 10,000, allowing
+application writes between commits. A short final transaction switches all
+catalog tables and refreshes target keys together; readers see either catalog,
+never a partial replacement. Retired tables are cleared in batches. Interrupted
+copies are cleaned up by the next rebuild, and concurrent builders serialize
+through a `.build.lock` file. Budget disk space for the snapshot, staging file,
+old and new catalog tables, and WAL; old readers may retain WAL pages.
+
+Online rebuilds do not run `VACUUM`: it holds SQLite's writer lock for the whole
+database. If the integrity gate accepts only leaked-page warnings, the rebuild
+retains them and logs `schedule VACUUM during maintenance`. Keep the clean backup
+and follow the [integrity recovery procedure](notes/DEPLOYMENT.md#database-integrity-failure)
+in a maintenance window to compact the database. Application writer timeouts
+remain 30 seconds.
+
+
 The source-of-truth chain, top to bottom:
 
 ```

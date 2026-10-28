@@ -326,16 +326,18 @@ def test_a_slow_snapshot_is_warned_about(tmp_path, backups, caplog, monkeypatch)
     assert any("slow" in r.message.lower() for r in caplog.records)
 
 
-def test_build_db_rebuilds_over_leaked_pages_and_drops_them(tmp_path, backups, no_real_obslog_scan):
-    """A rebuild reclaims accepted leaked pages without restoring stale rows."""
+def test_build_db_defers_leaked_page_compaction(tmp_path, backups, no_real_obslog_scan, caplog):
+    """Online rebuilds retain flagged pages rather than blocking writers with VACUUM."""
     db = tmp_path / "muscat.db"
     _make_db(db, notes=500)
     _leak_pages(db)
 
     build_db(str(db))
 
-    assert db_backup.integrity_ok(db)
+    assert not db_backup.integrity_ok(db)
+    assert 'schedule VACUUM during maintenance' in caplog.text
     with sqlite3.connect(str(db)) as c:
+        assert db_backup.leaked_pages_only(db_backup.integrity_problems(db))
         assert c.execute("SELECT COUNT(*) FROM target_notes").fetchone()[0] == 500
     assert len(_snapshots(backups)) == 1
 
@@ -377,17 +379,19 @@ def test_build_db_does_not_swap_in_a_corrupt_rebuild(tmp_path, backups, monkeypa
         db_backup, "integrity_ok",
         lambda p: False if os.fspath(p) == tmp_image else real_ok(p),
     )
-    # A table build_db neither rebuilds nor preserves: it survives only if the
-    # live file was never swapped. (Byte equality is too strict here -- the
-    # preserve step legitimately runs schema migrations on the live file.)
+    # Check derived catalog state: application tables survive even a successful
+    # publication, so an unrelated sentinel cannot prove publication was refused.
     with sqlite3.connect(str(db)) as c:
-        c.execute("CREATE TABLE sentinel (x)")
+        c.execute("INSERT INTO frames(instrument, obsdate, ccd, filename, object) "
+                  "VALUES ('muscat3', '261027', 0, 'old.fits', 'OLD')")
+        c.execute("INSERT OR REPLACE INTO db_meta(key, value) VALUES ('last_build_at', 'OLD')")
 
     with pytest.raises(db_backup.IntegrityError, match="rebuilt database"):
         build_db(str(db))
 
     with sqlite3.connect(str(db)) as c:
-        assert c.execute("SELECT name FROM sqlite_master WHERE name='sentinel'").fetchone()
+        assert c.execute("SELECT object FROM frames").fetchall() == [('OLD',)]
+        assert c.execute("SELECT value FROM db_meta WHERE key='last_build_at'").fetchone() == ('OLD',)
     assert not os.path.exists(tmp_image)
 
 
