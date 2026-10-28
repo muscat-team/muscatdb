@@ -26,6 +26,17 @@ PINNED_KEYS = {
     "V1298Tau_b": "V1298TAU",
     "V1298Tauc": "V1298TAU",
     "AU Mic": "AUMIC",
+    "AU Mic b": "AUMIC",
+    # A name ending in a constellation keeps its last letter, so a star and
+    # its planets share one key (rule v2; v1 keyed "DS Tuc" as DSTU).
+    "DS Tuc": "DSTUC",
+    "DSTuc": "DSTUC",
+    "DS Tuc b": "DSTUC",
+    "55 Cnc": "55CNC",
+    "55 Cnc e": "55CNC",
+    "BL Lac": "BLLAC",
+    "51 Peg": "51PEG",
+    "WZ Sge": "WZSGE",
     "WASP-12": "WASP12",
     "K2-25 b": "K225",
     # A trailing ".digits" is dropped for every name, not just TOIs, so these
@@ -41,7 +52,7 @@ PINNED_KEYS = {
 
 
 def test_pinned_keys_hold_for_this_rule_version():
-    assert target_keys.TARGET_KEY_VERSION == 1
+    assert target_keys.TARGET_KEY_VERSION == 2
     assert {name: target_keys.target_key(name) for name in PINNED_KEYS} == PINNED_KEYS
 
 

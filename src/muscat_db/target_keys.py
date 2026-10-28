@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 # Bump when target_key() changes the key of any name, and update the pinned
 # keys in tests/test_target_keys.py.
-TARGET_KEY_VERSION = 1
+TARGET_KEY_VERSION = 2
 
 
 def target_key(name: str | None) -> str:

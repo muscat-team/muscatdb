@@ -21,18 +21,18 @@ _DECORATED_TOI_OBJECT_RE = re.compile(
 )
 
 
-# Real star names that happen to end in a letter the trailing-planet-letter
-# heuristic below would otherwise strip -- e.g. "AU Mic" (AU Microscopii):
-# "MIC" is the constellation abbreviation, not a planet letter, but stripping
-# rule has no way to tell that apart from "V1298Tauc" (a real planet-letter
-# suffix glued directly onto a name with no separator, which the same rule
-# must keep stripping -- see the V1298Tauc case asserted in
-# tests/test_photometry.py). A per-object target_overrides row only fixes
-# the exact raw spelling it was set on, so a second raw spelling of the same
-# star (e.g. "AUMic" vs "AU Mic") silently mis-normalizes again; listing the
-# canonical (already letter/punctuation-stripped, uppercased) name here fixes
-# every raw spelling at once.
-_LETTER_SUFFIX_EXCEPTIONS = {"AUMIC"}
+# The 88 IAU constellation abbreviations, as they close a compacted star name
+# ("DSTUC", "55CNC", "AUMIC", "BLLAC"). Many end in a letter the trailing-
+# planet-letter rule below strips, which keyed "DS Tuc" as DSTU while "DS Tuc
+# b" kept DSTUC, so a star never matched its own planets. A name ending in one
+# is the star itself; a letter after one is still a planet ("V1298Tauc").
+_CONSTELLATIONS = frozenset(
+    "AND ANT APS AQR AQL ARA ARI AUR BOO CAE CAM CNC CVN CMA CMI CAP CAR CAS "
+    "CEN CEP CET CHA CIR COL COM CRA CRB CRV CRT CRU CYG DEL DOR DRA EQU ERI "
+    "FOR GEM GRU HER HOR HYA HYI IND LAC LEO LMI LEP LIB LUP LYN LYR MEN MIC "
+    "MON MUS NOR OCT OPH ORI PAV PEG PER PHE PIC PSC PSA PUP PYX RET SGE SGR "
+    "SCO SCL SCT SER SEX TAU TEL TRI TRA TUC UMA UMI VEL VIR VOL VUL".split()
+)
 
 
 # LCO key-project OBJECT/target names decorate a primary designation with a
@@ -95,7 +95,7 @@ def _normalize_target_name(t: str, overrides: dict[str, str] | None = None) -> s
 
     s = raw.replace(" ", "").replace("-", "").replace("_", "")
     s = re.sub(r"\.\d+$", "", s)
-    if s in _LETTER_SUFFIX_EXCEPTIONS:
+    if len(s) > 3 and s[-3:] in _CONSTELLATIONS:
         return s
     if len(s) > 2 and s[-1] in "BCDEFGH":
         return s[:-1]
