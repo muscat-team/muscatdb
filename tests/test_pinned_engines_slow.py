@@ -2,7 +2,8 @@
 
 Run with TMPDIR=~/temp uv run pytest -m slow tests/test_pinned_engines_slow.py
 after provisioning deploy/engines.toml. No web job rows or production outputs
-are changed. These are smoke comparisons, not convergence-quality MCMC runs.
+are changed. Photometry checks the product contract; timer also compares the
+unchanged engine with its baseline. These are not convergence-quality MCMC runs.
 """
 from __future__ import annotations
 
@@ -25,21 +26,26 @@ _ROOT = Path(__file__).resolve().parents[1]
 _PINS = tomllib.loads((_ROOT / "deploy/engines.toml").read_text())["engines"]
 
 
-def _interpreters(engine):
+def _pinned_interpreter(engine):
     pin = _PINS[engine]
-    paths = [phot._conda_env_python(pin[key])
-             for key in ("source_environment", "environment")]
-    if not all(paths):
-        pytest.skip(f"{engine} baseline and pinned environments are required")
-    # A half-finished clone still has a Python executable, and may still import
-    # the baseline's editable checkout. Comparing it with itself would pass.
-    conda = Path(paths[1]).parents[3] / "bin/conda"
+    python = phot._conda_env_python(pin["environment"])
+    if not python:
+        pytest.skip(f"{engine} pinned environment is required")
+    # A half-finished clone may still import the editable development checkout.
+    conda = Path(python).parents[3] / "bin/conda"
     result = subprocess.run(
         [sys.executable, str(_ROOT / "deploy/engines.py"), "verify", engine,
          "--conda", str(conda)], capture_output=True, text=True, timeout=60,
     )
     assert result.returncode == 0, result.stderr or result.stdout
-    return paths
+    return python
+
+
+def _interpreters(engine):
+    baseline = phot._conda_env_python(_PINS[engine]["source_environment"])
+    if not baseline:
+        pytest.skip(f"{engine} baseline environment is required")
+    return baseline, _pinned_interpreter(engine)
 
 
 def _run(command, directory):
@@ -56,11 +62,15 @@ def _run(command, directory):
 
 
 @pytest.mark.parametrize("preview", [True, False], ids=["preview", "full"])
-def test_photometry_pinned_install_matches_baseline(tmp_path, monkeypatch, preview):
-    interpreters = _interpreters("prose")
+def test_photometry_pinned_install_produces_timer_inputs(tmp_path, monkeypatch, preview):
+    python = _pinned_interpreter("prose")
     if not phot.raw_data_dir("sinistro", "260624").is_dir():
         pytest.skip("Sinistro/260624 raw data unavailable")
     monkeypatch.setenv("MUSCAT_PROSE_DIR", str(tmp_path))
+    monkeypatch.setenv("MUSCAT_OBSLOG_DIR", str(tmp_path / "obslog"))
+    monkeypatch.delenv("MUSCAT_PROSE_PYTHON", raising=False)
+    monkeypatch.setenv("MUSCAT_PROSE_CONDA_ENV", _PINS["prose"]["environment"])
+    monkeypatch.setenv("MUSCAT_PROSE_FROZEN_CONFIG", "1")
     options = {
         "bands": ["zs"], "ref_band": "zs", "target_coord": "261.784554 -25.969731",
         "avoid_comparison_ids": "0,1,2", "avoid_nearby_star_mode": "custom",
@@ -68,39 +78,32 @@ def test_photometry_pinned_install_matches_baseline(tmp_path, monkeypatch, previ
         "aper_radii": "3,8,1", "annulus": "12,18", "plot_gaia_sources": False,
         "make_gif": False,
     }
-    outputs = []
-    for label, python in zip(("baseline", "pinned"), interpreters):
-        directory = tmp_path / label
-        directory.mkdir()
-        if label == "pinned":
-            # Select the pinned env the way production does: frozen mode
-            # refuses an explicit MUSCAT_PROSE_PYTHON.
-            monkeypatch.delenv("MUSCAT_PROSE_PYTHON", raising=False)
-            monkeypatch.setenv("MUSCAT_PROSE_CONDA_ENV", _PINS["prose"]["environment"])
-            monkeypatch.setenv("MUSCAT_PROSE_FROZEN_CONFIG", "1")
-        else:
-            monkeypatch.setenv("MUSCAT_PROSE_PYTHON", python)
-            monkeypatch.setenv("MUSCAT_PROSE_FROZEN_CONFIG", "0")
-        command = phot.build_command("sinistro", "260624", "TIC88297141", options,
-                                     test_run=preview)
-        assert command[0] == python, f"{label} run launched {command[0]}"
-        command[command.index("--results_dir") + 1] = str(directory)
-        _run(command, directory)
-        if label == "pinned":
-            assert "telescope snapshot sha256:" in (directory / "smoke.log").read_text()
-        assert list(directory.glob("*_ref.png")), "reference diagnostic missing"
-        outputs.append(directory)
+    command = phot.build_command("sinistro", "260624", "TIC88297141", options,
+                                 test_run=preview)
+    assert command[0] == python
+    command[command.index("--results_dir") + 1] = str(tmp_path)
+    # Bound host resources for the smoke run; the GUI retains engine defaults.
+    command += ["--workers", "2"]
+    _run(command, tmp_path)
+    assert "telescope snapshot sha256:" in (tmp_path / "smoke.log").read_text()
+    assert list(tmp_path.glob("*_ref.png")), "reference diagnostic missing"
     if not preview:
-        before = list(outputs[0].glob("*_zs_260624.csv"))
-        assert before, "no baseline light curve produced"
-        for csv in before:
-            left = pd.read_csv(csv)
-            right = pd.read_csv(outputs[1] / csv.name)
-            assert len(left) > phot.RUN_DEFAULTS["test_run_frames"]
-            pd.testing.assert_frame_equal(left, right, check_exact=False, rtol=1e-8, atol=1e-10)
-            for column in left:
-                if column.casefold() in {"jd", "bjd", "bjd_tdb", "time"}:
-                    np.testing.assert_array_equal(left[column], right[column])
+        csvs = list(tmp_path.glob("*_zs_260624.csv"))
+        assert csvs, "no light curve produced"
+        assert list(tmp_path.glob("*.npz")), "photometry archive missing"
+        for csv in csvs:
+            curve = pd.read_csv(csv)
+            assert len(curve) > phot.RUN_DEFAULTS["test_run_frames"]
+            columns = ["BJD_TDB", "Flux", "Err"]
+            assert np.isfinite(curve[columns].to_numpy()).all()
+            assert (np.diff(curve["BJD_TDB"]) > 0).all()
+            assert (curve["Err"] > 0).all()
+            # 3.5.1 deliberately changes times, errors and retained frames.
+            # Check that the timer handoff preserves those measurements exactly.
+            staged = tmp_path / ("timer_" + csv.name)
+            transit_fit._copy_lightcurve_for_timer(csv, staged)
+            pd.testing.assert_frame_equal(curve[columns], pd.read_csv(staged)[columns],
+                                          check_exact=True)
 
 
 @pytest.mark.parametrize("preview", [True, False], ids=["optimize", "sample"])

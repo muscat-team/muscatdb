@@ -18,12 +18,20 @@ reproduced consistently, and communicated easily among collaborators.
 
 ## Pipeline engines
 
-muscat-db orchestrates three external packages. Each package's code lives in its
-own `ext_tools/` checkout and is installed editable into a dedicated conda
-environment, which supplies its dependencies rather than the code itself — so the
-checkout's git ref, not the environment, determines what actually runs. muscat-db
-stores their inputs, launches them as background jobs, and renders their outputs;
-the science lives in the packages themselves.
+muscat-db orchestrates three external packages. Development uses editable
+`ext_tools/` checkouts in dedicated conda environments. Production uses exact
+commits installed in separate environments, selected by `deploy/engines.toml`
+and `deploy/workers.toml`. muscat-db stores their inputs, launches them as
+background jobs, and renders their outputs; the science lives in the packages.
+
+The photometry pin is prose2 3.5.1. It corrects exposure-midpoint timestamps and
+measurement uncertainties, and drops frames with invalid target measurements.
+Existing reductions and transit fits keep their original results; rerun them
+under a new run name to obtain the corrections while preserving the comparison.
+CSV/NPZ formats and existing command options remain compatible. The new
+`--workers`, `--chunksize`, and `--plots` options retain prose2's defaults in the
+web interface. See [the engine deployment procedure](notes/DEPLOYMENT.md)
+for coordinated web/worker activation and rollback.
 
 | Stage | Engine | Sampler | Outputs |
 |---|---|---|---|
