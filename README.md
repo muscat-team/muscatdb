@@ -31,6 +31,18 @@ the science lives in the packages themselves.
 | Transit fitting | [`timer`](https://github.com/john-livingston/timer) | PyMC (NUTS) | Posteriors, corner/trace/fit plots |
 | TTV fitting | [`harmonic`](https://github.com/john-livingston/harmonic) | emcee | Posteriors, corner/trace/fit plots |
 
+When scheduling from a saved harmonic fit, `fit_config.json`'s `t_offset`
+converts between the fit's time system and absolute BJD, including when extending
+the predictions to the requested end date. Successful model, ΔBIC, and ranking
+results are cached for five minutes; failed evaluations can be retried immediately.
+Invalid ranking uncertainties leave the transit windows available with a ranking
+error instead of failing the scheduling request.
+
+`MUSCAT_MAX_FULL_JOBS` controls the concurrent full-run cap per pipeline (default
+`1`; `0` disables full runs). Empty or malformed values use `1`, with a warning
+for non-empty malformed values. Negative integers retain the disabled (`0`)
+behavior.
+
 ## Requirements
 
 - Python ≥ 3.12

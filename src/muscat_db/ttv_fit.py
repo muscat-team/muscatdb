@@ -22,7 +22,7 @@ import yaml
 
 from muscat_db import jobs, database
 from muscat_db.job_store import current_instance_id, current_owner, get_job_store
-from muscat_db.job_limits import JobLimitExceeded, claim_caps, claim_caps_for_row, enqueue_caps, limit_refusal, params_with_running_cap
+from muscat_db.job_limits import JobLimitExceeded, claim_caps, claim_caps_for_row, enqueue_caps, full_job_cap, limit_refusal, params_with_running_cap
 from muscat_db import __meta__, __muscatdb_version__, __version__
 from muscat_db.photometry import (
     _conda_env_python,
@@ -228,7 +228,7 @@ _TTV_JOBS: dict[str, TTVFitJob] = {}
 _TTV_LOCK = threading.Lock()
 # See photometry._MAX_FULL_JOBS: 0 disables full runs so a secondary instance
 # never competes with production for the shared host.
-_MAX_FULL_JOBS = max(0, int(os.environ.get("MUSCAT_MAX_FULL_JOBS", "1")))
+_MAX_FULL_JOBS = full_job_cap()
 
 _FINALIZE_GRACE_S = int(os.environ.get("MUSCAT_TTV_FINALIZE_GRACE_S", 8))
 _FINALIZE_GRACE_TERMINAL_S = int(os.environ.get("MUSCAT_TTV_FINALIZE_GRACE_TERMINAL_S", 2))
@@ -857,7 +857,7 @@ def delete_ttv_fit(target: str, run_name: str = "") -> dict:
 
 
 _ttv_outputs_cache = register_cache(ttl=300.0)
-_ttv_model_cache = register_cache(ttl=300.0)
+_ttv_model_cache = register_cache(ttl=300.0, cache_if=lambda result: result.get("ok") is True)
 
 
 def has_ttv_outputs(target: str, run_name: str = "") -> bool:
@@ -1261,7 +1261,19 @@ def _get_ttv_ranking_cached(
         return {"ok": False, "error": "TTV ranking failed"}
     try:
         result = json.loads(completed.stdout)
-    except (json.JSONDecodeError, TypeError):
+        if not isinstance(result, dict) or not isinstance(result.get("sigmas"), dict):
+            raise ValueError("missing ranking uncertainties")
+        if any(
+            isinstance(sigma, bool) or not isinstance(sigma, (int, float))
+            or not math.isfinite(sigma) or sigma <= 0
+            for sigma in result["sigmas"].values()
+        ):
+            raise ValueError("invalid ranking uncertainties")
+        # Helpers can emit NaN/Infinity with json.dumps defaults. Reject them
+        # here so scheduling returns its windows with rank_error, not an HTTP
+        # error when JSONResponse eventually serializes the whole response.
+        json.dumps(result, allow_nan=False)
+    except (ValueError, TypeError, OverflowError):
         return {"ok": False, "error": "TTV ranking returned invalid output"}
     result.update({"ok": True, "run_name": slugify_run_name(run_name)})
     return result

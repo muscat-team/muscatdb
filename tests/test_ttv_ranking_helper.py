@@ -110,3 +110,16 @@ def test_evaluate_hands_scan_transits_bare_planet_letters(helper, monkeypatch, t
     assert captured["t14s"] == {"b": 0.269}, "scan_transits would raise KeyError"
     assert result["rows"][0]["planet"] == "b"
     assert result["rows"][0]["greedy_rank"] == 1
+
+
+@pytest.mark.parametrize("uncertainty", [float("nan"), float("inf"), 0.0, -0.001])
+def test_invalid_timing_precision_is_rejected(helper, monkeypatch, tmp_path, uncertainty):
+    import pandas as pd
+    (tmp_path / "fit_config.json").write_text('{"letters": "b"}')
+    (tmp_path / "config.ini").write_text("[T14]\nb = 0.269\n")
+    _fake_harmonic_env(monkeypatch, helper, {})
+    harmonic = helper.Harmonic()
+    harmonic.times = pd.DataFrame({"planet": ["b"], "tc_unc": [uncertainty]})
+    monkeypatch.setattr(helper, "Harmonic", lambda **kw: harmonic)
+    with pytest.raises(ValueError, match="timing uncertainty"):
+        helper.evaluate(tmp_path, ["2026-08-01", "2026-09-01"], "ttv")

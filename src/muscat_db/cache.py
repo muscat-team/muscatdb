@@ -1,4 +1,5 @@
 import time
+from collections.abc import Callable
 import threading
 from collections import OrderedDict
 from functools import wraps
@@ -68,12 +69,18 @@ class TTLCache:
     never holds more than ``maxsize`` live entries (least-recently-used evicted
     first), so a long-running server can't accumulate stale keys for every
     distinct (inst, date, target) ever queried before any of them expire.
+    Optional ``cache_if`` selects which results to store, allowing callers to
+    retry transient failures immediately while retaining successful results.
     """
 
-    def __init__(self, ttl: float = 300.0, maxsize: int = 2048):
+    def __init__(
+        self, ttl: float = 300.0, maxsize: int = 2048,
+        *, cache_if: Callable[[object], bool] | None = None,
+    ):
         if maxsize < 1:
             raise ValueError("maxsize must be >= 1")
         self.ttl = ttl
+        self.cache_if = cache_if
         self.maxsize = maxsize
         self.cache: OrderedDict = OrderedDict()
         self.lock = threading.Lock()
@@ -91,6 +98,8 @@ class TTLCache:
                         return val
                     del self.cache[key]
             val = func(*args, **kwargs)
+            if self.cache_if is not None and not self.cache_if(val):
+                return val
             with self.lock:
                 self.cache[key] = (val, now + self.ttl)
                 self.cache.move_to_end(key)
@@ -107,8 +116,11 @@ class TTLCache:
 
 _registered_caches: list[TTLCache] = []
 
-def register_cache(ttl: float = 300.0, maxsize: int = 2048) -> TTLCache:
-    cache = TTLCache(ttl, maxsize)
+def register_cache(
+    ttl: float = 300.0, maxsize: int = 2048,
+    *, cache_if: Callable[[object], bool] | None = None,
+) -> TTLCache:
+    cache = TTLCache(ttl, maxsize, cache_if=cache_if)
     _registered_caches.append(cache)
     return cache
 

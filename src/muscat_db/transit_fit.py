@@ -26,7 +26,7 @@ import yaml
 from muscat_db import jobs, database
 from muscat_db._optimize_helper import DONE_MARKER as _OPTIMIZE_DONE_MARKER
 from muscat_db.job_store import current_instance_id, current_owner, get_job_store
-from muscat_db.job_limits import JobLimitExceeded, claim_caps, claim_caps_for_row, enqueue_caps, limit_refusal, params_with_running_cap
+from muscat_db.job_limits import JobLimitExceeded, claim_caps, claim_caps_for_row, enqueue_caps, full_job_cap, limit_refusal, params_with_running_cap
 from muscat_db import __meta__, __muscatdb_version__, __version__
 from muscat_db.instruments import INSTRUMENTS
 from muscat_db.photometry import (
@@ -170,7 +170,7 @@ _FIT_JOBS: dict[str, TransitFitJob] = {}
 _FIT_LOCK = threading.Lock()
 # See photometry._MAX_FULL_JOBS: 0 disables full runs so a secondary instance
 # never competes with production for the shared host.
-_MAX_FULL_JOBS = max(0, int(os.environ.get("MUSCAT_MAX_FULL_JOBS", "1")))
+_MAX_FULL_JOBS = full_job_cap()
 # See photometry._MAX_TEST_JOBS: test runs take no durable slot, so they need a
 # ceiling of their own to stay bounded.
 _MAX_TEST_JOBS = max(1, int(os.environ.get("MUSCAT_MAX_TEST_JOBS", "4")))
