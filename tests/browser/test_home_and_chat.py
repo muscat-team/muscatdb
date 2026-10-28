@@ -82,6 +82,133 @@ def _receive(page, event, data=None):
     page.evaluate('([event, data]) => window.__chatTransport.receive(event, data)', [event, data])
 
 
+def _agent(text):
+    """A private @bot reply, shaped like chat._private_agent_payload."""
+    return {'id': None, 'user': 'bot', 'text': text, 'kind': 'agent', 'ephemeral': False,
+            'private': True, 'ts': 1791000000, 'sid': None, 'mentions': []}
+
+
+BOT_REPLY = """I am @bot, the read-only assistant.
+
+### ✅ What I Can Do:
+* **Explain Code:** modules like `photometry.py` and *how* they fit.
+* See TOI-1000 or https://example.org/docs.
+  - nested `run_photometry` detail
+
+1. first step
+2. second step
+
+```
+uv run muscat-db serve
+```"""
+
+
+def test_bot_reply_renders_markdown(page):
+    page.goto('/targets')
+    page.click('#minimize-chat')
+    _receive(page, 'message', _agent(BOT_REPLY))
+    body = page.locator('#chat-messages .message.agent .message-body')
+    expect(body).to_have_count(1)
+    expect(body.locator('.md-heading')).to_have_text('✅ What I Can Do:')
+    expect(body.locator('strong').first).to_have_text('Explain Code:')
+    expect(body.locator('em')).to_have_text('how')
+    expect(body.locator('ul > li')).to_have_count(3)  # two bullets + one nested
+    expect(body.locator('ul ul > li')).to_have_text('nested run_photometry detail')
+    expect(body.locator('ol > li')).to_have_count(2)
+    expect(body.locator('pre code')).to_have_text('uv run muscat-db serve')
+    assert body.locator('code').nth(0).inner_text() == 'photometry.py'
+    # Linkify and @mentions still apply inside formatted blocks.
+    expect(body.locator('a[href="/target?name=TOI-1000"]')).to_have_count(1)
+    expect(body.locator('a[href="https://example.org/docs"]')).to_have_count(1)
+    expect(body.locator('.chat-mention')).to_have_text('@bot')
+    text = body.inner_text()
+    assert '**' not in text and '###' not in text and '```' not in text
+
+
+def test_bot_markdown_stays_inert(page):
+    page.goto('/targets')
+    page.click('#minimize-chat')
+    _receive(page, 'message', _agent(
+        '**<img src=x onerror=alert(1)>** [click](javascript:alert(1)) [docs](/jobs) `<b>x</b>`'))
+    body = page.locator('#chat-messages .message.agent .message-body')
+    expect(body).to_contain_text('<img src=x onerror=alert(1)>')
+    assert body.locator('img, b').count() == 0
+    assert body.locator('a[href^="javascript"]').count() == 0
+    expect(body.locator('a[href="/jobs"]')).to_have_text('docs')
+    expect(body.locator('code')).to_have_text('<b>x</b>')
+
+
+def _private_question(text, ts):
+    """The asker's own @bot question, echoed back privately by chat.py."""
+    return {'id': None, 'user': 'admin', 'text': text, 'kind': 'user', 'ephemeral': False,
+            'private': True, 'ts': ts, 'sid': None, 'mentions': [], 'reactions': [], 'edited': False}
+
+
+def _bot_texts(page):
+    return page.locator('#chat-messages .message.private .message-body').all_inner_texts()
+
+
+def test_bot_exchange_survives_reload_in_time_order(page):
+    page.goto('/targets')
+    page.click('#minimize-chat')
+    _receive(page, 'message', _private_question('@bot what is finalizing?', 1791000100))
+    _receive(page, 'message', {**_agent('It is the **grace** window.'), 'ts': 1791000101})
+    # A second tab of the same user receives the same pair; it must not duplicate.
+    _receive(page, 'message', {**_agent('It is the **grace** window.'), 'ts': 1791000101})
+
+    page.reload()  # the chat stays expanded across the reload
+    messages = page.locator('#chat-messages .message.private')
+    expect(messages).to_have_count(2)
+    assert _bot_texts(page) == ['@bot what is finalizing?', 'It is the grace window.']
+    expect(page.locator('#chat-messages .message.agent strong')).to_have_text('grace')
+
+    # Shared history arriving later interleaves by time with the restored pair.
+    before = {'id': 601, 'user': 'observer', 'text': 'earlier', 'ts': 1791000050}
+    after = {'id': 602, 'user': 'observer', 'text': 'later', 'ts': 1791000200}
+    _receive(page, 'history', {'messages': [before, after]})
+    texts = page.locator('#chat-messages .message-body').all_inner_texts()
+    assert texts == ['earlier', '@bot what is finalizing?', 'It is the grace window.', 'later']
+
+
+def test_bot_message_can_be_deleted_and_stays_deleted(page):
+    page.goto('/targets')
+    page.click('#minimize-chat')
+    _receive(page, 'message', _private_question('@bot hi', 1791000300))
+    _receive(page, 'message', {**_agent('Hello!'), 'ts': 1791000301})
+    reply = page.locator('#chat-messages .message.agent')
+    reply.get_by_role('button', name='Delete this message').click()
+    expect(reply).to_have_count(0)
+    assert _bot_texts(page) == ['@bot hi']
+
+    page.reload()  # the chat stays expanded across the reload
+    assert _bot_texts(page) == ['@bot hi']
+    page.locator('#chat-messages .message.private').get_by_role('button', name='Delete this message').click()
+    expect(page.locator('#chat-messages .message.private')).to_have_count(0)
+    page.reload()  # the chat stays expanded across the reload
+    expect(page.locator('#chat-messages .message.private')).to_have_count(0)
+
+
+def test_bot_history_is_kept_per_user(page):
+    page.goto('/targets')
+    page.click('#minimize-chat')
+    _receive(page, 'message', {**_agent('for admin only'), 'ts': 1791000400})
+    keys = page.evaluate("Object.keys(localStorage).filter(k => k.startsWith('muscat-bot-chat:'))")
+    assert keys == ['muscat-bot-chat:admin']
+    # Shared, persisted messages are never copied into the private store.
+    _receive(page, 'message', {'id': 605, 'user': 'observer', 'text': 'shared', 'ts': 1791000401})
+    stored = page.evaluate("JSON.parse(localStorage.getItem('muscat-bot-chat:admin'))")
+    assert [m['text'] for m in stored] == ['for admin only']
+
+
+def test_teammate_messages_keep_literal_markdown(page):
+    page.goto('/targets')
+    page.click('#minimize-chat')
+    _receive(page, 'message', {'id': 504, 'user': 'observer', 'text': '**not bold** ### nope', 'ts': 1791000000})
+    body = page.locator('#chat-messages .message-body').last
+    expect(body).to_have_text('**not bold** ### nope')
+    assert body.locator('strong').count() == 0
+
+
 def test_weather_failure_shows_missing_readings_without_hanging(page):
     page.route('https://weather-api.lco.global/**', lambda r: r.fulfill(json=[]))
     page.goto('/')

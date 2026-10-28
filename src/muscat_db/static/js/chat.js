@@ -50,6 +50,12 @@ document.addEventListener("DOMContentLoaded", () => {
     let typingStopTimer = null;
     const typingUsers = new Map();     // user -> clear-timeout id
     const els = new Map();             // message id -> { el, data }
+    const botEls = new Map();          // private @bot entry id -> { el, data }
+    const BOT_STORE_PREFIX = "muscat-bot-chat:";
+    const BOT_STORE_MAX = 200;         // newest entries kept per user
+    // The private @bot exchange: the asker's question echo and every bot note.
+    const isBotMessage = (data) => !!(data && data.private && data.kind !== "help");
+    const botEntryId = (data) => data.ts + "|" + data.kind;
     const origTitle = document.title;
     let flashTimer = null;
 
@@ -64,6 +70,7 @@ document.addEventListener("DOMContentLoaded", () => {
         if (!u || u === currentUser) return;
         currentUser = u;
         refreshOwnership();
+        restoreBotLog();
     };
     if (window.MuscatWhoami && typeof window.MuscatWhoami.then === "function") {
         window.MuscatWhoami.then(onUserResolved);
@@ -163,6 +170,134 @@ document.addEventListener("DOMContentLoaded", () => {
             if (m.index === re.lastIndex) re.lastIndex++;
         }
         if (last < text.length) container.appendChild(document.createTextNode(text.slice(last)));
+    };
+
+    // ----- markdown (@bot replies only) -------------------------------------
+    // The model answers in Markdown. Render the subset it uses -- headings,
+    // bullet/numbered lists (nested by indent), fenced code, **bold**, *italic*,
+    // `code`, [label](url) -- as DOM nodes, never innerHTML, so model output
+    // stays inert. Plain runs still go through renderText (links, @mentions).
+    // Teammates' messages are not parsed: "**" typed by a person stays literal.
+    // Underscore emphasis is skipped on purpose: it would mangle identifiers
+    // such as run_photometry.
+    const MD_INLINE_SRC = "(`+)([^`]|[^`][\\s\\S]*?[^`])\\1(?!`)" +      // 1-2 `code`
+        "|\\*\\*(?=\\S)([\\s\\S]*?\\S)\\*\\*" +                             // 3 **bold**
+        "|\\[([^\\]\\n]+)\\]\\(([^)\\s]+)\\)" +                              // 4-5 [label](url)
+        "|(^|[^\\w*])\\*(?=[^\\s*])([^*\\n]*?[^\\s*])\\*(?![\\w*])";         // 6-7 *italic*
+    const MD_SAFE_HREF = /^(https?:\/\/|\/(?!\/))/i;
+
+    const renderInline = (container, text) => {
+        const re = new RegExp(MD_INLINE_SRC, "g");
+        let last = 0, m;
+        while ((m = re.exec(text)) !== null) {
+            // *italic* consumes the character before it; that char is plain text.
+            const start = m.index + (m[6] !== undefined ? m[6].length : 0);
+            if (start > last) renderText(container, text.slice(last, start));
+            if (m[1]) {
+                const code = document.createElement("code");
+                code.textContent = m[2].trim() || m[2];
+                container.appendChild(code);
+            } else if (m[3] !== undefined) {
+                const strong = document.createElement("strong");
+                renderInline(strong, m[3]);
+                container.appendChild(strong);
+            } else if (m[4] !== undefined) {
+                // Only http(s) and same-site paths become links; anything else
+                // (javascript:, data:, //host) renders as its label alone.
+                if (MD_SAFE_HREF.test(m[5])) container.appendChild(makeLink(m[5], m[4], m[5]));
+                else renderText(container, m[4]);
+            } else {
+                const em = document.createElement("em");
+                renderInline(em, m[7]);
+                container.appendChild(em);
+            }
+            last = re.lastIndex;
+        }
+        if (last < text.length) renderText(container, text.slice(last));
+    };
+
+    const MD_FENCE = /^\s*```/;
+    const MD_HEADING = /^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$/;
+    const MD_RULE = /^\s{0,3}([-*_])(\s*\1){2,}\s*$/;
+    const MD_ITEM = /^(\s*)([*+-]|\d{1,3}[.)])\s+(.*)$/;
+
+    const appendCodeBlock = (container, lines) => {
+        const pre = document.createElement("pre");
+        const code = document.createElement("code");
+        code.textContent = lines.join("\n");
+        pre.appendChild(code);
+        container.appendChild(pre);
+    };
+
+    // lists: the open lists, outermost first, as { el, indent, li }. Returns the
+    // list stack after adding `item` (a MD_ITEM match) as a new <li>.
+    const appendListItem = (container, lists, item) => {
+        const indent = item[1].replace(/\t/g, "    ").length;
+        const tag = /\d/.test(item[2]) ? "ol" : "ul";
+        const open = lists.filter((l) => l.indent <= indent);
+        let top = open[open.length - 1];
+        if (top && top.indent === indent && top.el.tagName.toLowerCase() !== tag) {
+            open.pop();  // "1." after "*" at the same depth starts a new list
+            top = open[open.length - 1];
+        }
+        if (!top || top.indent < indent) {
+            const list = document.createElement(tag);
+            (top && top.li ? top.li : container).appendChild(list);
+            top = { el: list, indent, li: null };
+            open.push(top);
+        }
+        const li = document.createElement("li");
+        renderInline(li, item[3]);
+        top.el.appendChild(li);
+        top.li = li;
+        return open;
+    };
+
+    const renderMarkdown = (container, text) => {
+        const lines = String(text).replace(/\r\n?/g, "\n").split("\n");
+        let para = null;    // open <p>, continued by the next plain line
+        let lists = [];
+
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i];
+            if (MD_FENCE.test(line)) {
+                const body = [];
+                while (++i < lines.length && !MD_FENCE.test(lines[i])) body.push(lines[i]);
+                para = null; lists = [];
+                appendCodeBlock(container, body);
+                continue;
+            }
+            if (!line.trim()) { para = null; continue; }  // a blank line ends a paragraph, not a list
+            const heading = line.match(MD_HEADING);
+            if (heading || MD_RULE.test(line)) {
+                para = null; lists = [];
+                const el = document.createElement(heading ? "p" : "hr");
+                if (heading) { el.className = "md-heading"; renderInline(el, heading[1]); }
+                container.appendChild(el);
+                continue;
+            }
+            const item = line.match(MD_ITEM);
+            if (item) {
+                para = null;
+                lists = appendListItem(container, lists, item);
+                continue;
+            }
+            // An indented line under a list item continues that item.
+            const top = lists[lists.length - 1];
+            if (top && top.li && /^\s/.test(line)) {
+                top.li.appendChild(document.createElement("br"));
+                renderInline(top.li, line.trim());
+                continue;
+            }
+            lists = [];
+            if (para) {
+                para.appendChild(document.createElement("br"));
+            } else {
+                para = document.createElement("p");
+                container.appendChild(para);
+            }
+            renderInline(para, line.trim());
+        }
     };
 
     // ----- unread / minimize ----------------------------------------------
@@ -441,6 +576,17 @@ document.addEventListener("DOMContentLoaded", () => {
         return actions;
     };
 
+    // Insert a message by timestamp rather than always at the end, so @bot
+    // messages restored from this browser interleave with shared history that
+    // arrives after them. Live messages are the newest, so they still append.
+    const placeMessage = (el, ts) => {
+        if (!Number.isFinite(ts)) { chatMessages.appendChild(el); return; }
+        el.dataset.ts = String(ts);
+        let prev = chatMessages.lastElementChild;
+        while (prev && Number(prev.dataset.ts) > ts) prev = prev.previousElementSibling;
+        chatMessages.insertBefore(el, prev ? prev.nextSibling : chatMessages.firstChild);
+    };
+
     const renderMessage = (data) => {
         if (chatEmpty && chatEmpty.parentNode) chatEmpty.remove();
 
@@ -457,7 +603,7 @@ document.addEventListener("DOMContentLoaded", () => {
             time.textContent = formatTime(data.ts);
             body.appendChild(time);
             sys.appendChild(body);
-            chatMessages.appendChild(sys);
+            placeMessage(sys, data.ts);
             if (data.id != null) els.set(data.id, { el: sys, data });
             scrollToBottom();
             return;
@@ -492,7 +638,7 @@ document.addEventListener("DOMContentLoaded", () => {
             row.appendChild(body);
             if (data.id != null) row.appendChild(buildMessageActions(data));
             act.appendChild(row);
-            chatMessages.appendChild(act);
+            placeMessage(act, data.ts);
             if (data.id != null) {
                 els.set(data.id, { el: act, data });
                 buildReactions(act, data);
@@ -510,10 +656,15 @@ document.addEventListener("DOMContentLoaded", () => {
             body.className = "message-body";
             renderText(body, data.text);
             card.appendChild(body);
-            chatMessages.appendChild(card);
+            placeMessage(card, data.ts);
             scrollToBottom();
             return;
         }
+
+        // Private @bot messages carry no server id; they are tracked (and
+        // de-duplicated against the restored log) by their bot entry id.
+        const botId = isBotMessage(data) ? botEntryId(data) : null;
+        if (botId && botEls.has(botId)) return;
 
         const el = document.createElement("div");
         el.className = "message " + (isMine(data) ? "me" : "them");
@@ -548,7 +699,8 @@ document.addEventListener("DOMContentLoaded", () => {
         }
         if (data.private) {
             // Private @bot exchange: visible only to this user (server routes it
-            // to their room and never persists it).
+            // to their room and never persists it; this browser keeps a copy,
+            // see "private @bot log" below).
             const tag = document.createElement("span");
             tag.className = "tag private-tag"; tag.textContent = "only you";
             meta.appendChild(tag);
@@ -563,20 +715,27 @@ document.addEventListener("DOMContentLoaded", () => {
         row.className = "message-row";
         const body = document.createElement("div");
         body.className = "message-body message-text";
-        renderText(body, data.text);
+        if (data.kind === "agent") {
+            body.classList.add("md");
+            renderMarkdown(body, data.text);
+        } else {
+            renderText(body, data.text);
+        }
         row.appendChild(body);
 
         if (!data.ephemeral && data.id != null) row.appendChild(buildMessageActions(data));
+        if (botId) row.appendChild(buildBotDelete(botId));
         el.append(meta, row);
-        chatMessages.appendChild(el);
+        placeMessage(el, data.ts);
         if (data.id != null) els.set(data.id, { el, data });
+        if (botId) botEls.set(botId, { el, data });
         if (!data.ephemeral && data.id != null) buildReactions(el, data);
         scrollToBottom();
     };
 
     // Re-apply own/other styling once identity resolves (history may render first).
     const refreshOwnership = () => {
-        els.forEach((entry) => {
+        [...els.values(), ...botEls.values()].forEach((entry) => {
             const { el, data } = entry;
             if (data.kind === "system") return;
             el.classList.toggle("me", isMine(data));
@@ -585,6 +744,72 @@ document.addEventListener("DOMContentLoaded", () => {
             if (userSpan) userSpan.textContent = isMine(data) ? "You" : (data.user || "Anonymous");
         });
     };
+
+    // ----- private @bot log (this browser only) ---------------------------
+    // The server never stores the private @bot exchange (see chat.py), so the
+    // asker's browser keeps it: one localStorage list per user, restored on load
+    // and deletable message by message. Anonymous sessions keep nothing, since
+    // their server-side @bot context is per-connection anyway. Every tab of the
+    // user receives each message, so entries are keyed by server ts + kind.
+    const botStoreKey = () => {
+        return currentUser ? BOT_STORE_PREFIX + currentUser.toLowerCase() : null;
+    };
+
+    const loadBotLog = () => {
+        const key = botStoreKey();
+        const log = key && window.MuscatStorage ? window.MuscatStorage.getJSON(key, []) : [];
+        return Array.isArray(log)
+            ? log.filter((m) => m && typeof m.text === "string" && Number.isFinite(m.ts))
+            : [];
+    };
+
+    const saveBotLog = (log) => {
+        const key = botStoreKey();
+        if (key && window.MuscatStorage) window.MuscatStorage.setJSON(key, log.slice(-BOT_STORE_MAX));
+    };
+
+    const rememberBotMessage = (data) => {
+        if (!isBotMessage(data) || !botStoreKey()) return;
+        const log = loadBotLog();
+        const id = botEntryId(data);
+        if (log.some((m) => botEntryId(m) === id)) return;
+        saveBotLog([...log, {
+            user: data.user, text: data.text, kind: data.kind, ts: data.ts, private: true,
+        }]);
+    };
+
+    const forgetBotMessage = (id) => {
+        const entry = botEls.get(id);
+        if (entry) { entry.el.remove(); botEls.delete(id); }
+        saveBotLog(loadBotLog().filter((m) => botEntryId(m) !== id));
+    };
+
+    const restoreBotLog = () => {
+        loadBotLog().forEach((m) => { if (!botEls.has(botEntryId(m))) renderMessage(m); });
+    };
+
+    const buildBotDelete = (id) => {
+        const actions = document.createElement("div");
+        actions.className = "message-actions";
+        const del = document.createElement("button");
+        del.type = "button";
+        del.className = "act bot-delete";
+        del.textContent = "×";
+        del.title = "Delete this message (only from your view)";
+        del.setAttribute("aria-label", "Delete this message");
+        del.addEventListener("click", () => forgetBotMessage(id));
+        actions.appendChild(del);
+        return actions;
+    };
+
+    // A delete in another tab of the same user removes the message here too.
+    window.addEventListener("storage", (e) => {
+        if (!e.key || e.key !== botStoreKey()) return;
+        const kept = new Set(loadBotLog().map(botEntryId));
+        [...botEls.keys()].forEach((id) => {
+            if (!kept.has(id)) { botEls.get(id).el.remove(); botEls.delete(id); }
+        });
+    });
 
     // ----- special commands ------------------------------------------------
     // Reference shown by @help. Built at call time so the @name example reflects
@@ -790,6 +1015,7 @@ document.addEventListener("DOMContentLoaded", () => {
     socket.on("history", (d) => syncHistory(d && Array.isArray(d.messages) ? d.messages : [], d && d.window));
     socket.on("message", (data) => {
         if (!data || typeof data.text !== "string") return;
+        rememberBotMessage(data);
         renderMessage(data);
         bumpUnread();
     });
@@ -865,4 +1091,8 @@ document.addEventListener("DOMContentLoaded", () => {
         try { storedMin = localStorage.getItem("muscat-chat-min") || "0"; } catch (e) {}
     }
     setMinimized(storedMin === "1");
+
+    // The page may already know the user (data-current-user); otherwise the
+    // log is restored once /whoami resolves (onUserResolved).
+    restoreBotLog();
 });

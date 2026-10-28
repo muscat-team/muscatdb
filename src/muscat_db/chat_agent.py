@@ -1,11 +1,17 @@
 """``@bot`` codebase assistant: routes chat questions to a Gemma model on ollama.
 
 When a chat message addresses the agent (``@bot <question>``), :mod:`chat` hands
-the question here. We build a system prompt from the project's ``CLAUDE.md`` plus
-the package's module map, prepend a short window of recent conversation for
-follow-up context, and POST a *non-streaming* request to the ollama ``/api/chat``
-endpoint (by default the box on ``muscat-ut4``). The reply is posted back into
-chat as an ``agent`` message.
+the question here. We build a system prompt (role, limits, and the package's
+module map), add the user-guide sections that match the question
+(:mod:`chat_guide`), prepend a short window of recent conversation for follow-up
+context, and POST a *non-streaming* request to the ollama ``/api/chat`` endpoint
+(by default the box on ``muscat-ut4``). The reply is posted back into chat as an
+``agent`` message.
+
+The agent answers with the access of a regular (non-admin) user. It is grounded
+on the user guide, never on ``CLAUDE.md`` (the developers' and agents'
+handbook: hosts, tmux, backups, the release process), and its prompt tells it to
+refer server-administration questions to an administrator.
 
 Everything is configured through environment variables (mirrored in ``config.py``
 and ``.env.example``):
@@ -19,9 +25,9 @@ and ``.env.example``):
                                   (default ``2``)
 
 When a question is about a specific pipeline stage, the matching external repo's
-own docs (README + CLAUDE.md) are folded in as *extra read-only grounding* — the
-agent gains no tools or file access, we just widen the static context the same
-way ``CLAUDE.md`` is injected:
+own README is folded in as *extra read-only grounding* — the agent gains no
+tools or file access, we just widen the static context (an engine's CLAUDE.md is
+left out for the same reason as ours):
 
 - photometry  -> prose2   (``MUSCAT_PROSE_PROJECT``,   default ``../ext_tools/prose2``)
 - transit fit -> timer    (``MUSCAT_TIMER_PROJECT``,   default ``../ext_tools/timer``)
@@ -40,7 +46,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
-from . import http_client
+from . import chat_guide, http_client
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +70,6 @@ _MENTION_RE = re.compile(rf"(?<![\w@])@{re.escape(AGENT_NAME)}\b", re.IGNORECASE
 
 # ----- limits --------------------------------------------------------------
 _MAX_QUESTION_LEN = 4000
-_MAX_CLAUDEMD_CHARS = 8000
 _DEFAULT_URL = "http://muscat-ut4.c.u-tokyo.ac.jp:11434"
 _DEFAULT_MODEL = "gemma4:latest"
 _DEFAULT_TIMEOUT_S = 120.0
@@ -150,19 +155,8 @@ def release() -> None:
 
 # ----- system prompt -------------------------------------------------------
 def _repo_root() -> Path:
-    # src/muscat_db/chat_agent.py -> parents[2] == repo root (holds CLAUDE.md).
+    # src/muscat_db/chat_agent.py -> parents[2] == repo root (ext_tools/ is its sibling).
     return Path(__file__).resolve().parents[2]
-
-
-def _read_claude_md() -> str:
-    try:
-        text = (_repo_root() / "CLAUDE.md").read_text(encoding="utf-8", errors="replace").strip()
-    except OSError:
-        logger.debug("chat agent: CLAUDE.md not readable", exc_info=True)
-        return ""
-    if len(text) > _MAX_CLAUDEMD_CHARS:
-        text = text[:_MAX_CLAUDEMD_CHARS] + "\n…(truncated)…"
-    return text
 
 
 def _module_map() -> str:
@@ -173,16 +167,25 @@ def _module_map() -> str:
 
 @lru_cache(maxsize=1)
 def _system_prompt() -> str:
-    """Static grounding context (cached; edits to CLAUDE.md need a restart, like
-    the Jinja templates)."""
+    """Static role and limits (cached). Per-question grounding from the user
+    guide is added by :func:`answer`."""
     parts = [
         f"You are @{AGENT_NAME}, a concise, friendly assistant embedded in the "
         "team chat of the muscat-db web application. muscat-db manages MuSCAT "
         "multi-band photometry observation logs and drives a photometry and "
         "transit-fitting pipeline over data from seven instruments (muscat, "
         "muscat2, muscat3, muscat4, sinistro, sbig, qhy600).\n\n"
-        "Answer questions about this codebase: its data model, workflows, "
-        "configuration, and how the pieces fit together.\n\n"
+        "Help users of the web application: its pages and workflows, the "
+        "photometry, transit-fit and TTV pipelines, the data model, and what "
+        "the settings mean.\n\n"
+        "Access (REGULAR USER):\n"
+        "- You have the access of a regular (non-admin) user. You do not know "
+        "and must not guess at server administration: deployment, hosts and "
+        "paths on the servers, services and restarts, backups and cron jobs, "
+        "credentials, tokens and secrets, user accounts, access grants and "
+        "login setup, or the development and release process.\n"
+        "- For any of those, say it is handled by an administrator and suggest "
+        "asking one, without speculating about how it works.\n\n"
         "Capabilities and limits (READ-ONLY):\n"
         "- You are a strictly read-only advisor. You can read and explain this "
         "codebase, but you CANNOT modify, create, or delete any file, run any "
@@ -194,15 +197,13 @@ def _system_prompt() -> str:
         "claim to have done it. Explain what a human would change and where, and "
         "let them apply it.\n\n"
         "Guidelines:\n"
-        "- Ground answers in the project notes and module map below.\n"
+        "- Ground answers in the user-guide excerpts and module map you are "
+        "given.\n"
         "- If the information is not here or you are unsure, say so plainly "
         "instead of inventing details.\n"
         "- Keep replies short and readable in a small chat window; use brief "
         "code spans or bullet lists when they help.\n"
     ]
-    notes = _read_claude_md()
-    if notes:
-        parts.append("\n## Project notes (CLAUDE.md)\n" + notes + "\n")
     modules = _module_map()
     if modules:
         parts.append("\n## Python modules (src/muscat_db/)\n" + modules + "\n")
@@ -214,9 +215,10 @@ def _system_prompt() -> str:
 # When a question is about one of those stages we fold that repo's own docs into
 # the model's context so it can answer with real API detail. This is grounding
 # only: no tools, no query-time file access, and the doc set is a fixed
-# allow-list (README.md + CLAUDE.md), never a path derived from user input.
+# allow-list (README.md), never a path derived from user input. An engine's
+# CLAUDE.md is its developers' handbook, so it is left out like ours.
 _MAX_REPO_DOC_CHARS = 6000
-_REPO_DOC_FILES = ("README.md", "CLAUDE.md")
+_REPO_DOC_FILES = ("README.md",)
 
 
 @dataclass(frozen=True)
@@ -342,6 +344,9 @@ async def answer(question: str, history: list[dict] | None = None) -> str:
         raise ValueError("empty question")
 
     messages: list[dict] = [{"role": "system", "content": _system_prompt()}]
+    guide = chat_guide.guide_grounding(question)
+    if guide:
+        messages.append({"role": "system", "content": guide})
     grounding = _repo_grounding(question)
     if grounding:
         messages.append({"role": "system", "content": grounding})

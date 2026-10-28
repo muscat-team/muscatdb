@@ -1170,6 +1170,19 @@ class El {
   get textContent() { return this.children.map((c) => c.textContent).join(""); }
   set textContent(v) { this.children = []; if (String(v) !== "") this.children.push(new Text(v)); }
   appendChild(c) { c.parentNode = this; this.children.push(c); return c; }
+  insertBefore(c, ref) {
+    const i = ref ? this.children.indexOf(ref) : -1;
+    c.parentNode = this;
+    if (i < 0) this.children.push(c); else this.children.splice(i, 0, c);
+    return c;
+  }
+  get firstChild() { return this.children[0] || null; }
+  get lastElementChild() { return [...this.children].reverse().find((c) => c instanceof El) || null; }
+  get nextSibling() { const p = this.parentNode; return p ? p.children[p.children.indexOf(this) + 1] || null : null; }
+  get previousElementSibling() {
+    const p = this.parentNode;
+    return p ? p.children.slice(0, p.children.indexOf(this)).reverse().find((c) => c instanceof El) || null : null;
+  }
   append(...nodes) { nodes.forEach((n) => this.appendChild(typeof n === "string" ? new Text(n) : n)); }
   remove() { if (this.parentNode) this.parentNode.children = this.parentNode.children.filter((c) => c !== this); }
   replaceWith(n) { const p = this.parentNode; if (!p) return; p.children[p.children.indexOf(this)] = n; n.parentNode = p; this.parentNode = null; }
