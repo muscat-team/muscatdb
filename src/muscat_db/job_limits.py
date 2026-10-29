@@ -63,6 +63,11 @@ def _env_cap(name: str, default: int) -> int:
         return default
 
 
+def full_job_cap() -> int:
+    """Per-pipeline full-run cap; zero disables runs, malformed values use one."""
+    return _env_cap("MUSCAT_MAX_FULL_JOBS", 1)
+
+
 def site_defaults() -> UserLimits:
     """The caps a user gets when their row carries no override."""
     return UserLimits(

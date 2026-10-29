@@ -952,7 +952,7 @@ The current pins are:
 
 | Engine | Repository | Commit | Candidate environment |
 |---|---|---|---|
-| prose2 | `jpdeleon/prose2` | `3daed56b8b4bf23b6cf3a19f8f17d898b8c15785` (v3.4.0) | `prose-prod-3daed56b` |
+| prose2 | `jpdeleon/prose2` | `dd19c2e238336f3cf25cc9f3af2581c3366ba210` (v3.5.1) | `prose-prod-dd19c2e2` |
 | timer | `john-livingston/timer` | `b8428258c9b62266532173af4abd7fbafee6dcef` | `timer-prod-b8428258` |
 | harmonic | `john-livingston/harmonic` | `a32fb8e32ca776e0e6e7dc92ad4232cef1f12194` | `harmonic-prod-a32fb8e3` |
 
@@ -1023,11 +1023,11 @@ Frozen mode refuses to launch unless the selected env reports a pinned,
 non-editable prose (`version+git.<SHA>`), and refuses `MUSCAT_PROSE_PYTHON`,
 which would bypass the selected env.
 
-The snapshot preserves all 94 effective aliases, including builtin/custom
-definitions, resolved duplicate-name precedence, and YAML tuple types. It records
-the source telescope-file hashes. No camera values or header precedence are
-changed by freezing them. It was captured at prose2 `6029ea87`; its
-`engine_commit` field records that capture, not the current pin. The digest is
+The current snapshot preserves 102 effective aliases, including builtin/custom
+definitions, the MuSCAT3/4 camera IDs, resolved duplicate-name precedence, and
+YAML tuple types. It records the source telescope-file hashes. It was captured
+with the pinned prose2 3.5.1 engine; the procedure and changes from the previously
+activated snapshot are recorded below. The digest is
 written at the top of each run log and stored as
 `tool_versions.prose_config_sha256` in `_product.json`. `engines.py verify`
 imports the real pinned engine with the file selected the way production launches
@@ -1041,6 +1041,146 @@ the candidate's scientific settings, then update the packaged YAML and both
 recorded SHA-256 values (`muscat_db/prose_config.py` and `engines.toml`) together.
 Never regenerate the production snapshot automatically at launch or by following
 live symlinks.
+
+### Prose2 3.5.1 candidate (2026-10-28)
+
+This candidate follows [jpdeleon/prose2#48](https://github.com/jpdeleon/prose2/pull/48)
+and supersedes the 3.5.0 candidate in #322. Preparing it did not activate it on
+production or the fleet. The earlier activation record above remains historical.
+
+- Owner repository: `https://github.com/jpdeleon/prose2`.
+- Release/tag commit: `dd19c2e238336f3cf25cc9f3af2581c3366ba210` (`v3.5.1`).
+- New environment: `prose-prod-dd19c2e2`; earlier environments remain installed.
+- Frozen configuration SHA-256:
+  `54955f39468408dbd14676ba4943772998c5fc28e2b995f0f5dced548ca26be0`.
+- `deploy/conda/production/prose.json` records the actual non-editable installation,
+  its dependencies, and the successful read-only configuration verification on ut2.
+
+The configuration was captured with `deploy/engines.py`'s `capture_config` from
+the installed 3.5.1 interpreter. Its input was #322's reviewed schema-1 snapshot,
+loaded read-only through `PROSE_CONFIG_FILE`, beside copies of the preserved
+source telescope files. Every copied file was checked against that snapshot's
+SHA-256 manifest before capture. The captured settings, telescope mappings, and
+file hashes equal #322's snapshot; only engine provenance changes. Compared with
+the activated 3.4.0 snapshot, this retains #322's addition of the MuSCAT3/4
+`ep02`–`ep09` aliases and the corresponding band definitions.
+
+The new `time_reference` telescope field defaults to `auto`; no manual timing
+setting was added to the snapshot. Header-aware exposure midpoint corrections,
+uncertainty corrections, and removal of invalid target frames are performed by
+prose2. Consequently old/new light curves need not have identical timestamps,
+errors, or row counts. Existing CSV/NPZ products remain readable. The photometry
+smoke test checks finite measurements, increasing times, positive errors, and
+exact preservation of `BJD_TDB`, `Flux`, and `Err` when staging timer input.
+
+Automatic annulus selection can now reject geometry that encloses a known
+contaminant. Inspect the reference image and supply the existing aperture and
+annulus overrides for such a field. Do not silently bypass that check. The GUI
+continues using the engine defaults for `--workers`, `--chunksize`, and `--plots`;
+these optional flags do not require a command-builder change.
+
+Validation on ut2:
+
+- `deploy/engines.py verify prose --record`: non-editable 3.5.1 at the pinned
+  commit, Matplotlib 3.8.4, read-only snapshot, 102 aliases, and `pip check` pass.
+- Frozen-config, deployment, product-record, and timer CSV tests: 151 passed.
+  The new consistency test was first observed failing against the old snapshot.
+- Ruff and the strict MkDocs build pass.
+- Production-baseline comparison (2026-10-29): full g-band reductions of
+  MuSCAT3/230605 TOI-3884 and MuSCAT2/200227 WASP104b use `prose-prod-3daed56b`
+  (3.4.0), **not** the unreleased 3.5.0 candidate. The baseline uses production's
+  original telescope snapshot (`39503fce…`, preserved in
+  `tests/data/prose_340_telescopes.yaml`); the candidate uses the packaged
+  `54955f39…` snapshot. Commands supply catalog coordinates and
+  `--avoid_nearby_star`, with no clipping options. MuSCAT3 uses automatic
+  comparison selection; MuSCAT2 fixes reference frame 417 and comparison IDs
+  2 and 3, the ensemble from its recorded successful reduction. Production
+  3.4.0's automatic selector returns no comparison stars for this night, so
+  the controlled numerical comparison must use an explicit common ensemble.
+  MuSCAT2 uses 138 calibrated g frames (137 at `EXPTIME=30`, plus one
+  20 s frame). Both engines reject one 30 s frame during alignment; MuSCAT3
+  uses BANZAI frames (`EXPTIME=45`). Outputs and logs are isolated under
+  `~/temp/pr328-review/`. Both engines are restricted to two CPU cores; 3.5.1
+  also uses `--workers 2 --plots none`. No engine installation was modified.
+- `tests/test_pinned_engines_slow.py::test_photometry_pinned_matches_production`
+  restores baseline-versus-pin checks for both nights. It uses private copies of
+  the MuSCAT2 calibration cache, matches retained rows against the expected
+  midpoint using each frame's `MJD-STRT` and `EXPTIME` metadata, and requires unique matches, at least 99% frame
+  retention, finite timer inputs, positive errors, and increasing times. It
+  also fails on target-localization/brightest-star fallback warnings. The
+  allowed UTC offset error is 1 ms and BJD offset error is 10 ms (barycentric
+  correction changes over an exposure). Absolute normalized-flux tolerance is
+  0.001 (1000 ppm), a migration-regression bound, not a science precision claim.
+  The check rejects an exposure-start candidate and an injected 2000 ppm flux
+  change before passing on both actual 3.5.1 outputs. The default fast suite
+  passes: 3615 tests, 80 skips, 2 expected failures, and 22 passing subtests.
+- Remote verification completed on 2026-10-29 for `muscat-ut3` through
+  `muscat-ut7`: `deploy/engines.py verify prose --conda
+  /ut2/jerome/miniconda3/bin/conda` passes on every host, confirming the
+  non-editable `dd19c2e2` installation, Matplotlib 3.8.4, read-only snapshot
+  `54955f39…`, and 102 aliases. Use the `muscat-utN` SSH names; `utN` aliases
+  are not configured. No remote service was modified.
+
+Per-column differences below are **3.5.1 minus production 3.4.0** on matched
+rows: 219/219 for MuSCAT3 and 137/137 for MuSCAT2. Median signed difference and
+maximum absolute difference use finite pairs; flux differences are in ppm of
+normalized flux. No rows are silently dropped from the timing/flux checks.
+
+| CSV column (delta units) | MuSCAT3 median / max absolute | MuSCAT2 median / max absolute |
+| --- | ---: | ---: |
+| BJD_TDB (s) | 22.497886 / 22.497967 | 15.000039 / 15.000120 |
+| Flux (ppm) | -0.370246 / 65.403970 | 0.000000 / 0.000000 |
+| Err | 0.004420 / 0.123819 | -0.000337 / 0.000383 |
+| Bkg(ADU) | 5.406221 / 143.782413 | 0.000000 / 0.000000 |
+| Airmass | 0.000000 / 0.000000 | 0.000000 / 0.000000 |
+| Dx(pix) | 0.000000 / 0.000000 | 0.000000 / 0.000000 |
+| Dy(pix) | 0.000000 / 0.000000 | 0.000000 / 0.000000 |
+| Peak(ADU) | 0.000000 / 0.000000 | 0.000000 / 0.000000 |
+| FWHM(pix) | 0.000000 / 0.000000 | 0.000000 / 0.000000 |
+| GJD_UTC (s) | 22.500019 / 22.500059 | 14.999999 / 15.000039 |
+
+MuSCAT3's UTC shift is 22.5 s. MuSCAT2 retains one 20 s exposure (10 s shift)
+and 136 exposures of 30 s (15 s shift); the regression checks both, rather than
+assuming the reference frame's exposure applies to the whole night. Median
+`Err` changes by +22.335007% (MuSCAT3) and -20.491283% (MuSCAT2). MuSCAT2 fluxes
+are identical. Times, fluxes and uncertainties are finite, uncertainties are
+positive, and times increase in both accepted comparisons. MuSCAT3's candidate
+has six missing `Bkg(ADU)` diagnostics, versus zero in production; its background
+statistics above cover the 213 finite pairs. All MuSCAT2 columns are finite.
+
+Fixture screening matters: the default KIC/260810 trial had missing uncertainties
+in 1094/1185 production rows and 1097/1185 candidate rows. In the Kepler-45b/260425
+trial, neither engine localized the catalog target; both fell back to the brightest star.
+Neither trial is used as acceptance evidence; the regression rejects both cases.
+On WASP104b/200227, production's automatic comparison selection returned an empty
+ensemble and 137 NaN flux/error rows. The explicit common ensemble above avoids
+that production failure without modifying either engine. These findings and the
+six missing MuSCAT3 background values are retained as limitations, not filled
+with synthetic values to make the checks pass.
+
+For rollout, use the coordinated activation procedure below after the release
+reaches `main`. Provision and verify `prose-prod-dd19c2e2` on every worker host
+before selecting it. Drain photometry work, apply the prod worker profile, change
+production's existing `MUSCAT_PROSE_CONDA_ENV` export to `prose-prod-dd19c2e2`, and
+restart the web process in `muscatdbgui`. Keep `MUSCAT_PROSE_FROZEN_CONFIG=1` and
+preserve all other exports. Confirm the new version/commit and snapshot digest in
+the job log and `_product.json`. Coordinate the web export with the deployed
+snapshot so the old engine does not run against the new configuration.
+
+Rerun photometry and its dependent transit/TTV fits under new run names to obtain
+the science corrections while retaining old results for comparison. **Do not mix
+3.4.0 exposure-start products with 3.5.1 midpoint products in one transit fit,
+ephemeris, or TTV analysis.** The convention changes by half of each frame's
+`EXPTIME` (22.5 s for 45 s exposures; 15 s for 30 s exposures). muscat-db
+applies no additional exposure correction. Before combining epochs, inspect
+`tool_versions.prose` in every input's `_product.json` and re-reduce all selected
+nights with the same midpoint engine, then regenerate their transit times.
+Different run names preserve provenance but do not make mixed epochs safe.
+Legacy products without recorded versions need their logs checked or must be
+re-reduced; an automatic mixed-version input flag remains follow-up work. Rollback
+restores both the previous engine selections and the previous packaged snapshot
+and digest; changing the environment alone is insufficient. No database migration
+is required.
 
 **Harmonic runs on the owner's upstream with its default Lithwick priors.**
 `john-livingston/harmonic` at `a32fb8e32ca776e0e6e7dc92ad4232cef1f12194` has no

@@ -52,6 +52,7 @@ def evaluate(run_dir: Path, end_bjd: float | None) -> dict:
     config_path = run_dir / "fit_config.json"
     config = json.loads(config_path.read_text())
     letters = str(config.get("letters") or "bcdefghijk")
+    t_offset = float(config.get("t_offset") or 0.0)
     ttv = Harmonic(
         fp_data=str(run_dir / "data.csv"),
         fp_config=str(run_dir / "config.ini"),
@@ -80,7 +81,8 @@ def evaluate(run_dir: Path, end_bjd: float | None) -> dict:
         if end_bjd is not None:
             period = float(params[f"per_{planet}"])
             t0 = float(params[f"t0_{planet}"])
-            epoch_max = max(epoch_max, int(math.ceil((end_bjd - t0) / period)) + 1)
+            # t0 is in the saved fit's time system (e.g. BKJD), not absolute BJD.
+            epoch_max = max(epoch_max, int(math.ceil((end_bjd - t_offset - t0) / period)) + 1)
         count = epoch_max - epoch_min + 1
         if count <= 0 or total_points + count > 50_000:
             raise ValueError("requested model date produces too many transit epochs")
@@ -110,7 +112,7 @@ def evaluate(run_dir: Path, end_bjd: float | None) -> dict:
         # otherwise). The ``tc`` values above are deliberately left in the fit's
         # own system so the O-C plot stays consistent with data.csv; consumers
         # that need absolute BJD, such as scheduling, add this themselves.
-        "t_offset": float(config.get("t_offset") or 0.0),
+        "t_offset": t_offset,
     }
 
 

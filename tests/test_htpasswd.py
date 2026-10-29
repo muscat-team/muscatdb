@@ -12,6 +12,8 @@ import grp
 import os
 import stat
 
+import pytest
+
 from typer.testing import CliRunner
 
 from muscat_db import cli
@@ -183,3 +185,46 @@ def test_htpasswd_promote_falls_back_to_users_table_when_file_unreadable(tmp_pat
     assert _is_admin(tmp_path, "john") is True
     assert runner.invoke(cli.app, ["htpasswd", "promote", "jhon"]).exit_code == 1
     assert _is_admin(tmp_path, "jhon") is None
+
+
+@pytest.mark.parametrize('existing, alias', [('boss', 'BOSS'), ('ext', 'Ext'), ('straße', 'STRASSE')])
+@pytest.mark.parametrize('command', ['add', 'set-email'])
+def test_account_cli_rejects_casefold_collision(tmp_path, monkeypatch, existing, alias, command):
+    import sqlite3
+    from muscat_db.database import _apply_schema
+
+    ht_path = _promote_env(tmp_path, monkeypatch)
+    cli._write_htpasswd({existing: 'original-hash'})
+    before = ht_path.read_bytes()
+    with sqlite3.connect(tmp_path / 'test.db') as conn:
+        _apply_schema(conn)
+        conn.execute('INSERT INTO users(username,is_admin) VALUES (?,?)', (existing, int(existing == 'boss')))
+        conn.commit()
+        rows = conn.execute('SELECT * FROM users').fetchall()
+    args = ['--password-stdin'] if command == 'add' else ['alias@univ.edu']
+    result = CliRunner().invoke(cli.app, ['htpasswd', command, alias, *args], input='secret\n')
+    assert result.exit_code == 1, result.output
+    assert 'case' in result.output.lower()
+    assert ht_path.read_bytes() == before
+    with sqlite3.connect(tmp_path / 'test.db') as conn:
+        assert conn.execute('SELECT * FROM users').fetchall() == rows
+
+
+def test_htpasswd_add_rejects_file_only_collision(tmp_path, monkeypatch):
+    ht_path = _promote_env(tmp_path, monkeypatch)
+    cli._write_htpasswd({'boss': 'original-hash'})
+    before = ht_path.read_bytes()
+    result = CliRunner().invoke(cli.app, ['htpasswd', 'add', 'BOSS', '--password-stdin'], input='secret\n')
+    assert result.exit_code == 1
+    assert 'case' in result.output.lower()
+    assert ht_path.read_bytes() == before
+
+
+def test_htpasswd_add_allows_exact_name_update(tmp_path, monkeypatch):
+    _promote_env(tmp_path, monkeypatch)
+    runner = CliRunner()
+    for password in ['first', 'second']:
+        result = runner.invoke(cli.app, ['htpasswd', 'add', 'boss', '--admin', '--password-stdin'], input=password + '\n')
+        assert result.exit_code == 0, result.output
+    assert list(cli._read_htpasswd()) == ['boss']
+    assert _is_admin(tmp_path, 'boss') is True

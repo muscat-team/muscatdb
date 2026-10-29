@@ -44,7 +44,7 @@ from pathlib import Path
 
 from muscat_db import jobs, database
 from muscat_db.job_store import current_instance_id, current_owner, get_job_store
-from muscat_db.job_limits import JobLimitExceeded, claim_caps, claim_caps_for_row, enqueue_caps, limit_refusal, params_with_running_cap
+from muscat_db.job_limits import JobLimitExceeded, claim_caps, claim_caps_for_row, enqueue_caps, full_job_cap, limit_refusal, params_with_running_cap
 from muscat_db.ref_time import is_valid_ref_time
 from muscat_db.instruments import INSTRUMENTS
 from muscat_db.cache import register_cache
@@ -1859,7 +1859,7 @@ _LOCK = threading.Lock()
 # Concurrent full runs allowed across every process sharing this database. Set to
 # 0 on a secondary instance (e.g. staging) so it never competes with production
 # for the shared host: full runs are then refused outright, leaving test runs.
-_MAX_FULL_JOBS = max(0, int(os.environ.get("MUSCAT_MAX_FULL_JOBS", "1")))
+_MAX_FULL_JOBS = full_job_cap()
 # Test runs are admitted without a durable slot, so they need a ceiling of their
 # own or a caller varying the run key can spawn unbounded pipelines. Env-tunable
 # for hosts with more cores than the 24-core production server.

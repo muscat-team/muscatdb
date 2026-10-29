@@ -153,3 +153,28 @@ class TestTTLCacheBounded:
         c = register_cache(ttl=10.0, maxsize=3)
         assert isinstance(c, TTLCache)
         assert c.maxsize == 3
+
+
+def test_cache_predicate_retries_failure_and_keeps_success():
+    results = iter([{"ok": False}, {"ok": True}])
+    cache = register_cache(cache_if=lambda result: result["ok"])
+
+    @cache
+    def evaluate():
+        return next(results)
+
+    assert evaluate() == {"ok": False}
+    assert evaluate() == {"ok": True}
+    assert evaluate() == {"ok": True}
+
+
+def test_cache_without_predicate_still_caches_arbitrary_results():
+    calls = []
+
+    @TTLCache()
+    def evaluate():
+        calls.append(1)
+        return {"ok": False}
+
+    assert evaluate() == evaluate() == {"ok": False}
+    assert calls == [1]

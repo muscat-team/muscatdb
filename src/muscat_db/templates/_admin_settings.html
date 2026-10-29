@@ -1,0 +1,59 @@
+<style>
+  #admin-dashboard form { margin: 1rem 0; }
+  #admin-dashboard table { width: max-content; max-width: 100%; }
+  #admin-dashboard th, #admin-dashboard td { overflow-wrap: anywhere; }
+</style>
+<section class="settings-section" id="admin-dashboard" aria-label="Administration">
+  <h3 tabindex="0" role="button" aria-expanded="true">Administration</h3>
+  <div class="settings-body">
+    <p>Manage collaborator accounts and observation access. <a href="/jobs">Review jobs</a>.</p>
+    <p class="settings-note">Cloudflare sign-in requires both an email mapping here and approval in the Cloudflare Access policy. New accounts start with explicit grants only. Clearing an email blocks Cloudflare sign-in; any nginx password remains valid. Admin accounts and nginx passwords are managed through the CLI.</p>
+    <p id="admin-summary"></p>
+    <p id="admin-message" role="status" aria-live="polite">Loading administration…</p>
+    <button class="btn" type="button" id="admin-refresh">Refresh</button>
+    <div id="admin-content" hidden>
+      <h4>Accounts</h4>
+      <div style="overflow-x:auto"><table id="admin-users"><thead><tr><th>Username</th><th>Cloudflare email</th><th>Access</th><th>Last login</th></tr></thead><tbody></tbody></table></div>
+      <form data-admin-action="account" class="opt-grid">
+        <div class="opt"><label for="admin-username">Username</label><input id="admin-username" name="username" required maxlength="128" autocomplete="off"></div>
+        <div class="opt"><label for="admin-email">Cloudflare email</label><input id="admin-email" name="email" type="email" required maxlength="254" autocomplete="off"></div>
+        <div class="opt"><button class="btn primary" type="submit">Save email mapping</button></div>
+      </form>
+      <form data-admin-action="scope" class="settings-actions">
+        <label for="admin-account">Account</label><select id="admin-account" name="username" data-users required></select>
+        <label for="admin-scope">Data access</label><select id="admin-scope" name="scoped"><option value="true">Explicit grants only</option><option value="false">Include everyone group</option></select>
+        <button class="btn" type="submit">Save access scope</button>
+      </form>
+      <form data-admin-action="clear_email" class="settings-actions">
+        <label for="admin-clear-user">Account</label><select id="admin-clear-user" name="username" data-users required></select>
+        <button class="btn" type="submit">Clear Cloudflare email</button>
+      </form>
+      <h4>Groups and membership</h4>
+      <form data-admin-action="group" class="settings-actions">
+        <label for="admin-group-name">New group</label><input id="admin-group-name" name="group" required maxlength="64">
+        <label for="admin-group-note">Description</label><input id="admin-group-note" name="note" maxlength="1000">
+        <button class="btn" type="submit">Create group</button>
+      </form>
+      <form data-admin-action="join" class="settings-actions">
+        <label for="admin-member">Account</label><select id="admin-member" name="username" data-users required></select>
+        <label for="admin-member-group">Group</label><select id="admin-member-group" name="group" data-groups="custom" required></select>
+        <button class="btn" type="submit" value="join">Add member</button><button class="btn" type="submit" value="leave">Remove member</button>
+      </form>
+      <div id="admin-memberships"></div>
+      <h4>Observation grants</h4>
+      <p class="settings-note">All populated fields must match an observation. Separate grants add access. A grant to everyone affects every account that includes that group. Dates use YYMMDD.</p>
+      <form data-admin-action="grant" class="opt-grid">
+        <div class="opt"><label for="admin-grant-group">Group or account</label><select id="admin-grant-group" name="group" data-groups="all" required></select></div>
+        <div class="opt"><label for="admin-proposal">Proposal</label><input id="admin-proposal" name="proposal_id" maxlength="128"></div>
+        <div class="opt"><label for="admin-instrument">Instrument</label><select id="admin-instrument" name="instrument"><option value="">Any instrument</option></select></div>
+        <div class="opt"><label for="admin-target">Target</label><input id="admin-target" name="target" maxlength="256"></div>
+        <div class="opt"><label for="admin-from">First date</label><input id="admin-from" name="date_from" pattern="[0-9]{6}" placeholder="YYMMDD"></div>
+        <div class="opt"><label for="admin-to">Last date</label><input id="admin-to" name="date_to" pattern="[0-9]{6}" placeholder="YYMMDD"></div>
+        <div class="opt"><label for="admin-grant-note">Reason</label><input id="admin-grant-note" name="note" maxlength="1000"></div>
+        <div class="opt"><button class="btn primary" type="submit">Add grant</button></div>
+      </form>
+      <div style="overflow-x:auto"><table id="admin-grants"><thead><tr><th>Group</th><th>Matching observations</th><th>Granted by</th><th>Reason</th><th>Action</th></tr></thead><tbody></tbody></table></div>
+    </div>
+  </div>
+</section>
+<script defer src="{{ static_url('admin-settings.js') }}"></script>

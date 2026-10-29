@@ -43,14 +43,29 @@ def test_extract_question_caps_length():
 # --------------------------------------------------------------------------
 # System prompt grounding
 # --------------------------------------------------------------------------
-def test_system_prompt_includes_claude_md_and_module_map():
+def test_system_prompt_has_role_and_module_map():
     chat_agent._system_prompt.cache_clear()
     prompt = chat_agent._system_prompt()
-    # Role preamble + grounding from the repo's own docs and package layout.
     assert f"@{chat_agent.AGENT_NAME}" in prompt
     assert "muscat" in prompt.lower()
     assert "photometry" in prompt          # a real module name from the map
-    assert "CLAUDE.md" in prompt            # section header only present if file read
+
+
+def test_system_prompt_leaves_out_developer_and_admin_notes():
+    # CLAUDE.md is the developers' and agents' handbook (hosts, tmux, backups,
+    # release process); a regular user's assistant is not grounded on it.
+    chat_agent._system_prompt.cache_clear()
+    prompt = chat_agent._system_prompt()
+    assert "CLAUDE.md" not in prompt
+    for marker in ("muscatdbgui", "tmux", "$HOME/temp", "ruleset"):
+        assert marker not in prompt
+
+
+def test_system_prompt_declares_regular_user_access():
+    chat_agent._system_prompt.cache_clear()
+    prompt = chat_agent._system_prompt().lower()
+    assert "regular (non-admin) user" in prompt
+    assert "administrator" in prompt
 
 
 # --------------------------------------------------------------------------
@@ -98,7 +113,7 @@ def test_repo_grounding_injects_matched_repo_docs(monkeypatch, tmp_path):
     repo = _write_repo(
         tmp_path, "prose2",
         readme="PROSE2 README: aperture photometry entry point.",
-        claude="PROSE2 CLAUDE: run_photometry.py options.",
+        claude="PROSE2 CLAUDE: deploy host paths.",
     )
     monkeypatch.setenv("MUSCAT_PROSE_PROJECT", str(repo))
 
@@ -106,7 +121,7 @@ def test_repo_grounding_injects_matched_repo_docs(monkeypatch, tmp_path):
 
     assert "prose2 — photometry pipeline" in grounding
     assert "PROSE2 README" in grounding          # README folded in
-    assert "PROSE2 CLAUDE" in grounding          # CLAUDE.md folded in
+    assert "PROSE2 CLAUDE" not in grounding      # an engine's agent notes are not
     assert "read-only" in grounding.lower()
 
 
@@ -149,18 +164,19 @@ def test_answer_injects_repo_grounding_as_second_system_message(monkeypatch, tmp
 
     asyncio.run(run())
     messages = captured["body"]["messages"]
-    # [0] base system prompt, [1] injected repo grounding, [-1] the user question.
-    assert messages[0]["role"] == "system"
-    assert messages[1]["role"] == "system"
-    assert "timer — transit light-curve fitting" in messages[1]["content"]
-    assert "TIMER README" in messages[1]["content"]
+    # [0] base system prompt, [1] user-guide grounding, [2] engine docs,
+    # [-1] the user question.
+    assert [m["role"] for m in messages[:3]] == ["system", "system", "system"]
+    assert "user guide" in messages[1]["content"].lower()
+    assert "timer — transit light-curve fitting" in messages[2]["content"]
+    assert "TIMER README" in messages[2]["content"]
     assert messages[-1] == {"role": "user", "content": "how does the transit fit and limb darkening work?"}
     # Still strictly grounding — no tools/functions granted.
     assert "tools" not in captured["body"]
     assert "functions" not in captured["body"]
 
 
-def test_answer_offtopic_has_single_system_message(monkeypatch):
+def test_answer_without_engine_topic_gets_only_guide_grounding(monkeypatch):
     captured = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -177,8 +193,9 @@ def test_answer_offtopic_has_single_system_message(monkeypatch):
             await client.aclose()
 
     asyncio.run(run())
-    roles = [m["role"] for m in captured["body"]["messages"]]
-    assert roles.count("system") == 1   # no grounding injected for off-topic
+    system = [m["content"] for m in captured["body"]["messages"] if m["role"] == "system"]
+    assert len(system) == 2             # base prompt + user-guide grounding, no engine docs
+    assert "user guide" in system[1].lower()
 
 
 # --------------------------------------------------------------------------
@@ -288,8 +305,10 @@ def test_answer_success_builds_expected_request(monkeypatch):
     body = captured["body"]
     assert body["model"] == "gemma4:latest"
     assert body["stream"] is False
-    assert body["messages"][0]["role"] == "system"
-    assert body["messages"][1] == {"role": "user", "content": "alice: hi"}
+    roles = [m["role"] for m in body["messages"]]
+    # System grounding first, then the prior turns, then the question.
+    assert roles == ["system", "system", "user", "user"]
+    assert body["messages"][2] == {"role": "user", "content": "alice: hi"}
     assert body["messages"][-1] == {"role": "user", "content": "how do jobs work?"}
 
 

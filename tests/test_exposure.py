@@ -436,7 +436,7 @@ def test_get_coeff_falls_back_to_the_nearest_calibrated_focus(exposure_db):
 def test_get_coeff_falls_back_to_empirical_values_when_uncalibrated(exposure_db):
     """No DB entry for the band: the scaled MuSCAT3 curve is used instead."""
     assert exposure.load_coeffs("muscat3") == {}
-    assert exposure.get_coeff("muscat3", "g", 0.0) == exposure._scale_coef("muscat3", "g", 0.0)
+    assert exposure.get_coeff("muscat3", "gp", 0.0) == pytest.approx((10.51276637, 3.0))
 
 
 def test_get_coeff_does_not_borrow_another_bands_calibration(exposure_db):
@@ -446,8 +446,10 @@ def test_get_coeff_does_not_borrow_another_bands_calibration(exposure_db):
 
 def test_scale_coef_is_identity_for_muscat3(exposure_db):
     """MuSCAT3 is the reference instrument, so scaling must not move its values."""
-    scaled = exposure._scale_coef("muscat3", "g", 0.0)
-    assert scaled == pytest.approx(exposure._muscat3_coef("g", 0.0))
+    # Halfway between the measured 2 mm and 3 mm gp focus points.
+    scaled = exposure._scale_coef("muscat3", "gp", 2.5)
+    assert scaled == pytest.approx(((9.99203702 + 9.72257331) / 2,
+                                    (5.91166667 + 9.135) / 2))
 
 
 def test_scale_coef_lowers_the_peak_for_a_smaller_telescope(exposure_db):
@@ -455,8 +457,9 @@ def test_scale_coef_lowers_the_peak_for_a_smaller_telescope(exposure_db):
 
     coef is a log10 quantity, so 'fainter' means numerically smaller.
     """
-    m3_coef, _ = exposure._scale_coef("muscat3", "g", 0.0)
-    sin_coef, _ = exposure._scale_coef("sinistro", "g", 0.0)
+    m3_coef, _ = exposure._scale_coef("muscat3", "gp", 0.0)
+    sin_coef, _ = exposure._scale_coef("sinistro", "gp", 0.0)
+    assert m3_coef == pytest.approx(10.51276637)
     assert sin_coef < m3_coef
 
 

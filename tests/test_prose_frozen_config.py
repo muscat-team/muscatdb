@@ -5,11 +5,14 @@ prose2 loads an explicit schema-1 file read-only from PROSE_CONFIG_FILE
 that variable set instead of through an import adapter (#101).
 """
 import hashlib
+import json
 import os
-from pathlib import Path
 import subprocess
+import tomllib
+from pathlib import Path
 
 import pytest
+import yaml
 
 from muscat_db import photometry, prose_config
 
@@ -88,10 +91,29 @@ def test_checksum_rejects_modified_telescope_snapshot(tmp_path, monkeypatch):
 
 
 def test_checked_in_snapshot_matches_its_digest_and_deployment_pin():
-    import tomllib
-    config = Path(prose_config.__file__).resolve().parents[2] / "deploy/engines.toml"
-    pin = tomllib.loads(config.read_text())["engines"]["prose"]
-    assert hashlib.sha256(prose_config.snapshot_bytes()).hexdigest() == pin["frozen_config_sha256"]
+    root = Path(prose_config.__file__).resolve().parents[2]
+    pin = tomllib.loads((root / "deploy/engines.toml").read_text())["engines"]["prose"]
+    data = prose_config.snapshot_bytes()
+    assert hashlib.sha256(data).hexdigest() == pin["frozen_config_sha256"]
+    snapshot = yaml.load(data, Loader=yaml.FullLoader)
+    assert snapshot["engine_commit"] == pin["commit"]
+    assert snapshot["repository"] == pin["repository"]
+    workers = tomllib.loads((root / "deploy/workers.toml").read_text())
+    assert workers["profiles"]["prod"]["engine_envs"]["prose"] == pin["environment"]
+    record = json.loads((root / "deploy/conda/production/prose.json").read_text())
+    assert record["pin"] == pin
+    assert record["installed"]["version"] == snapshot["engine_version"]
+    assert record["installed"]["direct_url"]["vcs_info"]["commit_id"] == pin["commit"]
+    assert record["installed"]["prose_config_sha256"] == pin["frozen_config_sha256"]
+    assert record["installed"]["telescope_aliases"] == len(snapshot["telescopes"])
+
+
+def test_frozen_snapshot_keeps_muscat_camera_aliases():
+    snapshot = yaml.load(prose_config.snapshot_bytes(), Loader=yaml.FullLoader)
+    telescopes = snapshot["telescopes"]
+    for camera in range(2, 10):
+        instrument = "MuSCAT3" if camera <= 5 else "MuSCAT4"
+        assert instrument in telescopes[f"ep{camera:02d}"]["name"]
 
 
 @pytest.mark.slow
@@ -107,5 +129,6 @@ def test_real_engine_loads_the_snapshot_read_only_without_touching_home(tmp_path
     env = {**os.environ, "HOME": str(home), **prose_config.frozen_env()}
     out = subprocess.run([python, "-I", "-c", code], env=env, capture_output=True,
                          text=True, timeout=300, check=True).stdout.strip().splitlines()[-1]
-    assert out == f'[true, "{prose_config.SNAPSHOT_SHA256}", 94]'
+    snapshot = yaml.load(prose_config.snapshot_bytes(), Loader=yaml.FullLoader)
+    assert json.loads(out) == [True, prose_config.SNAPSHOT_SHA256, len(snapshot["telescopes"])]
     assert not (home / ".prose").exists()

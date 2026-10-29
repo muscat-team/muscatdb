@@ -18,18 +18,38 @@ reproduced consistently, and communicated easily among collaborators.
 
 ## Pipeline engines
 
-muscat-db orchestrates three external packages. Each package's code lives in its
-own `ext_tools/` checkout and is installed editable into a dedicated conda
-environment, which supplies its dependencies rather than the code itself — so the
-checkout's git ref, not the environment, determines what actually runs. muscat-db
-stores their inputs, launches them as background jobs, and renders their outputs;
-the science lives in the packages themselves.
+muscat-db orchestrates three external packages. Development uses editable
+`ext_tools/` checkouts in dedicated conda environments. Production uses exact
+commits installed in separate environments, selected by `deploy/engines.toml`
+and `deploy/workers.toml`. muscat-db stores their inputs, launches them as
+background jobs, and renders their outputs; the science lives in the packages.
+
+The photometry pin is prose2 3.5.1. It corrects exposure-midpoint timestamps and
+measurement uncertainties, and drops frames with invalid target measurements.
+Existing reductions and transit fits keep their original results; rerun them
+under a new run name to obtain the corrections while preserving the comparison.
+CSV/NPZ formats and existing command options remain compatible. The new
+`--workers`, `--chunksize`, and `--plots` options retain prose2's defaults in the
+web interface. See [the engine deployment procedure](notes/DEPLOYMENT.md)
+for coordinated web/worker activation and rollback.
 
 | Stage | Engine | Sampler | Outputs |
 |---|---|---|---|
 | Photometry | [`prose2`](https://github.com/jpdeleon/prose2) | — | Lightcurve CSVs, diagnostics |
 | Transit fitting | [`timer`](https://github.com/john-livingston/timer) | PyMC (NUTS) | Posteriors, corner/trace/fit plots |
 | TTV fitting | [`harmonic`](https://github.com/john-livingston/harmonic) | emcee | Posteriors, corner/trace/fit plots |
+
+When scheduling from a saved harmonic fit, `fit_config.json`'s `t_offset`
+converts between the fit's time system and absolute BJD, including when extending
+the predictions to the requested end date. Successful model, ΔBIC, and ranking
+results are cached for five minutes; failed evaluations can be retried immediately.
+Invalid ranking uncertainties leave the transit windows available with a ranking
+error instead of failing the scheduling request.
+
+`MUSCAT_MAX_FULL_JOBS` controls the concurrent full-run cap per pipeline (default
+`1`; `0` disables full runs). Empty or malformed values use `1`, with a warning
+for non-empty malformed values. Negative integers retain the disabled (`0`)
+behavior.
 
 ## Requirements
 

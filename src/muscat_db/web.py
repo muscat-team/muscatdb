@@ -80,6 +80,7 @@ from muscat_db import photometry_api as phot_api
 from muscat_db import ref_time as ref_time_lib
 from muscat_db import postprocess as postproc
 from muscat_db import exposure as exp_calc
+from muscat_db.admin import router as admin_router
 from muscat_db.access import (
     NightVisibility,
     denied_proposal_ids_for,
@@ -4570,8 +4571,9 @@ def _lco_error_response(e: "lco.LcoError") -> JSONResponse:
 
 
 @app.get("/settings", response_class=HTMLResponse)
-def settings_page():
-    return _render("settings.html")
+def settings_page(request: Request):
+    user = _request_user(request)
+    return _render("settings.html", is_admin=bool(user) and is_admin_user(_db_path(), user))
 
 
 @settings_router.get("/lco-token-status", response_class=JSONResponse)
@@ -8543,6 +8545,7 @@ app.include_router(ephemeris_router)
 app.include_router(ttv_fit_router)
 app.include_router(fov_router)
 app.include_router(lco_router)
+app.include_router(admin_router)
 app.include_router(settings_router)
 app.include_router(ads_router)
 

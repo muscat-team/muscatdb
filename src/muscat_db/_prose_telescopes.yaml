@@ -1,5 +1,5 @@
-engine_commit: 6029ea8777121bd4ba4de9248735744a101ab425
-engine_version: 3.3.4
+engine_commit: dd19c2e238336f3cf25cc9f3af2581c3366ba210
+engine_version: 3.5.1
 files:
   a.telescope: b489ce2c76706e1dd60fe4c74c56013dc93b097b756cbceee022c2624c130531
   artemis.telescope: 789bedd7ee4c62ef4220faa94029afcb004a18883af50ec3f5d02a5a63b70431
@@ -13,14 +13,14 @@ files:
   muscat2_i.telescope: f3fbc9d79c6dde649d0b5f78f2626385aa8ed7216ec3b171779fd3ce35c0ee6c
   muscat2_r.telescope: 48604030cf11da16bc05cc56061ca82b3b4822cac75ece3a0cf03a0dc1b738d4
   muscat2_zs.telescope: 7de9babae1d3b82ca82866373c6708aa721b1de134d5f9ec6816f1172c75eb09
-  muscat3_gp.telescope: 282c0dd5e8cf832f0a13b1189ea7ed659efb6a6fc3ae437f404ed5b1bb76eeac
-  muscat3_ip.telescope: f3a5b97d43a481547221f6e67f21b040a39f4f97f2875063863f4a8f82a094e0
-  muscat3_rp.telescope: 9353748927288c182e09f226af55d73b6bfdbeac9f387e12fbb6337b6501e871
-  muscat3_zs.telescope: 621152c6115cf9943783957a647e93b538c662d757f29c30138d4026b3c0b69d
-  muscat4_gp.telescope: 27672b66ad44176d08baed94c73826c28490c7d904fb415c9a54eaae4211bbd7
-  muscat4_ip.telescope: 14812b8c5c6b8c29ad00b75554c441e0437ce76b3b00339dd569e0bef2da4659
-  muscat4_rp.telescope: 77f2435bdddaee09977fff72a42d0b3c9b1c5e54f48685469a34c23bd5874ed6
-  muscat4_zs.telescope: c41a0ba8629654443688cf1760a77bc921353ef6f5f0a58ffa3dabb6677bc777
+  muscat3_gp.telescope: b0bb2fcca330ab74e888838795e9e8a25255b44fc7750627f5ba8b18cad9d13d
+  muscat3_ip.telescope: eef361d6f22b32293cd252e4016c3f646914b1d5afa1b62959ca68f2e9af2410
+  muscat3_rp.telescope: 25d579c078b34b9c555596c1502c6e37420da2886fcdd0c03254eb93bfead4bf
+  muscat3_zs.telescope: b10b1ec48fe005d0ae429b6024c3de5f48fd113e9ce52d1a415167165b09e80d
+  muscat4_gp.telescope: c2ad2107b2491deef0c0c8f07eb5bed7f13c11ed157a6705851b0cdd406528ca
+  muscat4_ip.telescope: 2eeeb7df349a15626443bed3cc3d22afb8310f9c3776eac54562b935263c4995
+  muscat4_rp.telescope: d099e04bd7579ef6894b301f17ef00773be9828093632abbaec0f97ce834502d
+  muscat4_zs.telescope: b784b50cb09feec9cdf3c6bb5d7ea089454807e765a50409efe506ba8e86ceec
   muscat_g.telescope: bb9a755cddb5b49ec5d2c59d3138f05cf0a39efcecbddcab826617f159d7ac5f
   muscat_r.telescope: 768ff1d106a5f58df7d528d6f6d10383cd8226178ff92001dea6b5c54b120d28
   muscat_z.telescope: 82681eed14e338af8d05e0999a8b0d2af19c82d8cf7326b87197757769aace45
@@ -318,7 +318,7 @@ telescopes:
     trimming: !!python/tuple
     - 8
     - 22
-  acp->ganymede: &id007
+  acp->ganymede: &id009
     altitude: 2000
     bjd_scale: utc
     camera_name: Andor ikon-L
@@ -362,7 +362,7 @@ telescopes:
     trimming: !!python/tuple
     - 8
     - 22
-  acp->io: &id008
+  acp->io: &id010
     altitude: 2000
     bjd_scale: utc
     camera_name: Andor ikon-L
@@ -406,7 +406,7 @@ telescopes:
     trimming: !!python/tuple
     - 8
     - 22
-  acp->ntm: &id013
+  acp->ntm: &id019
     altitude: 2000
     bjd_scale: utc
     camera_name: Andor IKONL BEX2 DD
@@ -450,7 +450,7 @@ telescopes:
     trimming: !!python/tuple
     - 8
     - 22
-  acp->saint-ex: &id015
+  acp->saint-ex: &id021
     altitude: 2000
     bjd_scale: utc
     camera_name: Andor ikon-L
@@ -493,7 +493,7 @@ telescopes:
     trimming: !!python/tuple
     - 8
     - 22
-  acp->trappist: &id017
+  acp->trappist: &id023
     altitude: 2000
     bjd_scale: utc
     camera_name: FLI ProLine PL3041-BB
@@ -581,7 +581,7 @@ telescopes:
     - 0
   c: *id001
   callisto: *id003
-  deltarho350: &id014
+  deltarho350: &id020
     altitude: 2000
     bjd_scale: utc
     camera_name: QHY600 CMOS 9576x6388 3.76-micron (DeltaRho 350)
@@ -628,21 +628,7 @@ telescopes:
     - 0
     - 0
   e: *id004
-  ep60: *id005
-  europa: *id006
-  fa01: *id005
-  fa03: *id005
-  fa04: *id005
-  fa05: *id005
-  fa06: *id005
-  fa08: *id005
-  fa12: *id005
-  fa14: *id005
-  fa15: *id005
-  fa16: *id005
-  fa19: *id005
-  fa20: *id005
-  ftn/muscat3: &id009
+  ep02: &id007
     altitude: 2070
     bjd_scale: utc
     camera_name: MuSCAT3 (ch rp/Na_D)
@@ -680,6 +666,7 @@ telescopes:
     - FTN/MuSCAT3
     - MuSCAT3
     - muscat3
+    - ep02
     pixel_scale: 0.267
     ra_unit: deg
     read_noise: 6
@@ -687,102 +674,7 @@ telescopes:
     trimming:
     - 0
     - 0
-  fts/muscat4: &id010
-    altitude: 1116
-    bjd_scale: utc
-    camera_name: MuSCAT4 (ch gp/g_narrow)
-    dec_unit: deg
-    diameter: 200
-    gain: 1.8
-    hdu: 0
-    jd_scale: mjd
-    keyword_airmass: AIRMASS
-    keyword_bias_images: bias
-    keyword_bjd: BJD
-    keyword_dark_images: dark
-    keyword_dec: DEC
-    keyword_exposure_time: EXPTIME
-    keyword_filter: FILTER
-    keyword_flat_images: flat
-    keyword_flip: PIERSIDE
-    keyword_fwhm: FWHM
-    keyword_gain: GAIN
-    keyword_image_type: IMAGETYP
-    keyword_jd: MJD-STRT
-    keyword_light_images: light
-    keyword_object: OBJECT
-    keyword_observation_date: DATE-OBS
-    keyword_ra: RA
-    keyword_read_noise: RDNOISE
-    keyword_seeing: SEEING
-    keyword_telescope: TELESCOP
-    latlong:
-    - -31.273333
-    - 149.071111
-    mjd: 0
-    name: LCO-2m/MuSCAT4_gp
-    names:
-    - FTS/MuSCAT4
-    - MuSCAT4
-    - muscat4
-    pixel_scale: 0.267
-    ra_unit: deg
-    read_noise: 6
-    saturation: 64000
-    trimming:
-    - 0
-    - 0
-  ganymede: *id007
-  i: *id001
-  io: *id008
-  l: *id004
-  lco-1m: *id005
-  lco-2m/muscat3_gp:
-    altitude: 2070
-    bjd_scale: utc
-    camera_name: MuSCAT3 (ch gp/g_narrow)
-    dec_unit: deg
-    diameter: 200
-    gain: 1.8
-    hdu: 0
-    jd_scale: mjd
-    keyword_airmass: AIRMASS
-    keyword_bias_images: bias
-    keyword_bjd: BJD
-    keyword_dark_images: dark
-    keyword_dec: DEC
-    keyword_exposure_time: EXPTIME
-    keyword_filter: FILTER
-    keyword_flat_images: flat
-    keyword_flip: PIERSIDE
-    keyword_fwhm: FWHM
-    keyword_gain: GAIN
-    keyword_image_type: IMAGETYP
-    keyword_jd: MJD-STRT
-    keyword_light_images: light
-    keyword_object: OBJECT
-    keyword_observation_date: DATE-OBS
-    keyword_ra: RA
-    keyword_read_noise: RDNOISE
-    keyword_seeing: SEEING
-    keyword_telescope: TELESCOP
-    latlong:
-    - 20.7075
-    - -156.256111
-    mjd: 0
-    name: LCO-2m/MuSCAT3_gp
-    names:
-    - FTN/MuSCAT3
-    - MuSCAT3
-    - muscat3
-    pixel_scale: 0.267
-    ra_unit: deg
-    read_noise: 6
-    saturation: 63158
-    trimming:
-    - 0
-    - 0
-  lco-2m/muscat3_ip:
+  ep03: &id012
     altitude: 2070
     bjd_scale: utc
     camera_name: MuSCAT3 (ch ip/i_narrow)
@@ -820,6 +712,7 @@ telescopes:
     - FTN/MuSCAT3
     - MuSCAT3
     - muscat3
+    - ep03
     pixel_scale: 0.267
     ra_unit: deg
     read_noise: 6
@@ -827,8 +720,53 @@ telescopes:
     trimming:
     - 0
     - 0
-  lco-2m/muscat3_rp: *id009
-  lco-2m/muscat3_zs:
+  ep04: &id011
+    altitude: 2070
+    bjd_scale: utc
+    camera_name: MuSCAT3 (ch gp/g_narrow)
+    dec_unit: deg
+    diameter: 200
+    gain: 1.8
+    hdu: 0
+    jd_scale: mjd
+    keyword_airmass: AIRMASS
+    keyword_bias_images: bias
+    keyword_bjd: BJD
+    keyword_dark_images: dark
+    keyword_dec: DEC
+    keyword_exposure_time: EXPTIME
+    keyword_filter: FILTER
+    keyword_flat_images: flat
+    keyword_flip: PIERSIDE
+    keyword_fwhm: FWHM
+    keyword_gain: GAIN
+    keyword_image_type: IMAGETYP
+    keyword_jd: MJD-STRT
+    keyword_light_images: light
+    keyword_object: OBJECT
+    keyword_observation_date: DATE-OBS
+    keyword_ra: RA
+    keyword_read_noise: RDNOISE
+    keyword_seeing: SEEING
+    keyword_telescope: TELESCOP
+    latlong:
+    - 20.7075
+    - -156.256111
+    mjd: 0
+    name: LCO-2m/MuSCAT3_gp
+    names:
+    - FTN/MuSCAT3
+    - MuSCAT3
+    - muscat3
+    - ep04
+    pixel_scale: 0.267
+    ra_unit: deg
+    read_noise: 6
+    saturation: 63158
+    trimming:
+    - 0
+    - 0
+  ep05: &id013
     altitude: 2070
     bjd_scale: utc
     camera_name: MuSCAT3 (ch zs/z_narrow)
@@ -866,6 +804,7 @@ telescopes:
     - FTN/MuSCAT3
     - MuSCAT3
     - muscat3
+    - ep05
     pixel_scale: 0.267
     ra_unit: deg
     read_noise: 6
@@ -873,11 +812,10 @@ telescopes:
     trimming:
     - 0
     - 0
-  lco-2m/muscat4_gp: *id010
-  lco-2m/muscat4_ip:
+  ep06: &id008
     altitude: 1116
     bjd_scale: utc
-    camera_name: MuSCAT4 (ch ip/i_narrow)
+    camera_name: MuSCAT4 (ch gp/g_narrow)
     dec_unit: deg
     diameter: 200
     gain: 1.8
@@ -907,19 +845,20 @@ telescopes:
     - -31.273333
     - 149.071111
     mjd: 0
-    name: LCO-2m/MuSCAT4_ip
+    name: LCO-2m/MuSCAT4_gp
     names:
     - FTS/MuSCAT4
     - MuSCAT4
     - muscat4
+    - ep06
     pixel_scale: 0.267
     ra_unit: deg
     read_noise: 6
-    saturation: 46000
+    saturation: 64000
     trimming:
     - 0
     - 0
-  lco-2m/muscat4_rp:
+  ep07: &id015
     altitude: 1116
     bjd_scale: utc
     camera_name: MuSCAT4 (ch rp/Na_D)
@@ -957,6 +896,7 @@ telescopes:
     - FTS/MuSCAT4
     - MuSCAT4
     - muscat4
+    - ep07
     pixel_scale: 0.267
     ra_unit: deg
     read_noise: 6
@@ -964,7 +904,53 @@ telescopes:
     trimming:
     - 0
     - 0
-  lco-2m/muscat4_zs:
+  ep08: &id014
+    altitude: 1116
+    bjd_scale: utc
+    camera_name: MuSCAT4 (ch ip/i_narrow)
+    dec_unit: deg
+    diameter: 200
+    gain: 1.8
+    hdu: 0
+    jd_scale: mjd
+    keyword_airmass: AIRMASS
+    keyword_bias_images: bias
+    keyword_bjd: BJD
+    keyword_dark_images: dark
+    keyword_dec: DEC
+    keyword_exposure_time: EXPTIME
+    keyword_filter: FILTER
+    keyword_flat_images: flat
+    keyword_flip: PIERSIDE
+    keyword_fwhm: FWHM
+    keyword_gain: GAIN
+    keyword_image_type: IMAGETYP
+    keyword_jd: MJD-STRT
+    keyword_light_images: light
+    keyword_object: OBJECT
+    keyword_observation_date: DATE-OBS
+    keyword_ra: RA
+    keyword_read_noise: RDNOISE
+    keyword_seeing: SEEING
+    keyword_telescope: TELESCOP
+    latlong:
+    - -31.273333
+    - 149.071111
+    mjd: 0
+    name: LCO-2m/MuSCAT4_ip
+    names:
+    - FTS/MuSCAT4
+    - MuSCAT4
+    - muscat4
+    - ep08
+    pixel_scale: 0.267
+    ra_unit: deg
+    read_noise: 6
+    saturation: 46000
+    trimming:
+    - 0
+    - 0
+  ep09: &id016
     altitude: 1116
     bjd_scale: utc
     camera_name: MuSCAT4 (ch zs/z_narrow)
@@ -1002,6 +988,7 @@ telescopes:
     - FTS/MuSCAT4
     - MuSCAT4
     - muscat4
+    - ep09
     pixel_scale: 0.267
     ra_unit: deg
     read_noise: 6
@@ -1009,10 +996,39 @@ telescopes:
     trimming:
     - 0
     - 0
+  ep60: *id005
+  europa: *id006
+  fa01: *id005
+  fa03: *id005
+  fa04: *id005
+  fa05: *id005
+  fa06: *id005
+  fa08: *id005
+  fa12: *id005
+  fa14: *id005
+  fa15: *id005
+  fa16: *id005
+  fa19: *id005
+  fa20: *id005
+  ftn/muscat3: *id007
+  fts/muscat4: *id008
+  ganymede: *id009
+  i: *id001
+  io: *id010
+  l: *id004
+  lco-1m: *id005
+  lco-2m/muscat3_gp: *id011
+  lco-2m/muscat3_ip: *id012
+  lco-2m/muscat3_rp: *id007
+  lco-2m/muscat3_zs: *id013
+  lco-2m/muscat4_gp: *id008
+  lco-2m/muscat4_ip: *id014
+  lco-2m/muscat4_rp: *id015
+  lco-2m/muscat4_zs: *id016
   lcogt-1m: *id005
   liverpool: *id004
   m: *id001
-  muscat: &id012
+  muscat: &id018
     altitude: 372
     bjd_scale: utc
     camera_name: PIXIS 1024B_eXcelon (ch3 z)
@@ -1055,7 +1071,7 @@ telescopes:
     trimming:
     - 0
     - 0
-  muscat2: &id011
+  muscat2: &id017
     altitude: 2387
     bjd_scale: utc
     camera_name: PIXIS 1024B_eXcelon (ch3 i)
@@ -1141,7 +1157,7 @@ telescopes:
     trimming:
     - 0
     - 0
-  muscat2_i: *id011
+  muscat2_i: *id017
   muscat2_r:
     altitude: 2387
     bjd_scale: utc
@@ -1228,8 +1244,8 @@ telescopes:
     trimming:
     - 0
     - 0
-  muscat3: *id009
-  muscat4: *id010
+  muscat3: *id007
+  muscat4: *id008
   muscat_g:
     altitude: 372
     bjd_scale: utc
@@ -1316,18 +1332,18 @@ telescopes:
     trimming:
     - 0
     - 0
-  muscat_z: *id012
-  ntm: *id013
+  muscat_z: *id018
+  ntm: *id019
   o: *id004
-  oao: *id012
+  oao: *id018
   p: *id001
-  qhy600: *id014
-  qhy600-deltarho350: *id014
-  qhy600cmos: *id014
+  qhy600: *id020
+  qhy600-deltarho350: *id020
+  qhy600cmos: *id020
   r: *id001
   s: *id001
-  saint-ex: *id015
-  sbig: &id016
+  saint-ex: *id021
+  sbig: &id022
     altitude: 2000
     bjd_scale: utc
     camera_name: SBIG STL-6303 3K x 2K 9-micron
@@ -1373,17 +1389,17 @@ telescopes:
     trimming:
     - 0
     - 0
-  sbig-stl6303: *id016
+  sbig-stl6303: *id022
   sinistro: *id005
   speculoos-artemis: *id002
   speculoos-callisto: *id003
   speculoos-europa: *id006
-  speculoos-ganymede: *id007
-  speculoos-io: *id008
+  speculoos-ganymede: *id009
+  speculoos-io: *id010
   spirit: *id001
-  stl-6303: *id016
+  stl-6303: *id022
   t: *id001
-  tcs: *id011
+  tcs: *id017
   telescopio carlo sanchez:
     altitude: 2930
     bjd_scale: utc
@@ -1513,8 +1529,8 @@ telescopes:
     trimming: !!python/tuple
     - 0
     - 0
-  trappist: *id017
-  trappist-north: *id013
-  trappist-s: *id017
-  trappist-south: *id017
+  trappist: *id023
+  trappist-north: *id019
+  trappist-s: *id023
+  trappist-south: *id023
   v: *id004
