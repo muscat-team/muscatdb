@@ -260,7 +260,7 @@
       <div class="csv-wrap" id="exofop-obslog-wrap" style="display: none;">
         <table id="exofop-obslog-table">
           <thead>
-            <tr><th>Telescope</th><th>Camera</th><th>Filter</th><th>Date (UT)</th><th>Frames</th><th>Status</th><th>Download</th></tr>
+            <tr><th>Planet</th><th>Telescope</th><th>Camera</th><th>Filter</th><th>Date (UT)</th><th>Frames</th><th>Status</th><th>Download</th></tr>
           </thead>
           <tbody id="exofop-obslog-tbody"></tbody>
         </table>
@@ -413,7 +413,10 @@
             lco: !!r.lco, instrument: String(r.instrument || '').toLowerCase(),
             dates: obsLabels(r.tsdate), exists: exists, actionHtml: actionHtml, jobId: ''
           };
+          // tstoi ("TOI 1130.01") names the planet; tsplname ("TIC 254113311.01")
+          // is the only label for a target that is not a TOI.
           tr.innerHTML =
+            '<td class="mono">' + esc(r.tstoi || r.tsplname || '') + '</td>' +
             '<td>' + esc(r.tstel || '') + '</td>' +
             '<td>' + esc(r.tscam || '') + '</td>' +
             '<td>' + esc(r.tsfilt || '') + '</td>' +

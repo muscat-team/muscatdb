@@ -106,6 +106,26 @@ def test_exofop_section_reports_an_unreachable_exofop(page):
     assert "No ExoFOP time-series entries reported" not in text
 
 
+def test_exofop_obslog_names_the_planet_of_each_row(page):
+    # Field names as ExoFOP's target.php?json returns them. A non-TOI row has
+    # only tsplname, so the column falls back to it.
+    report = {
+        "ok": True, "toi": "1000", "tic": None, "total": 2,
+        "time_series": [
+            {"tstoi": "TOI 1000.01", "tsplname": "TIC 50365310.01",
+             "tstel": "ASTEP-ANTARCTICA (0.4 m)", "tsdate": "2025-05-16", "tsnum": "3200"},
+            {"tstoi": "", "tsplname": "TIC 50365310.02",
+             "tstel": "ASTEP-ANTARCTICA (0.4 m)", "tsdate": "2025-06-01", "tsnum": "100"},
+        ],
+    }
+    page.route("**/api/lco/archive/exofop?*", lambda route: route.fulfill(json=report))
+    _open_section(page, "exofop-obslog-details")
+    headers = page.locator("#exofop-obslog-table thead th").all_inner_texts()
+    assert headers[0] == "Planet"
+    first_cells = page.locator("#exofop-obslog-tbody tr td:first-child").all_inner_texts()
+    assert first_cells == ["TOI 1000.01", "TIC 50365310.02"]
+
+
 def test_photometry_link_opens_the_selected_night(page):
     page.goto(URL)
     page.locator(f'{ROWS}[data-date="261001"] a[title="photometry"]').click()
