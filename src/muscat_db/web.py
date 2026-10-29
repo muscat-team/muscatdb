@@ -111,7 +111,7 @@ from muscat_db import ttv_fit as ttv
 from muscat_db import ttv_selection
 from muscat_db import lco
 from muscat_db.lco import _annotate_lco_archive_results
-from muscat_db import exofop
+from muscat_db import exofop, target_archive
 from muscat_db import transit_obs
 from muscat_db import fov as fov_opt
 from muscat_db import ephemeris_math
@@ -5955,6 +5955,33 @@ def api_lco_archive_frames(
             payload["resolved_dec"] = round(resolved[1], 5)
             payload["resolved_source"] = resolved[2]
         return JSONResponse(payload)
+    except lco.LcoError as e:
+        return _lco_error_response(e)
+
+
+@lco_router.get("/archive/target", response_class=JSONResponse)
+def api_lco_archive_target(request: Request, target: str = "", start: str = "", end: str = "",
+                           stream: bool = False):
+    try:
+        _require_own_archive_token(request)
+        user, denied = _request_user(request), _viewer_denied()
+        if stream:
+            def events():
+                try:
+                    for event in target_archive.inventory_events(
+                        target.strip(), user, denied=denied, start=start, end=end,
+                    ):
+                        yield json.dumps(event) + "\n"
+                except lco.LcoError as e:
+                    yield json.dumps(e.to_dict()) + "\n"
+            return StreamingResponse(events(), media_type="application/x-ndjson", headers={
+                # Bypass GZip buffering so page progress reaches the browser immediately.
+                "Content-Encoding": "identity", "X-Accel-Buffering": "no",
+                "Cache-Control": "no-store, no-transform",
+            })
+        return JSONResponse(target_archive.inventory(
+            target.strip(), user, denied=denied, start=start, end=end,
+        ))
     except lco.LcoError as e:
         return _lco_error_response(e)
 

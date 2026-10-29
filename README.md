@@ -569,3 +569,31 @@ is only repaired when that night already has a home elsewhere.
 As of the 2026-07 dry run: **10,328 frames** would move (sinistro 7,427 across 17
 directory pairs, muscat3 2,861 across 3, muscat4 40 across 1), with 28 `offset`,
 6 `stray` and 7,083 `conflict` reports left for review.
+
+### Target LCO archive inventory
+
+Open **LCO archive** on a target page to find reduced science observations
+covering its coordinates, including nights never reported to ExoFOP. The panel
+loads only when opened. Each row groups a night, instrument and LCO request,
+with filters, exposure times, proposal, frame count and proprietary status.
+Local presence uses the individual frame filenames in the database; a partial
+request remains downloadable. **Download** queues the existing whole-request
+download and ingest workflow. Follow progress in **Jobs**, then search again
+or reopen the panel to see the **Photometry** link.
+
+Archive metadata is cached for one hour per coordinates, user, token and date
+range; local presence and proposal access are checked on each load. A viewer
+with restricted proposals needs their own LCO token in Settings. The inventory
+can only show frames visible to that token and permitted by local access rules.
+A proprietary label means the archive's public-release date is still in the
+future; it does not prevent an authorized download.
+
+Searches follow [LCO cursor pagination](https://developers.lco.global/#pagination)
+in sequential pages of 1,000 frames until all matching nights have been read,
+without a total-frame cutoff. Progress streams while the search runs. An error
+on any page leaves the search incomplete and uncached; use Search to retry.
+Optional UT date filters (inclusive end date) narrow the search, and persist per
+target in the browser. ExoFOP-reported nights are included: a report does not
+account for every request, filter or telescope observed that night. ExoFOP indicators match instrument,
+site and night within one day, not individual request IDs. “No matching report”
+reflects the existing ExoFOP lookup, which may also return no rows during an outage.

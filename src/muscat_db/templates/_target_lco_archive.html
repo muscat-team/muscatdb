@@ -1,0 +1,134 @@
+<details class="adv" id="target-lco-details" style="margin-top: 1rem;">
+  <summary>LCO archive</summary>
+  <p class="hint">Science frames at reduction level 91 covering this target, including observations absent from ExoFOP. Results reflect your LCO token and proposal access. Archive metadata is cached for one hour.</p>
+  <form id="target-lco-form" class="lco-actions">
+    <label>Start (UT) <input id="target-lco-start" type="date"></label>
+    <label>End (UT, inclusive) <input id="target-lco-end" type="date"></label>
+    <button class="btn sm" type="submit">Search</button>
+    <a href="/jobs">Jobs / download progress</a>
+  </form>
+  <p id="target-lco-status" class="hint" role="status">Open this section to search the LCO archive.</p>
+  <p class="hint">“Reported” matches an ExoFOP observation by instrument, site and night (±1 day); it does not identify a particular request.</p>
+  <div class="csv-wrap">
+    <table id="target-lco-table" hidden style="width: max-content;">
+      <thead><tr><th>Night</th><th>Instrument</th><th>Site</th><th>Telescope</th><th>Filters</th><th>Frames</th><th>Exposure (s)</th><th>Proposal</th><th>Request ID</th><th>Access</th><th>In muscat-db</th><th>Reported on ExoFOP</th><th>Action</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</details>
+<script>
+(function () {
+  const details = document.getElementById('target-lco-details');
+  const form = document.getElementById('target-lco-form');
+  const status = document.getElementById('target-lco-status');
+  const table = document.getElementById('target-lco-table');
+  const target = {{ target_name | tojson }};
+  const fields = ['target-lco-start', 'target-lco-end'];
+  const storageKey = 'target-lco-dates:' + target;
+  let loaded = false, busy = false;
+  try {
+    const saved = JSON.parse(localStorage.getItem(storageKey) || '{}');
+    fields.forEach(id => { document.getElementById(id).value = saved[id] || ''; });
+  } catch (_) {}
+  function saveDates() {
+    try {
+      const saved = {};
+      fields.forEach(id => { saved[id] = document.getElementById(id).value; });
+      localStorage.setItem(storageKey, JSON.stringify(saved));
+    } catch (_) {}
+  }
+  fields.forEach(id => document.getElementById(id).addEventListener('change', saveDates));
+  function cell(tr, text) {
+    const td = document.createElement('td'); td.textContent = text; tr.appendChild(td); return td;
+  }
+  function exposure(values) {
+    return values.map(v => Number.isFinite(Number(v)) ? String(Number(Number(v).toFixed(6))) : v).join(', ');
+  }
+  async function download(row, button, action) {
+    button.disabled = true;
+    try {
+      const response = await fetch('/api/lco/archive/request-download', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({request_id: row.request_id, reduction_level: '91'})
+      });
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.error || 'Download failed');
+      button.textContent = 'Queued';
+      const link = document.createElement('a'); link.href = '/jobs';
+      link.textContent = ' View progress'; action.appendChild(link);
+      status.textContent = 'Download queued. After ingest, reload this panel to open photometry.';
+      loaded = false;
+    } catch (error) {
+      status.textContent = error.message; button.disabled = false;
+    }
+  }
+  async function load() {
+    if (busy) return;
+    busy = true; form.querySelector('button').disabled = true;
+    saveDates(); table.hidden = true; table.tBodies[0].replaceChildren();
+    status.textContent = 'Searching LCO archive…';
+    try {
+      const query = new URLSearchParams({target, stream: true,
+        start: document.getElementById(fields[0]).value,
+        end: document.getElementById(fields[1]).value});
+      const response = await fetch('/api/lco/archive/target?' + query);
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Archive search failed');
+      }
+      let data = null, pending = '';
+      const reader = response.body.getReader(), decoder = new TextDecoder();
+      function event(line) {
+        if (!line.trim()) return;
+        const message = JSON.parse(line);
+        if (message.progress) status.textContent = message.progress;
+        else if (message.ok === false) throw new Error(message.error || 'Archive search failed');
+        else if (message.ok) data = message;
+      }
+      try {
+        while (true) {
+          const chunk = await reader.read();
+          pending += decoder.decode(chunk.value, {stream: !chunk.done});
+          const lines = pending.split('\n'); pending = lines.pop();
+          lines.forEach(event);
+          if (chunk.done) break;
+        }
+        event(pending);
+      } finally { await reader.cancel(); }
+      if (!data) throw new Error('Archive search ended before completion');
+      data.rows.forEach(row => {
+        const tr = document.createElement('tr');
+        [row.date, row.instrument, row.site, row.telescope, row.filters.join(', '), row.frame_count,
+          exposure(row.exposures), row.proposal, row.request_id,
+          row.proprietary ? 'Proprietary' : 'Public / unspecified',
+          row.exists ? 'Yes' : row.local_frames ? 'Partial (' + row.local_frames + ')' : 'No',
+          row.reported === null ? 'Unknown' : row.reported ? 'Yes' : 'No matching report'
+        ].forEach(value => cell(tr, value));
+        const action = cell(tr, '');
+        if (!row.exists && /^\d+$/.test(row.request_id)) {
+          const button = document.createElement('button'); button.type = 'button';
+          button.className = 'btn sm'; button.textContent = 'Download';
+          button.addEventListener('click', () => download(row, button, action));
+          action.appendChild(button);
+        }
+        if (row.local_frames && row.date) {
+          const link = document.createElement('a');
+          link.href = '/photometry?' + new URLSearchParams({inst: row.instrument,
+            date: row.date.replaceAll('-', '').slice(2), target: row.local_target || target});
+          link.textContent = ' Photometry'; action.appendChild(link);
+        }
+        table.tBodies[0].appendChild(tr);
+      });
+      table.hidden = !data.rows.length;
+      status.textContent = data.rows.length ? data.rows.length + ' archive datasets.' : 'No visible archive datasets found.';
+      loaded = true;
+    } catch (error) {
+      loaded = false; status.textContent = error.message + ' Use Search to retry.';
+    } finally {
+      busy = false; form.querySelector('button').disabled = false;
+    }
+  }
+  details.addEventListener('toggle', () => { if (details.open && !loaded) load(); });
+  form.addEventListener('submit', event => { event.preventDefault(); load(); });
+})();
+</script>

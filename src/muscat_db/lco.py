@@ -461,6 +461,35 @@ def archive_search_all(
     return {"count": total, "results": results[:max_frames], "truncated": truncated}
 
 
+def archive_cursor_pages(filters: dict, user_name: str | None = None, *, token: str | None = None):
+    """Yield all matching archive pages without a total-frame limit.
+
+    LCO recommends cursor pagination for large queries. Counts are absent;
+    only exhaustion of ``next`` signals completion. Keep other callers' bounded
+    offset searches unchanged. See https://developers.lco.global/#pagination.
+    """
+    params = {**filters, "pagination_style": "cursor", "limit": "1000"}
+    params.pop("offset", None)
+    url = "https://archive-api.lco.global/frames/?" + _query_params(params)
+    seen = set()
+    while url:
+        parsed = urllib.parse.urlsplit(url)
+        if (parsed.scheme != "https" or parsed.netloc != "archive-api.lco.global"
+                or parsed.path != "/frames/" or parsed.fragment):
+            raise LcoError("Archive returned an unsafe pagination URL", status=502)
+        if url in seen:
+            raise LcoError("Archive pagination repeated a cursor; retry the search", status=502)
+        seen.add(url)
+        page = _lco_api_request(url, user_name=user_name, token=token)
+        rows = page.get("results")
+        if not isinstance(rows, list):
+            raise LcoError("Archive returned an invalid page", status=502)
+        yield rows
+        url = page.get("next")
+        if url is not None and not isinstance(url, str):
+            raise LcoError("Archive returned an invalid cursor", status=502)
+
+
 def _page_size(filters: dict, first_rows: list) -> int:
     try:
         return int(filters.get("limit") or len(first_rows))
