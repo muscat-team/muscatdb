@@ -792,6 +792,7 @@ def _query_sesame_coords(name: str) -> SkyCoord:
         try:
             response = http_client.get_sync_client().get(
                 endpoint + "SNV?" + quote(name, safe=""), timeout=5.0,
+                follow_redirects=True,
             )
             response.raise_for_status()
             break

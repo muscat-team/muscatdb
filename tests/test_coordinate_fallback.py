@@ -122,3 +122,17 @@ def test_sesame_primary_timeout_still_tries_the_existing_mirror(monkeypatch):
     monkeypatch.setattr(http_client, "get_sync_client", lambda: SimpleNamespace(get=get))
     assert exposure._query_sesame_coords("TOI-12345").ra.deg == 117.929
     assert "vizier.cfa.harvard.edu" in calls[1]
+
+
+def test_sesame_follows_endpoint_redirects(monkeypatch):
+    import httpx
+    from muscat_db import http_client
+
+    def handle(request):
+        if request.url.path == "/resolved":
+            return httpx.Response(200, text="%J 117.929 +12.536\n")
+        return httpx.Response(302, headers={"Location": "/resolved"})
+
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        monkeypatch.setattr(http_client, "get_sync_client", lambda: client)
+        assert exposure._query_sesame_coords("TOI-12345").ra.deg == 117.929
