@@ -214,3 +214,16 @@ def test_target_info_keeps_sources_separate_and_suppresses_hidden_sheets(monkeyp
     assert response.json()["shared_sheet_ephemeris"] == {}
     assert response.json()["sheet_ephemeris"] == {}
     assert queried == []
+
+
+def test_shared_source_can_be_disabled_without_disabling_personal_sheet(monkeypatch, tmp_path):
+    client = _authed_client(monkeypatch, tmp_path)
+    set_user_ephem_sheet("jerome", SHEET_URL)
+    set_user_ephem_sheet("alice", SHEET_URL)
+    monkeypatch.setenv("MUSCAT_SHARED_EPHEM_SHEET_USER", "none")
+    assert web._user_ephem_sheet_cfg(None, shared=True) is None
+    monkeypatch.setattr(web.gsheet_ephemeris, "query_target_ephemeris", lambda *a, **kw: {
+        "b": {"t0": 2459000.5, "period": 3.0, "duration": 2.0}
+    })
+    response = client.post("/api/lco/windows", headers=AUTH_HEADERS, json={**_WINDOW_BODY, "source": "gsheet"})
+    assert response.status_code == 200

@@ -6526,7 +6526,8 @@ def api_ephemeris_targets():
 
 
 def _shared_ephem_sheet_owner() -> str:
-    return os.environ.get("MUSCAT_SHARED_EPHEM_SHEET_USER", "jerome").strip()
+    owner = (os.environ.get("MUSCAT_SHARED_EPHEM_SHEET_USER") or "jerome").strip()
+    return "" if owner.lower() == "none" else owner
 
 
 def _user_ephem_sheet_cfg(request, *, shared: bool = False) -> dict | None:

@@ -585,7 +585,7 @@ fit. The shared owner sees their personal option labeled **shared with
 everyone**, not private. Sources remain distinct when both are configured.
 
 `MUSCAT_SHARED_EPHEM_SHEET_USER` selects the shared owner (default `jerome`);
-set it to an empty string to disable the shared source. Changing or clearing
+set it to `none` to disable the shared source. Changing or clearing
 the owner's sheet changes the shared source for everyone. The app exposes
 per-target ephemerides, not the sheet URL or editing credentials, and checks
 target visibility before reading a sheet. Never-observed targets remain
