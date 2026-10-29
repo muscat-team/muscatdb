@@ -4085,28 +4085,20 @@ def exposure_lookup_mags(payload: dict = Body(...)):
     if not target:
         return JSONResponse({"ok": False, "error": "Target name required"}, status_code=400)
 
-    # Try resolving target name
-    coords = exp_calc.resolve_target_coords(target)
+    coords, mags, source, is_approx, approx_reason = exp_calc.lookup_target_magnitudes(target)
     if not coords:
         return JSONResponse({"ok": False, "error": f"Could not resolve target '{target}'"})
-
     ra, dec = coords
-    mags, source = exp_calc.lookup_magnitudes(ra, dec, return_source=True)
     if not mags:
         return JSONResponse({
             "ok": False,
-            "error": f"No griz magnitudes found for '{target}' in Pan-STARRS or SkyMapper",
-            "ra": ra,
-            "dec": dec,
+            "error": f"No usable magnitudes found for '{target}' in Pan-STARRS, SkyMapper, TIC or SDSS (and no usable Gaia estimate)",
+            "ra": ra, "dec": dec,
         })
-
     return JSONResponse({
-        "ok": True,
-        "target": target,
-        "ra": ra,
-        "dec": dec,
-        "mags": mags,
-        "source": source,
+        "ok": True, "target": target, "ra": ra, "dec": dec,
+        "mags": mags, "source": source, "is_approx": is_approx,
+        "approx_reason": approx_reason,
     })
 
 

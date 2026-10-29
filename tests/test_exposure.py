@@ -248,12 +248,10 @@ def test_lookup_magnitudes_with_fallback_uses_real_catalog_when_available():
 
 
 def test_lookup_magnitudes_with_fallback_reports_no_photometry_when_catalog_and_gaia_both_miss():
-    # gaia_to_griz_transform currently has no verified coefficients and always
-    # returns None (see the TODO in exposure.py) -- confirm the wrapper
-    # degrades to "no photometry" rather than fabricating a result.
+    # No catalog match and a color outside the common four-band fit range.
     with patch.object(exposure, "lookup_magnitudes", return_value=(None, None)):
         mags, source, is_approx = exposure.lookup_magnitudes_with_fallback(
-            10.0, -20.0, gmag=11.2, bp_rp=0.8,
+            10.0, -20.0, gmag=11.2, bp_rp=3.0,
         )
     assert mags is None
     assert source is None
@@ -261,8 +259,7 @@ def test_lookup_magnitudes_with_fallback_reports_no_photometry_when_catalog_and_
 
 
 def test_lookup_magnitudes_with_fallback_uses_gaia_transform_when_catalog_misses():
-    # Exercises the fallback wiring itself (not the real transform, which is
-    # unimplemented pending verified coefficients): a stubbed transform must
+    # Exercises the fallback wiring independently of the polynomial: a stub must
     # be picked up, tagged as approximate, and logged as such.
     with patch.object(exposure, "lookup_magnitudes", return_value=(None, None)), \
          patch.object(exposure, "gaia_to_griz_transform", return_value={"gp": 11.3}):

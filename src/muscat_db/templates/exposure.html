@@ -264,7 +264,7 @@
         <h3 style="margin:0;">Magnitudes per band <span class="help-icon multiline" data-help="Broadband filter magnitudes (gp, rp, ip, zs). Narrowband filters (g_narrow, i_narrow, z_narrow, Na_D) use these same magnitudes with filter-width-dependent peak count adjustments in the calculation.">?</span></h3>
         <button class="copy-btn" type="button" id="clear-mags">Clear</button>
       </div>
-      <p class="hint" style="margin-bottom:0.6rem;">g/r/i/z from Pan-STARRS / SkyMapper (auto-filled) or manual entry</p>
+      <p class="hint" style="margin-bottom:0.6rem;">Enter magnitudes manually or look up measured griz from Pan-STARRS, SkyMapper, TIC or SDSS. Gaia estimates are labeled and explain why measurements were unavailable.</p>
       <div class="mag-grid" id="mag-broad"></div>
     </div>
 
@@ -433,6 +433,7 @@
   var targetName = document.getElementById('target-name');
   var lookupBtn = document.getElementById('lookup-btn');
   var lookupStatus = document.getElementById('lookup-status');
+  var magnitudeProvenance = '';
   var focusMm = document.getElementById('focus-mm');
   var focusVal = document.getElementById('focus-val');
   var airmass = document.getElementById('airmass');
@@ -494,7 +495,14 @@
 
   function markFilled(inp) { inp.classList.toggle('filled', inp.value !== '' && parseFloat(inp.value) > 0); }
   magInputs.forEach(function (inp) {
-    inp.addEventListener('input', function () { markFilled(inp); saveState(); });
+    inp.addEventListener('input', function () {
+      markFilled(inp);
+      if (magnitudeProvenance && magnitudeProvenance.indexOf('edited manually') === -1) {
+        magnitudeProvenance += ' Some values edited manually.';
+      }
+      if (magnitudeProvenance) lookupStatus.textContent = magnitudeProvenance;
+      saveState();
+    });
   });
 
   // ---- Button loading helper ----
@@ -527,6 +535,7 @@
       magInputs.forEach(function (inp) { if (inp.value !== '') mags[inp.dataset.band] = inp.value; });
       localStorage.setItem(STORE_KEY, JSON.stringify({
         inst: selInst.value, confmode: selConfmode.value, target: targetName.value, mags: mags,
+        magnitudeProvenance: magnitudeProvenance,
         focus: focusMm.value, airmass: airmass.value, seeing: seeingInput.value, satFrac: satFrac.value, customAdu: customAdu.value,
         showNarrow: showNarrow.checked, comps: currentComps,
         coeffView: coeffView, coeffParameter: coeffParameter
@@ -541,6 +550,11 @@
     if (s.confmode && CONFMODES_BY_INST[selInst.value]) selConfmode.value = s.confmode;
     if (!targetName.value && s.target) targetName.value = s.target;
     if (s.mags) magInputs.forEach(function (inp) { if (s.mags[inp.dataset.band] !== undefined) { inp.value = s.mags[inp.dataset.band]; markFilled(inp); } });
+    if (typeof s.magnitudeProvenance === 'string' && s.magnitudeProvenance) {
+      magnitudeProvenance = s.magnitudeProvenance;
+      lookupStatus.className = 'msg ok';
+      lookupStatus.textContent = magnitudeProvenance;
+    }
     if (s.focus !== undefined) focusMm.value = s.focus;
     if (s.airmass !== undefined) airmass.value = s.airmass;
     if (s.seeing !== undefined) seeingInput.value = s.seeing;
@@ -588,12 +602,17 @@
         body: JSON.stringify({ target: target })
       }).then(function (r) { return r.json(); }).then(function (data) {
         if (data.ok) {
-          var parts = BROAD.map(function (b) { return b[0] + '=' + (data.mags[b] !== undefined ? data.mags[b] : '—'); });
+          var parts = BROAD.map(function (b) { return b[0] + '=' + (data.mags[b] !== undefined ? Number(data.mags[b].toFixed(6)) : '—'); });
           lookupStatus.className = 'msg ok';
-          lookupStatus.innerHTML = '✓ ' + parts.join('  ') +
-            (data.source ? '  ·  <span style="color:var(--text-dim)">' + data.source + '</span>' : '');
+          lookupStatus.textContent = '✓ ' + target + ': ' + (data.is_approx ? 'Approximate · ' : '') + parts.join('  ') +
+            (data.source ? '  ·  ' + data.source : '') +
+            (data.is_approx && data.approx_reason ? ' — ' + data.approx_reason : '');
+          magnitudeProvenance = lookupStatus.textContent;
           magInputs.forEach(function (inp) {
-            if (data.mags[inp.dataset.band] !== undefined) { inp.value = data.mags[inp.dataset.band]; markFilled(inp); }
+            var mag = data.mags[inp.dataset.band];
+            inp.value = mag !== undefined ? Number(mag.toFixed(6)) : '';
+            inp.classList.remove('filled');
+            if (mag !== undefined) markFilled(inp);
           });
           saveState();
         } else {
@@ -612,7 +631,7 @@
   // ---- Clear mags ----
   clearMags.addEventListener('click', function () {
     magInputs.forEach(function (inp) { inp.value = ''; inp.classList.remove('filled'); });
-    lookupStatus.textContent = ''; saveState();
+    lookupStatus.textContent = ''; magnitudeProvenance = ''; saveState();
   });
 
   // ---- Comparison stars (FOV handoff) ----
@@ -629,7 +648,7 @@
       var magsTxt = c.mags
         ? BROAD.filter(function (b) { return c.mags[b] !== undefined; })
             .map(function (b) { return b + '=' + Number(c.mags[b]).toFixed(2); }).join('  ')
-        : 'No griz photometry available for this star (no Pan-STARRS/SkyMapper match; Gaia color-transform fallback is under development).';
+        : 'No griz photometry available for this star (no Pan-STARRS/SkyMapper match or usable Gaia DR3 color).';
       return '<div class="comp-card">' +
         '<div class="comp-card-head">' +
           '<strong>' + c.label + '</strong>' +

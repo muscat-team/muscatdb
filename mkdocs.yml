@@ -9,6 +9,7 @@ nav:
   - Using muscat-db:
       - Getting started: using/getting-started.md
       - Browse a night: using/browse-a-night.md
+      - Exposure magnitude lookup: exposure.md
   - Science: science.md
   - Tech stack: tech-stack.md
   - Running the system: running.md
