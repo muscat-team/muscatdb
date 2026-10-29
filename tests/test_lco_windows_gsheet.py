@@ -7,6 +7,8 @@ temp DB via ``set_user_ephem_sheet``).
 
 from __future__ import annotations
 
+import pytest
+
 from fastapi.testclient import TestClient
 
 from muscat_db import web
@@ -81,9 +83,11 @@ def test_windows_gsheet_source_accepts_candidate_planet(monkeypatch, tmp_path):
     assert data["period"] == 3.0
 
 
-def test_windows_gsheet_tc_source_runs_linear_fit(monkeypatch, tmp_path):
+@pytest.mark.parametrize("source,owner", [("gsheet_tc", "alice"), ("shared_gsheet_tc", "jerome")])
+def test_windows_gsheet_tc_source_runs_linear_fit(monkeypatch, tmp_path, source, owner):
     client = _authed_client(monkeypatch, tmp_path)
-    set_user_ephem_sheet("alice", SHEET_URL)
+    monkeypatch.setenv("MUSCAT_SHARED_EPHEM_SHEET_USER", "jerome")
+    set_user_ephem_sheet(owner, SHEET_URL)
     # Two transit centers 10 epochs apart -> period ~= 3.0 d, plus a catalog
     # duration seed the fit itself does not produce.
     monkeypatch.setattr(
@@ -106,7 +110,7 @@ def test_windows_gsheet_tc_source_runs_linear_fit(monkeypatch, tmp_path):
     )
 
     resp = client.post(
-        "/api/lco/windows", headers=AUTH_HEADERS, json={**_WINDOW_BODY, "source": "gsheet_tc"}
+        "/api/lco/windows", headers=AUTH_HEADERS, json={**_WINDOW_BODY, "source": source}
     )
     assert resp.status_code == 200, resp.text
     data = resp.json()
@@ -125,3 +129,88 @@ def test_windows_gsheet_requires_configured_sheet(monkeypatch, tmp_path):
     )
     assert resp.status_code == 400
     assert "Google Sheet" in resp.json()["error"]
+
+
+def test_shared_sheet_and_personal_sheet_resolve_independently(monkeypatch, tmp_path):
+    client = _authed_client(monkeypatch, tmp_path)
+    monkeypatch.setenv("MUSCAT_SHARED_EPHEM_SHEET_USER", "jerome")
+    shared_url = SHEET_URL.replace(VALID_ID, "ZYXWVUTSRQPONMLKJIHGFEDC")
+    set_user_ephem_sheet("jerome", shared_url)
+    set_user_ephem_sheet("alice", SHEET_URL)
+    queried = []
+
+    def query(target, url, tab, col_map=None):
+        queried.append(url)
+        return {"b": {"t0": 2459000.5, "period": 3.0 if url == shared_url else 4.0, "duration": 2.0}}
+
+    monkeypatch.setattr(web.gsheet_ephemeris, "query_target_ephemeris", query)
+    for source, expected in [("shared_gsheet", 3.0), ("gsheet", 4.0)]:
+        resp = client.post("/api/lco/windows", headers=AUTH_HEADERS, json={**_WINDOW_BODY, "source": source})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["period"] == expected
+        assert shared_url not in resp.text and SHEET_URL not in resp.text
+    assert queried == [shared_url, SHEET_URL]
+    # Another user gets the shared source, but cannot inherit Alice's private one.
+    headers = {**AUTH_HEADERS, "X-Forwarded-User": "bob"}
+    response = client.post("/api/lco/windows", headers=headers, json={**_WINDOW_BODY, "source": "shared_gsheet"})
+    assert response.status_code == 200
+    response = client.post("/api/lco/windows", headers=headers, json={**_WINDOW_BODY, "source": "gsheet"})
+    assert response.status_code == 400
+
+
+def test_shared_sheet_checks_target_visibility_before_read(monkeypatch, tmp_path):
+    from fastapi import HTTPException
+    client = _authed_client(monkeypatch, tmp_path)
+    set_user_ephem_sheet("jerome", SHEET_URL)
+
+    def deny(*args):
+        raise HTTPException(404, "target not found")
+
+    monkeypatch.setattr(web, "_require_visible_object", deny)
+    monkeypatch.setattr(web, "_sheet_ephemeris", lambda *a: pytest.fail("hidden target sheet was read"))
+    response = client.post("/api/lco/windows", headers=AUTH_HEADERS, json={**_WINDOW_BODY, "source": "shared_gsheet"})
+    assert response.status_code == 404
+
+
+def test_shared_owner_settings_disclose_sharing(monkeypatch, tmp_path):
+    client = _authed_client(monkeypatch, tmp_path)
+    monkeypatch.setenv("MUSCAT_SHARED_EPHEM_SHEET_USER", "jerome")
+    for user in ("alice", "jerome"):
+        response = client.get("/api/settings/ephem-sheet-status", headers={**AUTH_HEADERS, "X-Forwarded-User": user})
+        assert response.json()["shared_with_everyone"] is (user == "jerome")
+
+
+def test_target_info_keeps_sources_separate_and_suppresses_hidden_sheets(monkeypatch, tmp_path):
+    client = _authed_client(monkeypatch, tmp_path)
+    monkeypatch.setenv("MUSCAT_SHARED_EPHEM_SHEET_USER", "jerome")
+    shared_url = SHEET_URL.replace(VALID_ID, "ZYXWVUTSRQPONMLKJIHGFEDC")
+    set_user_ephem_sheet("jerome", shared_url)
+    set_user_ephem_sheet("alice", SHEET_URL)
+    monkeypatch.setattr(web.fit, "sync_jobs", lambda: None)
+    monkeypatch.setattr(web.fit, "_discover_orphan_fits", lambda keys: [])
+    monkeypatch.setattr(web, "_target_coordinates", lambda target: None)
+    for name in ("_query_target_planets_catalog", "_query_target_planets_nasa", "_query_target_planets_toi"):
+        monkeypatch.setattr(web, name, lambda target: {})
+    monkeypatch.setattr(web.ttv, "list_ttv_runs", lambda target: [])
+    monkeypatch.setattr(web, "_sheet_fit_ephemeris", lambda *args: {})
+    queried = []
+
+    def read(target, cfg):
+        queried.append(cfg["url"])
+        return {"b": {"t0": 2459000.5, "period": 3.0 if cfg["url"] == shared_url else 4.0}}
+
+    monkeypatch.setattr(web, "_sheet_ephemeris", read)
+    response = client.get("/api/ephemeris/target-info", params={"target": "WASP-12"}, headers=AUTH_HEADERS)
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["shared_sheet_ephemeris"]["b"]["period"] == 3.0
+    assert data["sheet_ephemeris"]["b"]["period"] == 4.0
+    assert not data["shared_sheet_is_mine"]
+    assert shared_url not in response.text and SHEET_URL not in response.text
+    queried.clear()
+    monkeypatch.setattr(web, "_object_hidden", lambda *args, **kwargs: True)
+    response = client.get("/api/ephemeris/target-info", params={"target": "WASP-12"}, headers=AUTH_HEADERS)
+    assert response.status_code == 200
+    assert response.json()["shared_sheet_ephemeris"] == {}
+    assert response.json()["sheet_ephemeris"] == {}
+    assert queried == []

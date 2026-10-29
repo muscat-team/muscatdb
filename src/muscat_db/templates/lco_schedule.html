@@ -1156,12 +1156,19 @@
       opt.textContent = 'TTV model: ' + (r.run_name || 'default');
       sel.appendChild(opt);
     });
+    if (info.shared_sheet_configured) {
+      var sharedLabel = 'Shared Google Sheet (' + (info.shared_sheet_owner || 'team') + ')';
+      [['shared_gsheet', sharedLabel], ['shared_gsheet_tc', sharedLabel + ' — transit-center fit']].forEach(function (item) {
+        var option = document.createElement('option');
+        option.value = item[0]; option.textContent = item[1]; sel.appendChild(option);
+      });
+    }
     if (info.sheet_configured) {
       var gs = document.createElement('option');
-      gs.value = 'gsheet'; gs.textContent = 'Google Sheet';
+      gs.value = 'gsheet'; gs.textContent = info.shared_sheet_is_mine ? 'My Google Sheet (shared with everyone)' : (info.shared_sheet_is_mine ? 'My Google Sheet (shared with everyone)' : 'My Google Sheet (private)');
       sel.appendChild(gs);
       var gt = document.createElement('option');
-      gt.value = 'gsheet_tc'; gt.textContent = 'Sheet transit centers (linear fit)';
+      gt.value = 'gsheet_tc'; gt.textContent = gs.textContent + ' — transit-center fit';
       sel.appendChild(gt);
     }
     (info.datasets || []).forEach(function (d, i) {
@@ -1318,38 +1325,41 @@
       return;
     }
 
-    if (source === 'gsheet') {
-      var g = (info.sheet_ephemeris || {})[planet] || {};
+    var sharedSheet = source.indexOf('shared_') === 0;
+    var sheetLabel = sharedSheet ? 'Shared Google Sheet (' + info.shared_sheet_owner + ')' : (info.shared_sheet_is_mine ? 'My Google Sheet (shared with everyone)' : 'My Google Sheet (private)');
+    var sheetBadge = sharedSheet ? 'SHARED SHEET' : 'MY SHEET';
+    if (source === 'gsheet' || source === 'shared_gsheet') {
+      var g = ((sharedSheet ? info.shared_sheet_ephemeris : info.sheet_ephemeris) || {})[planet] || {};
       if (g.t0 == null || g.period == null) {
         setVal('sch-t0', ''); setVal('sch-period', '');
         setFieldSource('sch-t0', ''); setFieldSource('sch-period', '');
         saveOptions();
-        msg('msg-windows', 'No Google Sheet ephemeris for ' + planet, 'err');
+        msg('msg-windows', 'No ' + sheetLabel + ' ephemeris for ' + planet, 'err');
         return;
       }
       setVal('sch-t0', tupleString(g.t0, g.t0_unc));
       setVal('sch-period', tupleString(g.period, g.period_unc));
-      setFieldSource('sch-t0', 'SHEET'); setFieldSource('sch-period', 'SHEET');
-      if (g.duration != null) { dur = g.duration; setVal('sch-duration', tupleString(g.duration, g.duration_unc)); setFieldSource('sch-duration', 'SHEET'); }
+      setFieldSource('sch-t0', sheetBadge); setFieldSource('sch-period', sheetBadge);
+      if (g.duration != null) { dur = g.duration; setVal('sch-duration', tupleString(g.duration, g.duration_unc)); setFieldSource('sch-duration', sheetBadge); }
       saveOptions();
-      msg('msg-windows', 'Google Sheet: t0=' + g.t0 + ', P=' + g.period + ' d' + (dur != null ? ', dur=' + dur + ' h' : ''), 'ok');
+      msg('msg-windows', sheetLabel + ': t0=' + g.t0 + ', P=' + g.period + ' d' + (dur != null ? ', dur=' + dur + ' h' : ''), 'ok');
       return;
     }
 
-    if (source === 'gsheet_tc') {
-      var gt = (info.sheet_fit_ephemeris || {})[planet] || {};
+    if (source === 'gsheet_tc' || source === 'shared_gsheet_tc') {
+      var gt = ((sharedSheet ? info.shared_sheet_fit_ephemeris : info.sheet_fit_ephemeris) || {})[planet] || {};
       if (gt.t0 == null || gt.period == null) {
         setVal('sch-t0', ''); setVal('sch-period', '');
         setFieldSource('sch-t0', ''); setFieldSource('sch-period', '');
         saveOptions();
-        msg('msg-windows', 'No Sheet transit-center fit for ' + planet + ' (needs ≥2 epochs and a seed period)', 'err');
+        msg('msg-windows', 'No ' + sheetLabel + ' transit-center fit for ' + planet + ' (needs ≥2 epochs and a seed period)', 'err');
         return;
       }
       setVal('sch-t0', tupleString(gt.t0, gt.t0_unc));
       setVal('sch-period', tupleString(gt.period, gt.period_unc));
-      setFieldSource('sch-t0', 'SHEET'); setFieldSource('sch-period', 'SHEET');
+      setFieldSource('sch-t0', sheetBadge); setFieldSource('sch-period', sheetBadge);
       saveOptions();
-      msg('msg-windows', 'Sheet linear fit: t0=' + gt.t0 + ', P=' + gt.period + ' d' + (dur != null ? ', dur=' + dur + ' h' : ''), 'ok');
+      msg('msg-windows', sheetLabel + ' linear fit: t0=' + gt.t0 + ', P=' + gt.period + ' d' + (dur != null ? ', dur=' + dur + ' h' : ''), 'ok');
       return;
     }
 

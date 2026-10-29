@@ -83,7 +83,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     fetch("/chat/users", { headers: { "X-Requested-With": "fetch" } })
         .then((r) => (r.ok ? r.json() : null))
-        .then((d) => { if (d && Array.isArray(d.users)) knownUsers = d.users; })
+        .then((d) => { if (d && Array.isArray(d.users) && activeRoom === "chat:public") knownUsers = d.users; })
         .catch(() => {});
 
     // ----- helpers ---------------------------------------------------------
@@ -587,7 +587,66 @@ document.addEventListener("DOMContentLoaded", () => {
         chatMessages.insertBefore(el, prev ? prev.nextSibling : chatMessages.firstChild);
     };
 
+    let activeRoom = "chat:public";
+    const roomPresence = new Map();
+    const roomSelect = document.createElement("select");
+    roomSelect.id = "chat-room";
+    roomSelect.setAttribute("aria-label", "Chat room");
+    roomSelect.title = "Group rooms include group members and all unscoped team members";
+    chatHeader.after(roomSelect);
+    const filterRoom = () => {
+        Array.from(chatMessages.children).forEach((el) => {
+            el.hidden = !!el.dataset.room && el.dataset.room !== activeRoom;
+        });
+    };
+    const updateRoom = () => {
+        activeRoom = roomSelect.value;
+        knownUsers = [];
+        filterRoom();
+        typingUsers.forEach(clearTimeout); typingUsers.clear(); renderTyping();
+        const presence = roomPresence.get(activeRoom);
+        onlineEl.textContent = presence ? presence.count + " online" : "";
+        onlineEl.title = presence ? "Online: " + presence.users.join(", ") : "";
+        const requestedRoom = activeRoom;
+        fetch("/chat/users?room=" + encodeURIComponent(requestedRoom))
+            .then(r => r.ok ? r.json() : null)
+            .then(d => { if (d && roomSelect.value === requestedRoom) knownUsers = d.users || []; })
+            .catch(() => {});
+        try { localStorage.setItem("muscat-chat-room:" + getCurrentUser(), activeRoom); } catch (e) {}
+    };
+    roomSelect.addEventListener("change", updateRoom);
+    socket.on("chat_rooms", (d) => {
+        const rooms = d.rooms || [];
+        let preferred = activeRoom;
+        try { preferred = localStorage.getItem("muscat-chat-room:" + getCurrentUser()) || preferred; } catch (e) {}
+        roomSelect.replaceChildren();
+        rooms.forEach(room => {
+            const option = document.createElement("option");
+            option.value = room;
+            option.textContent = room === "chat:public" ? "Team — public" : room.slice(6) + " — group + team";
+            roomSelect.appendChild(option);
+        });
+        roomSelect.value = rooms.includes(preferred) ? preferred : (rooms[0] || "");
+        // Reconnect may follow an access change: remove unauthorized cached rows.
+        els.forEach((entry, id) => {
+            if (!entry.data.visible_to && !rooms.includes(entry.data.room || "chat:public")) {
+                entry.el.remove(); els.delete(id);
+            }
+        });
+        updateRoom();
+    });
     const renderMessage = (data) => {
+        const previous = new Set(chatMessages.children);
+        renderRoomMessage(data);
+        Array.from(chatMessages.children).forEach(el => {
+            if (!previous.has(el) && !data.private && !data.visible_to && !data.notice && data.kind !== "help") {
+                el.dataset.room = data.room || "chat:public";
+            }
+        });
+        filterRoom();
+    };
+
+    const renderRoomMessage = (data) => {
         if (chatEmpty && chatEmpty.parentNode) chatEmpty.remove();
 
         // System messages get a compact, centered treatment.
@@ -873,7 +932,7 @@ document.addEventListener("DOMContentLoaded", () => {
         }
         const text = applyTextCommands(expandHere(messageInput.value).trim());
         if (!text) return;
-        socket.emit("message", { user: getCurrentUser(), text });
+        socket.emit("message", { user: getCurrentUser(), text, room: activeRoom });
         messageInput.value = "";
         stopTyping();
         hideAutocomplete();
@@ -948,13 +1007,13 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // ----- typing indicator ------------------------------------------------
     const sendTyping = () => {
-        if (!typingSent) { socket.emit("typing", { typing: true }); typingSent = true; }
+        if (!typingSent) { socket.emit("typing", { typing: true, room: activeRoom }); typingSent = true; }
         clearTimeout(typingStopTimer);
         typingStopTimer = setTimeout(stopTyping, 2500);
     };
     function stopTyping() {
         clearTimeout(typingStopTimer);
-        if (typingSent) { socket.emit("typing", { typing: false }); typingSent = false; }
+        if (typingSent) { socket.emit("typing", { typing: false, room: activeRoom }); typingSent = false; }
     }
     const renderTyping = () => {
         const names = Array.from(typingUsers.keys());
@@ -1042,7 +1101,7 @@ document.addEventListener("DOMContentLoaded", () => {
     socket.on("chat_error", (d) => { if (d && d.error) showNotice(d.error); });
 
     socket.on("typing", (d) => {
-        if (!d || !d.user) return;
+        if (!d || !d.user || (d.room && d.room !== activeRoom)) return;
         if (currentUser && d.user.toLowerCase() === currentUser.toLowerCase()) return;
         if (d.typing) {
             clearTimeout(typingUsers.get(d.user));
@@ -1079,6 +1138,8 @@ document.addEventListener("DOMContentLoaded", () => {
     });
     socket.on("connect", () => { lastConnectError = ""; });
     socket.on("presence", (d) => {
+        roomPresence.set(d.room || "chat:public", d);
+        if ((d.room || "chat:public") !== activeRoom) return;
         const users = (d && Array.isArray(d.users)) ? d.users : [];
         const n = (d && typeof d.count === "number") ? d.count : users.length;
         onlineEl.textContent = n + " online";

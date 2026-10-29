@@ -149,3 +149,23 @@ def test_draft_check_and_submit_never_books_while_submission_is_disabled(page, l
     expect(page.locator("#msg-ipp")).to_contain_text("0 booked, 1 failed")
     expect(request).to_contain_text("Live submission is disabled on the server")
     assert ("POST", "https://observe.lco.global/api/requestgroups/") not in lco_account
+
+
+def test_shared_and_private_sheet_dropdown_selects_distinct_values(page):
+    page.problems.allowed.extend(NO_TOKEN)
+    page.route('**/api/ephemeris/target-info?*', lambda route: route.fulfill(json={
+        'ok': True, 'planets': ['b'], 'datasets': [], 'ttv_runs': [],
+        'sheet_configured': True, 'shared_sheet_configured': True,
+        'shared_sheet_owner': 'jerome', 'sheet_ephemeris': {'b': {'t0': 2461314.5, 'period': 4.0}},
+        'shared_sheet_ephemeris': {'b': {'t0': 2461315.5, 'period': 3.0}},
+        'sheet_fit_ephemeris': {'b': {'t0': 2461316.5, 'period': 4.1}},
+        'shared_sheet_fit_ephemeris': {'b': {'t0': 2461317.5, 'period': 3.1}},
+    }))
+    page.goto('/lco/schedule')
+    page.fill('#sch-target', 'TOI-1000')
+    page.locator('#sch-target').blur()
+    expect(page.locator('#sch-source option[value="shared_gsheet"]')).to_have_text('Shared Google Sheet (jerome)')
+    expect(page.locator('#sch-source option[value="gsheet"]')).to_have_text('My Google Sheet (private)')
+    for source, period in [('shared_gsheet', '3'), ('gsheet', '4'), ('shared_gsheet_tc', '3.1'), ('gsheet_tc', '4.1')]:
+        page.select_option('#sch-source', source)
+        expect(page.locator('#sch-period')).to_have_value(period)

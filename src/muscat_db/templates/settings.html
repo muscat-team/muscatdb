@@ -107,7 +107,8 @@
 </div>
 
 <div class="settings-section collapsed">
-  <h3>Ephemeris Google Sheet</h3>
+  <h3>My ephemeris Google Sheet</h3>
+  <p class="hint">Your source is private within muscat-db unless you are the designated shared-sheet owner. The shared team sheet is a separate source in the schedule dropdown. Google link-sharing permissions still apply.</p>
   <div class="settings-body">
     <div class="opt-grid">
       <div class="opt">
@@ -248,6 +249,7 @@
           }
           var parts = [];
           parts.push('User: ' + d.user);
+          parts.push(d.shared_with_everyone ? 'SHARED WITH EVERYONE: replacing or clearing this sheet changes the shared scheduling source' : 'Private source within muscat-db');
           parts.push('user credentials: ' + (d.user_credentials_configured ? 'saved' : 'not saved'));
           parts.push('global fallback: ' + (d.global_credentials_configured ? 'available' : 'unset'));
           parts.push('encryption secret: ' + (d.secret_configured ? 'set' : 'unset'));
@@ -451,6 +453,7 @@
           var nCols = Object.keys(currentEphemCols).length + Object.keys(currentTcCols).length;
           var parts = [];
           parts.push('User: ' + d.user);
+          parts.push(d.shared_with_everyone ? 'SHARED WITH EVERYONE: replacing or clearing this sheet changes the shared scheduling source' : 'Private source within muscat-db');
           parts.push('sheet: ' + (d.configured ? 'saved' : 'not saved'));
           parts.push('tabs: ' + d.ephem_tab + ' / ' + d.tc_tab);
           parts.push('column overrides: ' + (nCols ? nCols : 'none'));

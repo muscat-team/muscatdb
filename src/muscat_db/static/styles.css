@@ -1346,6 +1346,7 @@ body.chat-popout #minimize-chat {
     min-height: 0;
 }
 
+#chat-window.minimized #chat-room,
 #chat-window.minimized #chat-messages,
 #chat-window.minimized #chat-input,
 #chat-window.minimized #chat-resize-handle {
@@ -1890,3 +1891,7 @@ body.chat-popout #minimize-chat {
 }
 
 
+
+/* Chat room selector also appears in the pop-out window. */
+#chat-room { margin: 0.35rem 0.6rem; max-width: calc(100% - 1.2rem); }
+#chat-messages .message[hidden] { display: none; }
