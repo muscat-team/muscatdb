@@ -97,8 +97,8 @@
 <details class="lco-section section-fold" open>
   <summary><h3>Target &amp; Transit Windows</h3></summary>
   <div class="lco-grid">
-    <div class="lco-field"><label for="sch-target">Target <span class="help-tooltip" title="Target star name. Matches normalized names from muscat-db (e.g. HIP 67522, TOI-1234).">?</span></label><input id="sch-target" type="text" placeholder="WASP-12" list="target-datalist" autocomplete="off"><datalist id="target-datalist"></datalist></div>
-    <div class="lco-field"><label for="sch-planet">Planet <span class="help-tooltip" title="Planet letter identifier (e.g. b, c). Used to look up the ephemeris for this planet.">?</span></label><input id="sch-planet" type="text" placeholder="b" style="max-width: 90px;"></div>
+    <div class="lco-field"><label for="sch-target">Target <span class="help-tooltip" title="Target star name. Matches normalized names from muscat-db (e.g. HIP 67522, TOI-1234).">?</span></label><input id="sch-target" type="text" placeholder="e.g. WASP-12" list="target-datalist" autocomplete="off"><datalist id="target-datalist"></datalist></div>
+    <div class="lco-field"><label for="sch-planet">Planet <span class="help-tooltip" title="Planet letter identifier (e.g. b, c). Used to look up the ephemeris for this planet.">?</span></label><input id="sch-planet" type="text" placeholder="e.g. b" style="max-width: 90px;"></div>
     <div class="lco-field"><label for="sch-source">Ephemeris source <span class="help-tooltip" title="Where t0 / period come from. 'linear fit' refines the ephemeris across all of this target's completed transit fits; individual datasets use that fit's t0/period directly (same as the Planetary Reference Ephemerides on the Ephemeris page). Click 'Fetch ephemeris' to populate datasets.">?</span></label>
       <select id="sch-source">
         <option value="">Auto</option>
@@ -232,7 +232,7 @@
         <option value="muscat">2M0-SCICAM-MUSCAT</option>
       </select>
     </div>
-    <div class="lco-field" id="sch-name-field" style="display: none;"><label for="sch-name">Request name <span class="help-tooltip" title="Human-readable name for this LCO request. Shown in the observing queue.">?</span></label><input id="sch-name" type="text" placeholder="WASP-12b transit"></div>
+    <div class="lco-field" id="sch-name-field" style="display: none;"><label for="sch-name">Request name <span class="help-tooltip" title="Human-readable name for this LCO request. Shown in the observing queue.">?</span></label><input id="sch-name" type="text" placeholder="e.g. WASP-12b transit"></div>
     <div class="lco-field" id="sch-site-field" style="display: none;"><label>Site <span class="help-tooltip" title="Observing site. Auto-filled from the checked window(s): the shared best site when they agree, or left blank when they differ so LCO's scheduler picks an observable node. For MuSCAT3 choose ogg (Maui) or coj (Siding Spring); for Sinistro choose any LCO 1m node (no unit at ogg); for QHY600 choose any LCO 0.4m node (all 6 sites, including ogg); or leave blank to let LCO pick.">?</span></label>
       <div class="muscat-only" style="display: none;">
         <select id="sch-muscat-site">
@@ -272,7 +272,7 @@
       </div>
       <div class="lco-field">
         <label for="sch-effective-exptime">Exp time (s) <span class="help-tooltip" title="Exposure time in seconds for Sinistro/QHY600 observations.">?</span></label>
-        <input id="sch-effective-exptime" type="text" inputmode="decimal" placeholder="60">
+        <input id="sch-effective-exptime" type="text" inputmode="decimal" placeholder="e.g. 60">
       </div>
       <div class="lco-field">
         <label for="sch-effective-mode">Readout <span class="help-tooltip" title="Readout mode. Sinistro: 2k 2x2 uses central CCD region, full uses entire frame. QHY600: central30x30 crops to a 30'x30' subframe (default, no binning), full uses entire frame.">?</span></label>
@@ -288,10 +288,10 @@
     <div class="lco-subhead lco-block-title" id="muscat-block-title">MuSCAT</div>
     <div class="lco-subhead">Exposure times per band</div>
     <div class="lco-grid" style="grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 0.5rem 1rem;">
-      <div class="lco-field"><label for="sch-exp-g">g (s) <span class="help-tooltip" title="Exposure time in seconds for the g band.">?</span></label><input id="sch-exp-g" type="number" step="any" placeholder="30"></div>
-      <div class="lco-field"><label for="sch-exp-r">r (s) <span class="help-tooltip" title="Exposure time in seconds for the r band.">?</span></label><input id="sch-exp-r" type="number" step="any" placeholder="30"></div>
-      <div class="lco-field"><label for="sch-exp-i">i (s) <span class="help-tooltip" title="Exposure time in seconds for the i band.">?</span></label><input id="sch-exp-i" type="number" step="any" placeholder="30"></div>
-      <div class="lco-field"><label for="sch-exp-z">z (s) <span class="help-tooltip" title="Exposure time in seconds for the z band.">?</span></label><input id="sch-exp-z" type="number" step="any" placeholder="30"></div>
+      <div class="lco-field"><label for="sch-exp-g">g (s) <span class="help-tooltip" title="Exposure time in seconds for the g band.">?</span></label><input id="sch-exp-g" type="number" step="any" placeholder="e.g. 30"></div>
+      <div class="lco-field"><label for="sch-exp-r">r (s) <span class="help-tooltip" title="Exposure time in seconds for the r band.">?</span></label><input id="sch-exp-r" type="number" step="any" placeholder="e.g. 30"></div>
+      <div class="lco-field"><label for="sch-exp-i">i (s) <span class="help-tooltip" title="Exposure time in seconds for the i band.">?</span></label><input id="sch-exp-i" type="number" step="any" placeholder="e.g. 30"></div>
+      <div class="lco-field"><label for="sch-exp-z">z (s) <span class="help-tooltip" title="Exposure time in seconds for the z band.">?</span></label><input id="sch-exp-z" type="number" step="any" placeholder="e.g. 30"></div>
     </div>
     <div class="lco-subhead">Settings</div>
     <div class="lco-grid" style="grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 0.5rem 1rem;">
