@@ -277,6 +277,18 @@ add roughly 3-4 minutes to the nightly run on an idle disk; see
 [Database integrity failure](notes/DEPLOYMENT.md#database-integrity-failure) when
 it refuses or runs for hours.
 
+The rebuild ingests and validates a separate catalog, then publishes `frames`,
+`summaries`, `targets`, and `db_meta` in one SQLite transaction. Application
+state (including notes, users, access grants, jobs, leases, and reservations)
+remains in the live database, so commits made during the rebuild survive.
+Target keys are refreshed against the current grants in that same transaction.
+WAL readers retain a consistent snapshot; writers wait during publication and
+may time out if it exceeds their busy timeout (normally 30 seconds). The log
+reports the publication transaction duration. A failed publication rolls back
+the catalog changes. Accepted leaked pages are reclaimed with a live `VACUUM`
+before publication, which also takes the write lock; healthy databases are not
+vacuumed automatically.
+
 ### LCO proposal sync
 
 `muscat-db lco-sync <PROPID>...` syncs a proposal's BANZAI final products
@@ -453,10 +465,27 @@ disk-consolidation path.
 
 ### Repairing a split (disk consolidation)
 
-`build-db` executes `DROP TABLE IF EXISTS frames; summaries; targets` and rebuilds
-them entirely from the obslog CSV tree. App-owned tables (notes, overrides, jobs,
-saved ephemeris views) are preserved; the observation-derived ones are not. **Any
-edit made directly to `muscat.db` is erased by the next nightly cron run.**
+`build-db` rebuilds `frames`, `summaries`, and `targets` entirely from the
+obslog CSV tree and publishes them atomically. App-owned tables (notes,
+overrides, jobs, saved ephemeris views) are preserved; the observation-derived
+ones are not. **An edit made directly to an observation-derived table is erased
+by the next nightly cron run.**
+
+Publication copies rows and maintains indexes in batches of 10,000, allowing
+application writes between commits. A short final transaction switches all
+catalog tables and refreshes target keys together; readers see either catalog,
+never a partial replacement. Retired tables are cleared in batches. Interrupted
+copies are cleaned up by the next rebuild, and concurrent builders serialize
+through a `.build.lock` file. Budget disk space for the snapshot, staging file,
+old and new catalog tables, and WAL; old readers may retain WAL pages.
+
+Online rebuilds do not run `VACUUM`: it holds SQLite's writer lock for the whole
+database. If the integrity gate accepts only leaked-page warnings, the rebuild
+retains them and logs `schedule VACUUM during maintenance`. Keep the clean backup
+and follow the [integrity recovery procedure](notes/DEPLOYMENT.md#database-integrity-failure)
+in a maintenance window to compact the database. Application writer timeouts
+remain 30 seconds.
+
 
 The source-of-truth chain, top to bottom:
 
