@@ -1,6 +1,7 @@
 """Publishing a rebuilt catalog must preserve concurrent application commits."""
 
 import sqlite3
+import threading
 
 import pytest
 
@@ -311,3 +312,44 @@ def test_publication_retries_abandoned_shadows_without_duplicate_indexes(catalog
             assert not conn.execute("SELECT name FROM sqlite_schema WHERE name GLOB '_catalog_*'").fetchall()
             assert conn.execute("SELECT note FROM target_notes WHERE object='DURING'").fetchone() == ('survives retry',)
             assert conn.execute('PRAGMA integrity_check').fetchone() == ('ok',)
+
+
+def test_second_builder_waits_for_the_catalog_build_lock(live_db, monkeypatch):
+    """Rebuilds serialize: a second build_db must not start while one holds the lock."""
+    built = []
+    monkeypatch.setattr(database, "_build_db", lambda path, progress=None: built.append(path) or 0)
+
+    with database._catalog_build_lock(live_db):
+        builder = threading.Thread(target=database.build_db, args=(live_db,), daemon=True)
+        builder.start()
+        builder.join(timeout=0.5)
+        assert builder.is_alive()
+        assert built == []
+
+    builder.join(timeout=10)
+    assert built == [live_db]
+
+
+def test_ingest_waits_for_the_catalog_build_lock(live_db, monkeypatch):
+    """An ingest writes frames that a rebuild replaces at publication, so it waits for the build."""
+    monkeypatch.setattr(
+        database, "_discover_csv_jobs",
+        lambda instrument=None, obsdate=None: [("muscat3", "260101", "obslog.csv", 1)],
+    )
+    ingested = []
+    monkeypatch.setattr(
+        database, "_ingest_csv_jobs",
+        lambda conn, csv_jobs, progress=None: ingested.append(csv_jobs) or 0,
+    )
+
+    with database._catalog_build_lock(live_db):
+        ingester = threading.Thread(
+            target=database.ingest_date, args=(live_db, "muscat3", "260101"), daemon=True,
+        )
+        ingester.start()
+        ingester.join(timeout=0.5)
+        assert ingester.is_alive()
+        assert ingested == []
+
+    ingester.join(timeout=10)
+    assert len(ingested) == 1

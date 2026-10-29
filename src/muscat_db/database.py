@@ -1035,8 +1035,9 @@ _PUBLISH_BATCH_ROWS = 10_000
 
 @contextmanager
 def _catalog_build_lock(db_path: str):
-    # Serialize builders, including stale shadow cleanup. Application writers
-    # never acquire this lock. The kernel releases it after a killed rebuild.
+    # Serialize rebuilds, including stale shadow cleanup, and CSV ingests, which
+    # write the frames a rebuild replaces. Application-state writers (leases,
+    # jobs) never acquire this lock. The kernel releases it after a killed rebuild.
     with open(db_path + ".build.lock", "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         try:
@@ -1339,65 +1340,71 @@ def _require_catalog_write_access() -> None:
 
 
 def ingest_date(db_path: str, instrument: str, obsdate: str, progress=None) -> int:
-    """Ingest one instrument/date from obslog CSVs into an existing database."""
+    """Ingest one instrument/date from obslog CSVs into an existing database.
+
+    Holds the catalog build lock while writing: a rebuild publishes a staged
+    copy of the frames, so rows written while it runs would be replaced at the
+    switch. An ingest that arrives during a rebuild waits for it to finish.
+    """
     _require_catalog_write_access()
     csv_jobs = _discover_csv_jobs(instrument, obsdate)
     if not csv_jobs:
         raise FileNotFoundError(f"No obslog CSVs found for {instrument} {obsdate}")
 
-    conn = connect(db_path)
-    try:
-        conn.create_aggregate("coord_repr", 2, CoordRepr)
-        conn.execute("PRAGMA cache_size=100000;")
-        # Keep GROUP BY / sort spills on the DB's own (roomy) volume, not /tmp.
-        _set_temp_store_dir(conn, db_path)
-        _apply_schema(conn)
+    with _catalog_build_lock(db_path):
+        conn = connect(db_path)
+        try:
+            conn.create_aggregate("coord_repr", 2, CoordRepr)
+            conn.execute("PRAGMA cache_size=100000;")
+            # Keep GROUP BY / sort spills on the DB's own (roomy) volume, not /tmp.
+            _set_temp_store_dir(conn, db_path)
+            _apply_schema(conn)
 
-        old_objects = {
-            row[0] for row in conn.execute(
-                "SELECT DISTINCT object FROM summaries WHERE instrument = ? AND obsdate = ?",
-                (instrument, obsdate),
-            ).fetchall()
-            if row[0] is not None
-        }
+            old_objects = {
+                row[0] for row in conn.execute(
+                    "SELECT DISTINCT object FROM summaries WHERE instrument = ? AND obsdate = ?",
+                    (instrument, obsdate),
+                ).fetchall()
+                if row[0] is not None
+            }
 
-        conn.execute("DELETE FROM frames WHERE instrument = ? AND obsdate = ?", (instrument, obsdate))
-        conn.execute("DELETE FROM summaries WHERE instrument = ? AND obsdate = ?", (instrument, obsdate))
+            conn.execute("DELETE FROM frames WHERE instrument = ? AND obsdate = ?", (instrument, obsdate))
+            conn.execute("DELETE FROM summaries WHERE instrument = ? AND obsdate = ?", (instrument, obsdate))
 
-        count = _ingest_csv_jobs(conn, csv_jobs, progress=progress)
-        summary_rows = _summary_rows(conn, instrument=instrument, obsdate=obsdate)
+            count = _ingest_csv_jobs(conn, csv_jobs, progress=progress)
+            summary_rows = _summary_rows(conn, instrument=instrument, obsdate=obsdate)
 
-        summary_task = None
-        if progress is not None:
-            summary_task = progress.add_task(
-                "[cyan]Building summaries[/]", total=len(summary_rows), filename=f"{instrument} {obsdate}",
+            summary_task = None
+            if progress is not None:
+                summary_task = progress.add_task(
+                    "[cyan]Building summaries[/]", total=len(summary_rows), filename=f"{instrument} {obsdate}",
+                )
+            _insert_summary_rows(conn, summary_rows)
+            if progress is not None:
+                progress.update(summary_task, completed=len(summary_rows))
+
+            new_objects = {
+                row[0] for row in conn.execute(
+                    "SELECT DISTINCT object FROM summaries WHERE instrument = ? AND obsdate = ?",
+                    (instrument, obsdate),
+                ).fetchall()
+                if row[0] is not None
+            }
+            _replace_target_rows(conn, old_objects | new_objects)
+            target_keys.refresh(conn)
+
+            now = datetime.datetime.now().isoformat()
+            conn.execute(
+                "INSERT OR REPLACE INTO db_meta (key, value) VALUES ('last_build_at', ?)",
+                (now,),
             )
-        _insert_summary_rows(conn, summary_rows)
-        if progress is not None:
-            progress.update(summary_task, completed=len(summary_rows))
-
-        new_objects = {
-            row[0] for row in conn.execute(
-                "SELECT DISTINCT object FROM summaries WHERE instrument = ? AND obsdate = ?",
-                (instrument, obsdate),
-            ).fetchall()
-            if row[0] is not None
-        }
-        _replace_target_rows(conn, old_objects | new_objects)
-        target_keys.refresh(conn)
-
-        now = datetime.datetime.now().isoformat()
-        conn.execute(
-            "INSERT OR REPLACE INTO db_meta (key, value) VALUES ('last_build_at', ?)",
-            (now,),
-        )
-        conn.execute(
-            "INSERT OR REPLACE INTO db_meta (key, value) VALUES ('last_ingest_at', ?)",
-            (now,),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+            conn.execute(
+                "INSERT OR REPLACE INTO db_meta (key, value) VALUES ('last_ingest_at', ?)",
+                (now,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
     clear_all_caches()
     return count
