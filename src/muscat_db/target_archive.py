@@ -17,8 +17,9 @@ from muscat_db.dayobs import dayobs_from_filename
 _CACHE_TTL = 3600
 _CACHE_SIZE = 16
 _cache: OrderedDict = OrderedDict()
-# Serialize cache fills: simultaneous panel opens must not multiply archive requests.
+# Protect cache operations; matching searches share an in-flight event.
 _cache_lock = threading.Lock()
+_inflight: dict[tuple, threading.Event] = {}
 
 
 def _night(frame: dict) -> str:
@@ -52,16 +53,22 @@ def _coords(target: str, denied: frozenset[str]) -> tuple[float, float] | None:
 def _search(coords, user_name, start, end, *, require_own_token):
     token = lco._get_lco_api_token(user_name, require_own_token=require_own_token)
     key = (coords, user_name, hashlib.sha256(token.encode()).hexdigest(), start, end)
-    while not _cache_lock.acquire(timeout=1):
+    while True:
+        with _cache_lock:
+            now = time.monotonic()
+            for old in list(_cache):
+                if now - _cache[old][0] >= _CACHE_TTL:
+                    del _cache[old]
+            if key in _cache:
+                _cache.move_to_end(key)
+                return _cache[key][1]
+            waiting = _inflight.get(key)
+            if waiting is None:
+                _inflight[key] = threading.Event()
+                break
+        waiting.wait(timeout=1)
         yield {'progress': 'Waiting for another archive search…'}
     try:
-        now = time.monotonic()
-        for old in list(_cache):
-            if now - _cache[old][0] >= _CACHE_TTL:
-                del _cache[old]
-        if key in _cache:
-            _cache.move_to_end(key)
-            return _cache[key][1]
         filters = {'covers': f'POINT({coords[0]} {coords[1]})', 'reduction_level': '91',
                    'configuration_type': 'EXPOSE', 'limit': '1000'}
         if start:
@@ -76,22 +83,28 @@ def _search(coords, user_name, start, end, *, require_own_token):
         aliases = {'SITEID': 'site_id', 'TELID': 'telescope_id', 'INSTRUME': 'instrument_id',
                    'DAY_OBS': 'observation_day', 'OBJECT': 'target_name',
                    'FILTER': 'primary_optical_element', 'EXPTIME': 'exposure_time'}
-        result = {'results': []}
-        for page in lco.archive_cursor_pages(filters, user_name, token=token):
-            for frame in page:
-                compact = {k: frame[k] for k in fields if k in frame}
-                for field, alias in aliases.items():
-                    if compact.get(field) is None and alias in frame:
-                        compact[field] = frame[alias]
-                result['results'].append(compact)
-            # Don't expose raw counts before proposal filtering.
-            yield {'progress': 'Searching all archive nights…'}
-        _cache[key] = (time.monotonic(), result)
-        while len(_cache) > _CACHE_SIZE:
-            _cache.popitem(last=False)
+        result = {'results': [], 'truncated': False}
+        try:
+            for page in lco.archive_cursor_pages(filters, user_name, token=token):
+                for frame in page:
+                    compact = {k: frame[k] for k in fields if k in frame}
+                    for field, alias in aliases.items():
+                        if compact.get(field) is None and alias in frame:
+                            compact[field] = frame[alias]
+                    result['results'].append(compact)
+                # Don't expose raw counts before proposal filtering.
+                yield {'progress': 'Searching all archive nights…'}
+        except lco.ArchiveSearchLimit:
+            result['truncated'] = True
+        if not result['truncated']:
+            with _cache_lock:
+                _cache[key] = (time.monotonic(), result)
+                while len(_cache) > _CACHE_SIZE:
+                    _cache.popitem(last=False)
         return result
     finally:
-        _cache_lock.release()
+        with _cache_lock:
+            _inflight.pop(key).set()
 
 
 def inventory_events(target: str, user_name: str | None, *, denied=frozenset(), start='', end=''):
@@ -183,7 +196,8 @@ def inventory_events(target: str, user_name: str | None, *, denied=frozenset(), 
             for e in entries
         ) if report.get('ok') else None
         rows.append(group)
-    yield {'ok': True, 'rows': sorted(rows, key=lambda r: (r['date'], r['request_id']), reverse=True)}
+    yield {'ok': True, 'truncated': result['truncated'],
+           'rows': sorted(rows, key=lambda r: (r['date'], r['request_id']), reverse=True)}
 
 
 def inventory(target: str, user_name: str | None, **kwargs):

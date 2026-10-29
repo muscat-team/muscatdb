@@ -99,7 +99,8 @@
       });
       table.hidden = !data.rows.length;
       status.textContent = data.rows.length ? data.rows.length + ' archive datasets.' : 'No visible archive datasets found.';
-      loaded = true;
+      if (data.truncated) status.textContent += ' Incomplete: search budget reached; narrow the dates and search again.';
+      loaded = !data.truncated;
     } catch (error) {
       loaded = false; status.textContent = error.message + ' Use Search to retry.';
     } finally {

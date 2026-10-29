@@ -7,6 +7,8 @@ from fastapi.testclient import TestClient
 from muscat_db import target_archive as inventory, lco, exofop, web
 from muscat_db.database import ScopedDenied
 
+_REAL_CURSOR_PAGES = lco.archive_cursor_pages
+
 
 def frame(seq=1, request=101, **extra):
     return dict(filename=f'lsc1m005-fa15-20261003-{seq:04d}-e91.fits.fz',
@@ -231,3 +233,70 @@ def test_abandoned_stream_releases_search_lock_without_caching(setup):
     assert not inventory._cache_lock.locked()
     assert not inventory._cache
     assert inventory.inventory('TOI-1000', 'alice')['ok']
+
+
+def test_other_user_search_does_not_wait_for_open_stream(setup):
+    first = inventory.inventory_events('TOI-1000', 'alice')
+    second = inventory.inventory_events('TOI-1000', 'bob')
+    try:
+        next(first)
+        next(first)
+        next(second)
+        assert next(second)['progress'] == 'Searching all archive nights…'
+    finally:
+        first.close()
+        second.close()
+
+
+def test_inventory_budget_is_incomplete_and_not_cached(setup, monkeypatch):
+    monkeypatch.setattr(lco, '_ARCHIVE_CURSOR_MAX_PAGES', 2, raising=False)
+    calls = []
+    def page(url, **kw):
+        calls.append(url)
+        return {'results': [frame(len(calls))],
+                'next': f'https://archive-api.lco.global/frames/?cursor={len(calls)}' if len(calls) < 5 else None}
+    # Restore the real pager instead of the fixture's inventory stub.
+    monkeypatch.setattr(lco, 'archive_cursor_pages', _REAL_CURSOR_PAGES)
+    monkeypatch.setattr(lco, '_ARCHIVE_CURSOR_MAX_PAGES', 2, raising=False)
+    monkeypatch.setattr(lco, '_get_lco_api_token', lambda *a, **kw: 'budget-token')
+    monkeypatch.setattr(lco, '_lco_api_request', page)
+    data = inventory.inventory('TOI-1000', 'alice')
+    assert len(calls) == 2
+    assert data['truncated']
+    assert not inventory._cache
+
+
+def test_matching_searches_share_fill_and_release_on_close(setup):
+    first = inventory.inventory_events('TOI-1000', 'alice')
+    second = inventory.inventory_events('TOI-1000', 'alice')
+    try:
+        next(first)
+        next(first)
+        next(second)
+        assert 'Waiting' in next(second)['progress']
+        list(first)
+        assert list(second)[-1]['ok']
+        assert len(setup[2]) == 1
+    finally:
+        first.close()
+        second.close()
+    assert not inventory._inflight
+
+
+@pytest.mark.parametrize('rows,next_url,truncated', [
+    ([], 'https://archive-api.lco.global/frames/?cursor=next', True),
+    ([frame(), frame(2)], None, False),
+    ([frame(), frame(2), frame(3)], None, True),
+])
+def test_cursor_budget_boundaries(monkeypatch, rows, next_url, truncated):
+    monkeypatch.setattr(lco, '_ARCHIVE_CURSOR_MAX_PAGES', 1)
+    monkeypatch.setattr(lco, '_ARCHIVE_CURSOR_MAX_FRAMES', 2)
+    calls = []
+    def page(url, **kw):
+        calls.append(url)
+        return {'results': rows, 'next': next_url}
+    monkeypatch.setattr(lco, '_lco_api_request', page)
+    result = lco.archive_search_all({}, max_frames=None)
+    assert result['truncated'] is truncated
+    assert len(result['results']) == min(2, len(rows))
+    assert len(calls) == 1

@@ -589,8 +589,10 @@ A proprietary label means the archive's public-release date is still in the
 future; it does not prevent an authorized download.
 
 Searches follow [LCO cursor pagination](https://developers.lco.global/#pagination)
-in sequential pages of 1,000 frames until all matching nights have been read,
-without a total-frame cutoff. Progress streams while the search runs. An error
+in sequential pages of 1,000 frames, stopping after 50 pages or 50,000 frames.
+A search that reaches this budget is labeled incomplete; narrow the dates to
+retrieve the remaining nights. Incomplete inventories are not cached. Progress
+streams while the search runs. An error
 on any page leaves the search incomplete and uncached; use Search to retry.
 Optional UT date filters (inclusive end date) narrow the search, and persist per
 target in the browser. ExoFOP-reported nights are included: a report does not
@@ -602,8 +604,10 @@ reflects the existing ExoFOP lookup, which may also return no rows during an out
 ### Complete searches on the LCO archive page
 
 On `/lco/archive`, **All matching frames** is the default search scope. Object
-searches follow all cursor pages, including nights beyond the former total-frame
-limit. Choose **Quick preview** to deliberately cap retrieval (up to 10,000 frames);
+searches follow cursor pages, including nights beyond the former 10,000-frame
+limit, with a server ceiling of 50 pages or 50,000 frames. Budget-limited results
+are labeled incomplete; narrow the target, proposal or dates before retrying.
+Choose **Quick preview** to deliberately cap retrieval (up to 10,000 frames);
 truncated previews are labeled incomplete. A limit saved by an older version does
 not enable preview mode: the new scope must be selected explicitly.
 

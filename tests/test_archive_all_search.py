@@ -1,6 +1,7 @@
 """The archive page defaults to complete object searches, not previews."""
 from urllib.parse import parse_qs, urlsplit
 
+import pytest
 from fastapi.testclient import TestClient
 
 from muscat_db import lco, web
@@ -50,3 +51,31 @@ def test_numeric_preview_remains_explicit_and_limited(mock_db, monkeypatch):
     monkeypatch.setattr(lco, '_lco_api_request', page)
     data = TestClient(web.app).get('/api/lco/archive/frames?OBJECT=TOI-1000&limit=5').json()
     assert len(data['results']) == 5 and data['truncated']
+
+
+@pytest.mark.parametrize('stream', [False, True])
+def test_blank_fuzzy_search_has_server_budget(mock_db, monkeypatch, stream):
+    import json
+    monkeypatch.setattr(lco, '_ARCHIVE_CURSOR_MAX_PAGES', 2, raising=False)
+    monkeypatch.setattr(web, '_annotate_lco_archive_results', lambda inst, rows, **kw: (rows, 1))
+    calls = []
+    def page(url, **kw):
+        calls.append(url)
+        return {'results': [frame(len(calls))],
+                'next': f'https://archive-api.lco.global/frames/?cursor={len(calls)}' if len(calls) < 5 else None}
+    monkeypatch.setattr(lco, '_lco_api_request', page)
+    response = TestClient(web.app).get('/api/lco/archive/frames', params={'fuzzy_name': 'true', 'stream': str(stream).lower()})
+    data = json.loads(response.text.splitlines()[-1]) if stream else response.json()
+    assert len(calls) == 2
+    assert len(data['results']) == 2 and data['truncated']
+
+
+def test_request_id_filters_locally_denied_rows(mock_db, monkeypatch):
+    monkeypatch.setattr(web, '_viewer_denied', lambda: frozenset({'HIDDEN'}))
+    monkeypatch.setattr(lco, 'require_own_token_for_archive', lambda *a: None)
+    hidden = frame()
+    hidden['proposal_id'] = 'HIDDEN'
+    monkeypatch.setattr(lco, 'archive_search_all', lambda *a, **kw: {'results': [hidden], 'count': 1})
+    monkeypatch.setattr(web, '_annotate_lco_archive_results', lambda inst, rows, **kw: (rows, 0))
+    data = TestClient(web.app).get('/api/lco/archive/frames?request_id=101').json()
+    assert data['results'] == [] and data['count'] == 0

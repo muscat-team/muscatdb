@@ -417,6 +417,12 @@ def archive_search(
 # Safety cap so a single request-id fetch can't spin forever paginating a
 # pathologically large observation request.
 _ARCHIVE_MAX_FRAMES = 10_000
+_ARCHIVE_CURSOR_MAX_PAGES = 50
+_ARCHIVE_CURSOR_MAX_FRAMES = 50_000
+
+
+class ArchiveSearchLimit(LcoError):
+    """The cursor budget was exhausted; collected rows are incomplete."""
 
 
 def archive_search_all(
@@ -432,11 +438,17 @@ def archive_search_all(
     request can span thousands of frames, so ``archive_search`` (one page) is not
     enough to pull a whole dataset by ``request_id``. Stops at ``max_frames`` and
     reports ``truncated`` so the caller can warn the user. Pass ``None`` to
-    traverse all cursor pages instead.
+    traverse cursor pages within the shared search budget instead.
     """
     if max_frames is None:
-        rows = [row for page in archive_cursor_pages(filters, user_name, token=token) for row in page]
-        return {"count": len(rows), "results": rows, "truncated": False}
+        rows = []
+        truncated = False
+        try:
+            for page in archive_cursor_pages(filters, user_name, token=token):
+                rows.extend(page)
+        except ArchiveSearchLimit:
+            truncated = True
+        return {"count": len(rows), "results": rows, "truncated": truncated}
     base_url = "https://archive-api.lco.global/frames/"
     params = _query_params(filters)
     url: str | None = f"{base_url}?{params}"
@@ -466,11 +478,12 @@ def archive_search_all(
 
 
 def archive_cursor_pages(filters: dict, user_name: str | None = None, *, token: str | None = None):
-    """Yield all matching archive pages without a total-frame limit.
+    """Yield archive pages within the shared frame and page budgets.
 
     LCO recommends cursor pagination for large queries. Counts are absent;
-    only exhaustion of ``next`` signals completion. Keep other callers' bounded
-    offset searches unchanged. See https://developers.lco.global/#pagination.
+    exhaustion of ``next`` signals completion. Budget exhaustion raises
+    ``ArchiveSearchLimit`` after yielding the last permitted rows. Other callers'
+    bounded offset searches are unchanged. See https://developers.lco.global/#pagination.
     """
     aliases = {"OBJECT": "target_name", "OBSTYPE": "configuration_type", "SITEID": "site_id",
                "TELID": "telescope_id", "INSTRUME": "instrument_id", "FILTER": "primary_optical_element"}
@@ -479,6 +492,7 @@ def archive_cursor_pages(filters: dict, user_name: str | None = None, *, token: 
     params.pop("offset", None)
     url = "https://archive-api.lco.global/frames/?" + _query_params(params)
     seen = set()
+    retrieved = 0
     while url:
         parsed = urllib.parse.urlsplit(url)
         if (parsed.scheme != "https" or parsed.netloc != "archive-api.lco.global"
@@ -491,10 +505,18 @@ def archive_cursor_pages(filters: dict, user_name: str | None = None, *, token: 
         rows = page.get("results")
         if not isinstance(rows, list):
             raise LcoError("Archive returned an invalid page", status=502)
-        yield rows
-        url = page.get("next")
-        if url is not None and not isinstance(url, str):
+        next_url = page.get("next")
+        if next_url is not None and not isinstance(next_url, str):
             raise LcoError("Archive returned an invalid cursor", status=502)
+        remaining = _ARCHIVE_CURSOR_MAX_FRAMES - retrieved
+        kept = rows[:remaining]
+        retrieved += len(kept)
+        yield kept
+        if len(rows) > remaining or (next_url and (
+            len(seen) >= _ARCHIVE_CURSOR_MAX_PAGES or retrieved >= _ARCHIVE_CURSOR_MAX_FRAMES
+        )):
+            raise ArchiveSearchLimit("Archive search budget reached; narrow the target, proposal or dates.")
+        url = next_url
 
 
 def _page_size(filters: dict, first_rows: list) -> int:

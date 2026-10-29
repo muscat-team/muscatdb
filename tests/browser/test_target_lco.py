@@ -101,3 +101,16 @@ def test_incomplete_stream_does_not_show_partial_results(page, archive):
     expect(page.locator('#target-lco-status')).to_contain_text('ended before completion')
     expect(page.locator('#target-lco-table')).to_be_hidden()
     expect(page.locator('#target-lco-form button')).to_be_enabled()
+
+
+def test_budget_limited_inventory_displays_warning_and_can_retry(page, archive):
+    def answer(route):
+        route.fulfill(json={'ok': True, 'rows': [], 'truncated': True})
+    page.route('**/api/lco/archive/target?**', answer)
+    page.goto('/target?name=TOI-1000')
+    page.locator('#target-lco-details > summary').click()
+    expect(page.locator('#target-lco-status')).to_contain_text('Incomplete: search budget reached')
+    expect(page.locator('#target-lco-form button')).to_be_enabled()
+    page.fill('#target-lco-start', '2026-10-01')
+    page.locator('#target-lco-form button').click()
+    expect(page.locator('#target-lco-status')).to_contain_text('narrow the dates')

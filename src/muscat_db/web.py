@@ -5819,6 +5819,22 @@ def _require_own_archive_token(request: Request) -> None:
         lco.require_own_token_for_archive(_request_user(request))
 
 
+def _visible_archive_rows(rows, denied):
+    if not denied:
+        return rows
+    visible = []
+    for row in rows:
+        try:
+            inst = lco.infer_archive_instrument(row)
+        except lco.LcoError:
+            inst = ""
+        if not _is_denied(row.get("proposal_id"), denied, instrument=inst,
+                          obsdate=target_archive._night(row).replace("-", "")[2:],
+                          obj=row.get("OBJECT") or row.get("target_name")):
+            visible.append(row)
+    return visible
+
+
 @lco_router.get("/archive/frames", response_class=JSONResponse)
 def api_lco_archive_frames(
     request: Request,
@@ -5858,8 +5874,12 @@ def api_lco_archive_frames(
         try:
             result = lco.archive_search_all(req_filters, _request_user(request))
             rows = result.get("results") or []
+            denied = _viewer_denied()
             if isinstance(rows, list):
-                annotated, dataset_count = _annotate_lco_archive_results(instrument, rows, denied=_viewer_denied())
+                rows = _visible_archive_rows(rows, denied)
+                if denied:
+                    result = {**result, "count": len(rows)}
+                annotated, dataset_count = _annotate_lco_archive_results(instrument, rows, denied=denied)
                 result = dict(result)
                 result["results"] = annotated
                 result["dataset_count"] = dataset_count
@@ -5945,17 +5965,7 @@ def api_lco_archive_frames(
             result = dict(result)
             result["results"] = rows
         if denied:
-            visible = []
-            for row in rows:
-                try:
-                    inst = lco.infer_archive_instrument(row)
-                except lco.LcoError:
-                    inst = ""
-                if not _is_denied(row.get("proposal_id"), denied, instrument=inst,
-                                  obsdate=target_archive._night(row).replace("-", "")[2:],
-                                  obj=row.get("OBJECT") or row.get("target_name")):
-                    visible.append(row)
-            rows = visible
+            rows = _visible_archive_rows(rows, denied)
             result = {**result, "results": rows, "count": len(rows)}
         if isinstance(rows, list):
             annotated, dataset_count = _annotate_lco_archive_results(instrument, rows, denied=denied)
@@ -5974,12 +5984,16 @@ def api_lco_archive_frames(
             try:
                 rows = []
                 yield json.dumps({"progress": "Searching all archive frames…"}) + "\n"
-                for page in lco.archive_cursor_pages(filters, user):
-                    # Keep only useful frame metadata, not the large archive payloads.
-                    rows.extend({k: v for k, v in row.items() if k not in
-                                 {"area", "version_set", "related_frames"}} for row in page)
-                    yield json.dumps({"progress": "Searching all archive frames…"}) + "\n"
-                yield json.dumps(finish({"count": len(rows), "results": rows, "truncated": False})) + "\n"
+                truncated = False
+                try:
+                    for page in lco.archive_cursor_pages(filters, user):
+                        # Keep useful metadata, excluding large archive payloads.
+                        rows.extend({k: v for k, v in row.items() if k not in
+                                     {"area", "version_set", "related_frames"}} for row in page)
+                        yield json.dumps({"progress": "Searching all archive frames…"}) + "\n"
+                except lco.ArchiveSearchLimit:
+                    truncated = True
+                yield json.dumps(finish({"count": len(rows), "results": rows, "truncated": truncated})) + "\n"
             except lco.LcoError as e:
                 yield json.dumps(e.to_dict()) + "\n"
         return StreamingResponse(events(), media_type="application/x-ndjson", headers={

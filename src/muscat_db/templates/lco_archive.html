@@ -494,7 +494,7 @@
       } else if (d.match_mode === 'name') {
         modeMsg = ' — fuzzy name match';
       }
-      var previewMsg = d.truncated ? ' — incomplete preview; choose All matching frames for a complete search' : '';
+      var previewMsg = d.truncated ? ' — incomplete results; narrow the target, proposal or dates, or increase an explicit preview limit' : '';
       msg('msg-search', head + datasetMsg + modeMsg + previewMsg, d.truncated ? 'err' : 'ok');
     }).catch(function (e) { msg('msg-search', String(e), 'err'); }).finally(function () {
       el('btn-search').disabled = false; el('btn-fetch-request').disabled = false;
