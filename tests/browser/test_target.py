@@ -179,3 +179,29 @@ def test_ads_success_renders_papers_as_text_and_safe_links(page):
     expect(page.locator('#ads-results-list')).to_contain_text('<b>A transit study</b>')
     assert page.locator('#ads-results-list b').count() == 0
     expect(page.locator('#ads-results-list a').first).to_have_attribute('href', 'https://ui.adsabs.harvard.edu/abs/2026Test/abstract')
+
+
+def test_exofop_unchecked_rows_have_reasons_and_are_not_counted_as_present(page):
+    reason = 'Target coordinates could not be resolved.'
+    report = {
+        'ok': True, 'toi': '1000', 'total': 3,
+        'time_series': [
+            {'tstel': 'LCO-SSO-1m0 (1.0 m)', 'tscam': 'Sinistro',
+             'exists_checked': True, 'exists': True, 'dataset_local_frames': 12},
+            {'tstel': 'LCO-CTIO (1.0 m)', 'tscam': 'Sinistro',
+             'exists_checked': True, 'exists': False},
+            {'tstel': 'LCO-SAAO (1.0 m)', 'tscam': 'Sinistro',
+             'exists_checked': False, 'exists': False, 'exists_unchecked_reason': reason},
+        ],
+    }
+    page.route('**/api/lco/archive/exofop?*', lambda route: route.fulfill(json=report))
+    _open_section(page, 'exofop-obslog-details')
+    rows = page.locator('#exofop-obslog-tbody tr')
+    expect(rows.nth(0).locator('.exofop-status')).to_have_text('In muscat-db (12 fr)')
+    expect(rows.nth(1).locator('.exofop-status')).to_have_text('Not in database')
+    badge = rows.nth(2).locator('.exofop-status .badge')
+    expect(badge).to_have_text('N/A')
+    expect(badge).to_have_attribute('title', reason)
+    expect(page.locator('#exofop-obslog-status')).to_have_text(
+        '1/3 reported in muscat-db, 1 missing, 1 unchecked.'
+    )
