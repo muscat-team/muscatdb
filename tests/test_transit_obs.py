@@ -616,3 +616,83 @@ def test_bjd_conversion_does_not_retry_unrelated_value_errors(error, monkeypatch
     with pytest.raises(ValueError, match=error):
         T.bjd_tdb_to_jd_utc(2461223.0, 228.45, -45.01)
     assert len(calls) == 1
+
+
+def test_transit_plans_rank_full_sites_by_airmass():
+    """Issue #333: ELP has lower airmass than LSC at equal full coverage."""
+    window = {"mid": "2026-11-04T02:00:00Z", "start": "2026-11-04T01:00:00Z",
+              "end": "2026-11-04T03:00:00Z"}
+    plans = T.transit_plans(330, 5, [window], 2, sites=["lsc", "elp"], moon_sep_min=0)[0]
+    singles = [p for p in plans if p["type"] == "single"]
+    assert [p["site"] for p in singles] == ["elp", "lsc"]
+    assert all(p["coverage"] == "full" for p in singles)
+    assert singles[0]["mean_airmass"] == pytest.approx(1.12, abs=0.02)
+    assert singles[1]["mean_airmass"] == pytest.approx(1.50, abs=0.02)
+
+
+def _plan_geometry(monkeypatch, spans, airmasses):
+    import numpy as np
+
+    monkeypatch.setattr(T, "_earth_location", lambda site: site)
+
+    def observable(target, site, times, *args):
+        minutes = (times.jd - times.jd[0]) * 1440
+        start, end = spans[site]
+        mask = (minutes >= start - 1e-5) & (minutes <= end + 1e-5)
+        values = airmasses[site]
+        values = values(minutes) if callable(values) else np.full(len(times), values)
+        altitude = np.degrees(np.arcsin(1 / values))
+        return mask, altitude, None, None, None, None
+
+    monkeypatch.setattr(T, "_observable_mask", observable)
+    return {"start": "2026-11-04T00:00:00Z", "mid": "2026-11-04T02:00:00Z",
+            "end": "2026-11-04T04:00:00Z"}
+
+
+def test_transit_plans_offer_all_ordered_contact_pairs(monkeypatch):
+    window = _plan_geometry(monkeypatch,
+                            {"lsc": (0, 150), "elp": (60, 240), "tfn": (0, 240)},
+                            {"lsc": 1.5, "elp": 1.2, "tfn": 1.7})
+    plans = T.transit_plans(0, 0, [window], 2, sites=["lsc", "elp", "tfn"])[0]
+    relays = [p for p in plans if p["type"] == "relay"]
+    assert {p["id"] for p in relays} == {
+        "relay:lsc>elp", "relay:lsc>tfn", "relay:elp>tfn", "relay:tfn>elp"}
+    assert len(relays) == 4
+    assert relays[0]["id"] == "relay:lsc>elp"
+    assert all(p["coverage"] == "full" for p in relays)
+
+
+def test_transit_plans_coverage_precedes_airmass(monkeypatch):
+    window = _plan_geometry(monkeypatch,
+                            {"lsc": (0, 99), "elp": (141, 240), "tfn": (0, 240)},
+                            {"lsc": 1.01, "elp": 1.01, "tfn": 1.9})
+    plans = T.transit_plans(0, 0, [window], 2, sites=["lsc", "elp", "tfn"])[0]
+    ranked = [p for p in plans if p["type"] != "either"]
+    gapped = next(p for p in ranked if p["id"] == "relay:lsc>elp")
+    assert gapped["gap_min"] == pytest.approx(42)
+    assert gapped["covered_min"] == pytest.approx(78)
+    assert all(p["coverage"] == "full" for p in ranked[:3])
+    assert ranked.index(gapped) == 3
+
+
+def test_transit_plan_airmass_excludes_padding_and_uses_trimmed_legs(monkeypatch):
+    import numpy as np
+
+    window = _plan_geometry(monkeypatch, {"lsc": (0, 240), "elp": (0, 240)},
+                            {"lsc": lambda m: np.where((m < 60 - 1e-5) | (m > 180 + 1e-5), 8., 1.5),
+                             "elp": 1.1})
+    plans = T.transit_plans(0, 0, [window], 2, sites=["lsc", "elp"])[0]
+    by_id = {p["id"]: p for p in plans}
+    assert by_id["site:lsc"]["mean_airmass"] == pytest.approx(1.5, abs=1e-6)
+    assert by_id["relay:lsc>elp"]["mean_airmass"] == pytest.approx(1.3, abs=1e-6)
+    assert by_id["relay:elp>lsc"]["mean_airmass"] == pytest.approx(1.3, abs=1e-6)
+
+
+def test_transit_plan_airmass_weights_only_booked_relay_time(monkeypatch):
+    window = _plan_geometry(monkeypatch, {"lsc": (0, 240), "elp": (0, 240)},
+                            {"lsc": lambda m: 1 + m / 240, "elp": 1.1})
+    plans = T.transit_plans(0, 0, [window], 2, sites=["lsc", "elp"])[0]
+    relay = next(p for p in plans if p["id"] == "relay:lsc>elp")
+    # LSC observes transit minutes 60..135, ELP 105..180. The LSC
+    # mean is 1 + 97.5/240; equal leg lengths give equal weights.
+    assert relay["mean_airmass"] == pytest.approx((1 + 97.5 / 240 + 1.1) / 2, abs=1e-6)

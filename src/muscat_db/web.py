@@ -111,7 +111,7 @@ from muscat_db import ttv_fit as ttv
 from muscat_db import ttv_selection
 from muscat_db import lco
 from muscat_db.lco import _annotate_lco_archive_results
-from muscat_db import exofop
+from muscat_db import exofop, target_archive
 from muscat_db import transit_obs
 from muscat_db import fov as fov_opt
 from muscat_db import ephemeris_math
@@ -119,6 +119,7 @@ from muscat_db import ephemeris_import
 from muscat_db import gsheet_ephemeris
 from muscat_db import test_analysis, test_observations
 from muscat_db import lco_monitor
+from muscat_db import midtimes
 from muscat_db import http_client
 from muscat_db import chat
 from muscat_db.catalog import (
@@ -2044,7 +2045,7 @@ def whoami(request: Request):
 
 
 @app.get("/chat/users", response_class=JSONResponse)
-def chat_users(request: Request):
+def chat_users(request: Request, room: str = "chat:public"):
     """Known usernames for chat @-mention autocomplete. Requires an
     authenticated request; returns only usernames (no other user data). Not
     under /api/ so it doesn't trip the global loading-bar fetch tracker."""
@@ -2053,7 +2054,10 @@ def chat_users(request: Request):
     try:
         from muscat_db.database import get_known_chat_usernames
         from muscat_db import chat_agent
-        users = get_known_chat_usernames()
+        from muscat_db import chat
+        if room not in chat._allowed_rooms(_request_user(request)):
+            return JSONResponse({"users": [chat_agent.DISPLAY_NAME]})
+        users = chat._room_users(get_known_chat_usernames(), room)
         # Surface the codebase assistant so @bot autocompletes, even though it is
         # never a real (notifiable) chat user.
         if chat_agent.DISPLAY_NAME not in {u.lower() for u in users}:
@@ -4084,28 +4088,20 @@ def exposure_lookup_mags(payload: dict = Body(...)):
     if not target:
         return JSONResponse({"ok": False, "error": "Target name required"}, status_code=400)
 
-    # Try resolving target name
-    coords = exp_calc.resolve_target_coords(target)
+    coords, mags, source, is_approx, approx_reason = exp_calc.lookup_target_magnitudes(target)
     if not coords:
         return JSONResponse({"ok": False, "error": f"Could not resolve target '{target}'"})
-
     ra, dec = coords
-    mags, source = exp_calc.lookup_magnitudes(ra, dec, return_source=True)
     if not mags:
         return JSONResponse({
             "ok": False,
-            "error": f"No griz magnitudes found for '{target}' in Pan-STARRS or SkyMapper",
-            "ra": ra,
-            "dec": dec,
+            "error": f"No usable magnitudes found for '{target}' in Pan-STARRS, SkyMapper, TIC or SDSS (and no usable Gaia estimate)",
+            "ra": ra, "dec": dec,
         })
-
     return JSONResponse({
-        "ok": True,
-        "target": target,
-        "ra": ra,
-        "dec": dec,
-        "mags": mags,
-        "source": source,
+        "ok": True, "target": target, "ra": ra, "dec": dec,
+        "mags": mags, "source": source, "is_approx": is_approx,
+        "approx_reason": approx_reason,
     })
 
 
@@ -4404,13 +4400,13 @@ def api_fov_resolve_target(payload: dict = Body(...)):
     if not target:
         return JSONResponse({"ok": False, "error": "Target name is required."}, status_code=400)
 
-    coords = exp_calc.resolve_target_coords(target)
+    coords = resolve_target_astrometry(target)
     if coords is None:
         return JSONResponse(
             {"ok": False, "error": f"Could not resolve '{target}'. Try a different name or enter RA/Dec manually."},
             status_code=200,
         )
-    return JSONResponse({"ok": True, "ra": round(coords[0], 5), "dec": round(coords[1], 5)})
+    return JSONResponse({"ok": True, "ra": round(coords["ra"], 5), "dec": round(coords["dec"], 5)})
 
 
 @fov_router.get("/observable", response_class=JSONResponse)
@@ -4639,6 +4635,7 @@ def api_settings_ephem_sheet_status(request: Request):
             "ephem_cols": (cfg or {}).get("ephem_cols") or {},
             "tc_cols": (cfg or {}).get("tc_cols") or {},
             "secret_configured": bool(os.environ.get("MUSCAT_DB_SECRET")),
+            "shared_with_everyone": user == _shared_ephem_sheet_owner(),
         }
     )
 
@@ -5007,6 +5004,92 @@ def api_lco_clone(ident: str, request: Request):
         return _lco_error_response(e)
 
 
+def _windows_from_midtimes(
+    mids: list[tuple[int, float, dict]],
+    payload: dict,
+    duration_h: float,
+    *,
+    relabel_epochs: bool = True,
+) -> list[dict]:
+    """Padded scheduling windows around explicit BJD_TDB mid-times.
+
+    ``mids`` is ``(epoch_abs, mid_bjd, extra)`` per transit; ``extra`` is merged
+    into that transit's window (e.g. ``mid_unc_min``). Windows carry the keys
+    ``generate_windows`` emits, so ``classify_transits``,
+    ``_clip_windows_to_observability`` and ``_repeat_duration`` consume them
+    unchanged. With ``relabel_epochs`` the displayed epoch counts from the first
+    transit in range, as ``generate_windows`` does; otherwise it is ``epoch_abs``.
+    """
+    pad_before = float(payload.get("pad_before_min") or 0)
+    pad_after = float(payload.get("pad_after_min") or 0)
+    half = duration_h / 2.0
+
+    start_jd = _iso_date_to_jd(str(payload.get("range_start")), end_of_day=False)
+    end_jd = _iso_date_to_jd(str(payload.get("range_end")), end_of_day=True)
+
+    req_ra = payload.get("ra")
+    req_dec = payload.get("dec")
+    has_coord = req_ra not in (None, "") and req_dec not in (None, "")
+    ra_deg = float(req_ra) if has_coord else None
+    dec_deg = float(req_dec) if has_coord else None
+
+    # start_jd/end_jd are calendar JD_UTC; mid_bjd is BJD_TDB, which can be up
+    # to ~9 minutes off UTC (see lco._BJD_UTC_BOUNDARY_PAD). Membership can't
+    # be decided on the raw BJD_TDB value alone once coordinates make the
+    # correction available, so the initial scan is padded (same margin as
+    # lco.generate_windows) and re-filtered below once each mid time has been
+    # corrected to true JD_UTC.
+    pad_days = lco._BJD_UTC_BOUNDARY_PAD.total_seconds() / 86400.0
+    scan_start_jd = start_jd - pad_days if has_coord else start_jd
+    scan_end_jd = end_jd + pad_days if has_coord else end_jd
+
+    raw_windows = []  # (epoch_abs, mid_bjd, start_jd_win, end_jd_win, extra)
+    for epoch_abs, mid_bjd, extra in mids:
+        if not (scan_start_jd <= mid_bjd <= scan_end_jd):
+            continue
+        start_jd_win = mid_bjd - (half / 24.0) - (pad_before / 1440.0)
+        end_jd_win = mid_bjd + (half / 24.0) + (pad_after / 1440.0)
+        raw_windows.append((epoch_abs, mid_bjd, start_jd_win, end_jd_win, extra))
+        if len(raw_windows) > 1000:
+            break
+
+    # mid_bjd is BJD_TDB; convert to true JD_UTC when target coordinates are
+    # known, same correction as lco.generate_windows. The offset drifts by
+    # about a minute per week, negligible over one transit's padded span, so
+    # the per-transit correction computed from mid_bjd is reused for that
+    # transit's start/end rather than converting all three separately.
+    if has_coord and raw_windows:
+        mid_jds_utc = transit_obs.bjd_tdb_to_jd_utc(
+            [w[1] for w in raw_windows], ra_deg, dec_deg,
+        )
+    else:
+        mid_jds_utc = [w[1] for w in raw_windows]
+
+    windows = []
+    for (epoch_abs, mid_bjd, start_jd_win, end_jd_win, extra), mid_jd_utc in zip(raw_windows, mid_jds_utc):
+        mid_jd_utc = float(mid_jd_utc)
+        # The scan above was padded to not miss a boundary transit; re-filter
+        # against the true (unpadded) range now that times are corrected.
+        if not (start_jd <= mid_jd_utc <= end_jd):
+            continue
+        correction = mid_jd_utc - mid_bjd
+        windows.append({
+            **extra,
+            "epoch": epoch_abs,
+            "epoch_abs": epoch_abs,
+            "mid_bjd": mid_bjd,
+            "mid": transit_obs._jd_to_iso_z(mid_jd_utc),
+            "start": transit_obs._jd_to_iso_z(start_jd_win + correction),
+            "end": transit_obs._jd_to_iso_z(end_jd_win + correction),
+        })
+
+    # Match generate_windows: displayed epoch is relative to the first in range.
+    if windows and relabel_epochs:
+        first = windows[0]["epoch_abs"]
+        windows = [{**w, "epoch": w["epoch_abs"] - first} for w in windows]
+    return windows
+
+
 def _ttv_windows(payload: dict, duration_h: float) -> dict:
     """Scheduling windows built from a harmonic TTV model's predicted mid-times.
 
@@ -5037,78 +5120,13 @@ def _ttv_windows(payload: dict, duration_h: float) -> dict:
 
     # The model's tc is in the fit's own time system; t_offset carries it to BJD.
     t_offset = float(model.get("t_offset") or 0.0)
-    pad_before = float(payload.get("pad_before_min") or 0)
-    pad_after = float(payload.get("pad_after_min") or 0)
-    half = duration_h / 2.0
-
-    start_jd = _iso_date_to_jd(str(start_dt), end_of_day=False)
-    end_jd = _iso_date_to_jd(str(end_dt), end_of_day=True)
-
-    req_ra = payload.get("ra")
-    req_dec = payload.get("dec")
-    has_coord = req_ra not in (None, "") and req_dec not in (None, "")
-    ra_deg = float(req_ra) if has_coord else None
-    dec_deg = float(req_dec) if has_coord else None
-
-    # start_jd/end_jd are calendar JD_UTC; mid_bjd is BJD_TDB, which can be up
-    # to ~9 minutes off UTC (see lco._BJD_UTC_BOUNDARY_PAD). Membership can't
-    # be decided on the raw BJD_TDB value alone once coordinates make the
-    # correction available, so the initial scan is padded (same margin as
-    # lco.generate_windows) and re-filtered below once each mid time has been
-    # corrected to true JD_UTC.
-    pad_days = lco._BJD_UTC_BOUNDARY_PAD.total_seconds() / 86400.0
-    scan_start_jd = start_jd - pad_days if has_coord else start_jd
-    scan_end_jd = end_jd + pad_days if has_coord else end_jd
-
-    raw_windows = []  # (epoch_abs, mid_bjd, start_jd_win, end_jd_win)
+    mids = []
     for point in points:
         try:
-            mid_bjd = float(point["tc"]) + t_offset
-            epoch_abs = int(point["epoch"])
+            mids.append((int(point["epoch"]), float(point["tc"]) + t_offset, {}))
         except (KeyError, TypeError, ValueError):
             continue
-        if not (scan_start_jd <= mid_bjd <= scan_end_jd):
-            continue
-        start_jd_win = mid_bjd - (half / 24.0) - (pad_before / 1440.0)
-        end_jd_win = mid_bjd + (half / 24.0) + (pad_after / 1440.0)
-        raw_windows.append((epoch_abs, mid_bjd, start_jd_win, end_jd_win))
-        if len(raw_windows) > 1000:
-            break
-
-    # mid_bjd is BJD_TDB; convert to true JD_UTC when target coordinates are
-    # known, same correction as lco.generate_windows. The offset drifts by
-    # about a minute per week, negligible over one transit's padded span, so
-    # the per-transit correction computed from mid_bjd is reused for that
-    # transit's start/end rather than converting all three separately.
-    if has_coord and raw_windows:
-        mid_jds_utc = transit_obs.bjd_tdb_to_jd_utc(
-            [w[1] for w in raw_windows], ra_deg, dec_deg,
-        )
-    else:
-        mid_jds_utc = [w[1] for w in raw_windows]
-
-    windows = []
-    for (epoch_abs, mid_bjd, start_jd_win, end_jd_win), mid_jd_utc in zip(raw_windows, mid_jds_utc):
-        mid_jd_utc = float(mid_jd_utc)
-        # The scan above was padded to not miss a boundary transit; re-filter
-        # against the true (unpadded) range now that times are corrected.
-        if not (start_jd <= mid_jd_utc <= end_jd):
-            continue
-        correction = mid_jd_utc - mid_bjd
-        windows.append({
-            "epoch": 0,  # replaced below, once the first in-range epoch is known
-            "epoch_abs": epoch_abs,
-            "mid_bjd": mid_bjd,
-            "mid": transit_obs._jd_to_iso_z(mid_jd_utc),
-            "start": transit_obs._jd_to_iso_z(start_jd_win + correction),
-            "end": transit_obs._jd_to_iso_z(end_jd_win + correction),
-        })
-
-    # Match generate_windows: displayed epoch is relative to the first in range.
-    if windows:
-        first = windows[0]["epoch_abs"]
-        for w in windows:
-            w["epoch"] = w["epoch_abs"] - first
+    windows = _windows_from_midtimes(mids, payload, duration_h)
 
     result = {"ok": True, "windows": windows, "planet": planet,
               "ttv_run": model.get("run_name", ""), "duration": duration_h}
@@ -5138,6 +5156,72 @@ def _ttv_windows(payload: dict, duration_h: float) -> dict:
             result["rank_error"] = ranking.get("error", "ranking unavailable")
 
     return result
+
+
+def _utc_jd_to_bjd_tdb(utc_jds: list[float], ra_deg: float, dec_deg: float) -> list[float]:
+    """Invert ``transit_obs.bjd_tdb_to_jd_utc`` by fixed-point iteration.
+
+    The correction (light travel time plus TDB-UTC) changes by well under a
+    second across its own few-minute size, so two passes agree with the
+    forward conversion to sub-millisecond.
+    """
+    import numpy as np
+
+    utc = np.asarray(utc_jds, dtype=float)
+    bjd = utc - (np.asarray(transit_obs.bjd_tdb_to_jd_utc(utc, ra_deg, dec_deg)) - utc)
+    bjd = bjd + (utc - np.asarray(transit_obs.bjd_tdb_to_jd_utc(bjd, ra_deg, dec_deg)))
+    return [float(b) for b in bjd]
+
+
+def _upload_windows(payload: dict, duration) -> dict:
+    """Scheduling windows from an observer's uploaded list of mid-times (#350).
+
+    The list is re-parsed here, whatever the page already checked: it is
+    external input. Coordinates are required, since the point of the source is
+    each row's visibility and an ISO UTC time needs them to become BJD_TDB.
+    """
+    if duration in (None, ""):
+        return {"ok": False, "error": "transit duration (hours) is required"}
+    if not payload.get("range_start") or not payload.get("range_end"):
+        return {"ok": False, "error": "date range is required"}
+    ra, dec = payload.get("ra"), payload.get("dec")
+    if ra in (None, "") or dec in (None, ""):
+        return {"ok": False, "error": "target coordinates are required for uploaded mid-times"}
+    try:
+        parsed = midtimes.parse_midtimes(str(payload.get("midtimes_text") or ""))
+    except midtimes.MidtimeError as e:
+        return {"ok": False, "error": "uploaded mid-times: " + "; ".join(e.errors),
+                "errors": e.errors}
+
+    rows = list(parsed.rows)
+    utc_rows = [r for r in rows if r.bjd is None]
+    converted = iter(_utc_jd_to_bjd_tdb([r.utc_jd for r in utc_rows], float(ra), float(dec))
+                     if utc_rows else [])
+    bjds = [r.bjd if r.bjd is not None else next(converted) for r in rows]
+
+    # Without uploaded epochs, number the transits in time order.
+    order = sorted(range(len(rows)), key=lambda i: bjds[i])
+    mids = []
+    for n, i in enumerate(order):
+        r = rows[i]
+        extra = {"mid_unc_min": r.unc_min} if r.unc_min is not None else {}
+        mids.append((r.epoch if parsed.has_epochs else n, bjds[i], extra))
+
+    windows = _windows_from_midtimes(mids, payload, float(duration),
+                                     relabel_epochs=not parsed.has_epochs)
+    return {
+        "ok": True,
+        "windows": windows,
+        "planet": (payload.get("planet") or "").strip().lower(),
+        "duration": float(duration),
+        "uploaded": {
+            "rows": len(rows),
+            "in_range": len(windows),
+            "out_of_range": len(rows) - len(windows),
+            "duplicates_dropped": parsed.duplicates_dropped,
+            "time_systems": parsed.time_systems,
+        },
+    }
 
 
 def _attach_observability(result: dict, payload: dict, duration_h: float) -> None:
@@ -5225,6 +5309,15 @@ def api_lco_windows(request: Request, payload: dict = Body(...)):
             _attach_observability(result, payload, float(duration))
             return JSONResponse(result)
 
+        # Like ttv, checked before the t0/period shortcut: the uploaded list is
+        # the ephemeris, and any posted t0/period is only the form's leftover.
+        if source == "upload":
+            result = _upload_windows(payload, duration)
+            if not result.get("ok"):
+                return JSONResponse(result, status_code=400)
+            _attach_observability(result, payload, float(duration))
+            return JSONResponse(result)
+
         if t0 in (None, "") or period in (None, ""):
             if not target:
                 return JSONResponse(
@@ -5241,14 +5334,15 @@ def api_lco_windows(request: Request, payload: dict = Body(...)):
                 planets = _query_target_planets_toi(target)
             elif source in ("", "catalog"):
                 planets = _query_target_planets_catalog(target)
-            elif source in ("gsheet", "gsheet_tc"):
-                cfg = _user_ephem_sheet_cfg(request)
+            elif source in ("gsheet", "gsheet_tc", "shared_gsheet", "shared_gsheet_tc"):
+                _require_visible_object(_db_path(), target)
+                cfg = _user_ephem_sheet_cfg(request, shared=source.startswith("shared_"))
                 if not cfg:
                     return JSONResponse(
                         {"ok": False, "error": "no ephemeris Google Sheet configured (see Settings)"},
                         status_code=400,
                     )
-                if source == "gsheet":
+                if source in ("gsheet", "shared_gsheet"):
                     planets = _sheet_ephemeris(target, cfg)
                 else:
                     # Transit-centers tab -> linear fit; seed epoch assignment
@@ -5819,6 +5913,22 @@ def _require_own_archive_token(request: Request) -> None:
         lco.require_own_token_for_archive(_request_user(request))
 
 
+def _visible_archive_rows(rows, denied):
+    if not denied:
+        return rows
+    visible = []
+    for row in rows:
+        try:
+            inst = lco.infer_archive_instrument(row)
+        except lco.LcoError:
+            inst = ""
+        if not _is_denied(row.get("proposal_id"), denied, instrument=inst,
+                          obsdate=target_archive._night(row).replace("-", "")[2:],
+                          obj=row.get("OBJECT") or row.get("target_name")):
+            visible.append(row)
+    return visible
+
+
 @lco_router.get("/archive/frames", response_class=JSONResponse)
 def api_lco_archive_frames(
     request: Request,
@@ -5832,7 +5942,8 @@ def api_lco_archive_frames(
     reduction_level: str = "",
     start: str = "",
     end: str = "",
-    limit: str = "50",
+    limit: str = "all",
+    stream: bool = False,
     fuzzy_name: str = "",
     request_id: str = "",
 ):
@@ -5857,8 +5968,12 @@ def api_lco_archive_frames(
         try:
             result = lco.archive_search_all(req_filters, _request_user(request))
             rows = result.get("results") or []
+            denied = _viewer_denied()
             if isinstance(rows, list):
-                annotated, dataset_count = _annotate_lco_archive_results(instrument, rows, denied=_viewer_denied())
+                rows = _visible_archive_rows(rows, denied)
+                if denied:
+                    result = {**result, "count": len(rows)}
+                annotated, dataset_count = _annotate_lco_archive_results(instrument, rows, denied=denied)
                 result = dict(result)
                 result["results"] = annotated
                 result["dataset_count"] = dataset_count
@@ -5868,16 +5983,14 @@ def api_lco_archive_frames(
 
     use_fuzzy = fuzzy_name.strip().lower() in ("1", "true", "yes", "on")
     tel_class = TELID if TELID in ("0m4", "1m0", "2m0") else ""
+    all_frames = limit.strip().lower() in ("", "all")
     try:
-        requested_limit = int(limit)
+        requested_limit = None if all_frames else int(limit)
+        if requested_limit is not None and not 1 <= requested_limit <= lco._ARCHIVE_MAX_FRAMES:
+            raise ValueError
     except (TypeError, ValueError):
-        requested_limit = 50
-    # "Limit" is the user-facing total frame count across pages, not the
-    # archive's own per-request page size (which is hard-capped at 1000
-    # regardless of what's requested -- see the request-id path above). Pass
-    # 1000 as the page size and let archive_search_all follow `next` to
-    # satisfy a larger total, bounded by the same safety cap used there.
-    max_frames = max(1, min(requested_limit, lco._ARCHIVE_MAX_FRAMES))
+        return JSONResponse({"ok": False, "error": "Limit must be all or a number from 1 to 10000."}, status_code=400)
+    max_frames = requested_limit
     filters = {
         "proposal_id": proposal_id,
         "SITEID": SITEID,
@@ -5887,7 +6000,7 @@ def api_lco_archive_frames(
         "reduction_level": reduction_level,
         "start": start,
         "end": end,
-        "limit": str(min(max_frames, 1000)),
+        "limit": str(min(max_frames or 1000, 1000)),
         # A target's coordinates/name also match auto-focus, standard-field,
         # and other engineering frames the telescope happened to take near
         # the same footprint (observed: TOI-1807 turned up "auto_focus"
@@ -5922,8 +6035,9 @@ def api_lco_archive_frames(
             )
         ra_deg, dec_deg, _source = resolved
         filters["covers"] = f"POINT({ra_deg} {dec_deg})"
-    try:
-        result = lco.archive_search_all(filters, _request_user(request), max_frames=max_frames)
+    user, denied = _request_user(request), _viewer_denied()
+
+    def finish(result):
         rows = result.get("results") or []
         if isinstance(rows, list):
             # OBSTYPE=EXPOSE (above) doesn't catch an engineering frame that
@@ -5944,8 +6058,11 @@ def api_lco_archive_frames(
             rows = [r for r in rows if str(r.get("TELID") or "").lower().startswith(tel_class)]
             result = dict(result)
             result["results"] = rows
+        if denied:
+            rows = _visible_archive_rows(rows, denied)
+            result = {**result, "results": rows, "count": len(rows)}
         if isinstance(rows, list):
-            annotated, dataset_count = _annotate_lco_archive_results(instrument, rows, denied=_viewer_denied())
+            annotated, dataset_count = _annotate_lco_archive_results(instrument, rows, denied=denied)
             result = dict(result)
             result["results"] = annotated
             result["dataset_count"] = dataset_count
@@ -5954,7 +6071,58 @@ def api_lco_archive_frames(
             payload["resolved_ra"] = round(resolved[0], 5)
             payload["resolved_dec"] = round(resolved[1], 5)
             payload["resolved_source"] = resolved[2]
-        return JSONResponse(payload)
+        return payload
+
+    if stream and all_frames:
+        def events():
+            try:
+                rows = []
+                yield json.dumps({"progress": "Searching all archive frames…"}) + "\n"
+                truncated = False
+                try:
+                    for page in lco.archive_cursor_pages(filters, user):
+                        # Keep useful metadata, excluding large archive payloads.
+                        rows.extend({k: v for k, v in row.items() if k not in
+                                     {"area", "version_set", "related_frames"}} for row in page)
+                        yield json.dumps({"progress": "Searching all archive frames…"}) + "\n"
+                except lco.ArchiveSearchLimit:
+                    truncated = True
+                yield json.dumps(finish({"count": len(rows), "results": rows, "truncated": truncated})) + "\n"
+            except lco.LcoError as e:
+                yield json.dumps(e.to_dict()) + "\n"
+        return StreamingResponse(events(), media_type="application/x-ndjson", headers={
+            "Content-Encoding": "identity", "X-Accel-Buffering": "no",
+            "Cache-Control": "no-store, no-transform",
+        })
+    try:
+        return JSONResponse(finish(lco.archive_search_all(filters, user, max_frames=max_frames)))
+    except lco.LcoError as e:
+        return _lco_error_response(e)
+
+
+@lco_router.get("/archive/target", response_class=JSONResponse)
+def api_lco_archive_target(request: Request, target: str = "", start: str = "", end: str = "",
+                           stream: bool = False):
+    try:
+        _require_own_archive_token(request)
+        user, denied = _request_user(request), _viewer_denied()
+        if stream:
+            def events():
+                try:
+                    for event in target_archive.inventory_events(
+                        target.strip(), user, denied=denied, start=start, end=end,
+                    ):
+                        yield json.dumps(event) + "\n"
+                except lco.LcoError as e:
+                    yield json.dumps(e.to_dict()) + "\n"
+            return StreamingResponse(events(), media_type="application/x-ndjson", headers={
+                # Bypass GZip buffering so page progress reaches the browser immediately.
+                "Content-Encoding": "identity", "X-Accel-Buffering": "no",
+                "Cache-Control": "no-store, no-transform",
+            })
+        return JSONResponse(target_archive.inventory(
+            target.strip(), user, denied=denied, start=start, end=end,
+        ))
     except lco.LcoError as e:
         return _lco_error_response(e)
 
@@ -6520,10 +6688,17 @@ def api_ephemeris_targets():
     return JSONResponse({"ok": True, "targets": targets})
 
 
-def _user_ephem_sheet_cfg(request) -> dict | None:
-    """Return the requesting user's ephemeris sheet config (tab defaults
-    applied), or None when no user / no sheet / unreadable."""
-    user = _request_user(request) if request else None
+def _shared_ephem_sheet_owner() -> str:
+    owner = (os.environ.get("MUSCAT_SHARED_EPHEM_SHEET_USER") or "jerome").strip()
+    return "" if owner.lower() == "none" else owner
+
+
+def _user_ephem_sheet_cfg(request, *, shared: bool = False) -> dict | None:
+    """Load the personal or designated shared source, with tab defaults.
+
+    Never accept an arbitrary source owner from a request.
+    """
+    user = _shared_ephem_sheet_owner() if shared else (_request_user(request) if request else None)
     if not user:
         return None
     try:
@@ -6605,13 +6780,13 @@ def _sheet_fit_ephemeris(target: str, cfg: dict, seed_by_planet: dict) -> dict:
 
 def _target_coordinates(target: str) -> dict | None:
     """Pointing coordinates for the schedule page: catalog CSVs first, then
-    SIMBAD.
+    SIMBAD and ExoFOP.
 
     The ephemeris catalogs (NASA/TOI) are consulted first via
     ``resolve_target_astrometry``; when the target is in neither, it falls back
-    to SIMBAD name resolution (both cached), so a catalog-less target still gets
+    to SIMBAD and then ExoFOP, so a catalog-less target still gets
     coordinates instead of an empty RA/Dec field. Returns ``{"ra", "dec",
-    "source", "epoch", "pmra", "pmdec"}`` (source one of nasa/toi/simbad;
+    "source", "epoch", "pmra", "pmdec"}`` (source one of nasa/toi/simbad/exofop;
     epoch a Julian year; proper motion mas/yr, None when unknown) or None when
     unresolved. The epoch matters: the catalogs are Gaia DR2 at 2015.5, so a
     high proper-motion star is arcseconds away from its catalog position."""
@@ -6755,7 +6930,8 @@ def api_ephemeris_target_info(target: str, request: Request):
     # Per-user Google Sheet ephemeris sources (optional). The ephemeris tab
     # feeds t0/period/duration directly; the transit-centers tab is linear-fit
     # against the best available seed ephemeris to derive t0/period.
-    sheet_cfg = _user_ephem_sheet_cfg(request)
+    sheets_visible = not _object_hidden(_db_path(), target, _viewer_denied())
+    sheet_cfg = _user_ephem_sheet_cfg(request) if sheets_visible else None
     sheet_ephem: dict = {}
     sheet_fit_ephem: dict = {}
     if sheet_cfg:
@@ -6774,6 +6950,17 @@ def api_ephemeris_target_info(target: str, request: Request):
         sheet_fit_ephem = _sheet_fit_ephemeris(target, sheet_cfg, seed_by_planet)
         seen_planets.update(sheet_ephem.keys())
         seen_planets.update(sheet_fit_ephem.keys())
+
+    shared_cfg = _user_ephem_sheet_cfg(request, shared=True) if sheets_visible else None
+    shared_ephem = _sheet_ephemeris(target, shared_cfg) if shared_cfg else {}
+    shared_seeds = {}
+    for pl in set(shared_ephem) | seen_planets:
+        seed = shared_ephem.get(pl) or ref_ephem.get(pl) or nasa_ephem.get(pl) or toi_ephem.get(pl) or {}
+        if seed.get("t0") is not None and seed.get("period"):
+            shared_seeds[pl] = seed
+    shared_fit = _sheet_fit_ephemeris(target, shared_cfg, shared_seeds) if shared_cfg else {}
+    seen_planets.update(shared_ephem)
+    seen_planets.update(shared_fit)
 
     # Ensure all seen planets are initialized in all ephemerides
     for pl in seen_planets:
@@ -6794,6 +6981,11 @@ def api_ephemeris_target_info(target: str, request: Request):
         "reference_ephemeris": ref_ephem,
         "nasa_ephemeris": nasa_ephem,
         "toi_ephemeris": toi_ephem,
+        "shared_sheet_configured": shared_cfg is not None,
+        "shared_sheet_owner": _shared_ephem_sheet_owner(),
+        "shared_sheet_is_mine": _request_user(request) == _shared_ephem_sheet_owner(),
+        "shared_sheet_ephemeris": shared_ephem,
+        "shared_sheet_fit_ephemeris": shared_fit,
         "sheet_configured": sheet_cfg is not None,
         "sheet_ephemeris": sheet_ephem,
         "sheet_fit_ephemeris": sheet_fit_ephem,

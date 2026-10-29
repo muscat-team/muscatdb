@@ -231,7 +231,7 @@ def test_chat_send_button_enter_and_empty_input(page):
             page.locator('#message-input').press('Enter')
         expect(page.locator('#message-input')).to_have_value('')
     sent = page.evaluate("__chatTransport.sent.filter(e => e.event === 'message').map(e => e.data)")
-    assert sent == [{'user': 'admin', 'text': 'first message'}, {'user': 'admin', 'text': 'second message'}]
+    assert sent == [{'user': 'admin', 'text': 'first message', 'room': 'chat:public'}, {'user': 'admin', 'text': 'second message', 'room': 'chat:public'}]
 
 
 def test_chat_history_live_edit_delete_and_reconnect(page):
@@ -264,3 +264,32 @@ def test_chat_target_link_and_literal_html(page):
     expect(link).to_have_attribute('href', '/target?name=TOI-1000')
     link.click()
     page.wait_for_url('**/target?name=TOI-1000')
+
+
+def test_chat_room_selection_filters_messages_and_routes_posts(page):
+    page.goto('/targets')
+    page.click('#minimize-chat')
+    page.evaluate("""() => {
+        const transport = window.__chatTransport;
+        transport.receive('chat_rooms', {rooms: ['chat:public', 'group:unc']});
+        transport.receive('history', {messages: [
+            {id: 910, kind: 'user', user: 'alice', text: 'Public only', ts: 10},
+            {id: 911, kind: 'user', user: 'bob', text: 'UNC conversation', room: 'group:unc', ts: 11}
+        ]});
+    }""")
+    expect(page.get_by_text('Public only', exact=True)).to_be_visible()
+    expect(page.get_by_text('UNC conversation', exact=True)).to_be_hidden()
+    page.click('#minimize-chat')
+    expect(page.locator('#chat-room')).to_be_hidden()
+    page.click('#minimize-chat')
+    page.select_option('#chat-room', 'group:unc')
+    expect(page.get_by_text('Public only', exact=True)).to_be_hidden()
+    expect(page.get_by_text('UNC conversation', exact=True)).to_be_visible()
+    page.fill('#message-input', 'Hello UNC')
+    page.click('#send-button')
+    sent = page.evaluate("window.__chatTransport.sent.filter(x => x.event === 'message')")
+    assert sent[-1]['data']['room'] == 'group:unc'
+    assert sent[-1]['data']['text'] == 'Hello UNC'
+    page.reload()
+    page.evaluate("window.__chatTransport.receive('chat_rooms', {rooms: ['chat:public', 'group:unc']})")
+    expect(page.locator('#chat-room')).to_have_value('group:unc')

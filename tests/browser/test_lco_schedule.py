@@ -149,3 +149,204 @@ def test_draft_check_and_submit_never_books_while_submission_is_disabled(page, l
     expect(page.locator("#msg-ipp")).to_contain_text("0 booked, 1 failed")
     expect(request).to_contain_text("Live submission is disabled on the server")
     assert ("POST", "https://observe.lco.global/api/requestgroups/") not in lco_account
+
+
+def test_shared_and_private_sheet_dropdown_selects_distinct_values(page):
+    page.problems.allowed.extend(NO_TOKEN)
+    page.route('**/api/ephemeris/target-info?*', lambda route: route.fulfill(json={
+        'ok': True, 'planets': ['b'], 'datasets': [], 'ttv_runs': [],
+        'sheet_configured': True, 'shared_sheet_configured': True,
+        'shared_sheet_owner': 'jerome', 'sheet_ephemeris': {'b': {'t0': 2461314.5, 'period': 4.0}},
+        'shared_sheet_ephemeris': {'b': {'t0': 2461315.5, 'period': 3.0}},
+        'sheet_fit_ephemeris': {'b': {'t0': 2461316.5, 'period': 4.1}},
+        'shared_sheet_fit_ephemeris': {'b': {'t0': 2461317.5, 'period': 3.1}},
+    }))
+    page.goto('/lco/schedule')
+    page.fill('#sch-target', 'TOI-1000')
+    page.locator('#sch-target').blur()
+    expect(page.locator('#sch-source option[value="shared_gsheet"]')).to_have_text('Shared Google Sheet (jerome)')
+    expect(page.locator('#sch-source option[value="gsheet"]')).to_have_text('My Google Sheet (private)')
+    for source, period in [('shared_gsheet', '3'), ('gsheet', '4'), ('shared_gsheet_tc', '3.1'), ('gsheet_tc', '4.1')]:
+        page.select_option('#sch-source', source)
+        expect(page.locator('#sch-period')).to_have_value(period)
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_unconfigured_sheet_sources_remain_visible_with_settings_link(page, shared):
+    page.problems.allowed.extend(NO_TOKEN)
+    page.route('**/api/ephemeris/target-info?*', lambda route: route.fulfill(json={
+        'ok': True, 'planets': ['b'], 'datasets': [], 'ttv_runs': [],
+        'sheet_configured': False, 'shared_sheet_configured': shared,
+    }))
+    page.goto('/lco/schedule')
+    with page.expect_response('**/api/ephemeris/target-info?*'):
+        page.fill('#sch-target', 'TOI-1000')
+        page.locator('#sch-target').blur()
+    expect(page.locator('#sch-source option[value="gsheet"]')).to_contain_text('not configured')
+    for source in ('gsheet', 'gsheet_tc', 'shared_gsheet', 'shared_gsheet_tc'):
+        option = page.locator('#sch-source option[value="' + source + '"]')
+        if shared and source.startswith('shared_'):
+            expect(option).to_be_enabled()
+        else:
+            expect(option).to_be_disabled()
+    link = page.locator('#sheet-source-hint a')
+    expect(link).to_be_visible()
+    link.click()
+    expect(page).to_have_url('/settings')
+
+
+# HIP 67522 from coj, April 2027, 3 h transit: one full, one partial and one
+# unobservable transit (see tests/test_lco_windows_upload.py).
+UPLOAD_COORDS = "199.3, -40.6"
+UPLOADED = "tc,tc_err_min\n2027-04-10T14:00:00Z,2.5\n2027-04-10T19:00:00Z,\n2027-04-10T02:00:00Z,\n"
+
+
+def _upload_and_generate(page, tmp_path) -> None:
+    page.goto("/lco/schedule")
+    page.select_option("#sch-source", "upload")
+    expect(page.locator("#sch-midtimes")).to_be_visible()
+    page.fill("#sch-coords", UPLOAD_COORDS)  # by hand: no target lookup
+    page.fill("#sch-range-start", "2027-04-01")
+    page.fill("#sch-range-end", "2027-04-30")
+    page.fill("#sch-duration", "3")
+    page.fill("#sch-pad-before", "0")
+    page.fill("#sch-pad-after", "0")
+    page.select_option("#sch-sites", "coj")
+    path = tmp_path / "midtimes.csv"
+    path.write_text(UPLOADED)
+    page.set_input_files("#sch-midtimes-file", str(path))
+    expect(page.locator("#sch-midtimes")).to_have_value(UPLOADED)
+    with page.expect_response("**/api/lco/windows", timeout=60_000):
+        page.click("#btn-gen-windows")
+
+
+def _visible_ratings(page) -> list[str]:
+    return page.eval_on_selector_all(
+        "#windows-body tr",
+        "rows => rows.filter(r => r.style.display !== 'none').map(r => r.dataset.rating)",
+    )
+
+
+def test_uploaded_midtimes_are_rated_and_filtered(page, tmp_path):
+    page.problems.allowed.extend(NO_TOKEN)
+    _upload_and_generate(page, tmp_path)
+    expect(page.locator("#windows-body tr")).to_have_count(3)
+    expect(page.locator("#msg-windows")).to_contain_text("uploaded: 3 times (3 as UTC)")
+    expect(page.locator("#win-counts")).to_have_text("3 transits: 1 full, 1 partial, 0 split, 1 none")
+    # the uploaded uncertainty fills Mid unc; the rows without one show '-'
+    expect(page.locator("#windows-body")).to_contain_text("± 2.50 min")
+
+    expected = {"all": ["none", "full", "partial"], "obs": ["full", "partial"],
+                "full": ["full"], "none": ["none"], "split": []}
+    for mode, ratings in expected.items():
+        page.select_option("#win-filter", mode)
+        assert _visible_ratings(page) == ratings, mode
+
+    with page.expect_download() as dl:
+        page.click("#btn-win-csv")
+    lines = open(dl.value.path()).read().splitlines()
+    assert lines[0].startswith("epoch,mid_utc,mid_bjd_tdb,mid_unc_min")
+    assert [line.split(",")[6] for line in lines[1:]] == ["none", "full", "partial"]
+
+    # the list and the source survive a reload (which keeps the URL slug) and
+    # a fresh visit, like the rest of the form
+    for revisit in (page.reload, lambda: page.goto("/lco/schedule")):
+        revisit()
+        assert page.input_value("#sch-source") == "upload"
+        assert page.input_value("#sch-midtimes") == UPLOADED.strip()
+        expect(page.locator("#windows-body tr")).to_have_count(3)
+
+
+def test_a_bad_uploaded_line_is_reported_by_number(page):
+    page.problems.allowed.extend(NO_TOKEN + ("HTTP 400: POST /api/lco/windows", "status of 400"))
+    page.goto("/lco/schedule")
+    page.select_option("#sch-source", "upload")
+    page.fill("#sch-coords", UPLOAD_COORDS)
+    page.fill("#sch-range-start", "2027-04-01")
+    page.fill("#sch-range-end", "2027-04-30")
+    page.fill("#sch-duration", "3")
+    page.fill("#sch-midtimes", "2461505.5\n3000.5\n")
+    page.click("#btn-gen-windows")
+    expect(page.locator("#msg-windows")).to_contain_text("line 2: tc '3000.5' looks like a reduced BJD")
+
+
+def test_other_sources_hide_the_upload_box(page):
+    page.problems.allowed.extend(NO_TOKEN)
+    page.goto("/lco/schedule")
+    expect(page.locator("#sch-midtimes")).to_be_hidden()
+    page.select_option("#sch-source", "upload")
+    expect(page.locator("#sch-midtimes")).to_be_visible()
+    page.select_option("#sch-source", "nasa")
+    expect(page.locator("#sch-midtimes")).to_be_hidden()
+
+
+def test_reload_keeps_fields_outside_the_url_slug(page):
+    """The slug carries only target/coords/range/...; a reload keeps it, so the
+    stored form has to fill in everything else rather than be discarded."""
+    page.problems.allowed.extend(NO_TOKEN)
+    page.goto("/lco/schedule")
+    page.fill("#sch-coords", f"{RA}, {DEC}")
+    page.fill("#sch-pad-before", "17")
+    page.select_option("#sch-twilight", "nautical")
+    page.select_option("#win-filter", "none")
+    assert "#" in page.url  # the slug is in place
+    page.reload()
+    assert page.input_value("#sch-pad-before") == "17"
+    assert page.input_value("#sch-twilight") == "nautical"
+    assert page.input_value("#win-filter") == "none"
+    assert page.input_value("#sch-coords") == f"{RA}, {DEC}"
+
+
+def test_a_link_to_another_target_drops_the_stored_targets_ephemeris(page):
+    """Opening a shared #target= link must not pair that target with the t0,
+    period, source or windows resolved for the target stored in this browser."""
+    page.problems.allowed.extend(NO_TOKEN + ("HTTP 404", "status of 404"))
+    page.goto("/lco/schedule")
+    _generate_windows(page)
+    expect(page.locator("#windows-body tr")).to_have_count(4)
+    stored_t0 = page.input_value("#sch-t0")
+    page.select_option("#sch-source", "upload")
+    page.fill("#sch-midtimes", "2461505.5")
+    page.fill("#sch-pad-before", "17")
+    page.locator("#sch-pad-before").blur()
+
+    page.goto("about:blank")  # a hash-only change would not reload the page
+    page.goto("/lco/schedule#target=NOT-A-STORED-TARGET")
+    assert page.input_value("#sch-target") == "NOT-A-STORED-TARGET"
+    assert page.input_value("#sch-t0") != stored_t0
+    assert page.input_value("#sch-source") != "upload"
+    assert page.input_value("#sch-midtimes") == ""
+    expect(page.locator("#windows-body tr")).to_have_count(0)
+    # settings that are not about the target still carry over
+    assert page.input_value("#sch-pad-before") == "17"
+
+
+def test_airmass_ranked_plans_can_be_selected_and_restored(page):
+    page.problems.allowed.extend(NO_TOKEN)
+    page.goto("/lco/schedule")
+    page.select_option("#sch-source", "upload")
+    page.select_option("#sch-kind", "qhy600")
+    page.fill("#sch-coords", "330, 5")
+    page.fill("#sch-range-start", "2026-11-04")
+    page.fill("#sch-range-end", "2026-11-05")
+    page.fill("#sch-duration", "2")
+    page.fill("#sch-pad-before", "0")
+    page.fill("#sch-pad-after", "0")
+    page.fill("#sch-moon-sep", "0")
+    page.fill("#sch-midtimes", "2026-11-04T02:00:00Z")
+    with page.expect_response("**/api/lco/windows", timeout=60_000):
+        page.click("#btn-gen-windows")
+    select = page.locator(".plan-select")
+    expect(select).to_have_count(1)
+    expect(select).to_have_value("site:elp")
+    expect(select.locator('option[value="site:elp"]')).to_contain_text("mean X 1.12")
+    expect(select.locator('option[value="site:lsc"]')).to_contain_text("mean X 1.50")
+    relay_ids = select.locator('option[value^="relay:"]').evaluate_all("opts => opts.map(o => o.value)")
+    assert "relay:lsc>elp" in relay_ids and "relay:elp>lsc" in relay_ids
+    page.locator("#windows-body input[type=checkbox]").check()
+    for relay_id in relay_ids:
+        select.select_option(relay_id)
+        expect(page.locator("#requests-body tr")).to_have_count(2)
+        expect(select).to_have_value(relay_id)
+    page.reload()
+    expect(page.locator(".plan-select")).to_have_value(relay_ids[-1])

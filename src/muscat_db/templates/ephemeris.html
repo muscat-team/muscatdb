@@ -2338,8 +2338,8 @@
     ).join('');
     // Placeholders surface the defaults used when the field is left blank: the
     // first loaded target, and the UTC date derived from the BJD.
-    const datePlaceholder = jdToYYMMDD(parseFloat(mp.tc)) || 'auto';
-    const targetHint = (loadedTargets.slice().sort()[0]) || 'target';
+    const datePlaceholder = 'auto: ' + (jdToYYMMDD(parseFloat(mp.tc)) || 'from BJD');
+    const targetHint = 'default: ' + (loadedTargets.slice().sort()[0] || 'target');
     const manualEpoch = planetEpochForTC(mp.planet, parseFloat(mp.tc));
     const manualEpochText = Number.isInteger(manualEpoch) ? manualEpoch : '—';
 
@@ -2371,7 +2371,7 @@
                style="width: 100%; ${inputStyle}">
       </td>
       <td>
-        <input type="text" class="manual-note" value="${escapeAttr(mp.note)}" placeholder="manual"
+        <input type="text" class="manual-note" value="${escapeAttr(mp.note)}" placeholder="e.g. manual"
                oninput="updateManualField('${mp.id}', 'note', this.value)"
                title="Optional note for your own reference"
                style="width: 100%; ${inputStyle}">
@@ -2442,7 +2442,7 @@
       // hint (the placeholder) current without clobbering a user-typed date.
       const row = document.querySelector(`tr.manual-row[data-mid="${id}"]`);
       const dateInput = row && row.querySelector('.manual-date');
-      if (dateInput) dateInput.placeholder = jdToYYMMDD(parseFloat(value)) || 'auto';
+      if (dateInput) dateInput.placeholder = 'auto: ' + (jdToYYMMDD(parseFloat(value)) || 'from BJD');
     }
     scheduleComputeFit();
     scheduleSaveView();

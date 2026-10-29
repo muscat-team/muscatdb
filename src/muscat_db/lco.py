@@ -417,12 +417,18 @@ def archive_search(
 # Safety cap so a single request-id fetch can't spin forever paginating a
 # pathologically large observation request.
 _ARCHIVE_MAX_FRAMES = 10_000
+_ARCHIVE_CURSOR_MAX_PAGES = 50
+_ARCHIVE_CURSOR_MAX_FRAMES = 50_000
+
+
+class ArchiveSearchLimit(LcoError):
+    """The cursor budget was exhausted; collected rows are incomplete."""
 
 
 def archive_search_all(
     filters: dict,
     user_name: str | None = None,
-    max_frames: int = _ARCHIVE_MAX_FRAMES,
+    max_frames: int | None = _ARCHIVE_MAX_FRAMES,
     token: str | None = None,
 ) -> dict:
     """Search the LCO archive, following pagination until exhausted or capped.
@@ -431,8 +437,18 @@ def archive_search_all(
     next-page URL, already carrying the same query params). A single observation
     request can span thousands of frames, so ``archive_search`` (one page) is not
     enough to pull a whole dataset by ``request_id``. Stops at ``max_frames`` and
-    reports ``truncated`` so the caller can warn the user.
+    reports ``truncated`` so the caller can warn the user. Pass ``None`` to
+    traverse cursor pages within the shared search budget instead.
     """
+    if max_frames is None:
+        rows = []
+        truncated = False
+        try:
+            for page in archive_cursor_pages(filters, user_name, token=token):
+                rows.extend(page)
+        except ArchiveSearchLimit:
+            truncated = True
+        return {"count": len(rows), "results": rows, "truncated": truncated}
     base_url = "https://archive-api.lco.global/frames/"
     params = _query_params(filters)
     url: str | None = f"{base_url}?{params}"
@@ -459,6 +475,48 @@ def archive_search_all(
         # (a lower bound when `truncated` is set).
         total = len(results)
     return {"count": total, "results": results[:max_frames], "truncated": truncated}
+
+
+def archive_cursor_pages(filters: dict, user_name: str | None = None, *, token: str | None = None):
+    """Yield archive pages within the shared frame and page budgets.
+
+    LCO recommends cursor pagination for large queries. Counts are absent;
+    exhaustion of ``next`` signals completion. Budget exhaustion raises
+    ``ArchiveSearchLimit`` after yielding the last permitted rows. Other callers'
+    bounded offset searches are unchanged. See https://developers.lco.global/#pagination.
+    """
+    aliases = {"OBJECT": "target_name", "OBSTYPE": "configuration_type", "SITEID": "site_id",
+               "TELID": "telescope_id", "INSTRUME": "instrument_id", "FILTER": "primary_optical_element"}
+    params = {aliases.get(k, k): v for k, v in filters.items()}
+    params.update(pagination_style="cursor", limit="1000")
+    params.pop("offset", None)
+    url = "https://archive-api.lco.global/frames/?" + _query_params(params)
+    seen = set()
+    retrieved = 0
+    while url:
+        parsed = urllib.parse.urlsplit(url)
+        if (parsed.scheme != "https" or parsed.netloc != "archive-api.lco.global"
+                or parsed.path != "/frames/" or parsed.fragment):
+            raise LcoError("Archive returned an unsafe pagination URL", status=502)
+        if url in seen:
+            raise LcoError("Archive pagination repeated a cursor; retry the search", status=502)
+        seen.add(url)
+        page = _lco_api_request(url, user_name=user_name, token=token)
+        rows = page.get("results")
+        if not isinstance(rows, list):
+            raise LcoError("Archive returned an invalid page", status=502)
+        next_url = page.get("next")
+        if next_url is not None and not isinstance(next_url, str):
+            raise LcoError("Archive returned an invalid cursor", status=502)
+        remaining = _ARCHIVE_CURSOR_MAX_FRAMES - retrieved
+        kept = rows[:remaining]
+        retrieved += len(kept)
+        yield kept
+        if len(rows) > remaining or (next_url and (
+            len(seen) >= _ARCHIVE_CURSOR_MAX_PAGES or retrieved >= _ARCHIVE_CURSOR_MAX_FRAMES
+        )):
+            raise ArchiveSearchLimit("Archive search budget reached; narrow the target, proposal or dates.")
+        url = next_url
 
 
 def _page_size(filters: dict, first_rows: list) -> int:

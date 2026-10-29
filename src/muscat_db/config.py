@@ -153,6 +153,11 @@ ENV_VARS: tuple[EnvVar, ...] = (
     EnvVar("MUSCAT_CATALOG_BATCH_MAX_ITEMS", "200", "Stars allowed per catalog batch"),
     EnvVar("MUSCAT_CATALOG_BATCH_MAX_BYTES", "262144", "Serialized bytes allowed per catalog batch"),
     EnvVar(
+        "MUSCAT_SHARED_EPHEM_SHEET_USER", "jerome",
+        "Account whose saved ephemeris sheet is shared with all viewers; "
+        "set to 'none' to disable the shared source",
+    ),
+    EnvVar(
         "MUSCAT_EPHEMERIS_SHEET_TTL_S",
         "300",
         "Cache lifetime (seconds) for a per-user ephemeris Google Sheet tab fetch "

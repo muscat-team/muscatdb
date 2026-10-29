@@ -46,6 +46,27 @@ _LCO_KEY_PROJECT_ALIAS_RE = re.compile(r"^(?P<primary>[^()]+?)\s*\((?P<alias>[^(
 _TOI_SHAPE_RE = re.compile(r"TOI[ _-]*0*\d+(?:\.\d+)?(?:\s*[B-H])?", re.IGNORECASE)
 
 
+# A planet letter closing an OBJECT name, which name resolvers reject ("DS Tuc
+# b", "WASP-12b"). It counts only after a separator ("DS Tuc b", "V1298Tau-c"),
+# a digit ("WASP-12b", "TOI-700.01c") or a digit plus one stellar-component
+# capital ("WASP-77Ab", "XO-2Nb"). A letter glued to a lowercase one is part of
+# the name: stripping it would turn the star "DSTuc" into "DSTu".
+_PLANET_LETTER_RE = re.compile(r"(?:(?<=[0-9A-Za-z])[\s_-]+|(?<=[0-9])|(?<=[0-9][A-Z]))[b-i]$")
+# Names in the frames table whose closing letter tells apart distinct objects,
+# not planets: transients ("WFST240506b" and "WFST240506c" are two sources,
+# likewise "EP240627b"), minor-planet numbers ("98943b") and provisional
+# designations ("2019AV4b"). Stripping would give two objects one position.
+_NOT_PLANET_LETTERED_RE = re.compile(r"(?:WFST|EP)\d{6}[a-z]|\d+[a-z]|\d{4}[A-Z]{1,2}\d*[a-z]", re.IGNORECASE)
+
+
+def strip_planet_letter(raw: str) -> str:
+    """The host-star name for a planet-lettered target, else *raw* (stripped)."""
+    raw = (raw or "").strip()
+    if _NOT_PLANET_LETTERED_RE.fullmatch(raw):
+        return raw
+    return _PLANET_LETTER_RE.sub("", raw)
+
+
 def resolve_lco_key_project_name(raw: str) -> str:
     """Resolve an LCO key-project decorated target name to the single
     designation worth querying a catalog or SIMBAD with.

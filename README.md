@@ -46,6 +46,14 @@ results are cached for five minutes; failed evaluations can be retried immediate
 Invalid ranking uncertainties leave the transit windows available with a ranking
 error instead of failing the scheduling request.
 
+The schedule page can also take mid-transit times from outside muscat-db: choose
+**Uploaded mid-times** as the ephemeris source and paste or load a list (full
+BJD_TDB or ISO UTC per line, optionally `tc_err` and `epoch`). Each time is
+scheduled as given and gets the same per-site rating as a generated window; the
+**Show** filter selects full, partial, split or unobservable transits. A list
+with any malformed line, or more than 1000 times, is refused with the line
+numbers at fault.
+
 `MUSCAT_MAX_FULL_JOBS` controls the concurrent full-run cap per pipeline (default
 `1`; `0` disables full runs). Empty or malformed values use `1`, with a warning
 for non-empty malformed values. Negative integers retain the disabled (`0`)
@@ -277,6 +285,18 @@ add roughly 3-4 minutes to the nightly run on an idle disk; see
 [Database integrity failure](notes/DEPLOYMENT.md#database-integrity-failure) when
 it refuses or runs for hours.
 
+The rebuild ingests and validates a separate catalog, then publishes `frames`,
+`summaries`, `targets`, and `db_meta` in one SQLite transaction. Application
+state (including notes, users, access grants, jobs, leases, and reservations)
+remains in the live database, so commits made during the rebuild survive.
+Target keys are refreshed against the current grants in that same transaction.
+WAL readers retain a consistent snapshot; writers wait during publication and
+may time out if it exceeds their busy timeout (normally 30 seconds). The log
+reports the publication transaction duration. A failed publication rolls back
+the catalog changes. Accepted leaked pages are reclaimed with a live `VACUUM`
+before publication, which also takes the write lock; healthy databases are not
+vacuumed automatically.
+
 ### LCO proposal sync
 
 `muscat-db lco-sync <PROPID>...` syncs a proposal's BANZAI final products
@@ -453,10 +473,27 @@ disk-consolidation path.
 
 ### Repairing a split (disk consolidation)
 
-`build-db` executes `DROP TABLE IF EXISTS frames; summaries; targets` and rebuilds
-them entirely from the obslog CSV tree. App-owned tables (notes, overrides, jobs,
-saved ephemeris views) are preserved; the observation-derived ones are not. **Any
-edit made directly to `muscat.db` is erased by the next nightly cron run.**
+`build-db` rebuilds `frames`, `summaries`, and `targets` entirely from the
+obslog CSV tree and publishes them atomically. App-owned tables (notes,
+overrides, jobs, saved ephemeris views) are preserved; the observation-derived
+ones are not. **An edit made directly to an observation-derived table is erased
+by the next nightly cron run.**
+
+Publication copies rows and maintains indexes in batches of 10,000, allowing
+application writes between commits. A short final transaction switches all
+catalog tables and refreshes target keys together; readers see either catalog,
+never a partial replacement. Retired tables are cleared in batches. Interrupted
+copies are cleaned up by the next rebuild, and concurrent builders serialize
+through a `.build.lock` file. Budget disk space for the snapshot, staging file,
+old and new catalog tables, and WAL; old readers may retain WAL pages.
+
+Online rebuilds do not run `VACUUM`: it holds SQLite's writer lock for the whole
+database. If the integrity gate accepts only leaked-page warnings, the rebuild
+retains them and logs `schedule VACUUM during maintenance`. Keep the clean backup
+and follow the [integrity recovery procedure](notes/DEPLOYMENT.md#database-integrity-failure)
+in a maintenance window to compact the database. Application writer timeouts
+remain 30 seconds.
+
 
 The source-of-truth chain, top to bottom:
 
@@ -569,3 +606,80 @@ is only repaired when that night already has a home elsewhere.
 As of the 2026-07 dry run: **10,328 frames** would move (sinistro 7,427 across 17
 directory pairs, muscat3 2,861 across 3, muscat4 40 across 1), with 28 `offset`,
 6 `stray` and 7,083 `conflict` reports left for review.
+
+### Collaborator chat and ephemeris sheets
+
+The chat room selector separates the public team conversation from explicit
+access-group rooms. A room such as `group:unc` is visible only to that group's
+explicit members, with group exclusions respected. Admins also need membership;
+unscoped team access does not grant access to group conversations.
+Scoped viewers never receive public messages,
+history, mentions, typing, or presence. Private job notices and `@bot` remain
+private. Hidden `user:*` groups do not create chat rooms.
+
+On `/lco/schedule`, **Shared Google Sheet (jerome)** uses Jerome's saved
+sheet configuration. **My Google Sheet (private)** uses only the signed-in
+user's configuration from Settings. Each also offers a transit-center linear
+fit. The shared owner sees their personal option labeled **shared with
+everyone**, not private. Sources remain distinct when both are configured. Unconfigured sheet sources
+remain visible but disabled, with a link to Settings beside the dropdown.
+
+`MUSCAT_SHARED_EPHEM_SHEET_USER` selects the shared owner (default `jerome`);
+set it to `none` to disable the shared source. Changing or clearing
+the owner's sheet changes the shared source for everyone. The app exposes
+per-target ephemerides, not the sheet URL or editing credentials, and checks
+target visibility before reading a sheet. Never-observed targets remain
+queryable under the existing target-access policy. Sharing a sheet therefore
+makes its ephemerides available beyond the owner's group; do not put data
+that must remain owner-only in that shared source. Other users' sheet
+configurations remain private within the app. Google permissions are separate:
+the importer requires a published or link-readable sheet.
+
+
+### Target LCO archive inventory
+
+Open **LCO archive** on a target page to find reduced science observations
+covering its coordinates, including nights never reported to ExoFOP. The panel
+loads only when opened. Each row groups a night, instrument and LCO request,
+with filters, exposure times, proposal, frame count and proprietary status.
+Local presence uses the individual frame filenames in the database; a partial
+request remains downloadable. **Download** queues the existing whole-request
+download and ingest workflow. Follow progress in **Jobs**, then search again
+or reopen the panel to see the **Photometry** link.
+
+Archive metadata is cached for one hour per coordinates, user, token and date
+range; local presence and proposal access are checked on each load. A viewer
+with restricted proposals needs their own LCO token in Settings. The inventory
+can only show frames visible to that token and permitted by local access rules.
+A proprietary label means the archive's public-release date is still in the
+future; it does not prevent an authorized download.
+
+Searches follow [LCO cursor pagination](https://developers.lco.global/#pagination)
+in sequential pages of 1,000 frames, stopping after 50 pages or 50,000 frames.
+A search that reaches this budget is labeled incomplete; narrow the dates to
+retrieve the remaining nights. Incomplete inventories are not cached. Progress
+streams while the search runs. An error
+on any page leaves the search incomplete and uncached; use Search to retry.
+Optional UT date filters (inclusive end date) narrow the search, and persist per
+target in the browser. ExoFOP-reported nights are included: a report does not
+account for every request, filter or telescope observed that night. ExoFOP indicators match instrument,
+site and night within one day, not individual request IDs. “No matching report”
+reflects the existing ExoFOP lookup, which may also return no rows during an outage.
+
+
+### Complete searches on the LCO archive page
+
+On `/lco/archive`, **All matching frames** is the default search scope. Object
+searches follow cursor pages, including nights beyond the former 10,000-frame
+limit, with a server ceiling of 50 pages or 50,000 frames. Budget-limited results
+are labeled incomplete; narrow the target, proposal or dates before retrying.
+Choose **Quick preview** to deliberately cap retrieval (up to 10,000 frames);
+truncated previews are labeled incomplete. A limit saved by an older version does
+not enable preview mode: the new scope must be selected explicitly.
+
+Results render 200 frames per display page. Selections survive Previous/Next,
+and **Download selected** includes selected frames from every display page. Group
+checkboxes select only the displayed frames. Search settings persist in the
+browser; large result sets remain in memory only for the current visit and must
+be searched again after returning. Small results still restore as before. Whole
+request downloads retain their existing safety limits.

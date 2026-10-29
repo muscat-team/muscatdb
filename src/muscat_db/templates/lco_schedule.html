@@ -97,15 +97,22 @@
 <details class="lco-section section-fold" open>
   <summary><h3>Target &amp; Transit Windows</h3></summary>
   <div class="lco-grid">
-    <div class="lco-field"><label for="sch-target">Target <span class="help-tooltip" title="Target star name. Matches normalized names from muscat-db (e.g. HIP 67522, TOI-1234).">?</span></label><input id="sch-target" type="text" placeholder="WASP-12" list="target-datalist" autocomplete="off"><datalist id="target-datalist"></datalist></div>
-    <div class="lco-field"><label for="sch-planet">Planet <span class="help-tooltip" title="Planet letter identifier (e.g. b, c). Used to look up the ephemeris for this planet.">?</span></label><input id="sch-planet" type="text" placeholder="b" style="max-width: 90px;"></div>
+    <div class="lco-field"><label for="sch-target">Target <span class="help-tooltip" title="Target star name. Matches normalized names from muscat-db (e.g. HIP 67522, TOI-1234).">?</span></label><input id="sch-target" type="text" placeholder="e.g. WASP-12" list="target-datalist" autocomplete="off"><datalist id="target-datalist"></datalist></div>
+    <div class="lco-field"><label for="sch-planet">Planet <span class="help-tooltip" title="Planet letter identifier (e.g. b, c). Used to look up the ephemeris for this planet.">?</span></label><input id="sch-planet" type="text" placeholder="e.g. b" style="max-width: 90px;"></div>
     <div class="lco-field"><label for="sch-source">Ephemeris source <span class="help-tooltip" title="Where t0 / period come from. 'linear fit' refines the ephemeris across all of this target's completed transit fits; individual datasets use that fit's t0/period directly (same as the Planetary Reference Ephemerides on the Ephemeris page). Click 'Fetch ephemeris' to populate datasets.">?</span></label>
       <select id="sch-source">
         <option value="">Auto</option>
         <option value="nasa">NASA catalog</option>
         <option value="toi">TOI catalog</option>
         <option value="linear">linear fit</option>
-      </select></div>
+        <option value="shared_gsheet" disabled>Shared Google Sheet — fetch ephemeris to check availability</option>
+        <option value="shared_gsheet_tc" disabled>Shared Google Sheet — transit-center fit (unavailable)</option>
+        <option value="gsheet" disabled>My Google Sheet (private) — configure in Settings</option>
+        <option value="gsheet_tc" disabled>My Google Sheet (private) — transit-center fit (unavailable)</option>
+        <option value="upload">Uploaded mid-times</option>
+      </select>
+      <span class="hint" id="sheet-source-hint">Configure your personal source in <a href="/settings">Settings</a>. Shared sources require a configured team sheet.</span>
+    </div>
     <div class="lco-field"><label for="sch-coords">RA, Dec (deg) <span class="ephem-src none" id="src-coords">—</span> <span class="help-tooltip" title="Target coordinates in decimal degrees (RA, Dec). Auto-filled by Fetch ephemeris from the catalog.">?</span></label><input id="sch-coords" type="text" placeholder="e.g. 97.64, 29.67"></div>
     <div class="lco-field"><label for="sch-range-start">Range start (UTC) <span class="help-tooltip" title="Start of the scheduling search window in UTC. Only transits with mid-point inside this range are considered.">?</span></label><input id="sch-range-start" type="date"></div>
     <div class="lco-field"><label for="sch-range-end">Range end (UTC) <span class="help-tooltip" title="End of the scheduling search window in UTC.">?</span></label><input id="sch-range-end" type="date"></div>
@@ -116,6 +123,14 @@
     <div class="lco-field"><label for="sch-pad-after">Post-egress (min) <span class="help-tooltip" title="Minutes to add after egress (end of transit). Extends the scheduling window later to ensure baseline coverage.">?</span></label><input id="sch-pad-after" type="number" step="any" value="45"></div>
     <div class="lco-field"><label for="sch-include-padding" style="margin: 0;">Include padding in obs check <span class="help-tooltip" title="When on, the padded baseline (start→end) must also be observable for a transit to rate 'full'. When off, padding is used only for the displayed span and the observability check spans just the transit (mid ± duration/2).">?</span></label>
       <input id="sch-include-padding" type="checkbox" checked></div>
+  </div>
+  <div class="lco-field" id="midtimes-block" style="display: none; margin-top: 0.6rem;">
+    <label for="sch-midtimes">Mid-transit times <span class="help-tooltip" title="One transit per line: tc, then optionally tc_err (days) and epoch, separated by commas, tabs or spaces. tc is a full BJD_TDB (e.g. 2461000.51234) or an ISO UTC time (e.g. 2026-11-03T04:12:00Z). A header line may name the columns in any order: tc, tc_err (days) or tc_err_min (minutes), epoch. Lines starting with # are ignored. Up to 1000 times; the duration and padding fields above apply to every row.">?</span></label>
+    <textarea id="sch-midtimes" class="lco-pre" rows="6" spellcheck="false" aria-label="Mid-transit times" placeholder="e.g.&#10;tc,tc_err_min,epoch&#10;2461000.51234,1.2,411&#10;2026-11-03T04:12:00Z,,412"></textarea>
+    <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.3rem;">
+      <label for="sch-midtimes-file" class="hint" style="margin: 0;">or load a file</label>
+      <input id="sch-midtimes-file" type="file" accept=".csv,.tsv,.txt,.dat,text/csv,text/plain">
+    </div>
   </div>
   <div class="lco-grid" style="margin-top: 0.6rem;">
     <div class="lco-field">
@@ -164,7 +179,7 @@
     </label>
     <label class="lco-field" style="flex-direction: row; align-items: center; gap: 0.4rem;">
       <span style="font-size: 0.72rem; color: var(--text-dim); text-transform: uppercase;">Default plan
-        <span class="help-tooltip" title="How each transit's plan (the dropdown in its Transit obs cell) starts out; changing a row's plan by hand keeps it. Sites LCO currently lists as unschedulable are avoided when another plan exists.&#10;• Best site, relay if none is full: one site covering the whole transit, else a two-site relay, else the best partial site.&#10;• Best single site: always one site (full, else the most coverage).&#10;• Either site when possible: one unpinned request; repeat_duration fits the listed site seeing the least. Coverage is not guaranteed: LCO may run the block at any site with this instrument that can see the target (not only the listed ones) and anywhere inside the window, so it may miss ingress, egress, or both.">?</span></span>
+        <span class="help-tooltip" title="How each transit's plan (the dropdown in its Transit obs cell) starts out; changing a row's plan by hand keeps it. Plans are ranked by full transit coverage, covered minutes, gap, then lower mean in-transit airmass (X). Relay means weight both legs by observed transit time, including both during overlap; baseline padding is excluded. Either-site labels show the range of candidate-site means, not guaranteed conditions. Sites LCO currently lists as unschedulable are avoided when another plan exists.&#10;• Best site, relay if none is full: one site covering the whole transit, else a two-site relay, else the best partial site.&#10;• Best single site: always one site (full, else the most coverage).&#10;• Either site when possible: one unpinned request; repeat_duration fits the listed site seeing the least. Coverage is not guaranteed: LCO may run the block at any site with this instrument that can see the target (not only the listed ones) and anywhere inside the window, so it may miss ingress, egress, or both.">?</span></span>
       <select id="sch-plan-policy" class="lco-control">
         <option value="relay">Best site, relay if none is full</option>
         <option value="single">Best single site</option>
@@ -178,8 +193,11 @@
         <option value="obs" selected>partial + full</option>
         <option value="full">full only</option>
         <option value="split">split only</option>
+        <option value="none">none only</option>
       </select>
     </label>
+    <span class="hint" id="win-counts" style="margin: 0;"></span>
+    <button class="btn sm" type="button" id="btn-win-csv" title="Download the windows table, with each transit's rating and observing sites, as CSV" style="display: none;">Export CSV</button>
     <span class="lco-msg" id="msg-windows" style="margin: 0;"></span>
   </div>
   <div class="lco-table-wrap" style="margin-top: 0.75rem;">
@@ -232,7 +250,7 @@
         <option value="muscat">2M0-SCICAM-MUSCAT</option>
       </select>
     </div>
-    <div class="lco-field" id="sch-name-field" style="display: none;"><label for="sch-name">Request name <span class="help-tooltip" title="Human-readable name for this LCO request. Shown in the observing queue.">?</span></label><input id="sch-name" type="text" placeholder="WASP-12b transit"></div>
+    <div class="lco-field" id="sch-name-field" style="display: none;"><label for="sch-name">Request name <span class="help-tooltip" title="Human-readable name for this LCO request. Shown in the observing queue.">?</span></label><input id="sch-name" type="text" placeholder="e.g. WASP-12b transit"></div>
     <div class="lco-field" id="sch-site-field" style="display: none;"><label>Site <span class="help-tooltip" title="Observing site. Auto-filled from the checked window(s): the shared best site when they agree, or left blank when they differ so LCO's scheduler picks an observable node. For MuSCAT3 choose ogg (Maui) or coj (Siding Spring); for Sinistro choose any LCO 1m node (no unit at ogg); for QHY600 choose any LCO 0.4m node (all 6 sites, including ogg); or leave blank to let LCO pick.">?</span></label>
       <div class="muscat-only" style="display: none;">
         <select id="sch-muscat-site">
@@ -272,7 +290,7 @@
       </div>
       <div class="lco-field">
         <label for="sch-effective-exptime">Exp time (s) <span class="help-tooltip" title="Exposure time in seconds for Sinistro/QHY600 observations.">?</span></label>
-        <input id="sch-effective-exptime" type="text" inputmode="decimal" placeholder="60">
+        <input id="sch-effective-exptime" type="text" inputmode="decimal" placeholder="e.g. 60">
       </div>
       <div class="lco-field">
         <label for="sch-effective-mode">Readout <span class="help-tooltip" title="Readout mode. Sinistro: 2k 2x2 uses central CCD region, full uses entire frame. QHY600: central30x30 crops to a 30'x30' subframe (default, no binning), full uses entire frame.">?</span></label>
@@ -288,10 +306,10 @@
     <div class="lco-subhead lco-block-title" id="muscat-block-title">MuSCAT</div>
     <div class="lco-subhead">Exposure times per band</div>
     <div class="lco-grid" style="grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 0.5rem 1rem;">
-      <div class="lco-field"><label for="sch-exp-g">g (s) <span class="help-tooltip" title="Exposure time in seconds for the g band.">?</span></label><input id="sch-exp-g" type="number" step="any" placeholder="30"></div>
-      <div class="lco-field"><label for="sch-exp-r">r (s) <span class="help-tooltip" title="Exposure time in seconds for the r band.">?</span></label><input id="sch-exp-r" type="number" step="any" placeholder="30"></div>
-      <div class="lco-field"><label for="sch-exp-i">i (s) <span class="help-tooltip" title="Exposure time in seconds for the i band.">?</span></label><input id="sch-exp-i" type="number" step="any" placeholder="30"></div>
-      <div class="lco-field"><label for="sch-exp-z">z (s) <span class="help-tooltip" title="Exposure time in seconds for the z band.">?</span></label><input id="sch-exp-z" type="number" step="any" placeholder="30"></div>
+      <div class="lco-field"><label for="sch-exp-g">g (s) <span class="help-tooltip" title="Exposure time in seconds for the g band.">?</span></label><input id="sch-exp-g" type="number" step="any" placeholder="e.g. 30"></div>
+      <div class="lco-field"><label for="sch-exp-r">r (s) <span class="help-tooltip" title="Exposure time in seconds for the r band.">?</span></label><input id="sch-exp-r" type="number" step="any" placeholder="e.g. 30"></div>
+      <div class="lco-field"><label for="sch-exp-i">i (s) <span class="help-tooltip" title="Exposure time in seconds for the i band.">?</span></label><input id="sch-exp-i" type="number" step="any" placeholder="e.g. 30"></div>
+      <div class="lco-field"><label for="sch-exp-z">z (s) <span class="help-tooltip" title="Exposure time in seconds for the z band.">?</span></label><input id="sch-exp-z" type="number" step="any" placeholder="e.g. 30"></div>
     </div>
     <div class="lco-subhead">Settings</div>
     <div class="lco-grid" style="grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 0.5rem 1rem;">
@@ -506,7 +524,7 @@
   // model's predicted mid-times). Grey those fields and make them read-only so
   // that is obvious, rather than leaving editable-looking inputs that imply a
   // linear ephemeris drives the schedule.
-  var EPHEM_IGNORED_TITLE = "Ignored — scheduling uses the TTV model's predicted mid-times";
+  var EPHEM_IGNORED_TITLE = "Ignored — scheduling uses the source's own predicted mid-times";
   function setEphemIgnored(on) {
     ['sch-t0', 'sch-period'].forEach(function (id) {
       var input = el(id);
@@ -516,6 +534,11 @@
       if (on) { input.title = EPHEM_IGNORED_TITLE; }
       else { input.removeAttribute('title'); }
     });
+  }
+  // Sources that supply mid-times directly (a TTV model, an uploaded list), so
+  // t0/period neither shape the windows nor propagate a mid-time uncertainty.
+  function isMidtimeSource(source) {
+    return source === 'upload' || String(source || '').indexOf('ttv:') === 0;
   }
   function clearEphemFields() {
     EPHEM_FIELDS.forEach(function (id) { setVal(id, ''); setFieldSource(id, ''); });
@@ -556,7 +579,7 @@
 
   var TEXT_IDS = [
     'sch-proposal','sch-target','sch-planet','sch-source','sch-coords',
-    'sch-t0','sch-period','sch-duration',
+    'sch-t0','sch-period','sch-duration','sch-midtimes',
     'sch-range-start','sch-range-end','sch-pad-before','sch-pad-after',
     'sch-twilight','sch-sites','win-filter',
     'sch-kind','sch-name','sch-count','sch-exp-g','sch-exp-r','sch-exp-i','sch-exp-z',
@@ -573,7 +596,7 @@
   // invalidates the rendered prediction; win-filter is deliberately absent
   // because it only changes which already-current rows are displayed.
   var WINDOW_PREDICTION_IDS = [
-    'sch-target','sch-planet','sch-source','sch-coords',
+    'sch-target','sch-planet','sch-source','sch-coords','sch-midtimes',
     'sch-range-start','sch-range-end','sch-t0','sch-period','sch-duration',
     'sch-pad-before','sch-pad-after','sch-include-padding',
     'sch-sites','sch-twilight','sch-obs-airmass','sch-moon-sep','sch-max-lunar-phase','sch-rank'
@@ -621,13 +644,33 @@
     // Update URL slug for bookmarking/sharing.
     window.history.replaceState(null, '', window.location.pathname + encodeOptions(opts));
   }
+  // Values that only make sense for the target they were resolved for: kept
+  // from localStorage only while a URL slug names that same target.
+  var TARGET_SCOPED_KEYS = EPHEM_FIELDS.concat(['sch-planet', 'sch-source', 'sch-midtimes', '_ephemTarget', '_fieldSources']);
+  // Set when a slug opened a different target than the stored form's, so the
+  // stored windows (computed for that other target) are not restored either.
+  var slugSwitchedTarget = false;
+
+  function withoutKeys(obj, keys) {
+    var out = {};
+    Object.keys(obj).forEach(function (k) { if (keys.indexOf(k) === -1) out[k] = obj[k]; });
+    return out;
+  }
+
   function restoreOptions() {
-    // Priority: URL slug > localStorage > defaults.
-    var saved = decodeSlug();
-    if (!saved) {
-      try { saved = JSON.parse(localStorage.getItem(OPT_KEY) || 'null'); } catch (e) { saved = null; }
+    // localStorage holds the whole form; a URL slug (bookmark, shared link, or
+    // the hash a reload keeps) carries only a few fields and overrides those.
+    // Priority per field: URL slug > localStorage > defaults.
+    var stored = null;
+    try { stored = JSON.parse(localStorage.getItem(OPT_KEY) || 'null'); } catch (e) { stored = null; }
+    var slug = decodeSlug();
+    if (stored && slug && slug['sch-target'] !== undefined &&
+        String(slug['sch-target']).trim() !== String(stored['sch-target'] || '').trim()) {
+      stored = withoutKeys(stored, TARGET_SCOPED_KEYS);
+      slugSwitchedTarget = true;
     }
-    if (!saved) return;
+    if (!stored && !slug) return;
+    var saved = Object.assign({}, stored || {}, slug || {});
     TEXT_IDS.forEach(function (id) { if (saved[id] !== undefined && saved[id] !== '') setVal(id, saved[id]); });
     CHECK_IDS.forEach(function (id) { if (saved[id] !== undefined) setChk(id, saved[id]); });
     // Exp times are only valid when restored settings match current settings.
@@ -1146,7 +1189,8 @@
       '<option value="">Auto</option>' +
       '<option value="nasa">NASA catalog</option>' +
       '<option value="toi">TOI catalog</option>' +
-      '<option value="linear">linear fit</option>';
+      '<option value="linear">linear fit</option>' +
+      '<option value="upload">Uploaded mid-times</option>';
     // One option per completed TTV run: scheduling from a TTV model uses that
     // run's predicted mid-times rather than a linear ephemeris, so the run has
     // to be part of the selection.
@@ -1156,14 +1200,23 @@
       opt.textContent = 'TTV model: ' + (r.run_name || 'default');
       sel.appendChild(opt);
     });
-    if (info.sheet_configured) {
-      var gs = document.createElement('option');
-      gs.value = 'gsheet'; gs.textContent = 'Google Sheet';
-      sel.appendChild(gs);
-      var gt = document.createElement('option');
-      gt.value = 'gsheet_tc'; gt.textContent = 'Sheet transit centers (linear fit)';
-      sel.appendChild(gt);
-    }
+    var sharedLabel = info.shared_sheet_configured
+      ? 'Shared Google Sheet (' + (info.shared_sheet_owner || 'team') + ')'
+      : 'Shared Google Sheet';
+    var personalLabel = info.shared_sheet_is_mine
+      ? 'My Google Sheet (shared with everyone)' : 'My Google Sheet (private)';
+    [
+      ['shared_gsheet', sharedLabel, info.shared_sheet_configured],
+      ['shared_gsheet_tc', sharedLabel + ' — transit-center fit', info.shared_sheet_configured],
+      ['gsheet', personalLabel, info.sheet_configured],
+      ['gsheet_tc', personalLabel + ' — transit-center fit', info.sheet_configured]
+    ].forEach(function (item) {
+      var option = document.createElement('option');
+      option.value = item[0];
+      option.disabled = !item[2];
+      option.textContent = item[1] + (item[2] ? '' : ' — not configured');
+      sel.appendChild(option);
+    });
     (info.datasets || []).forEach(function (d, i) {
       if (d.planets_fitted && d.planets_fitted.indexOf(planet) !== -1) {
         var opt = document.createElement('option');
@@ -1172,7 +1225,7 @@
         sel.appendChild(opt);
       }
     });
-    var has = Array.prototype.some.call(sel.options, function (o) { return o.value === prev; });
+    var has = Array.prototype.some.call(sel.options, function (o) { return o.value === prev && !o.disabled; });
     sel.value = has ? prev : '';
   }
 
@@ -1231,10 +1284,11 @@
   function applySource(info, opts) {
     opts = opts || {};
     var source = val('sch-source');
-    // Grey t0/period whenever a TTV model is the source (server ignores them);
+    // Grey t0/period whenever the source supplies its own mid-times (server ignores them);
     // runs before the initial-load guard below so a restored TTV source is
     // reflected on first paint too.
-    setEphemIgnored(source.indexOf('ttv:') === 0);
+    setEphemIgnored(isMidtimeSource(source));
+    syncMidtimesBlock();
     // On the initial page load the restored t0/period already belong to the
     // restored target, and may be values the observer typed by hand (the input
     // listener below tags those 'manual'). Overwriting them from the catalog
@@ -1258,6 +1312,12 @@
     else if (nasa.duration != null) { dur = nasa.duration; durUnc = nasa.duration_unc; durSrc = 'NASA'; }
     else if (toi.duration != null) { dur = toi.duration; durUnc = toi.duration_unc; durSrc = 'TOI'; }
     if (dur != null) { setVal('sch-duration', tupleString(dur, durUnc)); setFieldSource('sch-duration', durSrc); }
+
+    if (source === 'upload') {
+      saveOptions();
+      msg('msg-windows', 'Windows will follow the uploaded mid-times; t0/period are not used', 'ok');
+      return;
+    }
 
     if (source.indexOf('ttv:') === 0) {
       // A TTV model supplies mid-times, not a t0/period pair, but the form still
@@ -1318,38 +1378,41 @@
       return;
     }
 
-    if (source === 'gsheet') {
-      var g = (info.sheet_ephemeris || {})[planet] || {};
+    var sharedSheet = source.indexOf('shared_') === 0;
+    var sheetLabel = sharedSheet ? 'Shared Google Sheet (' + info.shared_sheet_owner + ')' : (info.shared_sheet_is_mine ? 'My Google Sheet (shared with everyone)' : 'My Google Sheet (private)');
+    var sheetBadge = sharedSheet ? 'SHARED SHEET' : 'MY SHEET';
+    if (source === 'gsheet' || source === 'shared_gsheet') {
+      var g = ((sharedSheet ? info.shared_sheet_ephemeris : info.sheet_ephemeris) || {})[planet] || {};
       if (g.t0 == null || g.period == null) {
         setVal('sch-t0', ''); setVal('sch-period', '');
         setFieldSource('sch-t0', ''); setFieldSource('sch-period', '');
         saveOptions();
-        msg('msg-windows', 'No Google Sheet ephemeris for ' + planet, 'err');
+        msg('msg-windows', 'No ' + sheetLabel + ' ephemeris for ' + planet, 'err');
         return;
       }
       setVal('sch-t0', tupleString(g.t0, g.t0_unc));
       setVal('sch-period', tupleString(g.period, g.period_unc));
-      setFieldSource('sch-t0', 'SHEET'); setFieldSource('sch-period', 'SHEET');
-      if (g.duration != null) { dur = g.duration; setVal('sch-duration', tupleString(g.duration, g.duration_unc)); setFieldSource('sch-duration', 'SHEET'); }
+      setFieldSource('sch-t0', sheetBadge); setFieldSource('sch-period', sheetBadge);
+      if (g.duration != null) { dur = g.duration; setVal('sch-duration', tupleString(g.duration, g.duration_unc)); setFieldSource('sch-duration', sheetBadge); }
       saveOptions();
-      msg('msg-windows', 'Google Sheet: t0=' + g.t0 + ', P=' + g.period + ' d' + (dur != null ? ', dur=' + dur + ' h' : ''), 'ok');
+      msg('msg-windows', sheetLabel + ': t0=' + g.t0 + ', P=' + g.period + ' d' + (dur != null ? ', dur=' + dur + ' h' : ''), 'ok');
       return;
     }
 
-    if (source === 'gsheet_tc') {
-      var gt = (info.sheet_fit_ephemeris || {})[planet] || {};
+    if (source === 'gsheet_tc' || source === 'shared_gsheet_tc') {
+      var gt = ((sharedSheet ? info.shared_sheet_fit_ephemeris : info.sheet_fit_ephemeris) || {})[planet] || {};
       if (gt.t0 == null || gt.period == null) {
         setVal('sch-t0', ''); setVal('sch-period', '');
         setFieldSource('sch-t0', ''); setFieldSource('sch-period', '');
         saveOptions();
-        msg('msg-windows', 'No Sheet transit-center fit for ' + planet + ' (needs ≥2 epochs and a seed period)', 'err');
+        msg('msg-windows', 'No ' + sheetLabel + ' transit-center fit for ' + planet + ' (needs ≥2 epochs and a seed period)', 'err');
         return;
       }
       setVal('sch-t0', tupleString(gt.t0, gt.t0_unc));
       setVal('sch-period', tupleString(gt.period, gt.period_unc));
-      setFieldSource('sch-t0', 'SHEET'); setFieldSource('sch-period', 'SHEET');
+      setFieldSource('sch-t0', sheetBadge); setFieldSource('sch-period', sheetBadge);
       saveOptions();
-      msg('msg-windows', 'Sheet linear fit: t0=' + gt.t0 + ', P=' + gt.period + ' d' + (dur != null ? ', dur=' + dur + ' h' : ''), 'ok');
+      msg('msg-windows', sheetLabel + ' linear fit: t0=' + gt.t0 + ', P=' + gt.period + ' d' + (dur != null ? ', dur=' + dur + ' h' : ''), 'ok');
       return;
     }
 
@@ -1505,15 +1568,62 @@
 
   function applyWinFilter() {
     var mode = val('win-filter');
+    var counts = { full: 0, partial: 0, split: 0, none: 0 };
     document.querySelectorAll('#windows-body tr').forEach(function (tr) {
       var rating = tr.getAttribute('data-rating') || 'none';
+      counts[isSplitRating(rating) ? 'split' : (counts.hasOwnProperty(rating) ? rating : 'none')]++;
       var show = mode === 'all' ||
         (mode === 'obs' && rating !== 'none') ||
         (mode === 'full' && rating === 'full') ||
-        (mode === 'split' && isSplitRating(rating));
+        (mode === 'split' && isSplitRating(rating)) ||
+        (mode === 'none' && rating === 'none');
       tr.style.display = show ? '' : 'none';
     });
+    var n = lastWindows.length;
+    el('win-counts').textContent = n
+      ? n + ' transits: ' + counts.full + ' full, ' + counts.partial + ' partial, ' +
+        counts.split + ' split, ' + counts.none + ' none'
+      : '';
+    el('btn-win-csv').style.display = n ? '' : 'none';
   }
+
+  // What the server made of an uploaded list, for the windows message.
+  function uploadedProvenance(u) {
+    var ts = u.time_systems || {};
+    var systems = [];
+    if (ts.bjd_tdb) systems.push(ts.bjd_tdb + ' read as BJD_TDB');
+    if (ts.utc) systems.push(ts.utc + ' as UTC');
+    var parts = ['uploaded: ' + u.rows + ' times (' + systems.join(', ') + ')'];
+    if (u.out_of_range) parts.push(u.out_of_range + ' outside the date range');
+    if (u.duplicates_dropped) parts.push(u.duplicates_dropped + ' duplicate' + (u.duplicates_dropped === 1 ? '' : 's') + ' dropped');
+    return parts.join('; ');
+  }
+
+  function csvCell(v) {
+    var t = v == null ? '' : String(v);
+    return /[",\n]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t;
+  }
+
+  el('btn-win-csv').addEventListener('click', function () {
+    var header = ['epoch', 'mid_utc', 'mid_bjd_tdb', 'mid_unc_min', 'start_utc', 'end_utc', 'rating', 'sites', 'best_site'];
+    var lines = [header.join(',')];
+    lastWindows.forEach(function (w) {
+      var o = w.observability || {};
+      lines.push([
+        w.epoch, w.mid, typeof w.mid_bjd === 'number' ? w.mid_bjd.toFixed(6) : '',
+        typeof w.mid_unc_min === 'number' ? w.mid_unc_min.toFixed(2) : '',
+        w.start, w.end, o.rating || '', (o.sites || []).join(' '), o.best_site || ''
+      ].map(csvCell).join(','));
+    });
+    var blob = new Blob([lines.join('\n') + '\n'], { type: 'text/csv' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = (val('sch-target') || 'transits').replace(/[^A-Za-z0-9_.-]+/g, '_') + '_windows.csv';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 0);
+  });
 
   // 1-sigma mid-time uncertainty (minutes) propagated from the linear
   // ephemeris: sqrt(t0_unc^2 + (n * P_unc)^2), where n counts periods since t0
@@ -1615,7 +1725,7 @@
     // A TTV-model source numbers epochs from the model's own reference and its
     // mid-times do not follow t0/P, so the linear propagation does not apply.
     var showUnc = t0Tuple.ok && periodTuple.ok && (t0Tuple.unc !== null || periodTuple.unc !== null) &&
-      val('sch-source').indexOf('ttv:') !== 0;
+      !isMidtimeSource(val('sch-source'));
 
     lastWindows.forEach(function (w, i) {
       var o = w.observability;
@@ -1768,6 +1878,12 @@
     } else {
       label = 'Relay ' + p.sites.map(function (s) { return s.toUpperCase(); }).join(' → ') +
         (p.gap_min ? ' (' + p.gap_min + ' min gap)' : ' (' + p.overlap_min + ' min overlap)');
+    }
+    if (Number.isFinite(p.mean_airmass)) label += ' · mean X ' + p.mean_airmass.toFixed(2);
+    if (p.type === 'either' && p.site_mean_airmass) {
+      var means = p.sites.map(function (s) { return p.site_mean_airmass[s]; }).filter(Number.isFinite);
+      if (means.length) label += ' · site mean X ' + Math.min.apply(null, means).toFixed(2) +
+        '–' + Math.max.apply(null, means).toFixed(2);
     }
     if (!planSchedulable(p)) label += ' · offline';
     return label;
@@ -1963,6 +2079,7 @@
   }
 
   function restoreScheduleState() {
+    if (slugSwitchedTarget) return;  // the stored windows belong to another target
     var saved;
     try { saved = JSON.parse(localStorage.getItem(STATE_KEY) || 'null'); } catch (e) { saved = null; }
     if (!saved) return;
@@ -2619,7 +2736,12 @@
   el('sch-target').addEventListener('input', scheduleTargetRefresh);
   el('sch-target').addEventListener('change', function () { refreshTargetFields({ silent: true }); });
   el('sch-target').addEventListener('blur', function () { refreshTargetFields({ silent: true }); });
+  function syncMidtimesBlock() {
+    el('midtimes-block').style.display = val('sch-source') === 'upload' ? '' : 'none';
+  }
+  syncMidtimesBlock();
   el('sch-source').addEventListener('change', function () {
+    syncMidtimesBlock();
     var target = val('sch-target');
     if (lastTargetInfo && lastInfoTarget === target) {
       // Info already loaded for this target: re-apply the chosen source so
@@ -2633,6 +2755,25 @@
     } else {
       msg('msg-windows', 'Enter a target (and click "Fetch ephemeris") to load t0 / period / duration', 'err');
     }
+  });
+  var MIDTIMES_MAX_BYTES = 256000;  // matches midtimes.MAX_TEXT_CHARS on the server
+  el('sch-midtimes-file').addEventListener('change', function () {
+    var input = this;
+    var file = input.files && input.files[0];
+    if (!file) return;
+    if (file.size > MIDTIMES_MAX_BYTES) {
+      msg('msg-windows', file.name + ' is too large (at most ' + MIDTIMES_MAX_BYTES / 1000 + ' kB)', 'err');
+      input.value = '';
+      return;
+    }
+    file.text().then(function (text) {
+      el('sch-midtimes').value = text;
+      // A programmatic value fires no input event: invalidate and persist here.
+      el('sch-midtimes').dispatchEvent(new Event('input'));
+      saveOptions();
+      msg('msg-windows', 'Loaded ' + file.name + '; click Generate windows', 'ok');
+    }).catch(function (e) { msg('msg-windows', 'Could not read ' + file.name + ': ' + errText(e), 'err'); })
+      .then(function () { input.value = ''; });
   });
   el('sch-planet').addEventListener('change', function () {
     updateRequestName();
@@ -2748,7 +2889,11 @@
     var periodTuple = tupleField('sch-period');
     var durationTuple = tupleField('sch-duration');
 
-    if (!val('sch-target') && (t0Tuple.mean === null || periodTuple.mean === null)) {
+    var isUpload = val('sch-source') === 'upload';
+    if (isUpload && !val('sch-midtimes').trim()) {
+      msg('msg-windows', 'Paste or load the mid-transit times first.', 'err'); return;
+    }
+    if (!isUpload && !val('sch-target') && (t0Tuple.mean === null || periodTuple.mean === null)) {
       msg('msg-windows', 't0 and Period are required when no target is specified for lookup.', 'err'); return;
     }
     if (durationTuple.mean === null || durationTuple.mean <= 0) {
@@ -2790,7 +2935,8 @@
       max_lunar_phase: num('sch-max-lunar-phase') || 1.0,
       include_padding: chk('sch-include-padding'),
       rank: isTtv && chk('sch-rank'), rank_by: 'ttv',
-      sites: selectedSites()
+      sites: selectedSites(),
+      midtimes_text: isUpload ? val('sch-midtimes') : ''
     };
     MuscatFetch.fetchJson('/api/lco/windows', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(function (d) {
         if (!d.ok) { clearWindows(); msg('msg-windows', d.error || 'failed', 'err'); return; }
@@ -2800,7 +2946,7 @@
         // inputs that produced it are known now, and a restore may redraw the
         // table before they are refilled. Not for a TTV-model source (its
         // mid-times do not follow t0/P).
-        if (!isTtv && (t0Tuple.unc !== null || periodTuple.unc !== null)) {
+        if (!isTtv && !isUpload && (t0Tuple.unc !== null || periodTuple.unc !== null)) {
           lastWindows.forEach(function (w) { w.mid_unc_min = midUncMinutes(w, t0Tuple.unc, periodTuple.unc); });
         }
         if (d.duration && !val('sch-duration')) setVal('sch-duration', tupleString(d.duration, null));
@@ -2811,7 +2957,8 @@
         if (d.rank_error) extra += ', ranking unavailable: ' + d.rank_error;
         else if (d.rank_by) extra += ', ranked by ' + d.rank_by + ' info gain';
         var provenance = d.ttv_run ? 'TTV model: ' + d.ttv_run
-                                   : 't0=' + d.t0 + ', P=' + d.period + ' d';
+                       : d.uploaded ? uploadedProvenance(d.uploaded)
+                       : 't0=' + d.t0 + ', P=' + d.period + ' d';
         msg('msg-windows', lastWindows.length + ' windows (' + provenance + ')' + extra, 'ok');
       }).catch(function (e) { clearWindows(); msg('msg-windows', errText(e), 'err'); });
   });

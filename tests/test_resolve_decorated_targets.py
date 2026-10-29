@@ -60,6 +60,7 @@ def test_falls_back_to_tic_on_simbad_when_catalogs_have_nothing(monkeypatch):
 
 
 def test_unresolvable_decorated_name_is_none(monkeypatch):
+    monkeypatch.setattr("muscat_db.exofop.fetch_target_by_name", lambda name: None)
     monkeypatch.setattr(catalog, "_query_target_coordinates", lambda n: None)
     monkeypatch.setattr(catalog.exp_calc, "resolve_target_coords", lambda n: None)
     assert catalog._resolve_archive_coords("TIC 1.01 (TOI 2.01)") is None

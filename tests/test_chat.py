@@ -670,6 +670,7 @@ def sio_harness(monkeypatch):
     fake = _FakeSio()
     monkeypatch.setattr(chat, "sio", fake)
     monkeypatch.setattr(chat, "_rate", {})
+    monkeypatch.setattr(chat, "_rooms_by_sid", {}, raising=False)
     monkeypatch.setattr(chat, "_users_by_sid", {})
 
     async def _not_scoped(_sid):
@@ -826,6 +827,7 @@ def test_edit_rejected_for_another_users_message(sio_harness, monkeypatch):
     import asyncio
 
     _as_user(monkeypatch, "mallory")
+    monkeypatch.setattr(chat.db, "get_chat_message", lambda mid: {"id": mid, "room": None})
     monkeypatch.setattr(chat.db, "edit_chat_message", lambda *a, **k: None)
     asyncio.run(chat.edit_message("sid-1", {"id": 7, "text": "changed"}))
 
@@ -837,6 +839,7 @@ def test_delete_rejected_for_another_users_message(sio_harness, monkeypatch):
     import asyncio
 
     _as_user(monkeypatch, "mallory")
+    monkeypatch.setattr(chat.db, "get_chat_message", lambda mid: {"id": mid, "room": None})
     monkeypatch.setattr(chat.db, "delete_chat_message", lambda *a, **k: False)
     asyncio.run(chat.delete_message("sid-1", {"id": 7}))
 
@@ -847,7 +850,7 @@ def test_successful_edit_and_delete_broadcast(sio_harness, monkeypatch):
     import asyncio
 
     _as_user(monkeypatch, "alice")
-    monkeypatch.setattr(chat.db, "get_chat_message", lambda mid: None)
+    monkeypatch.setattr(chat.db, "get_chat_message", lambda mid: {"id": mid, "room": None})
     monkeypatch.setattr(
         chat.db, "edit_chat_message", lambda mid, u, t, mentions=None: {"id": mid, "text": t}
     )
@@ -922,7 +925,7 @@ def test_shared_room_broadcasts_go_to_the_public_room_only(sio_harness, monkeypa
     monkeypatch.setattr(
         chat.db, "save_chat_message", lambda user, text, **k: {"id": 1, "user": user, "text": text}
     )
-    monkeypatch.setattr(chat, "_parse_mentions", lambda text: [])
+    monkeypatch.setattr(chat, "_parse_mentions", lambda text, room=None: [])
     asyncio.run(chat.message("sid-1", {"text": "hello room"}))
     broadcasts = [kw for event, _p, kw in sio_harness.emits if event == "message"]
     assert broadcasts and all(kw.get("room") == chat._PUBLIC_ROOM for kw in broadcasts)
@@ -1169,6 +1172,7 @@ class El {
   set className(v) { this.classes = new Set(String(v).split(/\s+/).filter(Boolean)); }
   get textContent() { return this.children.map((c) => c.textContent).join(""); }
   set textContent(v) { this.children = []; if (String(v) !== "") this.children.push(new Text(v)); }
+  after(c) { if (this.parentNode) this.parentNode.insertBefore(c, this.nextSibling); }
   appendChild(c) { c.parentNode = this; this.children.push(c); return c; }
   insertBefore(c, ref) {
     const i = ref ? this.children.indexOf(ref) : -1;
@@ -1306,3 +1310,157 @@ process.stdout.write(JSON.stringify({afterSnapshot, afterFailure: texts()}));
     assert proc.returncode == 0, proc.stderr
     expected = ["message1", "message2", "message3", "message5"]
     assert json.loads(proc.stdout) == {"afterSnapshot": expected, "afterFailure": expected}
+
+
+def test_group_history_isolated_and_private_messages_preserved(chat_db):
+    save_chat_message("alice", "public")
+    save_chat_message("alice", "unc", room="group:unc")
+    save_chat_message("alice", "other", room="group:other")
+    save_chat_message("system", "private", visible_to="bob")
+    save_chat_message("system", "someone else", visible_to="carol")
+    assert [m["text"] for m in get_recent_chat_messages()] == ["public"]
+    rows = get_recent_chat_messages(user="bob", addressed_only=True, rooms=["group:unc"])
+    assert [m["text"] for m in rows] == ["unc", "private"]
+    assert rows[0]["room"] == "group:unc"
+    rows = get_recent_chat_messages(user="alice", rooms=["group:unc"])
+    assert [m["text"] for m in rows] == ["public", "unc"]
+
+
+@pytest.fixture
+def group_chat_db(chat_db):
+    from muscat_db import database as db
+    save_chat_message("alice", "public history")
+    with db.get_conn(chat_db) as conn:
+        conn.executemany("INSERT INTO groups(name, builtin) VALUES (?, ?)",
+                         [("everyone", 1), ("unc", 0), ("other", 0), ("user:bob", 0)])
+        conn.executemany("INSERT INTO group_members(groupname, username) VALUES ('unc', ?)",
+                         [("bob",), ("alice",)])
+        conn.execute("INSERT INTO users(username, is_admin) VALUES ('admin', 1)")
+        conn.execute("INSERT INTO group_exclusions(groupname, username) VALUES ('everyone', 'bob')")
+        conn.commit()
+    return chat_db
+
+
+def test_group_chat_membership_and_delivery(group_chat_db, sio_harness, monkeypatch):
+    assert chat._allowed_rooms("bob") == {"group:unc"}
+    assert chat._allowed_rooms("alice") == {"chat:public", "group:unc"}
+    assert chat._allowed_rooms(None) == {"chat:public"}
+    _as_user(monkeypatch, "bob")
+    monkeypatch.setattr(chat, "_known_users_map", lambda: {"bob": "bob", "alice": "alice"})
+    asyncio.run(chat.message("bob-sid", {"text": "hello @alice", "room": "group:unc"}))
+    sent = [(p, kw) for e, p, kw in sio_harness.emits if e == "message"]
+    assert sent[0][1] == {"room": "group:unc"}
+    assert sent[0][0]["room"] == "group:unc"
+    rows = get_recent_chat_messages(user="alice", rooms=["group:unc"])
+    assert rows[-1]["text"] == "hello @alice"
+    assert get_recent_chat_messages(user="bob", addressed_only=True, rooms=["group:other"]) == []
+
+
+@pytest.mark.parametrize("user", ["bob", "carol", "admin"])
+def test_group_chat_rejects_guessed_rooms_and_message_ids(group_chat_db, sio_harness, monkeypatch, user):
+    _as_user(monkeypatch, user)
+    hidden = save_chat_message("bob", "old membership", room="group:other")
+    for handler, payload in [
+        (chat.message, {"room": "group:other", "text": "no"}),
+        (chat.edit_message, {"id": hidden["id"], "text": "changed"}),
+        (chat.delete_message, {"id": hidden["id"]}),
+        (chat.toggle_reaction, {"id": hidden["id"], "emoji": "👍"}),
+        (chat.typing, {"room": "group:other", "typing": True}),
+    ]:
+        asyncio.run(handler("bob-sid", payload))
+    assert all(event == "chat_error" for event, _, _ in sio_harness.emits)
+    assert chat.db.get_chat_message(hidden["id"])["text"] == "old membership"
+    assert chat.db.get_chat_message(hidden["id"])["reactions"] == []
+
+
+def test_group_chat_edit_delete_react_mentions(group_chat_db, sio_harness, monkeypatch):
+    _as_user(monkeypatch, "bob")
+    monkeypatch.setattr(chat, "_known_users_map", lambda: {"alice": "alice", "bob": "bob"})
+    msg = save_chat_message("bob", "hello", room="group:unc")
+    asyncio.run(chat.edit_message("b", {"id": msg["id"], "text": "hello @alice"}))
+    asyncio.run(chat.toggle_reaction("b", {"id": msg["id"], "emoji": "👍"}))
+    asyncio.run(chat.delete_message("b", {"id": msg["id"]}))
+    assert [kw["room"] for e, p, kw in sio_harness.emits if e != "mention"] == ["group:unc"] * 3
+    assert chat._parse_mentions("@bob", "group:unc") == ["bob"]
+    assert chat._parse_mentions("@bob", "group:other") == []
+    assert chat._parse_mentions("@bob") == []
+
+
+def test_connect_group_rooms_history_and_presence(group_chat_db, monkeypatch):
+    from unittest.mock import AsyncMock
+    fake = AsyncMock()
+    monkeypatch.setattr(chat, "sio", fake)
+    monkeypatch.setattr(chat, "_users_by_sid", {})
+    monkeypatch.setattr(chat, "_rooms_by_sid", {}, raising=False)
+    monkeypatch.setattr(chat, "_resolve_identity", lambda env: (env["user"], "trusted"))
+    save_chat_message("alice", "unc history", room="group:unc")
+    save_chat_message("alice", "other history", room="group:other")
+    async def run():
+        await chat.connect("alice-sid", {"user": "alice"})
+        await chat.connect("bob-sid", {"user": "bob"})
+    asyncio.run(run())
+    joined = [c.args[1] for c in fake.enter_room.call_args_list if c.args[0] == "bob-sid"]
+    assert set(joined) == {"user:bob", "group:unc"}
+    histories = [c.args[1] for c in fake.emit.call_args_list if c.args[0] == "history" and c.kwargs.get("to") == "bob-sid"]
+    assert [m["text"] for m in histories[0]["messages"]] == ["unc history"]
+    presence = [c.args[1] for c in fake.emit.call_args_list if c.args[0] == "presence"]
+    assert any(p["room"] == "group:unc" and p["users"] == ["alice", "bob"] for p in presence)
+    assert all("bob" not in p["users"] for p in presence if p["room"] == "chat:public")
+
+
+@pytest.mark.parametrize("user", ["bob", "alice", "admin"])
+def test_group_chat_revocation_removes_live_subscription(group_chat_db, monkeypatch, user):
+    from unittest.mock import AsyncMock
+    fake = AsyncMock()
+    monkeypatch.setattr(chat, "sio", fake)
+    monkeypatch.setattr(chat, "_users_by_sid", {"b": user})
+    with chat.db.get_conn(group_chat_db) as conn:
+        conn.execute("INSERT OR IGNORE INTO group_members(groupname, username) VALUES ('unc', ?)", (user,))
+        conn.commit()
+    monkeypatch.setattr(chat, "_rooms_by_sid", {"b": chat._allowed_rooms(user)})
+    assert "group:unc" in chat._rooms_by_sid["b"]
+    with chat.db.get_conn(group_chat_db) as conn:
+        conn.execute("DELETE FROM group_members WHERE username = ?", (user,))
+        conn.commit()
+    asyncio.run(chat._emit_room("message", {"text": "after removal"}, room="group:unc"))
+    fake.leave_room.assert_awaited_once_with("b", "group:unc")
+    assert "group:unc" not in chat._rooms_by_sid["b"]
+
+
+@pytest.mark.parametrize("user", ["carol", "admin"])
+def test_group_chat_requires_membership_even_for_admins(group_chat_db, monkeypatch, user):
+    monkeypatch.setattr(chat, "_known_users_map", lambda: {user: user})
+    assert chat._allowed_rooms(user) == {"chat:public"}
+    assert chat._parse_mentions("@" + user, "group:unc") == []
+    assert chat._nudge_targets([user], "bob", "group:unc") == []
+    with chat.db.get_conn(group_chat_db) as conn:
+        conn.execute("INSERT INTO group_members(groupname, username) VALUES ('unc', ?)", (user,))
+        conn.commit()
+    assert chat._allowed_rooms(user) == {"chat:public", "group:unc"}
+    assert chat._parse_mentions("@" + user, "group:unc") == [user]
+    with chat.db.get_conn(group_chat_db) as conn:
+        conn.execute("INSERT INTO group_exclusions(groupname, username) VALUES ('unc', ?)", (user,))
+        conn.commit()
+    assert chat._allowed_rooms(user) == {"chat:public"}
+
+
+@pytest.mark.parametrize("user", ["carol", "admin"])
+def test_nonmember_connect_receives_no_group_history_or_presence(group_chat_db, monkeypatch, user):
+    from unittest.mock import AsyncMock
+    fake = AsyncMock()
+    monkeypatch.setattr(chat, "sio", fake)
+    monkeypatch.setattr(chat, "_users_by_sid", {})
+    monkeypatch.setattr(chat, "_rooms_by_sid", {})
+    monkeypatch.setattr(chat, "_resolve_identity", lambda env: (env["user"], "trusted"))
+    save_chat_message("bob", "group secret", room="group:unc")
+    async def run():
+        await chat.connect("bob-sid", {"user": "bob"})
+        await chat.connect("outsider-sid", {"user": user})
+    asyncio.run(run())
+    joined = {c.args[1] for c in fake.enter_room.call_args_list if c.args[0] == "outsider-sid"}
+    assert joined == {f"user:{user}", "chat:public"}
+    histories = [c.args[1] for c in fake.emit.call_args_list
+                 if c.args[0] == "history" and c.kwargs.get("to") == "outsider-sid"]
+    assert [m["text"] for m in histories[0]["messages"]] == ["public history"]
+    presence = [c.args[1] for c in fake.emit.call_args_list if c.args[0] == "presence"]
+    assert all(user not in p["users"] for p in presence if p["room"] == "group:unc")

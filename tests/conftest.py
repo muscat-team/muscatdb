@@ -174,11 +174,23 @@ def _browser_request_headers(monkeypatch):
     monkeypatch.setattr(TestClient, "request", request)
 
 
+@pytest.fixture(autouse=True)
+def _offline_photometry_coord_resolution(monkeypatch):
+    """Keep ``photometry.build_command`` off the network.
+
+    It resolves every run's target (offline catalogs, then a live SIMBAD
+    query), and nearly every photometry and page test builds a command for a
+    made-up name. Resolving nothing reproduces the old command for those; a
+    test about resolution patches ``phot._resolve_archive_coords`` itself.
+    """
+    monkeypatch.setattr("muscat_db.photometry._resolve_archive_coords", lambda name: None)
+
+
 @pytest.fixture
 def mock_target_coord_resolution(monkeypatch):
     """Stub the live SIMBAD/Sesame name-resolution fallback.
 
-    ``exposure.resolve_target_coords`` calls astropy's ``SkyCoord.from_name``,
+    ``exposure.resolve_target_coords`` queries CDS Sesame over HTTP,
     a real network request, whenever a target isn't found in the local (git-
     ignored, often-absent) NASA/TOI catalog CSVs. ``catalog.py`` and ``web.py``
     both reach it via ``from muscat_db import exposure as exp_calc``, a module

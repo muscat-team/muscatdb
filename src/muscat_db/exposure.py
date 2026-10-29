@@ -22,13 +22,16 @@ import os
 import re
 import threading
 import uuid
+from functools import lru_cache
 from collections.abc import Callable
+from contextvars import ContextVar
 
 import numpy as np
 from astropy.io import fits
 from astropy.coordinates import SkyCoord
 import astropy.units as u
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import TimeoutError as FutureTimeoutError
 try:
     from astroquery.vizier import Vizier as _Vizier
     _HAS_ASTROQUERY = True
@@ -44,6 +47,39 @@ logger = logging.getLogger(__name__)
 
 _CATALOG_CALL_LIMIT = max(1, int(os.environ.get("MUSCAT_CATALOG_GLOBAL_WORKERS", "8")))
 _CATALOG_CALL_SLOTS = threading.BoundedSemaphore(_CATALOG_CALL_LIMIT)
+
+# nginx's proxy_read_timeout is 60 s; past it the page gets an HTML 504 instead
+# of the fallback. lookup_target_magnitudes therefore runs on one wall-clock
+# budget, and each stage gets at most its cap of what is left, so a hung
+# resolver (a CDS outage) or a slow catalog cannot starve the stages after it.
+_LOOKUP_TOTAL_TIMEOUT_S = 50.0
+_LOOKUP_STAGE_CAP_S = {
+    "resolve": 15.0, "measured": 15.0, "exofop": 10.0, "tic": 10.0, "sdss": 10.0, "gaia": 10.0,
+}
+_LOOKUP_STAGE_EXECUTOR = ThreadPoolExecutor(max_workers=_CATALOG_CALL_LIMIT, thread_name_prefix="mag-lookup")
+_STAGE_TIMED_OUT = object()
+
+
+def _run_stage(stage: str, deadline: float, fn, *args, **kwargs):
+    """``fn(*args, **kwargs)`` bounded by its stage cap and the lookup *deadline*.
+
+    Returns ``_STAGE_TIMED_OUT`` when the budget runs out. A stage with no
+    budget left is never submitted, and one still queued is cancelled, so
+    neither contacts its service. A call already running cannot be
+    interrupted; it finishes in the background and fills its own cache with a
+    complete answer, never a truncated one.
+    """
+    budget = min(_LOOKUP_STAGE_CAP_S[stage], deadline - time.monotonic())
+    if budget <= 0:
+        logger.warning("Magnitude lookup: no time left for the %s stage", stage)
+        return _STAGE_TIMED_OUT
+    future = _LOOKUP_STAGE_EXECUTOR.submit(fn, *args, **kwargs)
+    try:
+        return future.result(timeout=budget)
+    except FutureTimeoutError:
+        future.cancel()
+        logger.warning("Magnitude lookup: %s stage timed out after %.1f s", stage, budget)
+        return _STAGE_TIMED_OUT
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -508,7 +544,7 @@ def _clean_mag(val) -> float | None:
         fval = float(val)
     except (TypeError, ValueError):
         return None
-    if math.isnan(fval) or fval <= 0:
+    if not math.isfinite(fval) or fval <= 0:
         return None
     return fval
 
@@ -640,40 +676,238 @@ def lookup_magnitudes(
     return _result(None, None)
 
 
+@lru_cache(maxsize=256)
+def _fetch_tic_cached(tic: str, cache_epoch: int) -> dict | None:
+    """Exact-ID MAST lookup, bounded to one request with a 20-second timeout.
+
+    The caller supplies an hourly cache epoch; failures are cached as well.
+    Never use MAST name resolution, which could itself depend on CDS.
+    """
+    from muscat_db import http_client
+
+    request = {
+        "service": "Mast.Catalogs.Filtered.Tic", "format": "json",
+        "params": {
+            "columns": "ID,gmag,rmag,imag,zmag,GAIAmag,gaiabp,gaiarp",
+            "filters": [{"paramName": "ID", "values": [tic]}],
+        },
+    }
+    try:
+        with _CATALOG_CALL_SLOTS:
+            response = http_client.get_sync_client().post(
+                "https://mast.stsci.edu/api/v0/invoke",
+                data={"request": json.dumps(request)}, timeout=20,
+            )
+            response.raise_for_status()
+            data = response.json()
+        if data.get("status") != "COMPLETE":
+            return None
+        for row in data.get("data", []):
+            if str(row.get("ID")) == tic:
+                return row
+    except Exception as exc:
+        logger.warning("TIC lookup failed for %s: %s", tic, exc)
+    return None
+
+
+@lru_cache(maxsize=256)
+def _fetch_gaia_dr3_cached(ra: float, dec: float, cache_epoch: int) -> dict | None:
+    """One small MAST cone, accepting only an unambiguous match within 1 arcsec.
+
+    Fail closed for crowded fields and large epoch/proper-motion offsets.
+    A cone result is not assumed to share the TIC's Gaia DR2 source ID.
+    """
+    from muscat_db import http_client
+
+    request = {
+        "service": "Mast.Catalogs.GaiaDR3.Cone", "format": "json",
+        "params": {"ra": ra, "dec": dec, "radius": 1 / 3600},
+    }
+    try:
+        with _CATALOG_CALL_SLOTS:
+            response = http_client.get_sync_client().post(
+                "https://mast.stsci.edu/api/v0/invoke",
+                data={"request": json.dumps(request)}, timeout=20,
+            )
+            response.raise_for_status()
+            data = response.json()
+        if data.get("status") != "COMPLETE" or len(data.get("data", [])) != 1:
+            return None
+        row = data["data"][0]
+        separation = SkyCoord(ra, dec, unit="deg").separation(
+            SkyCoord(float(row["ra"]), float(row["dec"]), unit="deg")
+        ).arcsec
+        if math.isfinite(separation) and separation <= 1:
+            return row
+    except Exception as exc:
+        logger.warning("Gaia DR3 lookup failed: %s", exc)
+    return None
+
+
+@lru_cache(maxsize=256)
+def _fetch_sdss_cached(ra: float, dec: float, cache_epoch: int):
+    """Measured PSF griz from SDSS DR17 directly, independent of CDS/MAST.
+
+    Accept one primary clean stellar detection within three arcseconds and
+    reject bad individual bands. Return (magnitudes, failure explanation).
+    https://www.sdss4.org/dr17/algorithms/photo_flags_recommend/
+    """
+    from muscat_db import http_client
+
+    ra, dec = float(ra), float(dec)
+    if not (math.isfinite(ra) and math.isfinite(dec) and 0 <= ra < 360 and -90 <= dec <= 90):
+        return None, "SDSS: invalid coordinates."
+    columns = ",".join(f"p.psfMag_{b},p.flags_{b}" for b in "griz")
+    # Coordinates are finite floats; no target-name text enters the SQL.
+    query = (
+        f"SELECT TOP 2 p.ra,p.dec,{columns} FROM PhotoPrimary p "
+        f"JOIN dbo.fGetNearbyObjEq({ra:.10f},{dec:.10f},0.05) n ON p.objID=n.objID "
+        "WHERE p.type=6 AND p.clean=1 ORDER BY n.distance"
+    )
+    try:
+        with _CATALOG_CALL_SLOTS:
+            response = http_client.get_sync_client().get(
+                "https://skyserver.sdss.org/dr17/SkyServerWS/SearchTools/SqlSearch",
+                params={"cmd": query, "format": "json"}, timeout=20,
+            )
+            response.raise_for_status()
+            rows = response.json()[0]["Rows"]
+        if not rows:
+            return None, "SDSS: no clean stellar match within 3 arcsec."
+        if len(rows) != 1:
+            return None, "SDSS: ambiguous stellar matches within 3 arcsec."
+        row = {k.lower(): v for k, v in rows[0].items()}
+        separation = SkyCoord(ra, dec, unit="deg").separation(
+            SkyCoord(float(row["ra"]), float(row["dec"]), unit="deg")
+        ).arcsec
+        if not math.isfinite(separation) or separation > 3:
+            return None, "SDSS: match outside 3 arcsec."
+        mags = {}
+        # clean is primarily r-band quality; also reject saturated, edge,
+        # no-profile, interpolated PSF, and bad-count detections in each band.
+        bad_flags = 0x40000 | 0x4 | 0x80 | 0x800000000000 | 0x10000000000
+        for b, band in zip("griz", ("gp", "rp", "ip", "zs")):
+            mag = _clean_mag(row.get(f"psfmag_{b}"))
+            flags = row.get(f"flags_{b}")
+            if flags is None:
+                continue
+            flags = int(flags)
+            if mag is not None and mag < 99 and flags & 0x10000000 and not flags & bad_flags:
+                mags[band] = mag
+        return (mags, None) if mags else (None, "SDSS: no usable unsaturated griz bands.")
+    except Exception as exc:
+        logger.warning("SDSS lookup failed: %s", exc)
+        return None, "SDSS: service unavailable or invalid response."
+
+
+def lookup_target_magnitudes(target: str):
+    """Return coordinates, magnitudes, source, is_approx and approximation reason.
+
+    Measured catalogs always win. ExoFOP/TIC, direct SDSS, and Gaia DR3 at
+    MAST keep the fallback independent of CDS. Every empirical result explains
+    why measured photometry was unavailable. The whole lookup shares one
+    wall-clock budget (``_LOOKUP_TOTAL_TIMEOUT_S``); a stage that runs out of
+    time counts as unavailable and the next fallback is tried.
+    """
+    from muscat_db import exofop
+
+    deadline = time.monotonic() + _LOOKUP_TOTAL_TIMEOUT_S
+    reasons = []
+    coords = _run_stage("resolve", deadline, resolve_target_coords, target)
+    if coords is _STAGE_TIMED_OUT:
+        coords = None
+    if coords:
+        mags = source = None
+        try:
+            found = _run_stage("measured", deadline, lookup_magnitudes, *coords, return_source=True)
+            if found is not _STAGE_TIMED_OUT:
+                mags, source = found
+        except Exception as exc:
+            logger.warning("Catalog lookup failed for %s: %s", target, exc)
+        if mags:
+            return coords, mags, source, False, None
+        reasons.append("Pan-STARRS/SkyMapper: no usable measurements returned (no match, service unavailable or timed out).")
+    else:
+        reasons.append("CDS name resolution failed or timed out; Pan-STARRS/SkyMapper were not queried.")
+    data = _run_stage("exofop", deadline, exofop.fetch_target_by_name, target)
+    if data is _STAGE_TIMED_OUT:
+        data = None
+    if coords is None and data:
+        position = data.get("coordinates") or {}
+        try:
+            ra, dec = float(position["ra"]), float(position["dec"])
+            if not (math.isfinite(ra) and math.isfinite(dec) and 0 <= ra < 360 and -90 <= dec <= 90):
+                raise ValueError("Invalid ExoFOP coordinates")
+            coords = (ra, dec)
+        except (KeyError, TypeError, ValueError):
+            pass
+    if coords is None:
+        return None, None, None, False, None
+    epoch = int(time.time() // 3600)
+    if data:
+        tic = exofop.normalize_tic_input(data["basic_info"]["tic_id"])
+        row = _run_stage("tic", deadline, _fetch_tic_cached, tic, epoch)
+        if row is _STAGE_TIMED_OUT:
+            reasons.append(f"TIC {tic}: timed out.")
+        elif row is not None:
+            mags = {band: mag for column, band in PS1_TO_BAND.items()
+                    if (mag := _clean_mag(row.get(column))) is not None}
+            if mags:
+                return coords, mags, f"TIC {tic} (MAST)", False, None
+            reasons.append(f"TIC {tic}: no usable measured griz.")
+        else:
+            reasons.append(f"TIC {tic}: unavailable or no matching record.")
+    else:
+        reasons.append("ExoFOP/TIC: target unresolved, service unavailable or timed out.")
+    sdss = _run_stage("sdss", deadline, _fetch_sdss_cached, *coords, epoch)
+    mags, sdss_reason = (None, "SDSS: timed out.") if sdss is _STAGE_TIMED_OUT else sdss
+    if mags:
+        return coords, mags, "SDSS DR17 PSF photometry (within 3 arcsec)", False, None
+    reasons.append(sdss_reason)
+    # TIC v8 uses Gaia DR2: obtain DR3 rather than silently mixing releases.
+    gaia = _run_stage("gaia", deadline, _fetch_gaia_dr3_cached, *coords, epoch)
+    if gaia and gaia is not _STAGE_TIMED_OUT:
+        g = _clean_mag(gaia.get("phot_g_mean_mag"))
+        bp = _clean_mag(gaia.get("phot_bp_mean_mag"))
+        rp = _clean_mag(gaia.get("phot_rp_mean_mag"))
+        if g is not None and bp is not None and rp is not None:
+            mags = gaia_to_griz_transform(g, bp - rp)
+            if mags:
+                reason = " ".join(reasons) + " Using an empirical Gaia DR3 color relation; these are estimates, not measured griz."
+                return coords, mags, "Gaia DR3 to SDSS (approx)", True, reason
+    return coords, None, None, False, None
+
+
 # ---------------------------------------------------------------------------
 # Gaia (G, BP-RP) -> griz fallback, for comparison stars with no PS1/SkyMapper match
 # ---------------------------------------------------------------------------
 
-# TODO(gaia-griz-transform, under development -- do not fill in from memory):
-# pending independently verified coefficients for a published Gaia G/BP-RP ->
-# SDSS-like griz color transform (e.g. Evans et al. 2018 Table 5, or the Gaia
-# EDR3/DR3 "photometric relationships with other photometric systems"
-# documentation). Two attempts to source this have both failed verification:
-# (1) an automated fetch of the ESA documentation table produced internally
-# inconsistent numbers across two retrievals (different polynomial degree for
-# the same relationship); (2) a coefficient table supplied for this feature
-# (data/gaia_ps1_color_transform.md) cites arXiv:2601.05486 as support, but
-# that paper is on an unrelated topic (an all-sky photometric standard-star
-# database), indicating the table's numbers cannot be trusted either. Until a
-# properly-cited copy of the real source table is verified, this always
-# returns None, and lookup_magnitudes_with_fallback degrades to reporting "no
-# photometry available" for stars with no direct catalog match rather than
-# silently approximating a saturation-relevant magnitude with unverified
-# numbers.
+# ESA Gaia DR3 documentation, section 5.5.1, Tables 5.8 and 5.10:
+# https://gea.esac.esa.int/archive/documentation/GDR3/Data_processing/chap_cu5pho/cu5pho_sec_photSystem/cu5pho_ssec_photRelations.html
+# Coefficients are ascending powers of BP-RP for G - SDSS_band, NOT band - G.
+# The common range is 0.5 < BP-RP < 2.0 (i is the limiting band); this also
+# excludes the g/r red-color region restricted to M giants. See docs/exposure.md.
+_GAIA_DR3_SDSS_COEFFS = {
+    "gp": (0.2199, -0.6365, -0.1548, 0.0064),
+    "rp": (-0.09837, 0.08592, 0.1907, -0.1701, 0.02263),
+    "ip": (-0.293, 0.6404, -0.09609, -0.002104),
+    "zs": (-0.4619, 0.8992, -0.08271, 0.005029),
+}
+
+
 def gaia_to_griz_transform(gmag: float, bp_rp: float | None) -> dict[str, float] | None:
-    """Approximate gp/rp/ip/zs from Gaia (G, BP-RP) via a published color transform.
+    """Approximate all four SDSS-like bands from Gaia DR3 G and BP-RP.
 
-    NOT YET IMPLEMENTED -- always returns ``None``; see the TODO above.
-
-    Used only as a fallback when Pan-STARRS DR1 / SkyMapper DR2 have no match
-    for a star (see :func:`lookup_magnitudes_with_fallback`). Once
-    implemented, must return ``None`` if the transform isn't available
-    (missing color, or out of the fit's valid range) so the caller can report
-    "no photometry" rather than a bad estimate.
+    Use only release-matched Gaia DR3/EDR3 photometry, not TIC's DR2 values.
+    Reject missing/nonfinite inputs and colors outside the common published
+    validity interval. These are exposure-planning estimates, not calibration
+    measurements or guaranteed saturation limits.
     """
-    if bp_rp is None or not math.isfinite(bp_rp):
+    if (bp_rp is None or not math.isfinite(bp_rp) or not math.isfinite(gmag)
+            or not 0.5 < bp_rp < 2.0):
         return None
-    return None
+    return {band: gmag - sum(c * bp_rp ** power for power, c in enumerate(coeffs))
+            for band, coeffs in _GAIA_DR3_SDSS_COEFFS.items()}
 
 
 def lookup_magnitudes_with_fallback(
@@ -703,7 +937,7 @@ def lookup_magnitudes_with_fallback(
     if gmag is not None:
         transformed = gaia_to_griz_transform(gmag, bp_rp)
         if transformed:
-            source = "Gaia DR3 color transform (approx)"
+            source = "Gaia DR3 color transform (approx): empirical estimate because Pan-STARRS/SkyMapper returned no usable measured griz"
             logger.info(
                 "Griz for (%.4f, %.4f): no catalog match, using %s (G=%.2f, BP-RP=%s)",
                 ra, dec, source, gmag, bp_rp,
@@ -711,8 +945,7 @@ def lookup_magnitudes_with_fallback(
             return transformed, source, True
 
     logger.info(
-        "Griz for (%.4f, %.4f): no catalog match; Gaia color-transform fallback is "
-        "under development (gaia_to_griz_transform) and not yet available",
+        "Griz for (%.4f, %.4f): no catalog match or usable Gaia DR3 color",
         ra, dec,
     )
     return None, None, False
@@ -771,21 +1004,75 @@ def _target_name_variants(name: str) -> list[str]:
     return variants
 
 
+# Request-scoped deadline: never mutate Astropy's process-wide timeout config.
+# The photometry caller bounds its wait separately, including an in-flight I/O.
+_COORD_RESOLUTION_DEADLINE = ContextVar("coordinate_resolution_deadline", default=None)
+
+
+def _query_sesame_coords(name: str) -> SkyCoord:
+    """Query Sesame with a per-request timeout without changing global astropy settings."""
+    from urllib.parse import quote
+    import httpx
+    from muscat_db import http_client
+
+    # Preserve astropy's primary and mirror endpoints, with explicit timeouts.
+    endpoints = (
+        "https://cds.unistra.fr/cgi-bin/nph-sesame/",
+        "http://vizier.cfa.harvard.edu/viz-bin/nph-sesame/",
+    )
+    for index, endpoint in enumerate(endpoints):
+        try:
+            response = http_client.get_sync_client().get(
+                endpoint + "SNV?" + quote(name, safe=""), timeout=5.0,
+                follow_redirects=True,
+            )
+            response.raise_for_status()
+            break
+        except (httpx.TransportError, httpx.HTTPStatusError):
+            if index == len(endpoints) - 1:
+                raise
+    match = re.search(r"^%J\s+(\S+)\s+(\S+)", response.text, re.MULTILINE)
+    if match is None:
+        raise ValueError("No Sesame coordinates")
+    ra, dec = map(float, match.groups())
+    if not (math.isfinite(ra) and math.isfinite(dec) and 0 <= ra < 360 and -90 <= dec <= 90):
+        raise ValueError("Invalid Sesame coordinates")
+    return SkyCoord(ra=ra * u.deg, dec=dec * u.deg)
+
+
 def resolve_target_coords(target_name: str) -> tuple[float, float] | None:
-    """Resolve a target name to (ra, dec) in degrees using SIMBAD via astropy.
+    """Resolve a target name to (ra, dec) in degrees using CDS Sesame.
+
+    Network failures stop spelling retries so callers can try an independent
+    service promptly. Each request has a five-second inactivity timeout.
 
     Tries the name exactly as given first. If Sesame rejects it, retries a
     handful of normalized spellings (see :func:`_target_name_variants`)
     before giving up -- see that function's docstring for why a simple
     ``.upper()`` isn't enough.
     """
+    import httpx
+
     stripped = target_name.strip()
+    if not stripped:
+        return None
     attempts = [stripped, *_target_name_variants(stripped)]
 
     last_exc: Exception | None = None
     for attempt in attempts:
+        deadline = _COORD_RESOLUTION_DEADLINE.get()
+        if deadline is not None and time.monotonic() >= deadline:
+            return None
         try:
-            coord = SkyCoord.from_name(attempt)
+            coord = _query_sesame_coords(attempt)
+        except httpx.TransportError as exc:
+            last_exc = exc
+            break
+        except httpx.HTTPStatusError as exc:
+            last_exc = exc
+            if exc.response.status_code != 404:
+                break
+            continue
         except Exception as exc:
             last_exc = exc
             continue

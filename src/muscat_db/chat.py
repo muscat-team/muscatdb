@@ -66,8 +66,9 @@ _rate: dict[str, deque] = {}
 _LOOP: asyncio.AbstractEventLoop | None = None
 # Everything the whole team sees is emitted to this room. A scoped viewer
 # (issue #202) never joins it, so the shared room's free text -- which can name
-# any target -- cannot reach them; they keep their private room and @bot.
+# any target -- cannot reach them; they use explicit group rooms and @bot.
 _PUBLIC_ROOM = "chat:public"
+_rooms_by_sid: dict[str, set[str]] = {}
 _known_cache: dict = {"ts": 0.0, "map": {}}
 
 
@@ -131,9 +132,86 @@ def _online_usernames() -> set[str]:
     return {u for u in _users_by_sid.values() if u}
 
 
+def _allowed_rooms(user: str | None) -> set[str]:
+    """Group membership (including admins), plus public for unscoped viewers."""
+    scoped = _user_is_scoped(user)
+    rooms = set() if scoped else {_PUBLIC_ROOM}
+    if not user:
+        return rooms
+    try:
+        with db.get_conn(db.db_path()) as conn:
+            db._ensure_chat_schema(conn, db.db_path())
+            groups = conn.execute("SELECT name FROM groups WHERE builtin = 0").fetchall()
+            memberships = {r[0] for r in conn.execute(
+                "SELECT groupname FROM group_members WHERE username = ?", (user,)
+            )}
+            excluded = {r[0] for r in conn.execute(
+                "SELECT groupname FROM group_exclusions WHERE username = ?", (user,)
+            )}
+        rooms.update(
+            f"group:{name}" for (name,) in groups
+            if name not in {"everyone", "admin"} and not name.startswith("user:")
+            and name in memberships and name not in excluded
+        )
+    except Exception:
+        logger.exception("failed to load chat groups")
+    return rooms
+
+
+def _room_users(names, room: str) -> list[str]:
+    if room == _PUBLIC_ROOM:
+        return _unscoped(names)
+    return [name for name in names if room in _allowed_rooms(name)]
+
+
+async def _requested_room(sid, data) -> str | None:
+    room = data.get("room", _PUBLIC_ROOM) if isinstance(data, dict) else _PUBLIC_ROOM
+    if not isinstance(room, str):
+        return None
+    if room == _PUBLIC_ROOM:
+        return None if (await _session_scoped(sid) or _user_is_scoped(await _session_user(sid))) else room
+    return room if room in _allowed_rooms(await _session_user(sid)) else None
+
+
+async def _message_room(sid, msg_id) -> str | None:
+    # Check authorization before edit/delete/react, including guessed IDs.
+    before = db.get_chat_message(msg_id)
+    if not before or before.get("visible_to"):
+        return None
+    return await _requested_room(sid, {"room": before.get("room") or _PUBLIC_ROOM})
+
+
+async def _refresh_room_memberships() -> None:
+    # Existing sockets must stop receiving a room immediately after access is
+    # revoked, without waiting for the browser to reconnect.
+    for sid, old in list(_rooms_by_sid.items()):
+        if sid not in _users_by_sid:
+            continue
+        new = _allowed_rooms(_users_by_sid[sid])
+        if new == old:
+            continue
+        for room in old - new:
+            await sio.leave_room(sid, room)
+        for room in new - old:
+            await sio.enter_room(sid, room)
+        if sid not in _users_by_sid:
+            continue
+        _rooms_by_sid[sid] = new
+        await sio.emit("chat_rooms", {"rooms": sorted(new)}, to=sid)
+
+
+async def _emit_room(event, payload, *, room, **kwargs):
+    await _refresh_room_memberships()
+    await sio.emit(event, payload, room=room, **kwargs)
+
+
 async def _broadcast_presence() -> None:
-    users = _online_users()
-    await sio.emit("presence", {"count": len(users), "users": users}, room=_PUBLIC_ROOM)
+    await _refresh_room_memberships()
+    rooms = {_PUBLIC_ROOM} | set().union(*_rooms_by_sid.values())
+    for room in rooms:
+        users = sorted({_display(u) for sid, u in _users_by_sid.items()
+                        if room in _rooms_by_sid.get(sid, {_PUBLIC_ROOM})}, key=str.lower)
+        await sio.emit("presence", {"count": len(users), "users": users, "room": room}, room=room)
 
 
 def _known_users_map() -> dict[str, str]:
@@ -151,10 +229,8 @@ def _known_users_map() -> dict[str, str]:
     return _known_cache["map"]
 
 
-def _parse_mentions(text: str) -> list[str]:
-    """Canonical usernames @-mentioned in text that may see the shared room
-    (reserved tokens excluded). Scoped viewers are dropped here, so the stored
-    mention list, its highlighting, and the nudges all agree."""
+def _parse_mentions(text: str, room: str = _PUBLIC_ROOM) -> list[str]:
+    """Canonical mentions authorized for this room, excluding command tokens."""
     known = _known_users_map()
     found: list[str] = []
     for raw in _MENTION_RE.findall(text):
@@ -164,12 +240,12 @@ def _parse_mentions(text: str) -> list[str]:
         canon = known.get(low)
         if canon and canon not in found:
             found.append(canon)
-    return _unscoped(found)
+    return _room_users(found, room)
 
 
-def _nudge_targets(names, sender: str | None) -> list[str]:
-    """Users to notify about a message: never the sender, never a scoped viewer."""
-    return _unscoped(n for n in names if n != sender)
+def _nudge_targets(names, sender: str | None, room: str = _PUBLIC_ROOM) -> list[str]:
+    """Notify only other users authorized for this room."""
+    return _room_users((n for n in names if n != sender), room)
 
 
 def _rate_key(sid: str, user: str | None) -> str:
@@ -248,8 +324,11 @@ async def connect(sid, environ):
     _users_by_sid[sid] = user
     if user:
         await sio.enter_room(sid, f"user:{user}")
-    if not scoped:
-        await sio.enter_room(sid, _PUBLIC_ROOM)
+    rooms = _allowed_rooms(user)
+    _rooms_by_sid[sid] = rooms
+    for room in sorted(rooms):
+        await sio.enter_room(sid, room)
+    await sio.emit("chat_rooms", {"rooms": sorted(rooms)}, to=sid)
     # Backfill recent history to this client only (never persisted here).
     # When the user is authenticated, scoped messages (e.g. job-finished
     # notifications) are included only for their owner.
@@ -259,7 +338,9 @@ async def connect(sid, environ):
     try:
         # Read one extra row to distinguish a complete window from truncation.
         history = db.get_recent_chat_messages(
-            user=user, addressed_only=scoped, limit=501, since=since, until=until,
+            user=user, addressed_only=_PUBLIC_ROOM not in rooms,
+            limit=501, since=since, until=until,
+            rooms=sorted(rooms - {_PUBLIC_ROOM}),
         )
         window = {"since": since, "until": until}
         if len(history) > 500:
@@ -276,6 +357,7 @@ async def connect(sid, environ):
 @sio.event
 async def disconnect(sid):
     _users_by_sid.pop(sid, None)
+    _rooms_by_sid.pop(sid, None)
     # Only the anonymous budget goes; a user's outlives the socket on purpose.
     _rate.pop(_rate_key(sid, None), None)
     # Anonymous @bot context is per-connection; drop it so it can't leak. A
@@ -305,11 +387,12 @@ async def message(sid, data):
 
     display = _display(user)
 
-    # A scoped viewer has no part in the shared room; only the private @bot
-    # exchange below is open to them.
-    # ``@test`` is checked first because that branch broadcasts to the public
-    # room even when the text also contains ``@bot``.
-    if await _session_scoped(sid) and (
+    # Public and group posts require membership. The private @bot exchange
+    # remains available even when the user has no shared room.
+    # ``@test`` is checked first because it broadcasts to the selected room
+    # even when the text also contains ``@bot``.
+    room = await _requested_room(sid, data)
+    if room is None and (
         _TEST_PREFIX_RE.match(text) or not chat_agent.addressed(text)
     ):
         await sio.emit(
@@ -320,13 +403,14 @@ async def message(sid, data):
     # @test → ephemeral: broadcast live, never persisted, not editable.
     if _TEST_PREFIX_RE.match(text):
         body = _TEST_PREFIX_RE.sub("", text, count=1) or "(test message)"
-        await sio.emit(
+        await _emit_room(
             "message",
             {
                 "id": None,
                 "user": display,
                 "text": body,
                 "kind": "ephemeral",
+                "room": None if room == _PUBLIC_ROOM else room,
                 "ephemeral": True,
                 "ts": time.time(),
                 "sid": sid,
@@ -334,7 +418,7 @@ async def message(sid, data):
                 "reactions": [],
                 "edited": False,
             },
-            room=_PUBLIC_ROOM,
+            room=room,
         )
         return
 
@@ -367,35 +451,41 @@ async def message(sid, data):
         action = text[m.end() :].strip()
         if not action:
             return
-        mentions = _parse_mentions(action)
+        mentions = _parse_mentions(action, room)
         try:
-            msg = db.save_chat_message(display, action, mentions=mentions, kind="action")
+            msg = db.save_chat_message(
+                display, action, mentions=mentions, kind="action",
+                room=None if room == _PUBLIC_ROOM else room,
+            )
         except Exception:
             logger.exception("failed to persist /me action")
             await sio.emit("chat_error", {"error": "message could not be saved"}, to=sid)
             return
         payload = {**msg, "sid": sid}
-        await sio.emit("message", payload, room=_PUBLIC_ROOM)
-        for name in _nudge_targets(mentions, user):
+        await _emit_room("message", payload, room=room)
+        for name in _nudge_targets(mentions, user, room):
             await sio.emit("mention", {"from": display, "message": payload}, room=f"user:{name}")
         return
 
-    mentions = _parse_mentions(text)
+    mentions = _parse_mentions(text, room)
     try:
-        msg = db.save_chat_message(display, text, mentions=mentions, kind="user")
+        msg = db.save_chat_message(
+            display, text, mentions=mentions, kind="user",
+            room=None if room == _PUBLIC_ROOM else room,
+        )
     except Exception:
         logger.exception("failed to persist chat message")
         await sio.emit("chat_error", {"error": "message could not be saved"}, to=sid)
         return
 
     payload = {**msg, "sid": sid}
-    await sio.emit("message", payload, room=_PUBLIC_ROOM)
+    await _emit_room("message", payload, room=room)
     # Nudge each mentioned user (on any page/tab) so they notice.
-    for name in _nudge_targets(mentions, user):
+    for name in _nudge_targets(mentions, user, room):
         await sio.emit("mention", {"from": display, "message": payload}, room=f"user:{name}")
     # @all / @everyone / @channel → ping every other online teammate too.
     if _BROADCAST_MENTION_RE.search(text):
-        for name in _unscoped(_online_usernames() - {user} - set(mentions)):
+        for name in _room_users(_online_usernames() - {user} - set(mentions), room):
             await sio.emit("mention", {"from": display, "message": payload}, room=f"user:{name}")
 
 
@@ -404,7 +494,7 @@ async def edit_message(sid, data):
     if not isinstance(data, dict):
         return
     user = await _session_user(sid)
-    if not user or await _session_scoped(sid):
+    if not user:
         return
     msg_id = data.get("id")
     text = data.get("text")
@@ -413,18 +503,21 @@ async def edit_message(sid, data):
     text = text.strip()[:_MAX_TEXT_LEN]
     if not text:
         return
+    room = await _message_room(sid, msg_id)
+    if room is None:
+        return
     before = db.get_chat_message(msg_id)
-    mentions = _parse_mentions(text)
+    mentions = _parse_mentions(text, room)
     updated = db.edit_chat_message(msg_id, user, text, mentions=mentions)
     if updated is None:
         await sio.emit("chat_error", {"error": "not allowed to edit that message"}, to=sid)
         return
-    await sio.emit("message_edited", updated, room=_PUBLIC_ROOM)
+    await _emit_room("message_edited", updated, room=room)
     # Nudge only names the edit added; anyone already mentioned was notified
     # when the message was first sent.
     already = set((before or {}).get("mentions") or [])
     payload = {**updated, "sid": sid}
-    for name in _nudge_targets((m for m in mentions if m not in already), user):
+    for name in _nudge_targets((m for m in mentions if m not in already), user, room):
         await sio.emit("mention", {"from": user, "message": payload}, room=f"user:{name}")
 
 
@@ -433,13 +526,16 @@ async def delete_message(sid, data):
     if not isinstance(data, dict):
         return
     user = await _session_user(sid)
-    if not user or await _session_scoped(sid):
+    if not user:
         return
     msg_id = data.get("id")
     if not isinstance(msg_id, int):
         return
+    room = await _message_room(sid, msg_id)
+    if room is None:
+        return
     if db.delete_chat_message(msg_id, user):
-        await sio.emit("message_deleted", {"id": msg_id}, room=_PUBLIC_ROOM)
+        await _emit_room("message_deleted", {"id": msg_id}, room=room)
     else:
         await sio.emit("chat_error", {"error": "not allowed to delete that message"}, to=sid)
 
@@ -449,7 +545,7 @@ async def toggle_reaction(sid, data):
     if not isinstance(data, dict):
         return
     user = await _session_user(sid)
-    if not user or await _session_scoped(sid):  # reactions require an identity
+    if not user:  # reactions require an identity
         return
     msg_id = data.get("id")
     emoji = data.get("emoji")
@@ -458,20 +554,24 @@ async def toggle_reaction(sid, data):
     emoji = emoji.strip()[:_MAX_EMOJI_LEN]
     if not emoji:
         return
+    room = await _message_room(sid, msg_id)
+    if room is None:
+        return
     result = db.toggle_chat_reaction(msg_id, user, emoji)
     if result is not None:
-        await sio.emit("reaction_updated", result, room=_PUBLIC_ROOM)
+        await _emit_room("reaction_updated", result, room=room)
 
 
 @sio.on("typing")
 async def typing(sid, data):
-    if await _session_scoped(sid):
+    room = await _requested_room(sid, data)
+    if room is None:
         return
     user = await _session_user(sid)
     is_typing = bool(isinstance(data, dict) and data.get("typing"))
     # Relay to everyone except the sender; ephemeral, never stored.
-    await sio.emit(
-        "typing", {"user": _display(user), "typing": is_typing}, room=_PUBLIC_ROOM, skip_sid=sid
+    await _emit_room(
+        "typing", {"user": _display(user), "typing": is_typing, "room": room}, room=room, skip_sid=sid
     )
 
 
@@ -760,7 +860,7 @@ def _deliver_system_message(text: str, owner: str) -> None:
         asyncio.run_coroutine_threadsafe(sio.emit("message", payload, room=f"user:{owner}"), loop)
     else:
         asyncio.run_coroutine_threadsafe(
-            sio.emit("message", payload, room=_PUBLIC_ROOM), loop
+            _emit_room("message", payload, room=_PUBLIC_ROOM), loop
         )
 
 

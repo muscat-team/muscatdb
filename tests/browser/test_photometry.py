@@ -283,6 +283,9 @@ def test_switch_run_and_download_the_selected_lightcurve(page, live_server):
         assert contents.startswith('BJD_TDB,Flux,Flux_err')
         assert len(contents.splitlines()) == 61
     finally:
+        # Lazy product images can still be loading after the CSV download.
+        # Close the browser before removing files that its page still references.
+        page.context.close()
         shutil.rmtree(second)
 
 

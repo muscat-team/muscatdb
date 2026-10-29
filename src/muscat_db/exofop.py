@@ -37,6 +37,7 @@ from muscat_db import catalog, lco
 # (seconds). ExoFOP time series change slowly, so a short TTL lets an operator
 # re-run a search in the same session without hammering the external service.
 _EXOFOP_CACHE_TTL_S = 3600
+_EXOFOP_FAILURE_CACHE_TTL_S = 30
 
 _exofop_cache: dict = {}
 _exofop_cache_lock = threading.Lock()
@@ -217,39 +218,54 @@ def fetch_time_series(
     return entries
 
 
-def fetch_by_name(name: str, *, _now: float | None = None) -> tuple[str, list[dict]] | None:
-    """Ask ExoFOP to resolve *name* itself (``target.php?id=HIP67522``).
+def fetch_target_by_name(name: str, *, _now: float | None = None) -> dict | None:
+    """Resolve a TESS target through ExoFOP, retaining coordinates and TIC ID.
 
-    Returns ``(tic_id, time_series)`` when ExoFOP knows the name, else None
-    (it answers an unknown id with a plain-text "No TIC object found" page).
-    Cached like :func:`fetch_time_series`, under the upper-cased name.
+    Share the response with time-series callers. Cache failed lookups too so
+    repeated clicks during an outage do not keep hitting ExoFOP. Failures expire
+    after 30 seconds so transient errors do not suppress recovery for an hour.
     """
+    from copy import deepcopy
+
     ident = (name or "").strip()
     if not ident:
         return None
-    cache_key = f"name:{ident.upper()}"
+    cache_key = f"target:{ident.upper()}"
     now = _now if _now is not None else datetime.datetime.now(datetime.timezone.utc).timestamp()
     with _exofop_cache_lock:
         hit = _exofop_cache.get(cache_key)
-        if hit is not None and now - hit[0] < _EXOFOP_CACHE_TTL_S:
-            return hit[1][0], [dict(r) for r in hit[1][1]]
+        if hit is not None:
+            ttl = _EXOFOP_FAILURE_CACHE_TTL_S if hit[1] is None else _EXOFOP_CACHE_TTL_S
+            if now - hit[0] < ttl:
+                return deepcopy(hit[1])
+    data = None
     try:
         resp = catalog._sync_get(
             f"https://exofop.ipac.caltech.edu/tess/target.php?id={quote(ident)}&json",
             headers={"User-Agent": "MuSCAT-db/0.1.0"},
-            timeout=20,
+            timeout=5,
         )
-        data = resp.json()
+        candidate = resp.json()
+        info = candidate.get("basic_info") if isinstance(candidate, dict) else None
+        if isinstance(info, dict) and normalize_tic_input(info.get("tic_id")) is not None:
+            data = candidate
     except Exception:
-        return None
-    info = data.get("basic_info") if isinstance(data, dict) else None
-    tic = normalize_tic_input((info or {}).get("tic_id"))
-    if tic is None:
-        return None
-    entries = [dict(e) for e in (data.get("time_series") or [])]
+        pass
     with _exofop_cache_lock:
-        _exofop_cache[cache_key] = (now, (tic, [dict(e) for e in entries]))
-    return tic, entries
+        # Bound cache memory even for arbitrary user-supplied target names.
+        if len(_exofop_cache) >= 256:
+            _exofop_cache.pop(next(iter(_exofop_cache)))
+        _exofop_cache[cache_key] = (now, deepcopy(data))
+    return data
+
+
+def fetch_by_name(name: str, *, _now: float | None = None) -> tuple[str, list[dict]] | None:
+    """Return the resolved TIC ID and reported time series, cached by name."""
+    data = fetch_target_by_name(name, _now=_now)
+    if data is None:
+        return None
+    tic = normalize_tic_input(data["basic_info"]["tic_id"])
+    return tic, [dict(e) for e in (data.get("time_series") or [])]
 
 
 # --------------------------------------------------------------------------- #
@@ -301,16 +317,20 @@ def _site_from_tel(tstel: str) -> str:
     # "LCO-HAL-2m0"); whole-token only, so it cannot match inside another word.
     if re.search(r"(?<![A-Z])HAL(?![A-Z])", upper):
         return "ogg"
-    # Fall back to an LCO-style site code embedded in the string (e.g. "1m0a").
-    m = re.search(r"\b(cpt|lsc|ogg|coj|elp|tfn|tlv)\b", upper)
-    return m.group(1) if m else ""
+    # SSO is ExoFOP's abbreviation for Siding Spring (LCO site COJ).
+    # Match a whole token so unrelated observatory names do not become LCO.
+    if re.search(r"(?<![A-Z])SSO(?![A-Z])", upper):
+        return "coj"
+    # Match the uppercase input, then return canonical lowercase site codes.
+    m = re.search(r"\b(CPT|LSC|OGG|COJ|ELP|TFN|TLV)\b", upper)
+    return m.group(1).lower() if m else ""
 
 
 def is_lco_telescope(tstel: str) -> bool:
     """True when an ExoFOP ``tstel`` string names an LCO telescope."""
-    return bool(_site_from_tel(tstel)) or bool(
-        re.search(r"\bLCO", (tstel or "").upper())
-    )
+    # Other facilities share LCO observatory locations (e.g. iTelescope at
+    # Siding Spring); a site name alone does not identify an LCO telescope.
+    return bool(re.search(r"\bLCO(?:GT)?\b", (tstel or "").upper()))
 
 
 def _tel_class(tstel: str) -> str:
@@ -513,12 +533,17 @@ def check_time_series_exists(
     if not inst or not site:
         result["exists"] = False
         result["exists_checked"] = False
+        result["exists_unchecked_reason"] = (
+            "Instrument could not be identified." if not inst
+            else "Observatory site could not be identified."
+        )
         return result
 
     coords = _target_coords(target) if target else None
     if coords is None:
         result["exists"] = False
         result["exists_checked"] = False
+        result["exists_unchecked_reason"] = "Target coordinates could not be resolved."
         return result
     ra_deg, dec_deg = coords
 
