@@ -19,12 +19,15 @@ def outage(monkeypatch):
     post = Mock(return_value=Mock(json=lambda: {'status': 'COMPLETE', 'data': [{
         'ID': '166527623', 'gmag': 10.1, 'rmag': 9.7, 'imag': 9.5, 'zmag': 9.4,
     }]}))
-    monkeypatch.setattr(http_client, 'get_sync_client', lambda: Mock(post=post))
+    post.sdss_get = Mock(return_value=Mock(json=lambda: [{'Rows': []}]))
+    monkeypatch.setattr(http_client, 'get_sync_client', lambda: Mock(post=post, get=post.sdss_get))
     yield get, post
     exofop._exofop_cache.clear()
     if hasattr(exposure, '_fetch_tic_cached'):
         exposure._fetch_tic_cached.cache_clear()
         exposure._fetch_gaia_dr3_cached.cache_clear()
+        if hasattr(exposure, '_fetch_sdss_cached'):
+            exposure._fetch_sdss_cached.cache_clear()
 
 
 def lookup():
@@ -92,6 +95,9 @@ def test_four_band_transform_during_cds_outage(outage):
     })
     assert result['is_approx'] is True
     assert 'Gaia DR3' in result['source']
+    assert 'empirical' in result['approx_reason']
+    assert 'SDSS' in result['approx_reason']
+    assert 'TIC' in result['approx_reason']
     assert outage[1].call_count == 2
 
 
@@ -143,3 +149,59 @@ def test_partial_tic_photometry_is_preserved(outage):
     assert result['mags'] == {'gp': 10.1}
     assert result['is_approx'] is False
     assert outage[1].call_count == 1
+
+
+def test_sdss_measurements_precede_empirical_transform(outage):
+    outage[1].return_value.json = lambda: {'status': 'COMPLETE', 'data': [{'ID': 166527623}]}
+    row = {'ra': 207.526, 'dec': -40.835896}
+    for band in 'griz':
+        row['psfMag_' + band] = 12.3
+        row['flags_' + band] = 0x10000000  # BINNED1, no bad flags
+    outage[1].sdss_get.return_value.json = lambda: [{'Rows': [row]}]
+    result = lookup()
+    assert result['ok']
+    assert result['mags'] == dict.fromkeys(['gp', 'rp', 'ip', 'zs'], 12.3)
+    assert result['is_approx'] is False
+    assert 'SDSS DR17' in result['source']
+    assert outage[1].call_count == 1  # no Gaia request
+
+
+def test_sdss_available_without_exofop(outage, monkeypatch):
+    monkeypatch.setattr(exposure, 'resolve_target_coords', lambda _: (207.526, -40.835896))
+    outage[0].side_effect = RuntimeError('ExoFOP down')
+    row = {'ra': 207.526, 'dec': -40.835896, 'psfMag_g': 12.3, 'flags_g': 0x10000000}
+    outage[1].sdss_get.return_value.json = lambda: [{'Rows': [row]}]
+    assert lookup()['mags'] == {'gp': 12.3}
+
+
+@pytest.mark.parametrize('bad', [0x40000, 0x4, 0x80, 0x800000000000, 0x10000000000])
+def test_sdss_rejects_flagged_bands(outage, bad):
+    row = {'ra': 207.526, 'dec': -40.835896, 'psfMag_g': 12, 'flags_g': 0x10000000 | bad}
+    outage[1].sdss_get.return_value.json = lambda: [{'Rows': [row]}]
+    mags, reason = exposure._fetch_sdss_cached(207.526, -40.835896, 1)
+    assert mags is None
+    assert 'no usable' in reason
+
+
+@pytest.mark.parametrize('rows', [[], [{'ra': 1, 'dec': 2}, {'ra': 1, 'dec': 2}], [{'ra': 1, 'dec': 2}]])
+def test_sdss_rejects_missing_ambiguous_or_distant_match(outage, rows):
+    outage[1].sdss_get.return_value.json = lambda: [{'Rows': rows}]
+    assert exposure._fetch_sdss_cached(207.526, -40.835896, 1)[0] is None
+
+
+def test_sdss_outage_is_cached_and_explained(outage):
+    outage[1].sdss_get.side_effect = RuntimeError('SDSS down')
+    first = exposure._fetch_sdss_cached(207.526, -40.835896, 1)
+    assert first[0] is None
+    assert 'unavailable' in first[1]
+    assert exposure._fetch_sdss_cached(207.526, -40.835896, 1) == first
+    assert outage[1].sdss_get.call_count == 1
+
+
+def test_sdss_query_is_small_and_bounded(outage):
+    exposure._fetch_sdss_cached(207.526, -40.835896, 1)
+    call = outage[1].sdss_get.call_args
+    assert call.kwargs['timeout'] == 20
+    assert 'TOP 2' in call.kwargs['params']['cmd']
+    assert 'p.type=6 AND p.clean=1' in call.kwargs['params']['cmd']
+    assert '0.05)' in call.kwargs['params']['cmd']  # arcminutes = 3 arcsec

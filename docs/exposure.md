@@ -5,15 +5,32 @@ If Sesame cannot resolve the name, or those catalogs provide no magnitudes,
 it asks ExoFOP for the target's coordinates and TIC ID, then queries that exact
 ID at MAST. ExoFOP only covers TESS targets; other names still rely on Sesame.
 The existing name normalization and catalog lookup remain the first choice.
+If TIC returns no usable measurements (or cannot be reached), query SDSS DR17
+through its own SkyServer service before considering a Gaia estimate. SDSS also
+works for non-TIC names when Sesame resolved coordinates.
 
 Measured TIC griz values take precedence over estimates, including partial
 results. Missing bands are cleared from the form, so a previous target's
-magnitudes cannot survive a new successful lookup. All displayed values have
+magnitudes cannot survive a new successful lookup. The source and reason for
+an empirical estimate are saved with the values across navigation. Manual
+changes are annotated while retaining the original provenance. All displayed values have
 at most six decimal places.
+
+## Independent measured SDSS photometry
+
+SDSS queries use a three-arcsecond cone and request at most two primary, clean
+stellar detections (`type=6`, `clean=1`). Multiple matches are rejected. The
+returned PSF magnitudes are checked band by band: detection must be BINNED1,
+and SATURATED, EDGE, NOPROFILE, PSF_FLUX_INTERP and BAD_COUNTS_ERROR flags are
+rejected. This is necessary because the catalog's `clean` flag primarily
+checks r-band quality. See the [SDSS DR17 flag recommendations](https://www.sdss4.org/dr17/algorithms/photo_flags_recommend/).
+Missing, invalid and sentinel magnitudes are ignored. The direct SkyServer
+request does not depend on CDS or MAST and uses the same timeout, concurrency
+limit and bounded hourly cache as the other fallbacks.
 
 ## Gaia fallback
 
-When TIC has no usable griz, a one-arcsecond MAST Gaia DR3 cone supplies G, BP
+When none of the measured catalogs supplies usable griz, a one-arcsecond MAST Gaia DR3 cone supplies G, BP
 and RP. Only a single source within the cone is accepted. Crowded matches,
 large proper-motion/epoch offsets, unavailable services and missing photometry
 produce no estimate. This deliberately favors a failed lookup over assigning
@@ -37,7 +54,10 @@ whose supplied Gaia photometry must likewise be DR3/EDR3.
 
 Results use SDSS griz as proxies for MuSCAT gp/rp/ip/zs, as with catalog
 photometry. Every transformed result carries `is_approx=true`, a source label,
-and an **Approximate** label on the page. These color-based estimates have
+and an **Approximate** label on the page. The API's `approx_reason` and the
+page explain the preceding lookup outcomes (including skipped CDS queries,
+unavailable services, no clean match, or unusable photometry), and explicitly
+say these are empirical estimates rather than measured griz. These color-based estimates have
 intrinsic scatter and depend on stellar type, extinction and variability;
 they are exposure-planning inputs, not precision photometric calibration or
 a guarantee against saturation.

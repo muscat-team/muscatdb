@@ -170,13 +170,20 @@ def test_approximate_lookup_clears_missing_bands_and_persists(page):
     page.route('**/api/exposure/lookup-mags', lambda r: r.fulfill(json={
         'ok': True, 'mags': {'gp': 10.123456789, 'rp': 9.7, 'ip': 9.4},
         'source': 'TIC Gaia color transform', 'is_approx': True,
+        'approx_reason': 'No usable measured griz in TIC or SDSS; empirical Gaia relation used.',
     }))
     page.goto(URL)
     _fill_mags(page)
     page.click('#lookup-btn')
     expect(page.locator('#lookup-status')).to_contain_text('Approximate')
+    expect(page.locator('#lookup-status')).to_contain_text('No usable measured griz in TIC or SDSS')
     assert page.input_value('.mag-input[data-band="gp"]') == '10.123457'
     assert page.input_value('.mag-input[data-band="zs"]') == ''
     page.reload()
     assert page.input_value('.mag-input[data-band="zs"]') == ''
     assert page.input_value('.mag-input[data-band="gp"]') == '10.123457'
+    expect(page.locator('#lookup-status')).to_contain_text('No usable measured griz in TIC or SDSS')
+    page.fill('.mag-input[data-band="gp"]', '10.5')
+    page.reload()
+    expect(page.locator('#lookup-status')).to_contain_text('Approximate')
+    expect(page.locator('#lookup-status')).to_contain_text('edited manually')

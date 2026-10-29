@@ -710,15 +710,72 @@ def _fetch_gaia_dr3_cached(ra: float, dec: float, cache_epoch: int) -> dict | No
     return None
 
 
-def lookup_target_magnitudes(target: str):
-    """Resolve and look up a target, with an independent ExoFOP/MAST fallback.
+@lru_cache(maxsize=256)
+def _fetch_sdss_cached(ra: float, dec: float, cache_epoch: int):
+    """Measured PSF griz from SDSS DR17 directly, independent of CDS/MAST.
 
-    Returns (coordinates, magnitudes, source, is_approx). Existing catalog
-    photometry wins. If Sesame is down, go straight to TIC after ExoFOP
-    resolution rather than waiting for VizieR on the same failed CDS service.
+    Accept one primary clean stellar detection within three arcseconds and
+    reject bad individual bands. Return (magnitudes, failure explanation).
+    https://www.sdss4.org/dr17/algorithms/photo_flags_recommend/
+    """
+    from muscat_db import http_client
+
+    ra, dec = float(ra), float(dec)
+    if not (math.isfinite(ra) and math.isfinite(dec) and 0 <= ra < 360 and -90 <= dec <= 90):
+        return None, "SDSS: invalid coordinates."
+    columns = ",".join(f"p.psfMag_{b},p.flags_{b}" for b in "griz")
+    # Coordinates are finite floats; no target-name text enters the SQL.
+    query = (
+        f"SELECT TOP 2 p.ra,p.dec,{columns} FROM PhotoPrimary p "
+        f"JOIN dbo.fGetNearbyObjEq({ra:.10f},{dec:.10f},0.05) n ON p.objID=n.objID "
+        "WHERE p.type=6 AND p.clean=1 ORDER BY n.distance"
+    )
+    try:
+        with _CATALOG_CALL_SLOTS:
+            response = http_client.get_sync_client().get(
+                "https://skyserver.sdss.org/dr17/SkyServerWS/SearchTools/SqlSearch",
+                params={"cmd": query, "format": "json"}, timeout=20,
+            )
+            response.raise_for_status()
+            rows = response.json()[0]["Rows"]
+        if not rows:
+            return None, "SDSS: no clean stellar match within 3 arcsec."
+        if len(rows) != 1:
+            return None, "SDSS: ambiguous stellar matches within 3 arcsec."
+        row = {k.lower(): v for k, v in rows[0].items()}
+        separation = SkyCoord(ra, dec, unit="deg").separation(
+            SkyCoord(float(row["ra"]), float(row["dec"]), unit="deg")
+        ).arcsec
+        if not math.isfinite(separation) or separation > 3:
+            return None, "SDSS: match outside 3 arcsec."
+        mags = {}
+        # clean is primarily r-band quality; also reject saturated, edge,
+        # no-profile, interpolated PSF, and bad-count detections in each band.
+        bad_flags = 0x40000 | 0x4 | 0x80 | 0x800000000000 | 0x10000000000
+        for b, band in zip("griz", ("gp", "rp", "ip", "zs")):
+            mag = _clean_mag(row.get(f"psfmag_{b}"))
+            flags = row.get(f"flags_{b}")
+            if flags is None:
+                continue
+            flags = int(flags)
+            if mag is not None and mag < 99 and flags & 0x10000000 and not flags & bad_flags:
+                mags[band] = mag
+        return (mags, None) if mags else (None, "SDSS: no usable unsaturated griz bands.")
+    except Exception as exc:
+        logger.warning("SDSS lookup failed: %s", exc)
+        return None, "SDSS: service unavailable or invalid response."
+
+
+def lookup_target_magnitudes(target: str):
+    """Return coordinates, magnitudes, source, is_approx and approximation reason.
+
+    Measured catalogs always win. ExoFOP/TIC, direct SDSS, and Gaia DR3 at
+    MAST keep the fallback independent of CDS. Every empirical result explains
+    why measured photometry was unavailable.
     """
     from muscat_db import exofop
 
+    reasons = []
     coords = resolve_target_coords(target)
     if coords:
         try:
@@ -727,11 +784,12 @@ def lookup_target_magnitudes(target: str):
             logger.warning("Catalog lookup failed for %s: %s", target, exc)
             mags = None
         if mags:
-            return coords, mags, source, False
+            return coords, mags, source, False, None
+        reasons.append("Pan-STARRS/SkyMapper: no usable measurements returned (no match or service unavailable).")
+    else:
+        reasons.append("CDS name resolution failed; Pan-STARRS/SkyMapper were not queried.")
     data = exofop.fetch_target_by_name(target)
-    if data is None:
-        return coords, None, None, False
-    if coords is None:
+    if coords is None and data:
         position = data.get("coordinates") or {}
         try:
             ra, dec = float(position["ra"]), float(position["dec"])
@@ -739,17 +797,29 @@ def lookup_target_magnitudes(target: str):
                 raise ValueError("Invalid ExoFOP coordinates")
             coords = (ra, dec)
         except (KeyError, TypeError, ValueError):
-            return None, None, None, False
-    tic = exofop.normalize_tic_input(data["basic_info"]["tic_id"])
-    row = _fetch_tic_cached(tic, int(time.time() // 3600))
-    if row is None:
-        return coords, None, None, False
-    mags = {band: mag for column, band in PS1_TO_BAND.items()
-            if (mag := _clean_mag(row.get(column))) is not None}
+            pass
+    if coords is None:
+        return None, None, None, False, None
+    epoch = int(time.time() // 3600)
+    if data:
+        tic = exofop.normalize_tic_input(data["basic_info"]["tic_id"])
+        row = _fetch_tic_cached(tic, epoch)
+        if row is not None:
+            mags = {band: mag for column, band in PS1_TO_BAND.items()
+                    if (mag := _clean_mag(row.get(column))) is not None}
+            if mags:
+                return coords, mags, f"TIC {tic} (MAST)", False, None
+            reasons.append(f"TIC {tic}: no usable measured griz.")
+        else:
+            reasons.append(f"TIC {tic}: unavailable or no matching record.")
+    else:
+        reasons.append("ExoFOP/TIC: target unresolved or service unavailable.")
+    mags, sdss_reason = _fetch_sdss_cached(*coords, epoch)
     if mags:
-        return coords, mags, f"TIC {tic} (MAST)", False
+        return coords, mags, "SDSS DR17 PSF photometry (within 3 arcsec)", False, None
+    reasons.append(sdss_reason)
     # TIC v8 uses Gaia DR2: obtain DR3 rather than silently mixing releases.
-    gaia = _fetch_gaia_dr3_cached(*coords, int(time.time() // 3600))
+    gaia = _fetch_gaia_dr3_cached(*coords, epoch)
     if gaia:
         g = _clean_mag(gaia.get("phot_g_mean_mag"))
         bp = _clean_mag(gaia.get("phot_bp_mean_mag"))
@@ -757,8 +827,9 @@ def lookup_target_magnitudes(target: str):
         if g is not None and bp is not None and rp is not None:
             mags = gaia_to_griz_transform(g, bp - rp)
             if mags:
-                return coords, mags, f"TIC {tic}; Gaia DR3 to SDSS (approx)", True
-    return coords, None, None, False
+                reason = " ".join(reasons) + " Using an empirical Gaia DR3 color relation; these are estimates, not measured griz."
+                return coords, mags, "Gaia DR3 to SDSS (approx)", True, reason
+    return coords, None, None, False, None
 
 
 # ---------------------------------------------------------------------------
@@ -820,7 +891,7 @@ def lookup_magnitudes_with_fallback(
     if gmag is not None:
         transformed = gaia_to_griz_transform(gmag, bp_rp)
         if transformed:
-            source = "Gaia DR3 color transform (approx)"
+            source = "Gaia DR3 color transform (approx): empirical estimate because Pan-STARRS/SkyMapper returned no usable measured griz"
             logger.info(
                 "Griz for (%.4f, %.4f): no catalog match, using %s (G=%.2f, BP-RP=%s)",
                 ra, dec, source, gmag, bp_rp,
