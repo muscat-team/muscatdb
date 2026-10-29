@@ -119,6 +119,7 @@ from muscat_db import ephemeris_import
 from muscat_db import gsheet_ephemeris
 from muscat_db import test_analysis, test_observations
 from muscat_db import lco_monitor
+from muscat_db import midtimes
 from muscat_db import http_client
 from muscat_db import chat
 from muscat_db.catalog import (
@@ -5007,6 +5008,92 @@ def api_lco_clone(ident: str, request: Request):
         return _lco_error_response(e)
 
 
+def _windows_from_midtimes(
+    mids: list[tuple[int, float, dict]],
+    payload: dict,
+    duration_h: float,
+    *,
+    relabel_epochs: bool = True,
+) -> list[dict]:
+    """Padded scheduling windows around explicit BJD_TDB mid-times.
+
+    ``mids`` is ``(epoch_abs, mid_bjd, extra)`` per transit; ``extra`` is merged
+    into that transit's window (e.g. ``mid_unc_min``). Windows carry the keys
+    ``generate_windows`` emits, so ``classify_transits``,
+    ``_clip_windows_to_observability`` and ``_repeat_duration`` consume them
+    unchanged. With ``relabel_epochs`` the displayed epoch counts from the first
+    transit in range, as ``generate_windows`` does; otherwise it is ``epoch_abs``.
+    """
+    pad_before = float(payload.get("pad_before_min") or 0)
+    pad_after = float(payload.get("pad_after_min") or 0)
+    half = duration_h / 2.0
+
+    start_jd = _iso_date_to_jd(str(payload.get("range_start")), end_of_day=False)
+    end_jd = _iso_date_to_jd(str(payload.get("range_end")), end_of_day=True)
+
+    req_ra = payload.get("ra")
+    req_dec = payload.get("dec")
+    has_coord = req_ra not in (None, "") and req_dec not in (None, "")
+    ra_deg = float(req_ra) if has_coord else None
+    dec_deg = float(req_dec) if has_coord else None
+
+    # start_jd/end_jd are calendar JD_UTC; mid_bjd is BJD_TDB, which can be up
+    # to ~9 minutes off UTC (see lco._BJD_UTC_BOUNDARY_PAD). Membership can't
+    # be decided on the raw BJD_TDB value alone once coordinates make the
+    # correction available, so the initial scan is padded (same margin as
+    # lco.generate_windows) and re-filtered below once each mid time has been
+    # corrected to true JD_UTC.
+    pad_days = lco._BJD_UTC_BOUNDARY_PAD.total_seconds() / 86400.0
+    scan_start_jd = start_jd - pad_days if has_coord else start_jd
+    scan_end_jd = end_jd + pad_days if has_coord else end_jd
+
+    raw_windows = []  # (epoch_abs, mid_bjd, start_jd_win, end_jd_win, extra)
+    for epoch_abs, mid_bjd, extra in mids:
+        if not (scan_start_jd <= mid_bjd <= scan_end_jd):
+            continue
+        start_jd_win = mid_bjd - (half / 24.0) - (pad_before / 1440.0)
+        end_jd_win = mid_bjd + (half / 24.0) + (pad_after / 1440.0)
+        raw_windows.append((epoch_abs, mid_bjd, start_jd_win, end_jd_win, extra))
+        if len(raw_windows) > 1000:
+            break
+
+    # mid_bjd is BJD_TDB; convert to true JD_UTC when target coordinates are
+    # known, same correction as lco.generate_windows. The offset drifts by
+    # about a minute per week, negligible over one transit's padded span, so
+    # the per-transit correction computed from mid_bjd is reused for that
+    # transit's start/end rather than converting all three separately.
+    if has_coord and raw_windows:
+        mid_jds_utc = transit_obs.bjd_tdb_to_jd_utc(
+            [w[1] for w in raw_windows], ra_deg, dec_deg,
+        )
+    else:
+        mid_jds_utc = [w[1] for w in raw_windows]
+
+    windows = []
+    for (epoch_abs, mid_bjd, start_jd_win, end_jd_win, extra), mid_jd_utc in zip(raw_windows, mid_jds_utc):
+        mid_jd_utc = float(mid_jd_utc)
+        # The scan above was padded to not miss a boundary transit; re-filter
+        # against the true (unpadded) range now that times are corrected.
+        if not (start_jd <= mid_jd_utc <= end_jd):
+            continue
+        correction = mid_jd_utc - mid_bjd
+        windows.append({
+            **extra,
+            "epoch": epoch_abs,
+            "epoch_abs": epoch_abs,
+            "mid_bjd": mid_bjd,
+            "mid": transit_obs._jd_to_iso_z(mid_jd_utc),
+            "start": transit_obs._jd_to_iso_z(start_jd_win + correction),
+            "end": transit_obs._jd_to_iso_z(end_jd_win + correction),
+        })
+
+    # Match generate_windows: displayed epoch is relative to the first in range.
+    if windows and relabel_epochs:
+        first = windows[0]["epoch_abs"]
+        windows = [{**w, "epoch": w["epoch_abs"] - first} for w in windows]
+    return windows
+
+
 def _ttv_windows(payload: dict, duration_h: float) -> dict:
     """Scheduling windows built from a harmonic TTV model's predicted mid-times.
 
@@ -5037,78 +5124,13 @@ def _ttv_windows(payload: dict, duration_h: float) -> dict:
 
     # The model's tc is in the fit's own time system; t_offset carries it to BJD.
     t_offset = float(model.get("t_offset") or 0.0)
-    pad_before = float(payload.get("pad_before_min") or 0)
-    pad_after = float(payload.get("pad_after_min") or 0)
-    half = duration_h / 2.0
-
-    start_jd = _iso_date_to_jd(str(start_dt), end_of_day=False)
-    end_jd = _iso_date_to_jd(str(end_dt), end_of_day=True)
-
-    req_ra = payload.get("ra")
-    req_dec = payload.get("dec")
-    has_coord = req_ra not in (None, "") and req_dec not in (None, "")
-    ra_deg = float(req_ra) if has_coord else None
-    dec_deg = float(req_dec) if has_coord else None
-
-    # start_jd/end_jd are calendar JD_UTC; mid_bjd is BJD_TDB, which can be up
-    # to ~9 minutes off UTC (see lco._BJD_UTC_BOUNDARY_PAD). Membership can't
-    # be decided on the raw BJD_TDB value alone once coordinates make the
-    # correction available, so the initial scan is padded (same margin as
-    # lco.generate_windows) and re-filtered below once each mid time has been
-    # corrected to true JD_UTC.
-    pad_days = lco._BJD_UTC_BOUNDARY_PAD.total_seconds() / 86400.0
-    scan_start_jd = start_jd - pad_days if has_coord else start_jd
-    scan_end_jd = end_jd + pad_days if has_coord else end_jd
-
-    raw_windows = []  # (epoch_abs, mid_bjd, start_jd_win, end_jd_win)
+    mids = []
     for point in points:
         try:
-            mid_bjd = float(point["tc"]) + t_offset
-            epoch_abs = int(point["epoch"])
+            mids.append((int(point["epoch"]), float(point["tc"]) + t_offset, {}))
         except (KeyError, TypeError, ValueError):
             continue
-        if not (scan_start_jd <= mid_bjd <= scan_end_jd):
-            continue
-        start_jd_win = mid_bjd - (half / 24.0) - (pad_before / 1440.0)
-        end_jd_win = mid_bjd + (half / 24.0) + (pad_after / 1440.0)
-        raw_windows.append((epoch_abs, mid_bjd, start_jd_win, end_jd_win))
-        if len(raw_windows) > 1000:
-            break
-
-    # mid_bjd is BJD_TDB; convert to true JD_UTC when target coordinates are
-    # known, same correction as lco.generate_windows. The offset drifts by
-    # about a minute per week, negligible over one transit's padded span, so
-    # the per-transit correction computed from mid_bjd is reused for that
-    # transit's start/end rather than converting all three separately.
-    if has_coord and raw_windows:
-        mid_jds_utc = transit_obs.bjd_tdb_to_jd_utc(
-            [w[1] for w in raw_windows], ra_deg, dec_deg,
-        )
-    else:
-        mid_jds_utc = [w[1] for w in raw_windows]
-
-    windows = []
-    for (epoch_abs, mid_bjd, start_jd_win, end_jd_win), mid_jd_utc in zip(raw_windows, mid_jds_utc):
-        mid_jd_utc = float(mid_jd_utc)
-        # The scan above was padded to not miss a boundary transit; re-filter
-        # against the true (unpadded) range now that times are corrected.
-        if not (start_jd <= mid_jd_utc <= end_jd):
-            continue
-        correction = mid_jd_utc - mid_bjd
-        windows.append({
-            "epoch": 0,  # replaced below, once the first in-range epoch is known
-            "epoch_abs": epoch_abs,
-            "mid_bjd": mid_bjd,
-            "mid": transit_obs._jd_to_iso_z(mid_jd_utc),
-            "start": transit_obs._jd_to_iso_z(start_jd_win + correction),
-            "end": transit_obs._jd_to_iso_z(end_jd_win + correction),
-        })
-
-    # Match generate_windows: displayed epoch is relative to the first in range.
-    if windows:
-        first = windows[0]["epoch_abs"]
-        for w in windows:
-            w["epoch"] = w["epoch_abs"] - first
+    windows = _windows_from_midtimes(mids, payload, duration_h)
 
     result = {"ok": True, "windows": windows, "planet": planet,
               "ttv_run": model.get("run_name", ""), "duration": duration_h}
@@ -5138,6 +5160,72 @@ def _ttv_windows(payload: dict, duration_h: float) -> dict:
             result["rank_error"] = ranking.get("error", "ranking unavailable")
 
     return result
+
+
+def _utc_jd_to_bjd_tdb(utc_jds: list[float], ra_deg: float, dec_deg: float) -> list[float]:
+    """Invert ``transit_obs.bjd_tdb_to_jd_utc`` by fixed-point iteration.
+
+    The correction (light travel time plus TDB-UTC) changes by well under a
+    second across its own few-minute size, so two passes agree with the
+    forward conversion to sub-millisecond.
+    """
+    import numpy as np
+
+    utc = np.asarray(utc_jds, dtype=float)
+    bjd = utc - (np.asarray(transit_obs.bjd_tdb_to_jd_utc(utc, ra_deg, dec_deg)) - utc)
+    bjd = bjd + (utc - np.asarray(transit_obs.bjd_tdb_to_jd_utc(bjd, ra_deg, dec_deg)))
+    return [float(b) for b in bjd]
+
+
+def _upload_windows(payload: dict, duration) -> dict:
+    """Scheduling windows from an observer's uploaded list of mid-times (#350).
+
+    The list is re-parsed here, whatever the page already checked: it is
+    external input. Coordinates are required, since the point of the source is
+    each row's visibility and an ISO UTC time needs them to become BJD_TDB.
+    """
+    if duration in (None, ""):
+        return {"ok": False, "error": "transit duration (hours) is required"}
+    if not payload.get("range_start") or not payload.get("range_end"):
+        return {"ok": False, "error": "date range is required"}
+    ra, dec = payload.get("ra"), payload.get("dec")
+    if ra in (None, "") or dec in (None, ""):
+        return {"ok": False, "error": "target coordinates are required for uploaded mid-times"}
+    try:
+        parsed = midtimes.parse_midtimes(str(payload.get("midtimes_text") or ""))
+    except midtimes.MidtimeError as e:
+        return {"ok": False, "error": "uploaded mid-times: " + "; ".join(e.errors),
+                "errors": e.errors}
+
+    rows = list(parsed.rows)
+    utc_rows = [r for r in rows if r.bjd is None]
+    converted = iter(_utc_jd_to_bjd_tdb([r.utc_jd for r in utc_rows], float(ra), float(dec))
+                     if utc_rows else [])
+    bjds = [r.bjd if r.bjd is not None else next(converted) for r in rows]
+
+    # Without uploaded epochs, number the transits in time order.
+    order = sorted(range(len(rows)), key=lambda i: bjds[i])
+    mids = []
+    for n, i in enumerate(order):
+        r = rows[i]
+        extra = {"mid_unc_min": r.unc_min} if r.unc_min is not None else {}
+        mids.append((r.epoch if parsed.has_epochs else n, bjds[i], extra))
+
+    windows = _windows_from_midtimes(mids, payload, float(duration),
+                                     relabel_epochs=not parsed.has_epochs)
+    return {
+        "ok": True,
+        "windows": windows,
+        "planet": (payload.get("planet") or "").strip().lower(),
+        "duration": float(duration),
+        "uploaded": {
+            "rows": len(rows),
+            "in_range": len(windows),
+            "out_of_range": len(rows) - len(windows),
+            "duplicates_dropped": parsed.duplicates_dropped,
+            "time_systems": parsed.time_systems,
+        },
+    }
 
 
 def _attach_observability(result: dict, payload: dict, duration_h: float) -> None:
@@ -5220,6 +5308,15 @@ def api_lco_windows(request: Request, payload: dict = Body(...)):
                 )
             _require_visible_ttv_run(target, payload.get("ttv_run") or "")
             result = _ttv_windows(payload, float(duration))
+            if not result.get("ok"):
+                return JSONResponse(result, status_code=400)
+            _attach_observability(result, payload, float(duration))
+            return JSONResponse(result)
+
+        # Like ttv, checked before the t0/period shortcut: the uploaded list is
+        # the ephemeris, and any posted t0/period is only the form's leftover.
+        if source == "upload":
+            result = _upload_windows(payload, duration)
             if not result.get("ok"):
                 return JSONResponse(result, status_code=400)
             _attach_observability(result, payload, float(duration))

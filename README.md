@@ -46,6 +46,14 @@ results are cached for five minutes; failed evaluations can be retried immediate
 Invalid ranking uncertainties leave the transit windows available with a ranking
 error instead of failing the scheduling request.
 
+The schedule page can also take mid-transit times from outside muscat-db: choose
+**Uploaded mid-times** as the ephemeris source and paste or load a list (full
+BJD_TDB or ISO UTC per line, optionally `tc_err` and `epoch`). Each time is
+scheduled as given and gets the same per-site rating as a generated window; the
+**Show** filter selects full, partial, split or unobservable transits. A list
+with any malformed line, or more than 1000 times, is refused with the line
+numbers at fault.
+
 `MUSCAT_MAX_FULL_JOBS` controls the concurrent full-run cap per pipeline (default
 `1`; `0` disables full runs). Empty or malformed values use `1`, with a warning
 for non-empty malformed values. Negative integers retain the disabled (`0`)
