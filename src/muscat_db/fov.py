@@ -936,13 +936,13 @@ def optimize(
         if not target:
             res.error = "Provide a target name or ra/dec."
             return res
-        from . import exposure  # lazy: pulls astroquery
+        from .catalog import resolve_target_astrometry
 
-        coords = exposure.resolve_target_coords(target)
+        coords = resolve_target_astrometry(target)
         if coords is None:
             res.error = f"Could not resolve target {target!r}."
             return res
-        ra, dec = coords
+        ra, dec = coords["ra"], coords["dec"]
     res.ra, res.dec = float(ra), float(dec)
 
     # --- visibility from the instrument's site ---

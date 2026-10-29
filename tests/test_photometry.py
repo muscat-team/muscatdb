@@ -3162,6 +3162,7 @@ class TestRoutes:
         # fallback in resolve_target_coords() would otherwise fire (and fail)
         # on every run; stub it to fail fast instead of over the network.
         monkeypatch.setattr("muscat_db.exposure.resolve_target_coords", lambda name: None)
+        monkeypatch.setattr("muscat_db.exofop.fetch_target_by_name", lambda name: None)
         r2 = client.get("/api/ephemeris/target-info?target=test_star")
         assert r2.status_code == 200
         res = r2.json()

@@ -217,39 +217,52 @@ def fetch_time_series(
     return entries
 
 
-def fetch_by_name(name: str, *, _now: float | None = None) -> tuple[str, list[dict]] | None:
-    """Ask ExoFOP to resolve *name* itself (``target.php?id=HIP67522``).
+def fetch_target_by_name(name: str, *, _now: float | None = None) -> dict | None:
+    """Resolve a TESS target through ExoFOP, retaining coordinates and TIC ID.
 
-    Returns ``(tic_id, time_series)`` when ExoFOP knows the name, else None
-    (it answers an unknown id with a plain-text "No TIC object found" page).
-    Cached like :func:`fetch_time_series`, under the upper-cased name.
+    Share the response with time-series callers. Cache failed lookups too so
+    repeated clicks during an outage do not keep hitting ExoFOP.
     """
+    from copy import deepcopy
+
     ident = (name or "").strip()
     if not ident:
         return None
-    cache_key = f"name:{ident.upper()}"
+    cache_key = f"target:{ident.upper()}"
     now = _now if _now is not None else datetime.datetime.now(datetime.timezone.utc).timestamp()
     with _exofop_cache_lock:
         hit = _exofop_cache.get(cache_key)
-        if hit is not None and now - hit[0] < _EXOFOP_CACHE_TTL_S:
-            return hit[1][0], [dict(r) for r in hit[1][1]]
+        ttl = _EXOFOP_CACHE_TTL_S if hit is not None and hit[1] is not None else 30
+        if hit is not None and now - hit[0] < ttl:
+            return deepcopy(hit[1])
+    data = None
     try:
         resp = catalog._sync_get(
             f"https://exofop.ipac.caltech.edu/tess/target.php?id={quote(ident)}&json",
             headers={"User-Agent": "MuSCAT-db/0.1.0"},
-            timeout=20,
+            timeout=5.0,
         )
-        data = resp.json()
+        candidate = resp.json()
+        info = candidate.get("basic_info") if isinstance(candidate, dict) else None
+        if isinstance(info, dict) and normalize_tic_input(info.get("tic_id")) is not None:
+            data = candidate
     except Exception:
-        return None
-    info = data.get("basic_info") if isinstance(data, dict) else None
-    tic = normalize_tic_input((info or {}).get("tic_id"))
-    if tic is None:
-        return None
-    entries = [dict(e) for e in (data.get("time_series") or [])]
+        pass
     with _exofop_cache_lock:
-        _exofop_cache[cache_key] = (now, (tic, [dict(e) for e in entries]))
-    return tic, entries
+        # Bound cache memory even for arbitrary user-supplied target names.
+        if len(_exofop_cache) >= 256:
+            _exofop_cache.pop(next(iter(_exofop_cache)))
+        _exofop_cache[cache_key] = (now, deepcopy(data))
+    return data
+
+
+def fetch_by_name(name: str, *, _now: float | None = None) -> tuple[str, list[dict]] | None:
+    """Return the resolved TIC ID and reported time series, cached by name."""
+    data = fetch_target_by_name(name, _now=_now)
+    if data is None:
+        return None
+    tic = normalize_tic_input(data["basic_info"]["tic_id"])
+    return tic, [dict(e) for e in (data.get("time_series") or [])]
 
 
 # --------------------------------------------------------------------------- #
