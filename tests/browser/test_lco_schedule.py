@@ -169,3 +169,27 @@ def test_shared_and_private_sheet_dropdown_selects_distinct_values(page):
     for source, period in [('shared_gsheet', '3'), ('gsheet', '4'), ('shared_gsheet_tc', '3.1'), ('gsheet_tc', '4.1')]:
         page.select_option('#sch-source', source)
         expect(page.locator('#sch-period')).to_have_value(period)
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_unconfigured_sheet_sources_remain_visible_with_settings_link(page, shared):
+    page.problems.allowed.extend(NO_TOKEN)
+    page.route('**/api/ephemeris/target-info?*', lambda route: route.fulfill(json={
+        'ok': True, 'planets': ['b'], 'datasets': [], 'ttv_runs': [],
+        'sheet_configured': False, 'shared_sheet_configured': shared,
+    }))
+    page.goto('/lco/schedule')
+    with page.expect_response('**/api/ephemeris/target-info?*'):
+        page.fill('#sch-target', 'TOI-1000')
+        page.locator('#sch-target').blur()
+    expect(page.locator('#sch-source option[value="gsheet"]')).to_contain_text('not configured')
+    for source in ('gsheet', 'gsheet_tc', 'shared_gsheet', 'shared_gsheet_tc'):
+        option = page.locator('#sch-source option[value="' + source + '"]')
+        if shared and source.startswith('shared_'):
+            expect(option).to_be_enabled()
+        else:
+            expect(option).to_be_disabled()
+    link = page.locator('#sheet-source-hint a')
+    expect(link).to_be_visible()
+    link.click()
+    expect(page).to_have_url('/settings')

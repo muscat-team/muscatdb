@@ -582,7 +582,8 @@ On `/lco/schedule`, **Shared Google Sheet (jerome)** uses Jerome's saved
 sheet configuration. **My Google Sheet (private)** uses only the signed-in
 user's configuration from Settings. Each also offers a transit-center linear
 fit. The shared owner sees their personal option labeled **shared with
-everyone**, not private. Sources remain distinct when both are configured.
+everyone**, not private. Sources remain distinct when both are configured. Unconfigured sheet sources
+remain visible but disabled, with a link to Settings beside the dropdown.
 
 `MUSCAT_SHARED_EPHEM_SHEET_USER` selects the shared owner (default `jerome`);
 set it to `none` to disable the shared source. Changing or clearing

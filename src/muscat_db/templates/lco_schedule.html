@@ -105,7 +105,13 @@
         <option value="nasa">NASA catalog</option>
         <option value="toi">TOI catalog</option>
         <option value="linear">linear fit</option>
-      </select></div>
+        <option value="shared_gsheet" disabled>Shared Google Sheet — fetch ephemeris to check availability</option>
+        <option value="shared_gsheet_tc" disabled>Shared Google Sheet — transit-center fit (unavailable)</option>
+        <option value="gsheet" disabled>My Google Sheet (private) — configure in Settings</option>
+        <option value="gsheet_tc" disabled>My Google Sheet (private) — transit-center fit (unavailable)</option>
+      </select>
+      <span class="hint" id="sheet-source-hint">Configure your personal source in <a href="/settings">Settings</a>. Shared sources require a configured team sheet.</span>
+    </div>
     <div class="lco-field"><label for="sch-coords">RA, Dec (deg) <span class="ephem-src none" id="src-coords">—</span> <span class="help-tooltip" title="Target coordinates in decimal degrees (RA, Dec). Auto-filled by Fetch ephemeris from the catalog.">?</span></label><input id="sch-coords" type="text" placeholder="e.g. 97.64, 29.67"></div>
     <div class="lco-field"><label for="sch-range-start">Range start (UTC) <span class="help-tooltip" title="Start of the scheduling search window in UTC. Only transits with mid-point inside this range are considered.">?</span></label><input id="sch-range-start" type="date"></div>
     <div class="lco-field"><label for="sch-range-end">Range end (UTC) <span class="help-tooltip" title="End of the scheduling search window in UTC.">?</span></label><input id="sch-range-end" type="date"></div>
@@ -1156,21 +1162,23 @@
       opt.textContent = 'TTV model: ' + (r.run_name || 'default');
       sel.appendChild(opt);
     });
-    if (info.shared_sheet_configured) {
-      var sharedLabel = 'Shared Google Sheet (' + (info.shared_sheet_owner || 'team') + ')';
-      [['shared_gsheet', sharedLabel], ['shared_gsheet_tc', sharedLabel + ' — transit-center fit']].forEach(function (item) {
-        var option = document.createElement('option');
-        option.value = item[0]; option.textContent = item[1]; sel.appendChild(option);
-      });
-    }
-    if (info.sheet_configured) {
-      var gs = document.createElement('option');
-      gs.value = 'gsheet'; gs.textContent = info.shared_sheet_is_mine ? 'My Google Sheet (shared with everyone)' : (info.shared_sheet_is_mine ? 'My Google Sheet (shared with everyone)' : 'My Google Sheet (private)');
-      sel.appendChild(gs);
-      var gt = document.createElement('option');
-      gt.value = 'gsheet_tc'; gt.textContent = gs.textContent + ' — transit-center fit';
-      sel.appendChild(gt);
-    }
+    var sharedLabel = info.shared_sheet_configured
+      ? 'Shared Google Sheet (' + (info.shared_sheet_owner || 'team') + ')'
+      : 'Shared Google Sheet';
+    var personalLabel = info.shared_sheet_is_mine
+      ? 'My Google Sheet (shared with everyone)' : 'My Google Sheet (private)';
+    [
+      ['shared_gsheet', sharedLabel, info.shared_sheet_configured],
+      ['shared_gsheet_tc', sharedLabel + ' — transit-center fit', info.shared_sheet_configured],
+      ['gsheet', personalLabel, info.sheet_configured],
+      ['gsheet_tc', personalLabel + ' — transit-center fit', info.sheet_configured]
+    ].forEach(function (item) {
+      var option = document.createElement('option');
+      option.value = item[0];
+      option.disabled = !item[2];
+      option.textContent = item[1] + (item[2] ? '' : ' — not configured');
+      sel.appendChild(option);
+    });
     (info.datasets || []).forEach(function (d, i) {
       if (d.planets_fitted && d.planets_fitted.indexOf(planet) !== -1) {
         var opt = document.createElement('option');
@@ -1179,7 +1187,7 @@
         sel.appendChild(opt);
       }
     });
-    var has = Array.prototype.some.call(sel.options, function (o) { return o.value === prev; });
+    var has = Array.prototype.some.call(sel.options, function (o) { return o.value === prev && !o.disabled; });
     sel.value = has ? prev : '';
   }
 
