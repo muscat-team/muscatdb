@@ -1,5 +1,7 @@
 """Exposure lookup remains usable during a CDS outage (no live requests)."""
 import json
+import threading
+import time
 from unittest.mock import Mock
 
 import pytest
@@ -205,3 +207,100 @@ def test_sdss_query_is_small_and_bounded(outage):
     assert 'TOP 2' in call.kwargs['params']['cmd']
     assert 'p.type=6 AND p.clean=1' in call.kwargs['params']['cmd']
     assert '0.05)' in call.kwargs['params']['cmd']  # arcminutes = 3 arcsec
+
+
+# --- one wall-clock budget for the whole lookup (review of #348) -------------
+# A hung stage must not hold the request past nginx's 60 s proxy timeout, and
+# must not keep the stages after it (the fallbacks) from running.
+
+@pytest.fixture
+def tight_budget(monkeypatch):
+    monkeypatch.setattr(exposure, '_LOOKUP_TOTAL_TIMEOUT_S', 1.0)
+    monkeypatch.setattr(exposure, '_LOOKUP_STAGE_CAP_S', dict.fromkeys(exposure._LOOKUP_STAGE_CAP_S, 0.3))
+
+
+@pytest.fixture
+def stall(outage, monkeypatch):
+    """Factory for a service call that blocks until released (or 3 s).
+
+    ``stall()`` then fails; ``stall(value)`` then returns *value*, like a slow
+    service that does answer. Each test gets its own stage executor, and
+    ``stall.release()`` lets every stalled call go and waits until the
+    executor's work has finished, including the cache write that follows the
+    call. Depends on ``outage`` so this teardown runs before the hourly caches
+    are cleared: no late result can leak into the next test.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    release = threading.Event()
+    executor = [ThreadPoolExecutor(max_workers=8)]
+    monkeypatch.setattr(exposure, '_LOOKUP_STAGE_EXECUTOR', executor[0])
+
+    def make(value=None):
+        def _call(*args, **kwargs):
+            release.wait(3)
+            if value is None:
+                raise RuntimeError('service hung')
+            return value
+        return _call
+
+    def release_all():
+        release.set()
+        executor[0].shutdown(wait=True)
+        executor[0] = ThreadPoolExecutor(max_workers=8)
+        monkeypatch.setattr(exposure, '_LOOKUP_STAGE_EXECUTOR', executor[0])
+
+    make.release = release_all
+    yield make
+    release_all()
+    executor[0].shutdown(wait=True)
+
+
+def timed_lookup():
+    start = time.monotonic()
+    result = lookup()
+    return result, time.monotonic() - start
+
+
+def test_hung_name_resolution_still_reaches_the_exofop_fallback(outage, tight_budget, stall, monkeypatch):
+    monkeypatch.setattr(exposure.SkyCoord, 'from_name', Mock(side_effect=stall()))
+    result, elapsed = timed_lookup()
+    assert result['ok'] is True and 'TIC' in result['source']
+    assert elapsed < 1.0
+
+
+def test_every_stage_hung_still_answers_within_the_total_budget(outage, tight_budget, stall, monkeypatch):
+    get, post = outage
+    monkeypatch.setattr(exposure.SkyCoord, 'from_name', Mock(side_effect=stall()))
+    get.side_effect = stall()
+    post.side_effect = stall()
+    post.sdss_get.side_effect = stall()
+    result, elapsed = timed_lookup()
+    assert result['ok'] is False
+    assert elapsed < 1.5
+
+
+def test_stages_left_without_budget_never_contact_their_service(outage, tight_budget, stall, monkeypatch):
+    """Resolution and TIC hang through the whole budget: SDSS and Gaia, which
+    would come next, are not sent at all rather than queued behind it."""
+    monkeypatch.setattr(exposure, '_LOOKUP_TOTAL_TIMEOUT_S', 0.5)
+    monkeypatch.setattr(exposure.SkyCoord, 'from_name', Mock(side_effect=stall()))
+    post = outage[1]
+    post.side_effect = stall()
+    timed_lookup()
+    assert post.call_count == 1  # TIC only, not the Gaia DR3 cone
+    post.sdss_get.assert_not_called()
+
+
+def test_a_late_answer_is_kept_for_the_next_lookup(outage, tight_budget, stall):
+    """A stage that times out but whose service answers late keeps that answer
+    in its cache: the next lookup uses it without asking MAST again."""
+    post = outage[1]
+    post.side_effect = stall(post.return_value)
+    first, _ = timed_lookup()
+    assert first['ok'] is False  # TIC (and the Gaia cone) timed out
+    calls = post.call_count
+    stall.release()  # MAST answers, late
+    second, _ = timed_lookup()
+    assert second['ok'] is True and 'TIC' in second['source']
+    assert post.call_count == calls

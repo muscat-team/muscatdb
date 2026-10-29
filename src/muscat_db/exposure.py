@@ -31,6 +31,7 @@ from astropy.io import fits
 from astropy.coordinates import SkyCoord
 import astropy.units as u
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import TimeoutError as FutureTimeoutError
 try:
     from astroquery.vizier import Vizier as _Vizier
     _HAS_ASTROQUERY = True
@@ -46,6 +47,39 @@ logger = logging.getLogger(__name__)
 
 _CATALOG_CALL_LIMIT = max(1, int(os.environ.get("MUSCAT_CATALOG_GLOBAL_WORKERS", "8")))
 _CATALOG_CALL_SLOTS = threading.BoundedSemaphore(_CATALOG_CALL_LIMIT)
+
+# nginx's proxy_read_timeout is 60 s; past it the page gets an HTML 504 instead
+# of the fallback. lookup_target_magnitudes therefore runs on one wall-clock
+# budget, and each stage gets at most its cap of what is left, so a hung
+# resolver (a CDS outage) or a slow catalog cannot starve the stages after it.
+_LOOKUP_TOTAL_TIMEOUT_S = 50.0
+_LOOKUP_STAGE_CAP_S = {
+    "resolve": 15.0, "measured": 15.0, "exofop": 10.0, "tic": 10.0, "sdss": 10.0, "gaia": 10.0,
+}
+_LOOKUP_STAGE_EXECUTOR = ThreadPoolExecutor(max_workers=_CATALOG_CALL_LIMIT, thread_name_prefix="mag-lookup")
+_STAGE_TIMED_OUT = object()
+
+
+def _run_stage(stage: str, deadline: float, fn, *args, **kwargs):
+    """``fn(*args, **kwargs)`` bounded by its stage cap and the lookup *deadline*.
+
+    Returns ``_STAGE_TIMED_OUT`` when the budget runs out. A stage with no
+    budget left is never submitted, and one still queued is cancelled, so
+    neither contacts its service. A call already running cannot be
+    interrupted; it finishes in the background and fills its own cache with a
+    complete answer, never a truncated one.
+    """
+    budget = min(_LOOKUP_STAGE_CAP_S[stage], deadline - time.monotonic())
+    if budget <= 0:
+        logger.warning("Magnitude lookup: no time left for the %s stage", stage)
+        return _STAGE_TIMED_OUT
+    future = _LOOKUP_STAGE_EXECUTOR.submit(fn, *args, **kwargs)
+    try:
+        return future.result(timeout=budget)
+    except FutureTimeoutError:
+        future.cancel()
+        logger.warning("Magnitude lookup: %s stage timed out after %.1f s", stage, budget)
+        return _STAGE_TIMED_OUT
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -771,24 +805,33 @@ def lookup_target_magnitudes(target: str):
 
     Measured catalogs always win. ExoFOP/TIC, direct SDSS, and Gaia DR3 at
     MAST keep the fallback independent of CDS. Every empirical result explains
-    why measured photometry was unavailable.
+    why measured photometry was unavailable. The whole lookup shares one
+    wall-clock budget (``_LOOKUP_TOTAL_TIMEOUT_S``); a stage that runs out of
+    time counts as unavailable and the next fallback is tried.
     """
     from muscat_db import exofop
 
+    deadline = time.monotonic() + _LOOKUP_TOTAL_TIMEOUT_S
     reasons = []
-    coords = resolve_target_coords(target)
+    coords = _run_stage("resolve", deadline, resolve_target_coords, target)
+    if coords is _STAGE_TIMED_OUT:
+        coords = None
     if coords:
+        mags = source = None
         try:
-            mags, source = lookup_magnitudes(*coords, return_source=True)
+            found = _run_stage("measured", deadline, lookup_magnitudes, *coords, return_source=True)
+            if found is not _STAGE_TIMED_OUT:
+                mags, source = found
         except Exception as exc:
             logger.warning("Catalog lookup failed for %s: %s", target, exc)
-            mags = None
         if mags:
             return coords, mags, source, False, None
-        reasons.append("Pan-STARRS/SkyMapper: no usable measurements returned (no match or service unavailable).")
+        reasons.append("Pan-STARRS/SkyMapper: no usable measurements returned (no match, service unavailable or timed out).")
     else:
-        reasons.append("CDS name resolution failed; Pan-STARRS/SkyMapper were not queried.")
-    data = exofop.fetch_target_by_name(target)
+        reasons.append("CDS name resolution failed or timed out; Pan-STARRS/SkyMapper were not queried.")
+    data = _run_stage("exofop", deadline, exofop.fetch_target_by_name, target)
+    if data is _STAGE_TIMED_OUT:
+        data = None
     if coords is None and data:
         position = data.get("coordinates") or {}
         try:
@@ -803,8 +846,10 @@ def lookup_target_magnitudes(target: str):
     epoch = int(time.time() // 3600)
     if data:
         tic = exofop.normalize_tic_input(data["basic_info"]["tic_id"])
-        row = _fetch_tic_cached(tic, epoch)
-        if row is not None:
+        row = _run_stage("tic", deadline, _fetch_tic_cached, tic, epoch)
+        if row is _STAGE_TIMED_OUT:
+            reasons.append(f"TIC {tic}: timed out.")
+        elif row is not None:
             mags = {band: mag for column, band in PS1_TO_BAND.items()
                     if (mag := _clean_mag(row.get(column))) is not None}
             if mags:
@@ -813,14 +858,15 @@ def lookup_target_magnitudes(target: str):
         else:
             reasons.append(f"TIC {tic}: unavailable or no matching record.")
     else:
-        reasons.append("ExoFOP/TIC: target unresolved or service unavailable.")
-    mags, sdss_reason = _fetch_sdss_cached(*coords, epoch)
+        reasons.append("ExoFOP/TIC: target unresolved, service unavailable or timed out.")
+    sdss = _run_stage("sdss", deadline, _fetch_sdss_cached, *coords, epoch)
+    mags, sdss_reason = (None, "SDSS: timed out.") if sdss is _STAGE_TIMED_OUT else sdss
     if mags:
         return coords, mags, "SDSS DR17 PSF photometry (within 3 arcsec)", False, None
     reasons.append(sdss_reason)
     # TIC v8 uses Gaia DR2: obtain DR3 rather than silently mixing releases.
-    gaia = _fetch_gaia_dr3_cached(*coords, epoch)
-    if gaia:
+    gaia = _run_stage("gaia", deadline, _fetch_gaia_dr3_cached, *coords, epoch)
+    if gaia and gaia is not _STAGE_TIMED_OUT:
         g = _clean_mag(gaia.get("phot_g_mean_mag"))
         bp = _clean_mag(gaia.get("phot_bp_mean_mag"))
         rp = _clean_mag(gaia.get("phot_rp_mean_mag"))
