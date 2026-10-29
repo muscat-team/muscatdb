@@ -670,7 +670,7 @@ def _relay_legs(early: tuple[float, float], late: tuple[float, float],
     shared_end = min(a_e, b_e)
     if b_s > shared_end:
         return (a_s, a_e), (b_s, b_e)
-    handoff = (b_s + shared_end) / 2.0
+    handoff = (max(a_s, b_s) + shared_end) / 2.0
     half = overlap_min / 2.0 / 1440.0
     return (a_s, min(a_e, handoff + half)), (max(b_s, handoff - half), b_e)
 
@@ -696,14 +696,18 @@ def transit_plans(
 
     - ``{"type": "single", "id": "site:<s>", "site", "coverage": "full" |
       "partial", "ingress", "egress", "start", "end"}`` per useful site, full
-      sites first, then by transit minutes covered;
+      sites ranked by coverage and then mean in-transit airmass;
     - ``{"type": "either", "id": "either", "sites", "start", "end"}`` when two
       or more sites are useful: one request LCO may run at any of them, over
       their combined span;
     - ``{"type": "relay", "id": "relay:<early>><late>", "sites", "legs"}`` for
-      the best ordered pair whose early site sees ingress and late site sees
+      every ordered pair whose early site sees ingress and late site sees
       egress, legs trimmed around the handoff (:func:`_relay_legs`).
 
+    Single and relay plans rank by full coverage, covered minutes, gap, then
+    time-weighted mean sec(z) over their in-transit legs (both observations
+    count during overlap). Padding is excluded. Either-site plans come last,
+    with per-site means rather than a guaranteed combined coverage/airmass.
     Sites resolve as in :func:`classify_transits`. Returns one list per window.
     """
     import numpy as np
@@ -728,17 +732,43 @@ def transit_plans(
     grid = Time(jd.ravel(), format="jd", scale="utc")
 
     masks = {}
+    airmasses = {}
     for site in site_list:
-        mask, *_ = _observable_mask(
+        mask, altitude, *_ = _observable_mask(
             target, _earth_location(site), grid, alt_min, sun_alt_max,
             moon_sep_min, max_lunar_phase,
         )
         masks[site] = np.asarray(mask).reshape(len(windows), n_samp)
+        # Match the sec(z) definition used by alt_limit_from_airmass.
+        sine = np.sin(np.deg2rad(altitude))
+        airmasses[site] = np.divide(
+            1.0, sine, out=np.full_like(sine, np.nan), where=sine > 0,
+        ).reshape(len(windows), n_samp)
+
+    def rank(plan):
+        return (plan["coverage"] != "full", -round(plan["_covered"] * 1440, 6),
+                plan.get("gap_min", 0), plan["mean_airmass"], plan["id"])
 
     tol = (_CLASSIFY_STEP_MIN / 2.0) / 1440.0
     out = []
     for i in range(len(windows)):
         ingress, egress = mids[i] - half, mids[i] + half
+
+        def mean_airmass(site_spans):
+            # Time-weight each booked leg, clipped to the transit. During
+            # overlap both telescopes collect data, so both legs contribute.
+            integral = duration = 0.0
+            for site, (start, end) in site_spans:
+                start, end = max(start, ingress), min(end, egress)
+                if end <= start:
+                    continue
+                inside = (jd[i] > start) & (jd[i] < end)
+                times = np.concatenate(([start], jd[i][inside], [end]))
+                values = np.interp(times, jd[i], airmasses[site][i])
+                integral += float(np.trapezoid(values, times))
+                duration += end - start
+            return integral / duration
+
         singles = []
         for site in site_list:
             runs = _true_runs(masks[site][i])
@@ -756,49 +786,53 @@ def transit_plans(
                 "coverage": "full" if sees_in and sees_eg else "partial",
                 "ingress": bool(sees_in), "egress": bool(sees_eg),
                 "start": _jd_to_iso_z(s0), "end": _jd_to_iso_z(s1),
+                "mean_airmass": mean_airmass([(site, (s0, s1))]),
                 "_span": (s0, s1), "_covered": min(s1, egress) - max(s0, ingress),
             })
-        singles.sort(key=lambda p: (p["coverage"] != "full", -p["_covered"]))
+        singles.sort(key=rank)
 
         plans = list(singles)
+        for early, late in itertools.permutations(singles, 2):
+            if not (early["ingress"] and late["egress"]):
+                continue
+            legs = _relay_legs(early["_span"], late["_span"])
+            # A trimmed leg must still cover its assigned contact.
+            if legs[0][1] < ingress or legs[1][0] > egress:
+                continue
+            a_in = (max(legs[0][0], ingress), min(legs[0][1], egress))
+            b_in = (max(legs[1][0], ingress), min(legs[1][1], egress))
+            union = max(0.0, a_in[1] - a_in[0]) + max(0.0, b_in[1] - b_in[0]) - max(
+                0.0, min(a_in[1], b_in[1]) - max(a_in[0], b_in[0]))
+            gap = max(0.0, legs[1][0] - legs[0][1]) * 1440.0
+            overlap = max(0.0, legs[0][1] - legs[1][0]) * 1440.0
+            plans.append({
+                "type": "relay", "id": f"relay:{early['site']}>{late['site']}",
+                "sites": [early["site"], late["site"]],
+                "coverage": "full" if gap < 1e-6 else "partial",
+                "_covered": union,
+                "mean_airmass": mean_airmass(zip((early["site"], late["site"]), legs)),
+                "legs": [
+                    {"site": early["site"], "start": _jd_to_iso_z(legs[0][0]), "end": _jd_to_iso_z(legs[0][1])},
+                    {"site": late["site"], "start": _jd_to_iso_z(legs[1][0]), "end": _jd_to_iso_z(legs[1][1])},
+                ],
+                "overlap_min": round(overlap, 1), "gap_min": round(gap, 1),
+            })
+        plans.sort(key=rank)
+        # Either is an unpinned alternative, not the union of its sites: LCO
+        # can choose any site/time. Do not rank it as guaranteed coverage.
         if len(singles) >= 2:
             plans.append({
                 "type": "either", "id": "either", "sites": [p["site"] for p in singles],
                 "start": _jd_to_iso_z(min(p["_span"][0] for p in singles)),
                 "end": _jd_to_iso_z(max(p["_span"][1] for p in singles)),
+                "site_mean_airmass": {p["site"]: round(p["mean_airmass"], 6) for p in singles},
             })
-            best = None
-            for p, q in itertools.combinations(singles, 2):
-                early, late = sorted((p, q), key=lambda x: (x["_span"][0], x["_span"][1]))
-                if not (early["ingress"] and late["egress"]):
-                    continue
-                legs = _relay_legs(early["_span"], late["_span"])
-                # Transit time the two legs actually cover (a gap between them
-                # counts as uncovered), then the cheaper of equal coverages.
-                a_in = (max(legs[0][0], ingress), min(legs[0][1], egress))
-                b_in = (max(legs[1][0], ingress), min(legs[1][1], egress))
-                union = max(0.0, a_in[1] - a_in[0]) + max(0.0, b_in[1] - b_in[0]) - max(
-                    0.0, min(a_in[1], b_in[1]) - max(a_in[0], b_in[0]))
-                cost = (legs[0][1] - legs[0][0]) + (legs[1][1] - legs[1][0])
-                key = (-round(union * 1440.0), cost)
-                if best is None or key < best[0]:
-                    best = (key, early, late, legs)
-            if best is not None:
-                _, early, late, legs = best
-                gap = max(0.0, legs[1][0] - legs[0][1]) * 1440.0
-                overlap = max(0.0, legs[0][1] - legs[1][0]) * 1440.0
-                plans.append({
-                    "type": "relay", "id": f"relay:{early['site']}>{late['site']}",
-                    "sites": [early["site"], late["site"]],
-                    "legs": [
-                        {"site": early["site"], "start": _jd_to_iso_z(legs[0][0]), "end": _jd_to_iso_z(legs[0][1])},
-                        {"site": late["site"], "start": _jd_to_iso_z(legs[1][0]), "end": _jd_to_iso_z(legs[1][1])},
-                    ],
-                    "overlap_min": round(overlap, 1), "gap_min": round(gap, 1),
-                })
         for p in plans:
             p.pop("_span", None)
-            p.pop("_covered", None)
+            covered = p.pop("_covered", None)
+            if covered is not None:
+                p["covered_min"] = round(covered * 1440, 6)
+                p["mean_airmass"] = round(p["mean_airmass"], 6)
         out.append(plans)
     return out
 
