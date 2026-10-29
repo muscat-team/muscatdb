@@ -111,3 +111,34 @@ when a reduction must proceed without external name resolution.
 | **Multi-instrument Calibration** | Planned | Improved cross-instrument calibration procedures for more consistent multi-wavelength photometry. |
 | **Expanded Catalog Integration** | Planned | Integration with additional exoplanet and stellar catalogs (e.g., TESS Input Catalog, Kepler, K2) to enrich target information. |
 | **Advanced TTV Analysis** | Research | Incorporation of N-body simulations for more complex TTV modeling, especially for systems with strong mutual interactions. |
+
+### FOV service outages
+
+The FOV form works independently of the sky viewer. Aladin Lite 3.8.1 loads
+asynchronously from CDS; if loading or initialization fails or takes more than
+eight seconds, the page displays “Sky view unavailable (CDS unreachable)”.
+Resolve and Run remain available, and results obtained before the viewer is
+ready are plotted when initialization completes within that window.
+
+Gaia cone searches use ESA's synchronous TAP endpoint, then VizieR on failure,
+with a five-second network inactivity timeout for each service. Successful
+results retain the existing bounded memory and persistent disk cache keyed by
+cone and magnitude range; failures are not cached, allowing immediate retries.
+These are network inactivity timeouts, not a total optimization deadline.
+Both FOV Resolve and name-only Run use `catalog.resolve_target_astrometry()`:
+local NASA/TOI coordinates first, then Sesame, then ExoFOP. Sesame and ExoFOP
+requests each have a five-second inactivity timeout, including Sesame's existing
+Harvard mirror. Sesame stops spelling
+retries on transport failure; failed lookups are cached for 30 seconds before
+retrying. Successful ExoFOP responses are shared with archive callers for one
+hour in a bounded cache. ExoFOP coordinates are validated and labelled with
+source `exofop`; their epoch and proper motion remain unknown.
+
+This catalog resolver is also used by scheduling/ephemerides and archive
+lookups. The target page uses its coordinate wrapper after its local catalog
+cross-match and retains header pointing as the last resort. Coordinate lookup
+is not yet universal: exposure's lower-level Sesame helper, exposure's separate
+magnitude fallback, and photometry's engine-specific resolution are distinct
+paths. FOV now reuses the catalog resolver instead of the Sesame-only helper.
+Known RA/Dec bypasses name resolution. Survey images still depend on CDS even
+when the viewer code loads.

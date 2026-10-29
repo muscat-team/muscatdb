@@ -190,7 +190,7 @@ def _offline_photometry_coord_resolution(monkeypatch):
 def mock_target_coord_resolution(monkeypatch):
     """Stub the live SIMBAD/Sesame name-resolution fallback.
 
-    ``exposure.resolve_target_coords`` calls astropy's ``SkyCoord.from_name``,
+    ``exposure.resolve_target_coords`` queries CDS Sesame over HTTP,
     a real network request, whenever a target isn't found in the local (git-
     ignored, often-absent) NASA/TOI catalog CSVs. ``catalog.py`` and ``web.py``
     both reach it via ``from muscat_db import exposure as exp_calc``, a module

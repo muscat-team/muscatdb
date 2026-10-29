@@ -777,15 +777,53 @@ def _target_name_variants(name: str) -> list[str]:
 _COORD_RESOLUTION_DEADLINE = ContextVar("coordinate_resolution_deadline", default=None)
 
 
+def _query_sesame_coords(name: str) -> SkyCoord:
+    """Query Sesame with a per-request timeout without changing global astropy settings."""
+    from urllib.parse import quote
+    import httpx
+    from muscat_db import http_client
+
+    # Preserve astropy's primary and mirror endpoints, with explicit timeouts.
+    endpoints = (
+        "https://cds.unistra.fr/cgi-bin/nph-sesame/",
+        "http://vizier.cfa.harvard.edu/viz-bin/nph-sesame/",
+    )
+    for index, endpoint in enumerate(endpoints):
+        try:
+            response = http_client.get_sync_client().get(
+                endpoint + "SNV?" + quote(name, safe=""), timeout=5.0,
+                follow_redirects=True,
+            )
+            response.raise_for_status()
+            break
+        except (httpx.TransportError, httpx.HTTPStatusError):
+            if index == len(endpoints) - 1:
+                raise
+    match = re.search(r"^%J\s+(\S+)\s+(\S+)", response.text, re.MULTILINE)
+    if match is None:
+        raise ValueError("No Sesame coordinates")
+    ra, dec = map(float, match.groups())
+    if not (math.isfinite(ra) and math.isfinite(dec) and 0 <= ra < 360 and -90 <= dec <= 90):
+        raise ValueError("Invalid Sesame coordinates")
+    return SkyCoord(ra=ra * u.deg, dec=dec * u.deg)
+
+
 def resolve_target_coords(target_name: str) -> tuple[float, float] | None:
-    """Resolve a target name to (ra, dec) in degrees using SIMBAD via astropy.
+    """Resolve a target name to (ra, dec) in degrees using CDS Sesame.
+
+    Network failures stop spelling retries so callers can try an independent
+    service promptly. Each request has a five-second inactivity timeout.
 
     Tries the name exactly as given first. If Sesame rejects it, retries a
     handful of normalized spellings (see :func:`_target_name_variants`)
     before giving up -- see that function's docstring for why a simple
     ``.upper()`` isn't enough.
     """
+    import httpx
+
     stripped = target_name.strip()
+    if not stripped:
+        return None
     attempts = [stripped, *_target_name_variants(stripped)]
 
     last_exc: Exception | None = None
@@ -794,7 +832,15 @@ def resolve_target_coords(target_name: str) -> tuple[float, float] | None:
         if deadline is not None and time.monotonic() >= deadline:
             return None
         try:
-            coord = SkyCoord.from_name(attempt)
+            coord = _query_sesame_coords(attempt)
+        except httpx.TransportError as exc:
+            last_exc = exc
+            break
+        except httpx.HTTPStatusError as exc:
+            last_exc = exc
+            if exc.response.status_code != 404:
+                break
+            continue
         except Exception as exc:
             last_exc = exc
             continue

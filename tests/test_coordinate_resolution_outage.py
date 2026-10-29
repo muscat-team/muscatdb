@@ -13,6 +13,7 @@ from muscat_db import catalog, exposure, photometry as phot
 def isolated_resolution(monkeypatch):
     catalog._CATALOG_CACHE.clear()
     monkeypatch.setattr(catalog, "_query_target_coordinates", lambda name: None)
+    monkeypatch.setattr("muscat_db.exofop.fetch_target_by_name", lambda name: None)
     monkeypatch.setattr(phot, "_prose_prefix", lambda: ["python", "-m", "photometry"])
     monkeypatch.setattr(phot, "_COORD_LOOKUP_TIMEOUT_S", 0.03, raising=False)
     yield
@@ -72,6 +73,8 @@ def test_resolver_exception_does_not_abort_launch_and_next_call_recovers(monkeyp
 
 
 def test_failed_sesame_query_is_not_cached_for_process_lifetime(monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr(catalog.time, "monotonic", lambda: now[0])
     available = False
 
     def from_name(name):
@@ -79,14 +82,18 @@ def test_failed_sesame_query_is_not_cached_for_process_lifetime(monkeypatch):
             raise TimeoutError("CDS unavailable")
         return SkyCoord(10, -20, unit="deg")
 
-    monkeypatch.setattr(exposure.SkyCoord, "from_name", from_name)
+    monkeypatch.setattr(exposure, "_query_sesame_coords", from_name)
     assert catalog._resolve_archive_coords("DS Tuc") is None
     assert "simbad_DS TUC" not in catalog._CATALOG_CACHE
     available = True
+    assert catalog._resolve_archive_coords("DS Tuc") is None
+    now[0] += 31
     assert catalog._resolve_archive_coords("DS Tuc") == (10.0, -20.0, "simbad")
 
 
 def test_only_successful_remote_results_are_cached(monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr(catalog.time, "monotonic", lambda: now[0])
     calls = []
 
     def resolve(name):
@@ -95,6 +102,7 @@ def test_only_successful_remote_results_are_cached(monkeypatch):
 
     monkeypatch.setattr(exposure, "resolve_target_coords", resolve)
     assert catalog._resolve_archive_coords("Unlisted") is None
+    now[0] += 31
     assert catalog._resolve_archive_coords("Unlisted") == (10.0, -20.0, "simbad")
     assert catalog._resolve_archive_coords("Unlisted") == (10.0, -20.0, "simbad")
     assert calls == ["Unlisted", "Unlisted"]
@@ -110,7 +118,7 @@ def test_expired_deadline_stops_spelling_variant_requests(monkeypatch):
 
     deadline = ContextVar("test_deadline", default=time.monotonic() + 0.02)
     monkeypatch.setattr(exposure, "_COORD_RESOLUTION_DEADLINE", deadline, raising=False)
-    monkeypatch.setattr(exposure.SkyCoord, "from_name", from_name)
+    monkeypatch.setattr(exposure, "_query_sesame_coords", from_name)
     assert exposure.resolve_target_coords("DS Tuc") is None
     assert calls == ["DS Tuc"]
 
@@ -164,3 +172,15 @@ def test_cached_remote_position_does_not_need_a_remote_worker(monkeypatch):
     monkeypatch.setattr(phot, "_COORD_LOOKUP_LIMIT", 0)
     catalog._CATALOG_CACHE["simbad_DS TUC"] = (354.914503, -69.195752, "simbad")
     assert phot._auto_target_coord("DS Tuc b") == (354.914503, -69.195752, "simbad", "DS Tuc")
+
+
+@pytest.mark.parametrize("retry_suppressed", [False, True])
+def test_offline_lookup_never_calls_sesame_or_exofop(monkeypatch, retry_suppressed):
+    def unexpected(*args, **kwargs):
+        pytest.fail("offline lookup initiated a remote request")
+
+    monkeypatch.setattr(exposure, "resolve_target_coords", unexpected)
+    monkeypatch.setattr("muscat_db.exofop.fetch_target_by_name", unexpected)
+    if retry_suppressed:
+        catalog._CATALOG_CACHE["retry_simbad_UNLISTED"] = time.monotonic() + 30
+    assert catalog.resolve_target_astrometry("Unlisted", allow_remote=False) is None

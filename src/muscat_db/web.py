@@ -4405,13 +4405,13 @@ def api_fov_resolve_target(payload: dict = Body(...)):
     if not target:
         return JSONResponse({"ok": False, "error": "Target name is required."}, status_code=400)
 
-    coords = exp_calc.resolve_target_coords(target)
+    coords = resolve_target_astrometry(target)
     if coords is None:
         return JSONResponse(
             {"ok": False, "error": f"Could not resolve '{target}'. Try a different name or enter RA/Dec manually."},
             status_code=200,
         )
-    return JSONResponse({"ok": True, "ra": round(coords[0], 5), "dec": round(coords[1], 5)})
+    return JSONResponse({"ok": True, "ra": round(coords["ra"], 5), "dec": round(coords["dec"], 5)})
 
 
 @fov_router.get("/observable", response_class=JSONResponse)
@@ -6702,13 +6702,13 @@ def _sheet_fit_ephemeris(target: str, cfg: dict, seed_by_planet: dict) -> dict:
 
 def _target_coordinates(target: str) -> dict | None:
     """Pointing coordinates for the schedule page: catalog CSVs first, then
-    SIMBAD.
+    SIMBAD and ExoFOP.
 
     The ephemeris catalogs (NASA/TOI) are consulted first via
     ``resolve_target_astrometry``; when the target is in neither, it falls back
-    to SIMBAD name resolution (both cached), so a catalog-less target still gets
+    to SIMBAD and then ExoFOP, so a catalog-less target still gets
     coordinates instead of an empty RA/Dec field. Returns ``{"ra", "dec",
-    "source", "epoch", "pmra", "pmdec"}`` (source one of nasa/toi/simbad;
+    "source", "epoch", "pmra", "pmdec"}`` (source one of nasa/toi/simbad/exofop;
     epoch a Julian year; proper motion mas/yr, None when unknown) or None when
     unresolved. The epoch matters: the catalogs are Gaia DR2 at 2015.5, so a
     high proper-motion star is arcseconds away from its catalog position."""
