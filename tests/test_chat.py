@@ -1333,7 +1333,9 @@ def group_chat_db(chat_db):
     with db.get_conn(chat_db) as conn:
         conn.executemany("INSERT INTO groups(name, builtin) VALUES (?, ?)",
                          [("everyone", 1), ("unc", 0), ("other", 0), ("user:bob", 0)])
-        conn.execute("INSERT INTO group_members(groupname, username) VALUES ('unc', 'bob')")
+        conn.executemany("INSERT INTO group_members(groupname, username) VALUES ('unc', ?)",
+                         [("bob",), ("alice",)])
+        conn.execute("INSERT INTO users(username, is_admin) VALUES ('admin', 1)")
         conn.execute("INSERT INTO group_exclusions(groupname, username) VALUES ('everyone', 'bob')")
         conn.commit()
     return chat_db
@@ -1341,7 +1343,7 @@ def group_chat_db(chat_db):
 
 def test_group_chat_membership_and_delivery(group_chat_db, sio_harness, monkeypatch):
     assert chat._allowed_rooms("bob") == {"group:unc"}
-    assert chat._allowed_rooms("alice") == {"chat:public", "group:unc", "group:other"}
+    assert chat._allowed_rooms("alice") == {"chat:public", "group:unc"}
     assert chat._allowed_rooms(None) == {"chat:public"}
     _as_user(monkeypatch, "bob")
     monkeypatch.setattr(chat, "_known_users_map", lambda: {"bob": "bob", "alice": "alice"})
@@ -1354,8 +1356,9 @@ def test_group_chat_membership_and_delivery(group_chat_db, sio_harness, monkeypa
     assert get_recent_chat_messages(user="bob", addressed_only=True, rooms=["group:other"]) == []
 
 
-def test_group_chat_rejects_guessed_rooms_and_message_ids(group_chat_db, sio_harness, monkeypatch):
-    _as_user(monkeypatch, "bob")
+@pytest.mark.parametrize("user", ["bob", "carol", "admin"])
+def test_group_chat_rejects_guessed_rooms_and_message_ids(group_chat_db, sio_harness, monkeypatch, user):
+    _as_user(monkeypatch, user)
     hidden = save_chat_message("bob", "old membership", room="group:other")
     for handler, payload in [
         (chat.message, {"room": "group:other", "text": "no"}),
@@ -1405,15 +1408,59 @@ def test_connect_group_rooms_history_and_presence(group_chat_db, monkeypatch):
     assert all("bob" not in p["users"] for p in presence if p["room"] == "chat:public")
 
 
-def test_group_chat_revocation_removes_live_subscription(group_chat_db, monkeypatch):
+@pytest.mark.parametrize("user", ["bob", "alice", "admin"])
+def test_group_chat_revocation_removes_live_subscription(group_chat_db, monkeypatch, user):
     from unittest.mock import AsyncMock
     fake = AsyncMock()
     monkeypatch.setattr(chat, "sio", fake)
-    monkeypatch.setattr(chat, "_users_by_sid", {"b": "bob"})
-    monkeypatch.setattr(chat, "_rooms_by_sid", {"b": {"group:unc"}})
+    monkeypatch.setattr(chat, "_users_by_sid", {"b": user})
     with chat.db.get_conn(group_chat_db) as conn:
-        conn.execute("DELETE FROM group_members WHERE username = 'bob'")
+        conn.execute("INSERT OR IGNORE INTO group_members(groupname, username) VALUES ('unc', ?)", (user,))
+        conn.commit()
+    monkeypatch.setattr(chat, "_rooms_by_sid", {"b": chat._allowed_rooms(user)})
+    assert "group:unc" in chat._rooms_by_sid["b"]
+    with chat.db.get_conn(group_chat_db) as conn:
+        conn.execute("DELETE FROM group_members WHERE username = ?", (user,))
         conn.commit()
     asyncio.run(chat._emit_room("message", {"text": "after removal"}, room="group:unc"))
     fake.leave_room.assert_awaited_once_with("b", "group:unc")
-    assert chat._rooms_by_sid["b"] == set()
+    assert "group:unc" not in chat._rooms_by_sid["b"]
+
+
+@pytest.mark.parametrize("user", ["carol", "admin"])
+def test_group_chat_requires_membership_even_for_admins(group_chat_db, monkeypatch, user):
+    monkeypatch.setattr(chat, "_known_users_map", lambda: {user: user})
+    assert chat._allowed_rooms(user) == {"chat:public"}
+    assert chat._parse_mentions("@" + user, "group:unc") == []
+    assert chat._nudge_targets([user], "bob", "group:unc") == []
+    with chat.db.get_conn(group_chat_db) as conn:
+        conn.execute("INSERT INTO group_members(groupname, username) VALUES ('unc', ?)", (user,))
+        conn.commit()
+    assert chat._allowed_rooms(user) == {"chat:public", "group:unc"}
+    assert chat._parse_mentions("@" + user, "group:unc") == [user]
+    with chat.db.get_conn(group_chat_db) as conn:
+        conn.execute("INSERT INTO group_exclusions(groupname, username) VALUES ('unc', ?)", (user,))
+        conn.commit()
+    assert chat._allowed_rooms(user) == {"chat:public"}
+
+
+@pytest.mark.parametrize("user", ["carol", "admin"])
+def test_nonmember_connect_receives_no_group_history_or_presence(group_chat_db, monkeypatch, user):
+    from unittest.mock import AsyncMock
+    fake = AsyncMock()
+    monkeypatch.setattr(chat, "sio", fake)
+    monkeypatch.setattr(chat, "_users_by_sid", {})
+    monkeypatch.setattr(chat, "_rooms_by_sid", {})
+    monkeypatch.setattr(chat, "_resolve_identity", lambda env: (env["user"], "trusted"))
+    save_chat_message("bob", "group secret", room="group:unc")
+    async def run():
+        await chat.connect("bob-sid", {"user": "bob"})
+        await chat.connect("outsider-sid", {"user": user})
+    asyncio.run(run())
+    joined = {c.args[1] for c in fake.enter_room.call_args_list if c.args[0] == "outsider-sid"}
+    assert joined == {f"user:{user}", "chat:public"}
+    histories = [c.args[1] for c in fake.emit.call_args_list
+                 if c.args[0] == "history" and c.kwargs.get("to") == "outsider-sid"]
+    assert [m["text"] for m in histories[0]["messages"]] == ["public history"]
+    presence = [c.args[1] for c in fake.emit.call_args_list if c.args[0] == "presence"]
+    assert all(user not in p["users"] for p in presence if p["room"] == "group:unc")

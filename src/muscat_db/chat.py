@@ -133,7 +133,7 @@ def _online_usernames() -> set[str]:
 
 
 def _allowed_rooms(user: str | None) -> set[str]:
-    """Explicit groups plus public for unscoped viewers; fail closed on errors."""
+    """Group membership (including admins), plus public for unscoped viewers."""
     scoped = _user_is_scoped(user)
     rooms = set() if scoped else {_PUBLIC_ROOM}
     if not user:
@@ -151,7 +151,7 @@ def _allowed_rooms(user: str | None) -> set[str]:
         rooms.update(
             f"group:{name}" for (name,) in groups
             if name not in {"everyone", "admin"} and not name.startswith("user:")
-            and (not scoped or (name in memberships and name not in excluded))
+            and name in memberships and name not in excluded
         )
     except Exception:
         logger.exception("failed to load chat groups")

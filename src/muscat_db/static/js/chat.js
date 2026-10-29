@@ -592,7 +592,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const roomSelect = document.createElement("select");
     roomSelect.id = "chat-room";
     roomSelect.setAttribute("aria-label", "Chat room");
-    roomSelect.title = "Group rooms include group members and all unscoped team members";
+    roomSelect.title = "Group rooms are visible only to their members, including admins";
     chatHeader.after(roomSelect);
     const filterRoom = () => {
         Array.from(chatMessages.children).forEach((el) => {

@@ -610,8 +610,10 @@ directory pairs, muscat3 2,861 across 3, muscat4 40 across 1), with 28 `offset`,
 ### Collaborator chat and ephemeris sheets
 
 The chat room selector separates the public team conversation from explicit
-access-group rooms. A room such as `group:unc` includes that group's members
-and all unscoped team members. Scoped viewers never receive public messages,
+access-group rooms. A room such as `group:unc` is visible only to that group's
+explicit members, with group exclusions respected. Admins also need membership;
+unscoped team access does not grant access to group conversations.
+Scoped viewers never receive public messages,
 history, mentions, typing, or presence. Private job notices and `@bot` remain
 private. Hidden `user:*` groups do not create chat rooms.
 
