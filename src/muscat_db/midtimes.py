@@ -2,18 +2,17 @@
 
 Predictions often come from outside muscat-db (a collaborator's TTV model, a
 photodynamical fit, ExoFOP), so the schedule page accepts them as text: one
-time per line, optionally with a 1-sigma uncertainty and an epoch number.
+time per line, optionally with a 1-sigma uncertainty.
 
 This is a system boundary. A malformed line is reported by number, never
 skipped, and a number that looks like a reduced BJD (BTJD, BKJD, ...) is
 refused rather than scheduled thousands of days off.
 
-Columns, by header name in any order, or positionally as ``tc, tc_err, epoch``
+Columns, by header name in any order, or positionally as ``tc, tc_err``
 when the first line is not a header:
 
 - ``tc``: BJD_TDB (full, > 2400000) or an ISO 8601 UTC time. Required.
-- ``tc_err`` (days) or ``tc_err_min`` (minutes): 1-sigma uncertainty.
-- ``epoch``: integer transit number, given on every row or on none.
+- ``tc_err``: 1-sigma uncertainty in days, the same unit as numeric ``tc``.
 """
 
 from __future__ import annotations
@@ -37,10 +36,8 @@ _MIN_PER_DAY = 1440.0
 _HEADER_ALIASES = {
     "tc": "tc", "tmid": "tc", "mid": "tc", "midtime": "tc", "bjd": "tc", "bjd_tdb": "tc",
     "tc_err": "tc_err", "tc_unc": "tc_err", "err": "tc_err", "unc": "tc_err",
-    "tc_err_min": "tc_err_min", "tc_unc_min": "tc_err_min", "unc_min": "tc_err_min",
-    "epoch": "epoch", "n": "epoch",
 }
-_POSITIONAL = ("tc", "tc_err", "epoch")
+_POSITIONAL = ("tc", "tc_err")
 _ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}")
 
 
@@ -58,7 +55,6 @@ class Midtime:
     bjd: float | None      # BJD_TDB when given as a number
     utc_jd: float | None   # JD_UTC when given as an ISO time
     unc_min: float | None
-    epoch: int | None
 
 
 @dataclass(frozen=True)
@@ -66,7 +62,6 @@ class MidtimeList:
     rows: tuple[Midtime, ...]
     duplicates_dropped: int
     time_systems: dict[str, int]
-    has_epochs: bool
 
 
 def _split(line: str) -> list[str]:
@@ -104,15 +99,6 @@ def _parse_unc(text: str, unit_min: float) -> float | None:
     return value * unit_min
 
 
-def _parse_epoch(text: str) -> int | None:
-    if not text:
-        return None
-    value = float(text)
-    if not value.is_integer():
-        raise ValueError(f"epoch {text!r} must be an integer")
-    return int(value)
-
-
 def _header_columns(fields: list[str]) -> list[str] | None:
     """Column names when ``fields`` is a header line, else None."""
     try:
@@ -138,11 +124,9 @@ def _parse_row(lineno: int, fields: list[str], columns: list[str] | tuple[str, .
     values = dict(zip(columns, fields))
     bjd, utc_jd = _parse_time(values.get("tc", ""))
     unc = _parse_unc(values.get("tc_err", ""), _MIN_PER_DAY)
-    unc_min = _parse_unc(values.get("tc_err_min", ""), 1.0)
     return Midtime(
         line=lineno, bjd=bjd, utc_jd=utc_jd,
-        unc_min=unc_min if unc_min is not None else unc,
-        epoch=_parse_epoch(values.get("epoch", "")),
+        unc_min=unc,
     )
 
 
@@ -156,20 +140,14 @@ def _data_lines(text: str) -> list[tuple[int, list[str]]]:
 
 
 def _dedupe(rows: list[Midtime]) -> tuple[list[Midtime], int, list[str]]:
-    """Drop repeated times; an epoch claimed by two different times is an error."""
+    """Drop repeated times."""
     seen_times: set[float] = set()
-    epoch_line: dict[int, int] = {}
     kept, errors = [], []
     for r in rows:
         key = r.bjd if r.bjd is not None else ("utc", r.utc_jd)
         if key in seen_times:
             continue
         seen_times.add(key)
-        if r.epoch is not None:
-            if r.epoch in epoch_line:
-                errors.append(f"line {r.line}: epoch {r.epoch} already used on line {epoch_line[r.epoch]}")
-                continue
-            epoch_line[r.epoch] = r.line
         kept.append(r)
     return kept, len(rows) - len(kept) - len(errors), errors
 
@@ -204,11 +182,6 @@ def parse_midtimes(text: str) -> MidtimeList:
         except ValueError as e:
             errors.append(f"line {lineno}: {e}")
 
-    with_epoch = [r for r in rows if r.epoch is not None]
-    if with_epoch and len(with_epoch) != len(rows):
-        missing = next(r.line for r in rows if r.epoch is None)
-        errors.append(f"line {missing}: epoch missing (give an epoch on every row or on none)")
-
     rows, dropped, dup_errors = _dedupe(rows)
     errors.extend(dup_errors)
     if errors:
@@ -221,5 +194,4 @@ def parse_midtimes(text: str) -> MidtimeList:
         rows=tuple(rows),
         duplicates_dropped=dropped,
         time_systems={"bjd_tdb": n_bjd, "utc": len(rows) - n_bjd},
-        has_epochs=bool(with_epoch),
     )
