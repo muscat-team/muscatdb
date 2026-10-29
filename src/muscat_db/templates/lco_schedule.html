@@ -105,6 +105,7 @@
         <option value="nasa">NASA catalog</option>
         <option value="toi">TOI catalog</option>
         <option value="linear">linear fit</option>
+        <option value="upload">Uploaded mid-times</option>
       </select></div>
     <div class="lco-field"><label for="sch-coords">RA, Dec (deg) <span class="ephem-src none" id="src-coords">—</span> <span class="help-tooltip" title="Target coordinates in decimal degrees (RA, Dec). Auto-filled by Fetch ephemeris from the catalog.">?</span></label><input id="sch-coords" type="text" placeholder="e.g. 97.64, 29.67"></div>
     <div class="lco-field"><label for="sch-range-start">Range start (UTC) <span class="help-tooltip" title="Start of the scheduling search window in UTC. Only transits with mid-point inside this range are considered.">?</span></label><input id="sch-range-start" type="date"></div>
@@ -116,6 +117,14 @@
     <div class="lco-field"><label for="sch-pad-after">Post-egress (min) <span class="help-tooltip" title="Minutes to add after egress (end of transit). Extends the scheduling window later to ensure baseline coverage.">?</span></label><input id="sch-pad-after" type="number" step="any" value="45"></div>
     <div class="lco-field"><label for="sch-include-padding" style="margin: 0;">Include padding in obs check <span class="help-tooltip" title="When on, the padded baseline (start→end) must also be observable for a transit to rate 'full'. When off, padding is used only for the displayed span and the observability check spans just the transit (mid ± duration/2).">?</span></label>
       <input id="sch-include-padding" type="checkbox" checked></div>
+  </div>
+  <div class="lco-field" id="midtimes-block" style="display: none; margin-top: 0.6rem;">
+    <label for="sch-midtimes">Mid-transit times <span class="help-tooltip" title="One transit per line: tc, then optionally tc_err (days) and epoch, separated by commas, tabs or spaces. tc is a full BJD_TDB (e.g. 2461000.51234) or an ISO UTC time (e.g. 2026-11-03T04:12:00Z). A header line may name the columns in any order: tc, tc_err (days) or tc_err_min (minutes), epoch. Lines starting with # are ignored. Up to 1000 times; the duration and padding fields above apply to every row.">?</span></label>
+    <textarea id="sch-midtimes" class="lco-pre" rows="6" spellcheck="false" aria-label="Mid-transit times" placeholder="e.g.&#10;tc,tc_err_min,epoch&#10;2461000.51234,1.2,411&#10;2026-11-03T04:12:00Z,,412"></textarea>
+    <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.3rem;">
+      <label for="sch-midtimes-file" class="hint" style="margin: 0;">or load a file</label>
+      <input id="sch-midtimes-file" type="file" accept=".csv,.tsv,.txt,.dat,text/csv,text/plain">
+    </div>
   </div>
   <div class="lco-grid" style="margin-top: 0.6rem;">
     <div class="lco-field">
@@ -178,8 +187,11 @@
         <option value="obs" selected>partial + full</option>
         <option value="full">full only</option>
         <option value="split">split only</option>
+        <option value="none">none only</option>
       </select>
     </label>
+    <span class="hint" id="win-counts" style="margin: 0;"></span>
+    <button class="btn sm" type="button" id="btn-win-csv" title="Download the windows table, with each transit's rating and observing sites, as CSV" style="display: none;">Export CSV</button>
     <span class="lco-msg" id="msg-windows" style="margin: 0;"></span>
   </div>
   <div class="lco-table-wrap" style="margin-top: 0.75rem;">
@@ -506,7 +518,7 @@
   // model's predicted mid-times). Grey those fields and make them read-only so
   // that is obvious, rather than leaving editable-looking inputs that imply a
   // linear ephemeris drives the schedule.
-  var EPHEM_IGNORED_TITLE = "Ignored — scheduling uses the TTV model's predicted mid-times";
+  var EPHEM_IGNORED_TITLE = "Ignored — scheduling uses the source's own predicted mid-times";
   function setEphemIgnored(on) {
     ['sch-t0', 'sch-period'].forEach(function (id) {
       var input = el(id);
@@ -516,6 +528,11 @@
       if (on) { input.title = EPHEM_IGNORED_TITLE; }
       else { input.removeAttribute('title'); }
     });
+  }
+  // Sources that supply mid-times directly (a TTV model, an uploaded list), so
+  // t0/period neither shape the windows nor propagate a mid-time uncertainty.
+  function isMidtimeSource(source) {
+    return source === 'upload' || String(source || '').indexOf('ttv:') === 0;
   }
   function clearEphemFields() {
     EPHEM_FIELDS.forEach(function (id) { setVal(id, ''); setFieldSource(id, ''); });
@@ -556,7 +573,7 @@
 
   var TEXT_IDS = [
     'sch-proposal','sch-target','sch-planet','sch-source','sch-coords',
-    'sch-t0','sch-period','sch-duration',
+    'sch-t0','sch-period','sch-duration','sch-midtimes',
     'sch-range-start','sch-range-end','sch-pad-before','sch-pad-after',
     'sch-twilight','sch-sites','win-filter',
     'sch-kind','sch-name','sch-count','sch-exp-g','sch-exp-r','sch-exp-i','sch-exp-z',
@@ -573,7 +590,7 @@
   // invalidates the rendered prediction; win-filter is deliberately absent
   // because it only changes which already-current rows are displayed.
   var WINDOW_PREDICTION_IDS = [
-    'sch-target','sch-planet','sch-source','sch-coords',
+    'sch-target','sch-planet','sch-source','sch-coords','sch-midtimes',
     'sch-range-start','sch-range-end','sch-t0','sch-period','sch-duration',
     'sch-pad-before','sch-pad-after','sch-include-padding',
     'sch-sites','sch-twilight','sch-obs-airmass','sch-moon-sep','sch-max-lunar-phase','sch-rank'
@@ -1146,7 +1163,8 @@
       '<option value="">Auto</option>' +
       '<option value="nasa">NASA catalog</option>' +
       '<option value="toi">TOI catalog</option>' +
-      '<option value="linear">linear fit</option>';
+      '<option value="linear">linear fit</option>' +
+      '<option value="upload">Uploaded mid-times</option>';
     // One option per completed TTV run: scheduling from a TTV model uses that
     // run's predicted mid-times rather than a linear ephemeris, so the run has
     // to be part of the selection.
@@ -1231,10 +1249,11 @@
   function applySource(info, opts) {
     opts = opts || {};
     var source = val('sch-source');
-    // Grey t0/period whenever a TTV model is the source (server ignores them);
+    // Grey t0/period whenever the source supplies its own mid-times (server ignores them);
     // runs before the initial-load guard below so a restored TTV source is
     // reflected on first paint too.
-    setEphemIgnored(source.indexOf('ttv:') === 0);
+    setEphemIgnored(isMidtimeSource(source));
+    syncMidtimesBlock();
     // On the initial page load the restored t0/period already belong to the
     // restored target, and may be values the observer typed by hand (the input
     // listener below tags those 'manual'). Overwriting them from the catalog
@@ -1258,6 +1277,12 @@
     else if (nasa.duration != null) { dur = nasa.duration; durUnc = nasa.duration_unc; durSrc = 'NASA'; }
     else if (toi.duration != null) { dur = toi.duration; durUnc = toi.duration_unc; durSrc = 'TOI'; }
     if (dur != null) { setVal('sch-duration', tupleString(dur, durUnc)); setFieldSource('sch-duration', durSrc); }
+
+    if (source === 'upload') {
+      saveOptions();
+      msg('msg-windows', 'Windows will follow the uploaded mid-times; t0/period are not used', 'ok');
+      return;
+    }
 
     if (source.indexOf('ttv:') === 0) {
       // A TTV model supplies mid-times, not a t0/period pair, but the form still
@@ -1505,15 +1530,62 @@
 
   function applyWinFilter() {
     var mode = val('win-filter');
+    var counts = { full: 0, partial: 0, split: 0, none: 0 };
     document.querySelectorAll('#windows-body tr').forEach(function (tr) {
       var rating = tr.getAttribute('data-rating') || 'none';
+      counts[isSplitRating(rating) ? 'split' : (counts.hasOwnProperty(rating) ? rating : 'none')]++;
       var show = mode === 'all' ||
         (mode === 'obs' && rating !== 'none') ||
         (mode === 'full' && rating === 'full') ||
-        (mode === 'split' && isSplitRating(rating));
+        (mode === 'split' && isSplitRating(rating)) ||
+        (mode === 'none' && rating === 'none');
       tr.style.display = show ? '' : 'none';
     });
+    var n = lastWindows.length;
+    el('win-counts').textContent = n
+      ? n + ' transits: ' + counts.full + ' full, ' + counts.partial + ' partial, ' +
+        counts.split + ' split, ' + counts.none + ' none'
+      : '';
+    el('btn-win-csv').style.display = n ? '' : 'none';
   }
+
+  // What the server made of an uploaded list, for the windows message.
+  function uploadedProvenance(u) {
+    var ts = u.time_systems || {};
+    var systems = [];
+    if (ts.bjd_tdb) systems.push(ts.bjd_tdb + ' read as BJD_TDB');
+    if (ts.utc) systems.push(ts.utc + ' as UTC');
+    var parts = ['uploaded: ' + u.rows + ' times (' + systems.join(', ') + ')'];
+    if (u.out_of_range) parts.push(u.out_of_range + ' outside the date range');
+    if (u.duplicates_dropped) parts.push(u.duplicates_dropped + ' duplicate' + (u.duplicates_dropped === 1 ? '' : 's') + ' dropped');
+    return parts.join('; ');
+  }
+
+  function csvCell(v) {
+    var t = v == null ? '' : String(v);
+    return /[",\n]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t;
+  }
+
+  el('btn-win-csv').addEventListener('click', function () {
+    var header = ['epoch', 'mid_utc', 'mid_bjd_tdb', 'mid_unc_min', 'start_utc', 'end_utc', 'rating', 'sites', 'best_site'];
+    var lines = [header.join(',')];
+    lastWindows.forEach(function (w) {
+      var o = w.observability || {};
+      lines.push([
+        w.epoch, w.mid, typeof w.mid_bjd === 'number' ? w.mid_bjd.toFixed(6) : '',
+        typeof w.mid_unc_min === 'number' ? w.mid_unc_min.toFixed(2) : '',
+        w.start, w.end, o.rating || '', (o.sites || []).join(' '), o.best_site || ''
+      ].map(csvCell).join(','));
+    });
+    var blob = new Blob([lines.join('\n') + '\n'], { type: 'text/csv' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = (val('sch-target') || 'transits').replace(/[^A-Za-z0-9_.-]+/g, '_') + '_windows.csv';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 0);
+  });
 
   // 1-sigma mid-time uncertainty (minutes) propagated from the linear
   // ephemeris: sqrt(t0_unc^2 + (n * P_unc)^2), where n counts periods since t0
@@ -1615,7 +1687,7 @@
     // A TTV-model source numbers epochs from the model's own reference and its
     // mid-times do not follow t0/P, so the linear propagation does not apply.
     var showUnc = t0Tuple.ok && periodTuple.ok && (t0Tuple.unc !== null || periodTuple.unc !== null) &&
-      val('sch-source').indexOf('ttv:') !== 0;
+      !isMidtimeSource(val('sch-source'));
 
     lastWindows.forEach(function (w, i) {
       var o = w.observability;
@@ -2619,7 +2691,12 @@
   el('sch-target').addEventListener('input', scheduleTargetRefresh);
   el('sch-target').addEventListener('change', function () { refreshTargetFields({ silent: true }); });
   el('sch-target').addEventListener('blur', function () { refreshTargetFields({ silent: true }); });
+  function syncMidtimesBlock() {
+    el('midtimes-block').style.display = val('sch-source') === 'upload' ? '' : 'none';
+  }
+  syncMidtimesBlock();
   el('sch-source').addEventListener('change', function () {
+    syncMidtimesBlock();
     var target = val('sch-target');
     if (lastTargetInfo && lastInfoTarget === target) {
       // Info already loaded for this target: re-apply the chosen source so
@@ -2633,6 +2710,25 @@
     } else {
       msg('msg-windows', 'Enter a target (and click "Fetch ephemeris") to load t0 / period / duration', 'err');
     }
+  });
+  var MIDTIMES_MAX_BYTES = 256000;  // matches midtimes.MAX_TEXT_CHARS on the server
+  el('sch-midtimes-file').addEventListener('change', function () {
+    var input = this;
+    var file = input.files && input.files[0];
+    if (!file) return;
+    if (file.size > MIDTIMES_MAX_BYTES) {
+      msg('msg-windows', file.name + ' is too large (at most ' + MIDTIMES_MAX_BYTES / 1000 + ' kB)', 'err');
+      input.value = '';
+      return;
+    }
+    file.text().then(function (text) {
+      el('sch-midtimes').value = text;
+      // A programmatic value fires no input event: invalidate and persist here.
+      el('sch-midtimes').dispatchEvent(new Event('input'));
+      saveOptions();
+      msg('msg-windows', 'Loaded ' + file.name + '; click Generate windows', 'ok');
+    }).catch(function (e) { msg('msg-windows', 'Could not read ' + file.name + ': ' + errText(e), 'err'); })
+      .then(function () { input.value = ''; });
   });
   el('sch-planet').addEventListener('change', function () {
     updateRequestName();
@@ -2748,7 +2844,11 @@
     var periodTuple = tupleField('sch-period');
     var durationTuple = tupleField('sch-duration');
 
-    if (!val('sch-target') && (t0Tuple.mean === null || periodTuple.mean === null)) {
+    var isUpload = val('sch-source') === 'upload';
+    if (isUpload && !val('sch-midtimes').trim()) {
+      msg('msg-windows', 'Paste or load the mid-transit times first.', 'err'); return;
+    }
+    if (!isUpload && !val('sch-target') && (t0Tuple.mean === null || periodTuple.mean === null)) {
       msg('msg-windows', 't0 and Period are required when no target is specified for lookup.', 'err'); return;
     }
     if (durationTuple.mean === null || durationTuple.mean <= 0) {
@@ -2790,7 +2890,8 @@
       max_lunar_phase: num('sch-max-lunar-phase') || 1.0,
       include_padding: chk('sch-include-padding'),
       rank: isTtv && chk('sch-rank'), rank_by: 'ttv',
-      sites: selectedSites()
+      sites: selectedSites(),
+      midtimes_text: isUpload ? val('sch-midtimes') : ''
     };
     MuscatFetch.fetchJson('/api/lco/windows', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(function (d) {
         if (!d.ok) { clearWindows(); msg('msg-windows', d.error || 'failed', 'err'); return; }
@@ -2800,7 +2901,7 @@
         // inputs that produced it are known now, and a restore may redraw the
         // table before they are refilled. Not for a TTV-model source (its
         // mid-times do not follow t0/P).
-        if (!isTtv && (t0Tuple.unc !== null || periodTuple.unc !== null)) {
+        if (!isTtv && !isUpload && (t0Tuple.unc !== null || periodTuple.unc !== null)) {
           lastWindows.forEach(function (w) { w.mid_unc_min = midUncMinutes(w, t0Tuple.unc, periodTuple.unc); });
         }
         if (d.duration && !val('sch-duration')) setVal('sch-duration', tupleString(d.duration, null));
@@ -2811,7 +2912,8 @@
         if (d.rank_error) extra += ', ranking unavailable: ' + d.rank_error;
         else if (d.rank_by) extra += ', ranked by ' + d.rank_by + ' info gain';
         var provenance = d.ttv_run ? 'TTV model: ' + d.ttv_run
-                                   : 't0=' + d.t0 + ', P=' + d.period + ' d';
+                       : d.uploaded ? uploadedProvenance(d.uploaded)
+                       : 't0=' + d.t0 + ', P=' + d.period + ' d';
         msg('msg-windows', lastWindows.length + ' windows (' + provenance + ')' + extra, 'ok');
       }).catch(function (e) { clearWindows(); msg('msg-windows', errText(e), 'err'); });
   });

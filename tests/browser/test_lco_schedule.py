@@ -149,3 +149,86 @@ def test_draft_check_and_submit_never_books_while_submission_is_disabled(page, l
     expect(page.locator("#msg-ipp")).to_contain_text("0 booked, 1 failed")
     expect(request).to_contain_text("Live submission is disabled on the server")
     assert ("POST", "https://observe.lco.global/api/requestgroups/") not in lco_account
+
+
+# HIP 67522 from coj, April 2027, 3 h transit: one full, one partial and one
+# unobservable transit (see tests/test_lco_windows_upload.py).
+UPLOAD_COORDS = "199.3, -40.6"
+UPLOADED = "tc,tc_err_min\n2027-04-10T14:00:00Z,2.5\n2027-04-10T19:00:00Z,\n2027-04-10T02:00:00Z,\n"
+
+
+def _upload_and_generate(page, tmp_path) -> None:
+    page.goto("/lco/schedule")
+    page.select_option("#sch-source", "upload")
+    expect(page.locator("#sch-midtimes")).to_be_visible()
+    page.fill("#sch-coords", UPLOAD_COORDS)  # by hand: no target lookup
+    page.fill("#sch-range-start", "2027-04-01")
+    page.fill("#sch-range-end", "2027-04-30")
+    page.fill("#sch-duration", "3")
+    page.fill("#sch-pad-before", "0")
+    page.fill("#sch-pad-after", "0")
+    page.select_option("#sch-sites", "coj")
+    path = tmp_path / "midtimes.csv"
+    path.write_text(UPLOADED)
+    page.set_input_files("#sch-midtimes-file", str(path))
+    expect(page.locator("#sch-midtimes")).to_have_value(UPLOADED)
+    with page.expect_response("**/api/lco/windows", timeout=60_000):
+        page.click("#btn-gen-windows")
+
+
+def _visible_ratings(page) -> list[str]:
+    return page.eval_on_selector_all(
+        "#windows-body tr",
+        "rows => rows.filter(r => r.style.display !== 'none').map(r => r.dataset.rating)",
+    )
+
+
+def test_uploaded_midtimes_are_rated_and_filtered(page, tmp_path):
+    page.problems.allowed.extend(NO_TOKEN)
+    _upload_and_generate(page, tmp_path)
+    expect(page.locator("#windows-body tr")).to_have_count(3)
+    expect(page.locator("#msg-windows")).to_contain_text("uploaded: 3 times (3 as UTC)")
+    expect(page.locator("#win-counts")).to_have_text("3 transits: 1 full, 1 partial, 0 split, 1 none")
+    # the uploaded uncertainty fills Mid unc; the rows without one show '-'
+    expect(page.locator("#windows-body")).to_contain_text("± 2.50 min")
+
+    expected = {"all": ["none", "full", "partial"], "obs": ["full", "partial"],
+                "full": ["full"], "none": ["none"], "split": []}
+    for mode, ratings in expected.items():
+        page.select_option("#win-filter", mode)
+        assert _visible_ratings(page) == ratings, mode
+
+    with page.expect_download() as dl:
+        page.click("#btn-win-csv")
+    lines = open(dl.value.path()).read().splitlines()
+    assert lines[0].startswith("epoch,mid_utc,mid_bjd_tdb,mid_unc_min")
+    assert [line.split(",")[6] for line in lines[1:]] == ["none", "full", "partial"]
+
+    # the list and the source survive navigating back to the page (localStorage;
+    # a bare reload keeps the URL slug, which carries only a few fields)
+    page.goto("/lco/schedule")
+    assert page.input_value("#sch-source") == "upload"
+    assert page.input_value("#sch-midtimes") == UPLOADED.strip()
+
+
+def test_a_bad_uploaded_line_is_reported_by_number(page):
+    page.problems.allowed.extend(NO_TOKEN + ("HTTP 400: POST /api/lco/windows", "status of 400"))
+    page.goto("/lco/schedule")
+    page.select_option("#sch-source", "upload")
+    page.fill("#sch-coords", UPLOAD_COORDS)
+    page.fill("#sch-range-start", "2027-04-01")
+    page.fill("#sch-range-end", "2027-04-30")
+    page.fill("#sch-duration", "3")
+    page.fill("#sch-midtimes", "2461505.5\n3000.5\n")
+    page.click("#btn-gen-windows")
+    expect(page.locator("#msg-windows")).to_contain_text("line 2: tc '3000.5' looks like a reduced BJD")
+
+
+def test_other_sources_hide_the_upload_box(page):
+    page.problems.allowed.extend(NO_TOKEN)
+    page.goto("/lco/schedule")
+    expect(page.locator("#sch-midtimes")).to_be_hidden()
+    page.select_option("#sch-source", "upload")
+    expect(page.locator("#sch-midtimes")).to_be_visible()
+    page.select_option("#sch-source", "nasa")
+    expect(page.locator("#sch-midtimes")).to_be_hidden()
