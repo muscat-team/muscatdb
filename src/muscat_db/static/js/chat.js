@@ -623,7 +623,7 @@ document.addEventListener("DOMContentLoaded", () => {
         rooms.forEach(room => {
             const option = document.createElement("option");
             option.value = room;
-            option.textContent = room === "chat:public" ? "Team — public" : room.slice(6) + " — group + team";
+            option.textContent = room === "chat:public" ? "Team — public" : room.slice(6) + " — group members";
             roomSelect.appendChild(option);
         });
         roomSelect.value = rooms.includes(preferred) ? preferred : (rooms[0] || "");
