@@ -62,7 +62,8 @@ intrinsic scatter and depend on stellar type, extinction and variability;
 they are exposure-planning inputs, not precision photometric calibration or
 a guarantee against saturation.
 
-ExoFOP and MAST requests have 20-second timeouts and cached failures as well
-as successes. MAST uses bounded, hourly caches and the existing shared catalog
+ExoFOP target requests have a 5-second timeout; successful responses are cached
+for one hour and failures for 30 seconds. MAST requests have 20-second timeouts
+and cache failures as well as successes. MAST uses bounded, hourly caches and the existing shared catalog
 concurrency limit. No MAST name resolver (and thus no hidden CDS name lookup)
 is used. A failed Sesame lookup skips the subsequent VizieR attempt.

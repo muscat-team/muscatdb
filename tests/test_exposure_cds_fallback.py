@@ -304,3 +304,26 @@ def test_a_late_answer_is_kept_for_the_next_lookup(outage, tight_budget, stall):
     second, _ = timed_lookup()
     assert second['ok'] is True and 'TIC' in second['source']
     assert post.call_count == calls
+
+
+@pytest.mark.parametrize('failure', ['transport', 'json', 'malformed', 'invalid_tic'])
+def test_exofop_failure_cache_expires_after_30_seconds(outage, failure):
+    get = outage[0]
+    success = get.return_value
+    failed = {
+        'transport': RuntimeError('ExoFOP unavailable'),
+        'json': Mock(json=Mock(side_effect=ValueError('invalid JSON'))),
+        'malformed': Mock(json=lambda: []),
+        'invalid_tic': Mock(json=lambda: {'basic_info': {'tic_id': 'bad'}}),
+    }[failure]
+    get.side_effect = [failed, success, success]
+    assert exofop.fetch_target_by_name('HIP 67522', _now=1000) is None
+    assert exofop.fetch_target_by_name('HIP 67522', _now=1029) is None
+    assert get.call_count == 1
+    recovered = exofop.fetch_target_by_name('HIP 67522', _now=1030)
+    assert recovered == success.json()
+    assert get.call_count == 2
+    assert exofop.fetch_target_by_name('HIP 67522', _now=4629) == recovered
+    assert get.call_count == 2
+    assert exofop.fetch_target_by_name('HIP 67522', _now=4630) == recovered
+    assert get.call_count == 3

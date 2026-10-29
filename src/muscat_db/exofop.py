@@ -37,6 +37,7 @@ from muscat_db import catalog, lco
 # (seconds). ExoFOP time series change slowly, so a short TTL lets an operator
 # re-run a search in the same session without hammering the external service.
 _EXOFOP_CACHE_TTL_S = 3600
+_EXOFOP_FAILURE_CACHE_TTL_S = 30
 
 _exofop_cache: dict = {}
 _exofop_cache_lock = threading.Lock()
@@ -221,7 +222,8 @@ def fetch_target_by_name(name: str, *, _now: float | None = None) -> dict | None
     """Resolve a TESS target through ExoFOP, retaining coordinates and TIC ID.
 
     Share the response with time-series callers. Cache failed lookups too so
-    repeated clicks during an outage do not keep hitting ExoFOP.
+    repeated clicks during an outage do not keep hitting ExoFOP. Failures expire
+    after 30 seconds so transient errors do not suppress recovery for an hour.
     """
     from copy import deepcopy
 
@@ -232,15 +234,16 @@ def fetch_target_by_name(name: str, *, _now: float | None = None) -> dict | None
     now = _now if _now is not None else datetime.datetime.now(datetime.timezone.utc).timestamp()
     with _exofop_cache_lock:
         hit = _exofop_cache.get(cache_key)
-        ttl = _EXOFOP_CACHE_TTL_S if hit is not None and hit[1] is not None else 30
-        if hit is not None and now - hit[0] < ttl:
-            return deepcopy(hit[1])
+        if hit is not None:
+            ttl = _EXOFOP_FAILURE_CACHE_TTL_S if hit[1] is None else _EXOFOP_CACHE_TTL_S
+            if now - hit[0] < ttl:
+                return deepcopy(hit[1])
     data = None
     try:
         resp = catalog._sync_get(
             f"https://exofop.ipac.caltech.edu/tess/target.php?id={quote(ident)}&json",
             headers={"User-Agent": "MuSCAT-db/0.1.0"},
-            timeout=5.0,
+            timeout=5,
         )
         candidate = resp.json()
         info = candidate.get("basic_info") if isinstance(candidate, dict) else None
