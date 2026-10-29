@@ -111,3 +111,19 @@ when a reduction must proceed without external name resolution.
 | **Multi-instrument Calibration** | Planned | Improved cross-instrument calibration procedures for more consistent multi-wavelength photometry. |
 | **Expanded Catalog Integration** | Planned | Integration with additional exoplanet and stellar catalogs (e.g., TESS Input Catalog, Kepler, K2) to enrich target information. |
 | **Advanced TTV Analysis** | Research | Incorporation of N-body simulations for more complex TTV modeling, especially for systems with strong mutual interactions. |
+
+### FOV service outages
+
+The FOV form works independently of the sky viewer. Aladin Lite 3.8.1 loads
+asynchronously from CDS; if loading or initialization fails or takes more than
+eight seconds, the page displays “Sky view unavailable (CDS unreachable)”.
+Resolve and Run remain available, and results obtained before the viewer is
+ready are plotted when initialization completes within that window.
+
+Gaia cone searches use ESA's synchronous TAP endpoint, then VizieR on failure,
+with a five-second network inactivity timeout for each service. Successful
+results retain the existing bounded memory and persistent disk cache keyed by
+cone and magnitude range; failures are not cached, allowing immediate retries.
+These are network timeouts, not a total deadline for optimization or target
+name resolution. During a Sesame outage, enter known RA/Dec to bypass name
+resolution. Survey images still depend on CDS even when the viewer code loads.

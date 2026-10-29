@@ -28,6 +28,7 @@ offline.
 
 from __future__ import annotations
 
+from io import BytesIO
 import logging
 import math
 import os
@@ -41,6 +42,9 @@ import numpy as np
 from muscat_db.cache import LRUCache
 
 logger = logging.getLogger(__name__)
+
+# Per-service network inactivity timeout; ESA is followed by VizieR on failure.
+_GAIA_TIMEOUT_S = 5.0
 
 # Repo root: .../muscat-db (src/muscat_db/fov.py -> parents[2]).
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -536,11 +540,8 @@ def _query_gaia_esa(
     empty = StarField(
         np.array([]), np.array([]), np.array([]), np.array([]), "Gaia DR3 (ESA)"
     )
-    try:
-        from astroquery.gaia import Gaia
-    except Exception as exc:  # pragma: no cover - import guard
-        empty.error = f"astroquery.gaia unavailable: {exc}"
-        return empty
+    import httpx
+    from astropy.table import Table
 
     radius_deg = radius_arcsec / 3600.0
     mag_clause = (
@@ -556,7 +557,16 @@ def _query_gaia_esa(
         "ORDER BY phot_g_mean_mag"
     )
     try:
-        tab = Gaia.launch_job(query).get_results()
+        # astroquery's Gaia TAP transport opens HTTPConnection without a
+        # timeout (including on import). Use the same sync endpoint directly.
+        response = httpx.post(
+            "https://gea.esac.esa.int/tap-server/tap/sync",
+            data={"REQUEST": "doQuery", "LANG": "ADQL", "FORMAT": "votable", "QUERY": query},
+            timeout=_GAIA_TIMEOUT_S,
+            follow_redirects=True,
+        )
+        response.raise_for_status()
+        tab = Table.read(BytesIO(response.content), format="votable")
     except Exception as exc:
         empty.error = f"ESA Gaia query failed: {exc}"
         logger.warning("ESA Gaia query failed for (%.4f, %.4f): %s", ra, dec, exc)
@@ -595,6 +605,7 @@ def _query_gaia_vizier(
             columns=["RA_ICRS", "DE_ICRS", "Gmag", "BP-RP", "pmRA", "pmDE", "_r"],
             column_filters={"Gmag": gmag_filter},
             row_limit=-1,
+            timeout=_GAIA_TIMEOUT_S,
         )
         response = viz.query_region_async(
             coord, radius=radius_arcsec * u.arcsec, catalog="I/355/gaiadr3"

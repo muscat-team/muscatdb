@@ -57,7 +57,7 @@ ADMIN = "admin"
 CDN_STUBS = {
     "https://cdn.socket.io/": ("socketio.js", "application/javascript"),
     "https://cdn.plot.ly/": ("plotly.js", "application/javascript"),
-    "https://aladin.cds.unistra.fr/AladinLite/api/v3/latest/aladin.js": ("aladin.js", "application/javascript"),
+    "https://aladin.cds.unistra.fr/AladinLite/api/v3/3.8.1/aladin.js": ("aladin.js", "application/javascript"),
     "https://aladin.cds.unistra.fr/AladinLite/api/v3/latest/aladin.css": (None, "text/css"),
     "https://cdn.jsdelivr.net/npm/mermaid@": ("mermaid.mjs", "application/javascript"),
 }

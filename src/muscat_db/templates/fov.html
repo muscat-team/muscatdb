@@ -1,7 +1,6 @@
 {% extends "base.html" %}
 {% block title %}FOV — MuSCAT-db{% endblock %}
 {% block content %}
-<link rel="stylesheet" href="https://aladin.cds.unistra.fr/AladinLite/api/v3/latest/aladin.css">
 <style>
   .fov-layout { display: flex; gap: 1.5rem; align-items: flex-start; flex-wrap: wrap; }
   .fov-panel { flex: 1; min-width: 360px; }
@@ -188,6 +187,7 @@
   <div class="fov-viewer">
     <div class="fov-section">
       <h3>Sky View</h3>
+      <p id="fov-sky-status" role="status">Loading sky view…</p>
       <div id="aladin-lite-div"></div>
       <div class="fov-legend">
         <span><span class="swatch" style="background:#ff5470;"></span> Target</span>
@@ -365,7 +365,6 @@
   </div>
 </details>
 
-<script type="text/javascript" src="https://aladin.cds.unistra.fr/AladinLite/api/v3/latest/aladin.js" charset="utf-8"></script>
 <script>
 (function () {
   const FOV_ARCMIN = {{ fov_sizes | tojson }};
@@ -385,7 +384,7 @@
   let highlightOverlay = null;  // Graphics overlay for highlighting selected star
   let pmOverlay = null;  // Graphics overlay for proper-motion arrows
 
-  A.init.then(() => {
+  function initializeSkyView() {
     aladin = A.aladin('#aladin-lite-div', {
       survey: 'P/DSS2/color',
       fov: 0.2,
@@ -408,7 +407,45 @@
     aladin.addCatalog(targetCatalog);
     aladin.addCatalog(compCatalog);
     aladin.addCatalog(avoidCatalog);
-  });
+    if (lastResult) {
+      overplot(lastResult);
+      renderPmArrows(lastResult);
+      recenter(lastResult);
+    } else if ($('fov-ra').value && $('fov-dec').value) {
+      aladin.gotoRaDec(Number($('fov-ra').value), Number($('fov-dec').value));
+    }
+    if ($('fov-observed-date').selectedIndex) loadObservedFootprint();
+  }
+
+  function loadSkyView() {
+    const status = $('fov-sky-status');
+    let finished = false;
+    const unavailable = () => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      aladin = null;
+      $('aladin-lite-div').replaceChildren();
+      status.textContent = 'Sky view unavailable (CDS unreachable)';
+    };
+    // Includes script download and A.init's WASM initialization. A late load
+    // after the deadline must not replace the unavailable state.
+    const timer = setTimeout(unavailable, 8000);
+    const script = document.createElement('script');
+    script.async = true;
+    script.src = 'https://aladin.cds.unistra.fr/AladinLite/api/v3/3.8.1/aladin.js';
+    script.onerror = unavailable;
+    script.onload = () => {
+      Promise.resolve().then(() => window.A.init).then(() => {
+        if (finished) return;
+        initializeSkyView();
+        finished = true;
+        clearTimeout(timer);
+        status.textContent = '';
+      }).catch(unavailable);
+    };
+    document.head.appendChild(script);
+  }
 
   function setMsg(text, kind) {
     msg.textContent = text || '';
@@ -1140,6 +1177,7 @@
     syncPmLegend();
   });
   syncPmLegend();
+  loadSkyView();
 })();
 </script>
 {% endblock %}

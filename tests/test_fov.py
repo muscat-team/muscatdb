@@ -614,31 +614,48 @@ def test_cached_query_gaia_field_distinguishes_different_fields(monkeypatch):
 
 # ── ESA query must be synchronous (async TAP jobs took ~90 s -> proxy 504) ───
 
-def test_query_gaia_esa_uses_sync_job(monkeypatch):
+def test_query_gaia_esa_uses_bounded_sync_request(monkeypatch):
+    from io import BytesIO
     from astropy.table import Table
+    import httpx
 
     tab = Table({
         "ra": [10.0], "dec": [-20.0], "phot_g_mean_mag": [12.0],
         "bp_rp": [1.0], "pmra": [0.0], "pmdec": [0.0],
     })
+    output = BytesIO()
+    tab.write(output, format="votable")
+    calls = []
 
-    class _Job:
-        def get_results(self):
-            return tab
+    def post(url, **kwargs):
+        calls.append((url, kwargs))
+        return httpx.Response(200, content=output.getvalue(), request=httpx.Request("POST", url))
 
-    class _FakeGaia:
-        @staticmethod
-        def launch_job(query, *a, **k):
-            return _Job()
-
-        @staticmethod
-        def launch_job_async(query, *a, **k):
-            raise AssertionError("async TAP jobs queue for ~90 s; use the sync endpoint")
-
-    monkeypatch.setattr("astroquery.gaia.Gaia", _FakeGaia)
+    monkeypatch.setattr(httpx, "post", post)
     result = fov._query_gaia_esa(10.0, -20.0, 60.0, 0.0, 18.0)
+    assert calls and calls[0][0].endswith("/tap-server/tap/sync")
+    assert calls[0][1]["timeout"] == 5.0
+    assert calls[0][1]["data"]["REQUEST"] == "doQuery"
     assert result.error is None
     assert len(result) == 1
+
+
+def test_gaia_transport_timeouts_are_reported(monkeypatch):
+    import httpx
+    from astroquery.vizier import Vizier
+
+    def post(*args, **kwargs):
+        raise httpx.ReadTimeout("ESA timed out")
+
+    def query(self, *args, **kwargs):
+        assert self.TIMEOUT == 5.0
+        raise TimeoutError("VizieR timed out")
+
+    monkeypatch.setattr(httpx, "post", post)
+    monkeypatch.setattr(type(Vizier), "query_region_async", query)
+    result = fov.query_gaia_field(10.0, -20.0, 60.0)
+    assert "ESA timed out" in result.error
+    assert "VizieR timed out" in result.error
 
 
 # ── persistent (disk) Gaia cache ─────────────────────────────────────────────
