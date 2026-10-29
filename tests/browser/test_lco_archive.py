@@ -64,10 +64,12 @@ def test_search_resolves_the_target_and_groups_frames_by_night(page, archive):
     expect(page.locator("#msg-search")).to_have_text(
         "Showing 2 frames across 2 datasets — resolved to RA 117.929, Dec 12.536 (toi)"
     )
+    expect(page.locator("#frames-pager")).to_be_hidden()
     (url,) = archive
     query = parse_qs(urlparse(url).query)
     assert query["covers"] == ["POINT(117.929 12.536)"]
-    assert query["OBSTYPE"] == ["EXPOSE"]
+    assert query["configuration_type"] == ["EXPOSE"]
+    assert query["pagination_style"] == ["cursor"]
 
     known, new = page.locator("#frames-groups details.lco-dataset").all()
     expect(known.locator("summary")).to_contain_text("Dataset date: 2026-10-03")
@@ -101,3 +103,80 @@ def test_search_without_a_target_explains_what_is_needed(page):
     expect(page.locator("#msg-search")).to_have_text(
         "Enter a target name to resolve its coordinates, or enable 'Fuzzy name match'."
     )
+
+
+def test_legacy_limit_does_not_override_all_and_preview_persists(page, archive):
+    page.goto('/lco/archive')
+    page.evaluate("localStorage.setItem('lco:archive:options', JSON.stringify({'dl-limit':'5000','dl-object':'TOI-1000'}))")
+    page.reload()
+    expect(page.locator('#dl-search-mode')).to_have_value('all')
+    expect(page.locator('#dl-limit')).to_be_disabled()
+    with page.expect_response('**/api/lco/archive/frames?**') as response:
+        page.click('#btn-search')
+    query = parse_qs(urlparse(response.value.url).query)
+    assert query['limit'] == ['all']
+    expect(page.locator('#msg-search')).to_contain_text('Showing 2 frames')
+    page.select_option('#dl-search-mode', 'preview')
+    page.fill('#dl-limit', '1')
+    with page.expect_response('**/api/lco/archive/frames?**') as response:
+        page.click('#btn-search')
+    assert parse_qs(urlparse(response.value.url).query)['limit'] == ['1']
+    page.reload()
+    expect(page.locator('#dl-search-mode')).to_have_value('preview')
+    expect(page.locator('#dl-limit')).to_have_value('1')
+    expect(page.locator('#dl-limit')).to_be_enabled()
+
+
+def test_large_results_page_selections_and_storage(page, monkeypatch):
+    from muscat_db import lco
+    rows = [_frame('20261003', '2026-10-04T02:24:00Z', str(i).zfill(4)) for i in range(501)]
+    monkeypatch.setattr(lco, '_lco_api_request', lambda *a, **kw: {'results': rows, 'next': None})
+    _search(page)
+    expect(page.locator('#frames-groups tbody tr')).to_have_count(200)
+    expect(page.locator('#frames-page-status')).to_have_text('Frames 1–200 of 501')
+    assert page.evaluate("JSON.parse(localStorage.getItem('lco:archive:state'))") == {'large': True}
+    page.locator('#frames-groups tbody input').first.check()
+    page.click('#frames-next')
+    expect(page.locator('#frames-page-status')).to_have_text('Frames 201–400 of 501')
+    page.locator('#frames-groups tbody input').first.check()
+    page.click('#frames-next')
+    expect(page.locator('#frames-groups tbody tr')).to_have_count(101)
+    expect(page.locator('#frames-next')).to_be_disabled()
+    page.click('#frames-prev')
+    page.click('#frames-prev')
+    expect(page.locator('#frames-groups tbody input').first).to_be_checked()
+    posted = []
+    def download(route):
+        posted.extend(route.request.post_data_json['frames'])
+        route.fulfill(json={'ok': True, 'results': []})
+    page.route('**/api/lco/archive/download', download)
+    page.click('#btn-download')
+    expect(page.locator('#msg-download')).to_contain_text('Done:')
+    assert [r['filename'] for r in posted] == [rows[0]['filename'], rows[200]['filename']]
+    page.reload()
+    expect(page.locator('#frames-storage-note')).to_be_visible()
+    expect(page.locator('#frames-groups tbody tr')).to_have_count(0)
+
+
+def test_all_search_stream_progress_and_error_do_not_leave_old_downloads(page, archive, monkeypatch):
+    import threading
+    from muscat_db import lco
+    _search(page)
+    expect(page.locator('#frames-groups tbody tr')).to_have_count(2)
+    release = threading.Event()
+    def pages(*a, **kw):
+        yield ARCHIVE_FRAMES
+        if not release.wait(15):
+            raise lco.LcoError('Test timed out')
+        raise lco.LcoError('Archive unavailable', status=502)
+    monkeypatch.setattr(lco, 'archive_cursor_pages', pages)
+    try:
+        page.click('#btn-search')
+        expect(page.locator('#msg-search')).to_have_text('Searching all archive frames…')
+        expect(page.locator('#btn-search')).to_be_disabled()
+        expect(page.locator('#btn-download')).to_be_disabled()
+        expect(page.locator('#frames-groups tbody tr')).to_have_count(0)
+    finally:
+        release.set()
+    expect(page.locator('#msg-search')).to_contain_text('Archive unavailable')
+    expect(page.locator('#btn-search')).to_be_enabled()

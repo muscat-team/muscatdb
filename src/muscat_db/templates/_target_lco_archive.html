@@ -72,30 +72,8 @@
         start: document.getElementById(fields[0]).value,
         end: document.getElementById(fields[1]).value});
       const response = await fetch('/api/lco/archive/target?' + query);
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || 'Archive search failed');
-      }
-      let data = null, pending = '';
-      const reader = response.body.getReader(), decoder = new TextDecoder();
-      function event(line) {
-        if (!line.trim()) return;
-        const message = JSON.parse(line);
-        if (message.progress) status.textContent = message.progress;
-        else if (message.ok === false) throw new Error(message.error || 'Archive search failed');
-        else if (message.ok) data = message;
-      }
-      try {
-        while (true) {
-          const chunk = await reader.read();
-          pending += decoder.decode(chunk.value, {stream: !chunk.done});
-          const lines = pending.split('\n'); pending = lines.pop();
-          lines.forEach(event);
-          if (chunk.done) break;
-        }
-        event(pending);
-      } finally { await reader.cancel(); }
-      if (!data) throw new Error('Archive search ended before completion');
+      const data = await MuscatFetch.readProgress(response, text => { status.textContent = text; });
+      if (!data.ok) throw new Error(data.error || 'Archive search failed');
       data.rows.forEach(row => {
         const tr = document.createElement('tr');
         [row.date, row.instrument, row.site, row.telescope, row.filters.join(', '), row.frame_count,

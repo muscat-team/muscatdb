@@ -597,3 +597,19 @@ target in the browser. ExoFOP-reported nights are included: a report does not
 account for every request, filter or telescope observed that night. ExoFOP indicators match instrument,
 site and night within one day, not individual request IDs. “No matching report”
 reflects the existing ExoFOP lookup, which may also return no rows during an outage.
+
+
+### Complete searches on the LCO archive page
+
+On `/lco/archive`, **All matching frames** is the default search scope. Object
+searches follow all cursor pages, including nights beyond the former total-frame
+limit. Choose **Quick preview** to deliberately cap retrieval (up to 10,000 frames);
+truncated previews are labeled incomplete. A limit saved by an older version does
+not enable preview mode: the new scope must be selected explicitly.
+
+Results render 200 frames per display page. Selections survive Previous/Next,
+and **Download selected** includes selected frames from every display page. Group
+checkboxes select only the displayed frames. Search settings persist in the
+browser; large result sets remain in memory only for the current visit and must
+be searched again after returning. Small results still restore as before. Whole
+request downloads retain their existing safety limits.

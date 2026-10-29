@@ -422,7 +422,7 @@ _ARCHIVE_MAX_FRAMES = 10_000
 def archive_search_all(
     filters: dict,
     user_name: str | None = None,
-    max_frames: int = _ARCHIVE_MAX_FRAMES,
+    max_frames: int | None = _ARCHIVE_MAX_FRAMES,
     token: str | None = None,
 ) -> dict:
     """Search the LCO archive, following pagination until exhausted or capped.
@@ -431,8 +431,12 @@ def archive_search_all(
     next-page URL, already carrying the same query params). A single observation
     request can span thousands of frames, so ``archive_search`` (one page) is not
     enough to pull a whole dataset by ``request_id``. Stops at ``max_frames`` and
-    reports ``truncated`` so the caller can warn the user.
+    reports ``truncated`` so the caller can warn the user. Pass ``None`` to
+    traverse all cursor pages instead.
     """
+    if max_frames is None:
+        rows = [row for page in archive_cursor_pages(filters, user_name, token=token) for row in page]
+        return {"count": len(rows), "results": rows, "truncated": False}
     base_url = "https://archive-api.lco.global/frames/"
     params = _query_params(filters)
     url: str | None = f"{base_url}?{params}"
@@ -468,7 +472,10 @@ def archive_cursor_pages(filters: dict, user_name: str | None = None, *, token: 
     only exhaustion of ``next`` signals completion. Keep other callers' bounded
     offset searches unchanged. See https://developers.lco.global/#pagination.
     """
-    params = {**filters, "pagination_style": "cursor", "limit": "1000"}
+    aliases = {"OBJECT": "target_name", "OBSTYPE": "configuration_type", "SITEID": "site_id",
+               "TELID": "telescope_id", "INSTRUME": "instrument_id", "FILTER": "primary_optical_element"}
+    params = {aliases.get(k, k): v for k, v in filters.items()}
+    params.update(pagination_style="cursor", limit="1000")
     params.pop("offset", None)
     url = "https://archive-api.lco.global/frames/?" + _query_params(params)
     seen = set()
