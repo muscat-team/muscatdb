@@ -264,7 +264,7 @@
         <h3 style="margin:0;">Magnitudes per band <span class="help-icon multiline" data-help="Broadband filter magnitudes (gp, rp, ip, zs). Narrowband filters (g_narrow, i_narrow, z_narrow, Na_D) use these same magnitudes with filter-width-dependent peak count adjustments in the calculation.">?</span></h3>
         <button class="copy-btn" type="button" id="clear-mags">Clear</button>
       </div>
-      <p class="hint" style="margin-bottom:0.6rem;">g/r/i/z from Pan-STARRS / SkyMapper (auto-filled) or manual entry</p>
+      <p class="hint" style="margin-bottom:0.6rem;">g/r/i/z from Pan-STARRS / SkyMapper / TIC (auto-filled) or manual entry</p>
       <div class="mag-grid" id="mag-broad"></div>
     </div>
 
@@ -588,12 +588,15 @@
         body: JSON.stringify({ target: target })
       }).then(function (r) { return r.json(); }).then(function (data) {
         if (data.ok) {
-          var parts = BROAD.map(function (b) { return b[0] + '=' + (data.mags[b] !== undefined ? data.mags[b] : '—'); });
+          var parts = BROAD.map(function (b) { return b[0] + '=' + (data.mags[b] !== undefined ? Number(data.mags[b].toFixed(6)) : '—'); });
           lookupStatus.className = 'msg ok';
-          lookupStatus.innerHTML = '✓ ' + parts.join('  ') +
-            (data.source ? '  ·  <span style="color:var(--text-dim)">' + data.source + '</span>' : '');
+          lookupStatus.textContent = '✓ ' + (data.is_approx ? 'Approximate · ' : '') + parts.join('  ') +
+            (data.source ? '  ·  ' + data.source : '');
           magInputs.forEach(function (inp) {
-            if (data.mags[inp.dataset.band] !== undefined) { inp.value = data.mags[inp.dataset.band]; markFilled(inp); }
+            var mag = data.mags[inp.dataset.band];
+            inp.value = mag !== undefined ? Number(mag.toFixed(6)) : '';
+            inp.classList.remove('filled');
+            if (mag !== undefined) markFilled(inp);
           });
           saveState();
         } else {
@@ -629,7 +632,7 @@
       var magsTxt = c.mags
         ? BROAD.filter(function (b) { return c.mags[b] !== undefined; })
             .map(function (b) { return b + '=' + Number(c.mags[b]).toFixed(2); }).join('  ')
-        : 'No griz photometry available for this star (no Pan-STARRS/SkyMapper match; Gaia color-transform fallback is under development).';
+        : 'No griz photometry available for this star (no Pan-STARRS/SkyMapper match or usable Gaia DR3 color).';
       return '<div class="comp-card">' +
         '<div class="comp-card-head">' +
           '<strong>' + c.label + '</strong>' +

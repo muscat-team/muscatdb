@@ -22,6 +22,7 @@ import os
 import re
 import threading
 import uuid
+from functools import lru_cache
 from collections.abc import Callable
 from contextvars import ContextVar
 
@@ -509,7 +510,7 @@ def _clean_mag(val) -> float | None:
         fval = float(val)
     except (TypeError, ValueError):
         return None
-    if math.isnan(fval) or fval <= 0:
+    if not math.isfinite(fval) or fval <= 0:
         return None
     return fval
 
@@ -641,40 +642,155 @@ def lookup_magnitudes(
     return _result(None, None)
 
 
+@lru_cache(maxsize=256)
+def _fetch_tic_cached(tic: str, cache_epoch: int) -> dict | None:
+    """Exact-ID MAST lookup, bounded to one request with a 20-second timeout.
+
+    The caller supplies an hourly cache epoch; failures are cached as well.
+    Never use MAST name resolution, which could itself depend on CDS.
+    """
+    from muscat_db import http_client
+
+    request = {
+        "service": "Mast.Catalogs.Filtered.Tic", "format": "json",
+        "params": {
+            "columns": "ID,gmag,rmag,imag,zmag,GAIAmag,gaiabp,gaiarp",
+            "filters": [{"paramName": "ID", "values": [tic]}],
+        },
+    }
+    try:
+        with _CATALOG_CALL_SLOTS:
+            response = http_client.get_sync_client().post(
+                "https://mast.stsci.edu/api/v0/invoke",
+                data={"request": json.dumps(request)}, timeout=20,
+            )
+            response.raise_for_status()
+            data = response.json()
+        if data.get("status") != "COMPLETE":
+            return None
+        for row in data.get("data", []):
+            if str(row.get("ID")) == tic:
+                return row
+    except Exception as exc:
+        logger.warning("TIC lookup failed for %s: %s", tic, exc)
+    return None
+
+
+@lru_cache(maxsize=256)
+def _fetch_gaia_dr3_cached(ra: float, dec: float, cache_epoch: int) -> dict | None:
+    """One small MAST cone, accepting only an unambiguous match within 1 arcsec.
+
+    Fail closed for crowded fields and large epoch/proper-motion offsets.
+    A cone result is not assumed to share the TIC's Gaia DR2 source ID.
+    """
+    from muscat_db import http_client
+
+    request = {
+        "service": "Mast.Catalogs.GaiaDR3.Cone", "format": "json",
+        "params": {"ra": ra, "dec": dec, "radius": 1 / 3600},
+    }
+    try:
+        with _CATALOG_CALL_SLOTS:
+            response = http_client.get_sync_client().post(
+                "https://mast.stsci.edu/api/v0/invoke",
+                data={"request": json.dumps(request)}, timeout=20,
+            )
+            response.raise_for_status()
+            data = response.json()
+        if data.get("status") != "COMPLETE" or len(data.get("data", [])) != 1:
+            return None
+        row = data["data"][0]
+        separation = SkyCoord(ra, dec, unit="deg").separation(
+            SkyCoord(float(row["ra"]), float(row["dec"]), unit="deg")
+        ).arcsec
+        if math.isfinite(separation) and separation <= 1:
+            return row
+    except Exception as exc:
+        logger.warning("Gaia DR3 lookup failed: %s", exc)
+    return None
+
+
+def lookup_target_magnitudes(target: str):
+    """Resolve and look up a target, with an independent ExoFOP/MAST fallback.
+
+    Returns (coordinates, magnitudes, source, is_approx). Existing catalog
+    photometry wins. If Sesame is down, go straight to TIC after ExoFOP
+    resolution rather than waiting for VizieR on the same failed CDS service.
+    """
+    from muscat_db import exofop
+
+    coords = resolve_target_coords(target)
+    if coords:
+        try:
+            mags, source = lookup_magnitudes(*coords, return_source=True)
+        except Exception as exc:
+            logger.warning("Catalog lookup failed for %s: %s", target, exc)
+            mags = None
+        if mags:
+            return coords, mags, source, False
+    data = exofop.fetch_target_by_name(target)
+    if data is None:
+        return coords, None, None, False
+    if coords is None:
+        position = data.get("coordinates") or {}
+        try:
+            ra, dec = float(position["ra"]), float(position["dec"])
+            if not (math.isfinite(ra) and math.isfinite(dec) and 0 <= ra < 360 and -90 <= dec <= 90):
+                raise ValueError("Invalid ExoFOP coordinates")
+            coords = (ra, dec)
+        except (KeyError, TypeError, ValueError):
+            return None, None, None, False
+    tic = exofop.normalize_tic_input(data["basic_info"]["tic_id"])
+    row = _fetch_tic_cached(tic, int(time.time() // 3600))
+    if row is None:
+        return coords, None, None, False
+    mags = {band: mag for column, band in PS1_TO_BAND.items()
+            if (mag := _clean_mag(row.get(column))) is not None}
+    if mags:
+        return coords, mags, f"TIC {tic} (MAST)", False
+    # TIC v8 uses Gaia DR2: obtain DR3 rather than silently mixing releases.
+    gaia = _fetch_gaia_dr3_cached(*coords, int(time.time() // 3600))
+    if gaia:
+        g = _clean_mag(gaia.get("phot_g_mean_mag"))
+        bp = _clean_mag(gaia.get("phot_bp_mean_mag"))
+        rp = _clean_mag(gaia.get("phot_rp_mean_mag"))
+        if g is not None and bp is not None and rp is not None:
+            mags = gaia_to_griz_transform(g, bp - rp)
+            if mags:
+                return coords, mags, f"TIC {tic}; Gaia DR3 to SDSS (approx)", True
+    return coords, None, None, False
+
+
 # ---------------------------------------------------------------------------
 # Gaia (G, BP-RP) -> griz fallback, for comparison stars with no PS1/SkyMapper match
 # ---------------------------------------------------------------------------
 
-# TODO(gaia-griz-transform, under development -- do not fill in from memory):
-# pending independently verified coefficients for a published Gaia G/BP-RP ->
-# SDSS-like griz color transform (e.g. Evans et al. 2018 Table 5, or the Gaia
-# EDR3/DR3 "photometric relationships with other photometric systems"
-# documentation). Two attempts to source this have both failed verification:
-# (1) an automated fetch of the ESA documentation table produced internally
-# inconsistent numbers across two retrievals (different polynomial degree for
-# the same relationship); (2) a coefficient table supplied for this feature
-# (data/gaia_ps1_color_transform.md) cites arXiv:2601.05486 as support, but
-# that paper is on an unrelated topic (an all-sky photometric standard-star
-# database), indicating the table's numbers cannot be trusted either. Until a
-# properly-cited copy of the real source table is verified, this always
-# returns None, and lookup_magnitudes_with_fallback degrades to reporting "no
-# photometry available" for stars with no direct catalog match rather than
-# silently approximating a saturation-relevant magnitude with unverified
-# numbers.
+# ESA Gaia DR3 documentation, section 5.5.1, Tables 5.8 and 5.10:
+# https://gea.esac.esa.int/archive/documentation/GDR3/Data_processing/chap_cu5pho/cu5pho_sec_photSystem/cu5pho_ssec_photRelations.html
+# Coefficients are ascending powers of BP-RP for G - SDSS_band, NOT band - G.
+# The common range is 0.5 < BP-RP < 2.0 (i is the limiting band); this also
+# excludes the g/r red-color region restricted to M giants. See docs/exposure.md.
+_GAIA_DR3_SDSS_COEFFS = {
+    "gp": (0.2199, -0.6365, -0.1548, 0.0064),
+    "rp": (-0.09837, 0.08592, 0.1907, -0.1701, 0.02263),
+    "ip": (-0.293, 0.6404, -0.09609, -0.002104),
+    "zs": (-0.4619, 0.8992, -0.08271, 0.005029),
+}
+
+
 def gaia_to_griz_transform(gmag: float, bp_rp: float | None) -> dict[str, float] | None:
-    """Approximate gp/rp/ip/zs from Gaia (G, BP-RP) via a published color transform.
+    """Approximate all four SDSS-like bands from Gaia DR3 G and BP-RP.
 
-    NOT YET IMPLEMENTED -- always returns ``None``; see the TODO above.
-
-    Used only as a fallback when Pan-STARRS DR1 / SkyMapper DR2 have no match
-    for a star (see :func:`lookup_magnitudes_with_fallback`). Once
-    implemented, must return ``None`` if the transform isn't available
-    (missing color, or out of the fit's valid range) so the caller can report
-    "no photometry" rather than a bad estimate.
+    Use only release-matched Gaia DR3/EDR3 photometry, not TIC's DR2 values.
+    Reject missing/nonfinite inputs and colors outside the common published
+    validity interval. These are exposure-planning estimates, not calibration
+    measurements or guaranteed saturation limits.
     """
-    if bp_rp is None or not math.isfinite(bp_rp):
+    if (bp_rp is None or not math.isfinite(bp_rp) or not math.isfinite(gmag)
+            or not 0.5 < bp_rp < 2.0):
         return None
-    return None
+    return {band: gmag - sum(c * bp_rp ** power for power, c in enumerate(coeffs))
+            for band, coeffs in _GAIA_DR3_SDSS_COEFFS.items()}
 
 
 def lookup_magnitudes_with_fallback(
@@ -712,8 +828,7 @@ def lookup_magnitudes_with_fallback(
             return transformed, source, True
 
     logger.info(
-        "Griz for (%.4f, %.4f): no catalog match; Gaia color-transform fallback is "
-        "under development (gaia_to_griz_transform) and not yet available",
+        "Griz for (%.4f, %.4f): no catalog match or usable Gaia DR3 color",
         ra, dec,
     )
     return None, None, False

@@ -164,3 +164,19 @@ def test_comparison_handoff_is_consumed_persisted_and_cleared(page, monkeypatch)
     expect(page.locator('#comps-section')).not_to_be_visible()
     page.reload()
     expect(page.locator('#comps-section')).not_to_be_visible()
+
+
+def test_approximate_lookup_clears_missing_bands_and_persists(page):
+    page.route('**/api/exposure/lookup-mags', lambda r: r.fulfill(json={
+        'ok': True, 'mags': {'gp': 10.123456789, 'rp': 9.7, 'ip': 9.4},
+        'source': 'TIC Gaia color transform', 'is_approx': True,
+    }))
+    page.goto(URL)
+    _fill_mags(page)
+    page.click('#lookup-btn')
+    expect(page.locator('#lookup-status')).to_contain_text('Approximate')
+    assert page.input_value('.mag-input[data-band="gp"]') == '10.123457'
+    assert page.input_value('.mag-input[data-band="zs"]') == ''
+    page.reload()
+    assert page.input_value('.mag-input[data-band="zs"]') == ''
+    assert page.input_value('.mag-input[data-band="gp"]') == '10.123457'
