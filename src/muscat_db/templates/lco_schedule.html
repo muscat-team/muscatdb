@@ -173,7 +173,7 @@
     </label>
     <label class="lco-field" style="flex-direction: row; align-items: center; gap: 0.4rem;">
       <span style="font-size: 0.72rem; color: var(--text-dim); text-transform: uppercase;">Default plan
-        <span class="help-tooltip" title="How each transit's plan (the dropdown in its Transit obs cell) starts out; changing a row's plan by hand keeps it. Sites LCO currently lists as unschedulable are avoided when another plan exists.&#10;• Best site, relay if none is full: one site covering the whole transit, else a two-site relay, else the best partial site.&#10;• Best single site: always one site (full, else the most coverage).&#10;• Either site when possible: one unpinned request; repeat_duration fits the listed site seeing the least. Coverage is not guaranteed: LCO may run the block at any site with this instrument that can see the target (not only the listed ones) and anywhere inside the window, so it may miss ingress, egress, or both.">?</span></span>
+        <span class="help-tooltip" title="How each transit's plan (the dropdown in its Transit obs cell) starts out; changing a row's plan by hand keeps it. Plans are ranked by full transit coverage, covered minutes, gap, then lower mean in-transit airmass (X). Relay means weight both legs by observed transit time, including both during overlap; baseline padding is excluded. Either-site labels show the range of candidate-site means, not guaranteed conditions. Sites LCO currently lists as unschedulable are avoided when another plan exists.&#10;• Best site, relay if none is full: one site covering the whole transit, else a two-site relay, else the best partial site.&#10;• Best single site: always one site (full, else the most coverage).&#10;• Either site when possible: one unpinned request; repeat_duration fits the listed site seeing the least. Coverage is not guaranteed: LCO may run the block at any site with this instrument that can see the target (not only the listed ones) and anywhere inside the window, so it may miss ingress, egress, or both.">?</span></span>
       <select id="sch-plan-policy" class="lco-control">
         <option value="relay">Best site, relay if none is full</option>
         <option value="single">Best single site</option>
@@ -1860,6 +1860,12 @@
     } else {
       label = 'Relay ' + p.sites.map(function (s) { return s.toUpperCase(); }).join(' → ') +
         (p.gap_min ? ' (' + p.gap_min + ' min gap)' : ' (' + p.overlap_min + ' min overlap)');
+    }
+    if (Number.isFinite(p.mean_airmass)) label += ' · mean X ' + p.mean_airmass.toFixed(2);
+    if (p.type === 'either' && p.site_mean_airmass) {
+      var means = p.sites.map(function (s) { return p.site_mean_airmass[s]; }).filter(Number.isFinite);
+      if (means.length) label += ' · site mean X ' + Math.min.apply(null, means).toFixed(2) +
+        '–' + Math.max.apply(null, means).toFixed(2);
     }
     if (!planSchedulable(p)) label += ' · offline';
     return label;

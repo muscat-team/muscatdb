@@ -275,3 +275,34 @@ def test_a_link_to_another_target_drops_the_stored_targets_ephemeris(page):
     expect(page.locator("#windows-body tr")).to_have_count(0)
     # settings that are not about the target still carry over
     assert page.input_value("#sch-pad-before") == "17"
+
+
+def test_airmass_ranked_plans_can_be_selected_and_restored(page):
+    page.problems.allowed.extend(NO_TOKEN)
+    page.goto("/lco/schedule")
+    page.select_option("#sch-source", "upload")
+    page.select_option("#sch-kind", "qhy600")
+    page.fill("#sch-coords", "330, 5")
+    page.fill("#sch-range-start", "2026-11-04")
+    page.fill("#sch-range-end", "2026-11-05")
+    page.fill("#sch-duration", "2")
+    page.fill("#sch-pad-before", "0")
+    page.fill("#sch-pad-after", "0")
+    page.fill("#sch-moon-sep", "0")
+    page.fill("#sch-midtimes", "2026-11-04T02:00:00Z")
+    with page.expect_response("**/api/lco/windows", timeout=60_000):
+        page.click("#btn-gen-windows")
+    select = page.locator(".plan-select")
+    expect(select).to_have_count(1)
+    expect(select).to_have_value("site:elp")
+    expect(select.locator('option[value="site:elp"]')).to_contain_text("mean X 1.12")
+    expect(select.locator('option[value="site:lsc"]')).to_contain_text("mean X 1.50")
+    relay_ids = select.locator('option[value^="relay:"]').evaluate_all("opts => opts.map(o => o.value)")
+    assert "relay:lsc>elp" in relay_ids and "relay:elp>lsc" in relay_ids
+    page.locator("#windows-body input[type=checkbox]").check()
+    for relay_id in relay_ids:
+        select.select_option(relay_id)
+        expect(page.locator("#requests-body tr")).to_have_count(2)
+        expect(select).to_have_value(relay_id)
+    page.reload()
+    expect(page.locator(".plan-select")).to_have_value(relay_ids[-1])
