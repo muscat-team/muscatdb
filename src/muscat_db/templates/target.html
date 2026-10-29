@@ -241,6 +241,8 @@
     </div>
   </details>
 
+  {% include "_target_lco_archive.html" %}
+
   <details class="adv" id="exofop-obslog-details" style="margin-top: 1rem;">
     <summary><span id="exofop-obslog-summary">ExoFOP obslog</span>
       <a id="exofop-obslog-link" href="#" target="_blank" rel="noopener noreferrer" style="display: none; font-size: 0.8rem; font-weight: normal; margin-left: 0.5rem;">Open on ExoFOP</a></summary>
@@ -258,7 +260,7 @@
       <div class="csv-wrap" id="exofop-obslog-wrap" style="display: none;">
         <table id="exofop-obslog-table">
           <thead>
-            <tr><th>Telescope</th><th>Camera</th><th>Filter</th><th>Date (UT)</th><th>Frames</th><th>Status</th><th>Download</th></tr>
+            <tr><th>Planet</th><th>Telescope</th><th>Camera</th><th>Filter</th><th>Date (UT)</th><th>Frames</th><th>Status</th><th>Download</th></tr>
           </thead>
           <tbody id="exofop-obslog-tbody"></tbody>
         </table>
@@ -392,15 +394,18 @@
           statusEl.textContent = 'No ExoFOP time-series entries reported for this target.';
           return;
         }
-        let missing = 0;
+        let present = 0, missing = 0, unchecked = 0;
         rows.forEach(function (r) {
           const exists = !!r.exists;
-          if (!exists && r.exists_checked) missing++;
+          if (!r.exists_checked) unchecked++;
+          else if (exists) present++;
+          else missing++;
           const statusHtml = r.exists_checked
             ? (exists
                 ? '<span class="badge badge-green">In muscat-db' + (r.dataset_local_frames ? ' (' + r.dataset_local_frames + ' fr)' : '') + '</span>'
                 : '<span class="badge badge-amber">Not in database</span>')
-            : '<span class="badge badge-filter-other">N/A</span>';
+            : '<span class="badge badge-filter-other" title="' +
+              esc(r.exists_unchecked_reason || 'Database presence was not checked.') + '">N/A</span>';
           // LCO telescopes only: other facilities are not in the LCO archive.
           const actionHtml = (!exists && r.tsdate && r.lco)
             ? '<button type="button" class="btn sm exofop-dl-btn" data-date="' + esc(r.tsdate) +
@@ -411,7 +416,10 @@
             lco: !!r.lco, instrument: String(r.instrument || '').toLowerCase(),
             dates: obsLabels(r.tsdate), exists: exists, actionHtml: actionHtml, jobId: ''
           };
+          // tstoi ("TOI 1130.01") names the planet; tsplname ("TIC 254113311.01")
+          // is the only label for a target that is not a TOI.
           tr.innerHTML =
+            '<td class="mono">' + esc(r.tstoi || r.tsplname || '') + '</td>' +
             '<td>' + esc(r.tstel || '') + '</td>' +
             '<td>' + esc(r.tscam || '') + '</td>' +
             '<td>' + esc(r.tsfilt || '') + '</td>' +
@@ -422,7 +430,8 @@
           tbody.appendChild(tr);
         });
         wrap.style.display = '';
-        statusEl.textContent = (rows.length - missing) + '/' + rows.length + ' reported in muscat-db, ' + missing + ' missing.';
+        statusEl.textContent = present + '/' + rows.length + ' reported in muscat-db, ' +
+          missing + ' missing, ' + unchecked + ' unchecked.';
         schedule(0);
       }
 

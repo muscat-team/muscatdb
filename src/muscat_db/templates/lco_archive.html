@@ -52,7 +52,8 @@
       <select id="dl-rlevel"><option value="">any</option><option value="91" selected>91 (reduced)</option><option value="0">0 (raw)</option></select></div>
     <div class="lco-field"><label for="dl-start">Start (UTC)</label><input id="dl-start" type="date" min="2014-01-01"></div>
     <div class="lco-field"><label for="dl-end">End (UTC)</label><input id="dl-end" type="date" min="2014-01-01"></div>
-    <div class="lco-field"><label for="dl-limit">Limit <span class="help-tooltip" title="Total frames to fetch across the whole search, not a single archive page (the archive itself caps each page at 1000; a higher limit here paginates through more pages to reach it).">?</span></label><input id="dl-limit" type="number" min="1" max="10000" value="50"></div>
+    <div class="lco-field"><label for="dl-search-mode">Search scope</label><select id="dl-search-mode"><option value="all">All matching frames</option><option value="preview">Quick preview</option></select></div>
+    <div class="lco-field"><label for="dl-limit">Preview limit</label><input id="dl-limit" type="number" min="1" max="10000" value="5000" disabled></div>
   </div>
   <div class="lco-actions">
     <button class="btn primary" type="button" id="btn-search">Search frames</button>
@@ -73,6 +74,13 @@
     <span class="lco-msg" id="msg-download" style="margin: 0;"></span>
     <a id="link-to-jobs" href="/jobs" class="btn" style="display: none; margin-left: 0.4rem; font-size: 0.82rem;">To Jobs</a>
   </div>
+  <div id="frames-pager" class="lco-actions" style="display: none;">
+    <button type="button" class="btn" id="frames-prev">Previous frames</button>
+    <span id="frames-page-status"></span>
+    <button type="button" class="btn" id="frames-next">Next frames</button>
+    <span class="hint">Selections are kept across pages. Group checkboxes select displayed frames.</span>
+  </div>
+  <p id="frames-storage-note" class="hint" hidden>Large results are kept only for this visit. Search settings persist; search again after returning to this page.</p>
   <div id="frames-groups" style="display: none;"></div>
 </details>
 {% endblock %}
@@ -102,7 +110,7 @@
 
   var TEXT_IDS = [
     'dl-proposal','dl-object','dl-site','dl-tel','dl-instrume',
-    'dl-filter','dl-rlevel','dl-start','dl-end','dl-limit',
+    'dl-filter','dl-rlevel','dl-start','dl-end','dl-limit','dl-search-mode',
     'dl-request-id','dl-req-rlevel'
   ];
   var CHECK_IDS = ['dl-overwrite', 'dl-fuzzy-name'];
@@ -113,6 +121,10 @@
     '2m0': ['ogg', 'coj']
   };
   var lastFrames = [];
+  var selectedKeys = new Set(), framePage = 0, PAGE_SIZE = 200;
+  function frameKey(f, i) { return f.filename || f.basename || ('idx:' + i); }
+  function applySearchMode() { el('dl-limit').disabled = val('dl-search-mode') !== 'preview'; }
+  el('dl-search-mode').addEventListener('change', applySearchMode);
   var downloadRoot = '';
   // One poll timer per message line: a request download and a selected-row
   // download can run at the same time, each reporting to its own line.
@@ -296,22 +308,17 @@
     });
   }
 
-  function selectedFrameKeys() {
-    var out = [];
-    document.querySelectorAll('#frames-groups tbody input[type=checkbox]:checked').forEach(function (c) {
-      var f = lastFrames[+c.dataset.i];
-      if (f) out.push(f.filename || f.basename || ('idx:' + c.dataset.i));
-    });
-    return out;
-  }
+  function selectedFrameKeys() { return Array.from(selectedKeys); }
 
   function saveArchiveState() {
     try {
-      localStorage.setItem(STATE_KEY, JSON.stringify({
-        frames: lastFrames,
-        selected: selectedFrameKeys()
-      }));
-    } catch (e) {}
+      if (lastFrames.length > PAGE_SIZE) {
+        localStorage.setItem(STATE_KEY, JSON.stringify({large: true}));
+      } else {
+        const state = JSON.stringify({frames: lastFrames, selected: selectedFrameKeys()});
+        localStorage.setItem(STATE_KEY, state.length <= 500000 ? state : JSON.stringify({large: true}));
+      }
+    } catch (e) { try { localStorage.removeItem(STATE_KEY); } catch (_) {} }
   }
 
   function frameRowHtml(f, i, selectedSet) {
@@ -337,16 +344,23 @@
   function renderFrameGroups(selected) {
     var host = el('frames-groups');
     host.innerHTML = '';
+    el('frames-pager').style.display = lastFrames.length <= PAGE_SIZE ? 'none' : '';
+    el('frames-storage-note').hidden = lastFrames.length <= PAGE_SIZE;
+    el('frames-prev').disabled = framePage === 0;
+    el('frames-next').disabled = (framePage + 1) * PAGE_SIZE >= lastFrames.length;
+    el('frames-page-status').textContent = 'Frames ' + (framePage * PAGE_SIZE + 1) + '–' + Math.min((framePage + 1) * PAGE_SIZE, lastFrames.length) + ' of ' + lastFrames.length;
     if (!lastFrames.length) {
       host.style.display = 'none';
       updateDownloadButton();
       return;
     }
+    if (selected) selectedKeys = new Set(selected);
     var selectedSet = {};
-    (selected || []).forEach(function (key) { selectedSet[key] = true; });
+    selectedFrameKeys().forEach(function (key) { selectedSet[key] = true; });
     var groups = [];
     var byId = {};
-    lastFrames.forEach(function (f, i) {
+    lastFrames.slice(framePage * PAGE_SIZE, (framePage + 1) * PAGE_SIZE).forEach(function (f, offset) {
+      var i = framePage * PAGE_SIZE + offset;
       var id = f.dataset_id || ('ungrouped:' + i);
       if (!byId[id]) {
         byId[id] = { id: id, rows: [], first: f };
@@ -411,8 +425,10 @@
     var saved;
     try { saved = JSON.parse(localStorage.getItem(STATE_KEY) || 'null'); } catch (e) { saved = null; }
     if (!saved) return;
+    if (saved.large) { el('frames-storage-note').hidden = false; return; }
     lastFrames = Array.isArray(saved.frames) ? saved.frames : [];
     renderFrameGroups(saved.selected || []);
+    saveArchiveState();
   }
 
   el('frames-groups').addEventListener('change', function (e) {
@@ -420,26 +436,43 @@
     if (box) {
       var details = box.closest('details');
       if (!details) return;
-      details.querySelectorAll('tbody input[type=checkbox]').forEach(function (c) { c.checked = box.checked; });
+      details.querySelectorAll('tbody input[type=checkbox]').forEach(function (c) {
+        c.checked = box.checked;
+        var key = frameKey(lastFrames[+c.dataset.i], +c.dataset.i);
+        if (c.checked) selectedKeys.add(key); else selectedKeys.delete(key);
+      });
       saveArchiveState();
       return;
     }
-    if (e.target && e.target.matches('tbody input[type=checkbox]')) saveArchiveState();
+    if (e.target && e.target.matches('tbody input[type=checkbox]')) {
+      var key = frameKey(lastFrames[+e.target.dataset.i], +e.target.dataset.i);
+      if (e.target.checked) selectedKeys.add(key); else selectedKeys.delete(key);
+      saveArchiveState();
+    }
   });
+
+  el('frames-prev').addEventListener('click', function () { framePage--; renderFrameGroups(); });
+  el('frames-next').addEventListener('click', function () { framePage++; renderFrameGroups(); });
 
   el('btn-search').addEventListener('click', function () {
     msg('msg-search', 'Searching…');
+    el('btn-search').disabled = true; el('btn-fetch-request').disabled = true;
+    lastFrames = []; selectedKeys.clear(); framePage = 0; renderFrameGroups(); saveArchiveState();
     var q = new URLSearchParams();
     var map = {
       proposal_id: 'dl-proposal', OBJECT: 'dl-object', SITEID: 'dl-site', TELID: 'dl-tel',
       INSTRUME: 'dl-instrume', FILTER: 'dl-filter', reduction_level: 'dl-rlevel',
-      start: 'dl-start', end: 'dl-end', limit: 'dl-limit'
+      start: 'dl-start', end: 'dl-end'
     };
     Object.keys(map).forEach(function (k) { var v = val(map[k]); if (v) q.set(k, v); });
+    q.set('limit', val('dl-search-mode') === 'preview' ? val('dl-limit') : 'all');
+    q.set('stream', 'true');
     if (chk('dl-fuzzy-name')) q.set('fuzzy_name', '1');
-    fetch('/api/lco/archive/frames?' + q.toString()).then(function (r) { return r.json(); }).then(function (d) {
+    fetch('/api/lco/archive/frames?' + q.toString()).then(function (r) {
+      return MuscatFetch.readProgress(r, function (text) { msg('msg-search', text); });
+    }).then(function (d) {
       if (!d.ok) { msg('msg-search', (d.error || 'failed') + (d.detail ? ' — ' + d.detail : ''), 'err'); return; }
-      lastFrames = d.results || [];
+      lastFrames = d.results || []; selectedKeys.clear(); framePage = 0;
       renderFrameGroups();
       saveArchiveState();
       var shown = lastFrames.length;
@@ -461,8 +494,11 @@
       } else if (d.match_mode === 'name') {
         modeMsg = ' — fuzzy name match';
       }
-      msg('msg-search', head + datasetMsg + modeMsg, 'ok');
-    }).catch(function (e) { msg('msg-search', String(e), 'err'); });
+      var previewMsg = d.truncated ? ' — incomplete results; narrow the target, proposal or dates, or increase an explicit preview limit' : '';
+      msg('msg-search', head + datasetMsg + modeMsg + previewMsg, d.truncated ? 'err' : 'ok');
+    }).catch(function (e) { msg('msg-search', String(e), 'err'); }).finally(function () {
+      el('btn-search').disabled = false; el('btn-fetch-request').disabled = false;
+    });
   });
 
   el('btn-fetch-request').addEventListener('click', function () {
@@ -470,13 +506,15 @@
     if (!reqId) { msg('msg-request', 'Enter a request ID', 'err'); return; }
     if (!/^[0-9]+$/.test(reqId)) { msg('msg-request', 'Request ID must be numeric', 'err'); return; }
     msg('msg-request', 'Fetching request ' + reqId + '…');
+    el('btn-search').disabled = true; el('btn-fetch-request').disabled = true;
+    lastFrames = []; selectedKeys.clear(); framePage = 0; renderFrameGroups(); saveArchiveState();
     var q = new URLSearchParams();
     q.set('request_id', reqId);
     var rlevel = val('dl-req-rlevel');
     if (rlevel) q.set('reduction_level', rlevel);
     fetch('/api/lco/archive/frames?' + q.toString()).then(function (r) { return r.json(); }).then(function (d) {
       if (!d.ok) { msg('msg-request', (d.error || 'failed') + (d.detail ? ' — ' + d.detail : ''), 'err'); return; }
-      lastFrames = d.results || [];
+      lastFrames = d.results || []; selectedKeys.clear(); framePage = 0;
       renderFrameGroups();
       saveArchiveState();
       if (!lastFrames.length) { msg('msg-request', 'No frames found for request ' + reqId, 'err'); return; }
@@ -488,7 +526,9 @@
         ? ('Showing ' + shown + ' of ' + total + ' frame' + (shown === 1 ? '' : 's'))
         : ('Showing ' + shown + ' frame' + (shown === 1 ? '' : 's'));
       msg('msg-request', head + datasetMsg + truncMsg, d.truncated ? 'err' : 'ok');
-    }).catch(function (e) { msg('msg-request', String(e), 'err'); });
+    }).catch(function (e) { msg('msg-request', String(e), 'err'); }).finally(function () {
+      el('btn-search').disabled = false; el('btn-fetch-request').disabled = false;
+    });
   });
 
   // The LCO archive API returns verbose frame objects (version_set, area
@@ -509,11 +549,7 @@
   }
 
   el('btn-download').addEventListener('click', function () {
-    var picked = [];
-    document.querySelectorAll('#frames-groups tbody input[type=checkbox]:checked').forEach(function (c) {
-      var f = lastFrames[+c.dataset.i];
-      if (f) picked.push(f);
-    });
+    var picked = lastFrames.filter(function (f, i) { return selectedKeys.has(frameKey(f, i)); });
     if (!picked.length) {
       msg('msg-download', 'Select frames first', 'err'); return;
     }
@@ -615,6 +651,7 @@
   restoreFoldState();
   bindFoldState();
   restoreOptions();
+  applySearchMode();
   applyDateBounds();
   applyDownloadSiteOptions();
   restoreArchiveState();

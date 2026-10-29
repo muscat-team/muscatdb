@@ -314,16 +314,20 @@ def _site_from_tel(tstel: str) -> str:
     # "LCO-HAL-2m0"); whole-token only, so it cannot match inside another word.
     if re.search(r"(?<![A-Z])HAL(?![A-Z])", upper):
         return "ogg"
-    # Fall back to an LCO-style site code embedded in the string (e.g. "1m0a").
-    m = re.search(r"\b(cpt|lsc|ogg|coj|elp|tfn|tlv)\b", upper)
-    return m.group(1) if m else ""
+    # SSO is ExoFOP's abbreviation for Siding Spring (LCO site COJ).
+    # Match a whole token so unrelated observatory names do not become LCO.
+    if re.search(r"(?<![A-Z])SSO(?![A-Z])", upper):
+        return "coj"
+    # Match the uppercase input, then return canonical lowercase site codes.
+    m = re.search(r"\b(CPT|LSC|OGG|COJ|ELP|TFN|TLV)\b", upper)
+    return m.group(1).lower() if m else ""
 
 
 def is_lco_telescope(tstel: str) -> bool:
     """True when an ExoFOP ``tstel`` string names an LCO telescope."""
-    return bool(_site_from_tel(tstel)) or bool(
-        re.search(r"\bLCO", (tstel or "").upper())
-    )
+    # Other facilities share LCO observatory locations (e.g. iTelescope at
+    # Siding Spring); a site name alone does not identify an LCO telescope.
+    return bool(re.search(r"\bLCO(?:GT)?\b", (tstel or "").upper()))
 
 
 def _tel_class(tstel: str) -> str:
@@ -526,12 +530,17 @@ def check_time_series_exists(
     if not inst or not site:
         result["exists"] = False
         result["exists_checked"] = False
+        result["exists_unchecked_reason"] = (
+            "Instrument could not be identified." if not inst
+            else "Observatory site could not be identified."
+        )
         return result
 
     coords = _target_coords(target) if target else None
     if coords is None:
         result["exists"] = False
         result["exists_checked"] = False
+        result["exists_unchecked_reason"] = "Target coordinates could not be resolved."
         return result
     ra_deg, dec_deg = coords
 

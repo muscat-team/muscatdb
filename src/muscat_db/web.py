@@ -111,7 +111,7 @@ from muscat_db import ttv_fit as ttv
 from muscat_db import ttv_selection
 from muscat_db import lco
 from muscat_db.lco import _annotate_lco_archive_results
-from muscat_db import exofop
+from muscat_db import exofop, target_archive
 from muscat_db import transit_obs
 from muscat_db import fov as fov_opt
 from muscat_db import ephemeris_math
@@ -5916,6 +5916,22 @@ def _require_own_archive_token(request: Request) -> None:
         lco.require_own_token_for_archive(_request_user(request))
 
 
+def _visible_archive_rows(rows, denied):
+    if not denied:
+        return rows
+    visible = []
+    for row in rows:
+        try:
+            inst = lco.infer_archive_instrument(row)
+        except lco.LcoError:
+            inst = ""
+        if not _is_denied(row.get("proposal_id"), denied, instrument=inst,
+                          obsdate=target_archive._night(row).replace("-", "")[2:],
+                          obj=row.get("OBJECT") or row.get("target_name")):
+            visible.append(row)
+    return visible
+
+
 @lco_router.get("/archive/frames", response_class=JSONResponse)
 def api_lco_archive_frames(
     request: Request,
@@ -5929,7 +5945,8 @@ def api_lco_archive_frames(
     reduction_level: str = "",
     start: str = "",
     end: str = "",
-    limit: str = "50",
+    limit: str = "all",
+    stream: bool = False,
     fuzzy_name: str = "",
     request_id: str = "",
 ):
@@ -5954,8 +5971,12 @@ def api_lco_archive_frames(
         try:
             result = lco.archive_search_all(req_filters, _request_user(request))
             rows = result.get("results") or []
+            denied = _viewer_denied()
             if isinstance(rows, list):
-                annotated, dataset_count = _annotate_lco_archive_results(instrument, rows, denied=_viewer_denied())
+                rows = _visible_archive_rows(rows, denied)
+                if denied:
+                    result = {**result, "count": len(rows)}
+                annotated, dataset_count = _annotate_lco_archive_results(instrument, rows, denied=denied)
                 result = dict(result)
                 result["results"] = annotated
                 result["dataset_count"] = dataset_count
@@ -5965,16 +5986,14 @@ def api_lco_archive_frames(
 
     use_fuzzy = fuzzy_name.strip().lower() in ("1", "true", "yes", "on")
     tel_class = TELID if TELID in ("0m4", "1m0", "2m0") else ""
+    all_frames = limit.strip().lower() in ("", "all")
     try:
-        requested_limit = int(limit)
+        requested_limit = None if all_frames else int(limit)
+        if requested_limit is not None and not 1 <= requested_limit <= lco._ARCHIVE_MAX_FRAMES:
+            raise ValueError
     except (TypeError, ValueError):
-        requested_limit = 50
-    # "Limit" is the user-facing total frame count across pages, not the
-    # archive's own per-request page size (which is hard-capped at 1000
-    # regardless of what's requested -- see the request-id path above). Pass
-    # 1000 as the page size and let archive_search_all follow `next` to
-    # satisfy a larger total, bounded by the same safety cap used there.
-    max_frames = max(1, min(requested_limit, lco._ARCHIVE_MAX_FRAMES))
+        return JSONResponse({"ok": False, "error": "Limit must be all or a number from 1 to 10000."}, status_code=400)
+    max_frames = requested_limit
     filters = {
         "proposal_id": proposal_id,
         "SITEID": SITEID,
@@ -5984,7 +6003,7 @@ def api_lco_archive_frames(
         "reduction_level": reduction_level,
         "start": start,
         "end": end,
-        "limit": str(min(max_frames, 1000)),
+        "limit": str(min(max_frames or 1000, 1000)),
         # A target's coordinates/name also match auto-focus, standard-field,
         # and other engineering frames the telescope happened to take near
         # the same footprint (observed: TOI-1807 turned up "auto_focus"
@@ -6019,8 +6038,9 @@ def api_lco_archive_frames(
             )
         ra_deg, dec_deg, _source = resolved
         filters["covers"] = f"POINT({ra_deg} {dec_deg})"
-    try:
-        result = lco.archive_search_all(filters, _request_user(request), max_frames=max_frames)
+    user, denied = _request_user(request), _viewer_denied()
+
+    def finish(result):
         rows = result.get("results") or []
         if isinstance(rows, list):
             # OBSTYPE=EXPOSE (above) doesn't catch an engineering frame that
@@ -6041,8 +6061,11 @@ def api_lco_archive_frames(
             rows = [r for r in rows if str(r.get("TELID") or "").lower().startswith(tel_class)]
             result = dict(result)
             result["results"] = rows
+        if denied:
+            rows = _visible_archive_rows(rows, denied)
+            result = {**result, "results": rows, "count": len(rows)}
         if isinstance(rows, list):
-            annotated, dataset_count = _annotate_lco_archive_results(instrument, rows, denied=_viewer_denied())
+            annotated, dataset_count = _annotate_lco_archive_results(instrument, rows, denied=denied)
             result = dict(result)
             result["results"] = annotated
             result["dataset_count"] = dataset_count
@@ -6051,7 +6074,58 @@ def api_lco_archive_frames(
             payload["resolved_ra"] = round(resolved[0], 5)
             payload["resolved_dec"] = round(resolved[1], 5)
             payload["resolved_source"] = resolved[2]
-        return JSONResponse(payload)
+        return payload
+
+    if stream and all_frames:
+        def events():
+            try:
+                rows = []
+                yield json.dumps({"progress": "Searching all archive frames…"}) + "\n"
+                truncated = False
+                try:
+                    for page in lco.archive_cursor_pages(filters, user):
+                        # Keep useful metadata, excluding large archive payloads.
+                        rows.extend({k: v for k, v in row.items() if k not in
+                                     {"area", "version_set", "related_frames"}} for row in page)
+                        yield json.dumps({"progress": "Searching all archive frames…"}) + "\n"
+                except lco.ArchiveSearchLimit:
+                    truncated = True
+                yield json.dumps(finish({"count": len(rows), "results": rows, "truncated": truncated})) + "\n"
+            except lco.LcoError as e:
+                yield json.dumps(e.to_dict()) + "\n"
+        return StreamingResponse(events(), media_type="application/x-ndjson", headers={
+            "Content-Encoding": "identity", "X-Accel-Buffering": "no",
+            "Cache-Control": "no-store, no-transform",
+        })
+    try:
+        return JSONResponse(finish(lco.archive_search_all(filters, user, max_frames=max_frames)))
+    except lco.LcoError as e:
+        return _lco_error_response(e)
+
+
+@lco_router.get("/archive/target", response_class=JSONResponse)
+def api_lco_archive_target(request: Request, target: str = "", start: str = "", end: str = "",
+                           stream: bool = False):
+    try:
+        _require_own_archive_token(request)
+        user, denied = _request_user(request), _viewer_denied()
+        if stream:
+            def events():
+                try:
+                    for event in target_archive.inventory_events(
+                        target.strip(), user, denied=denied, start=start, end=end,
+                    ):
+                        yield json.dumps(event) + "\n"
+                except lco.LcoError as e:
+                    yield json.dumps(e.to_dict()) + "\n"
+            return StreamingResponse(events(), media_type="application/x-ndjson", headers={
+                # Bypass GZip buffering so page progress reaches the browser immediately.
+                "Content-Encoding": "identity", "X-Accel-Buffering": "no",
+                "Cache-Control": "no-store, no-transform",
+            })
+        return JSONResponse(target_archive.inventory(
+            target.strip(), user, denied=denied, start=start, end=end,
+        ))
     except lco.LcoError as e:
         return _lco_error_response(e)
 
