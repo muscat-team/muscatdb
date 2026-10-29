@@ -2045,7 +2045,7 @@ def whoami(request: Request):
 
 
 @app.get("/chat/users", response_class=JSONResponse)
-def chat_users(request: Request):
+def chat_users(request: Request, room: str = "chat:public"):
     """Known usernames for chat @-mention autocomplete. Requires an
     authenticated request; returns only usernames (no other user data). Not
     under /api/ so it doesn't trip the global loading-bar fetch tracker."""
@@ -2054,7 +2054,10 @@ def chat_users(request: Request):
     try:
         from muscat_db.database import get_known_chat_usernames
         from muscat_db import chat_agent
-        users = get_known_chat_usernames()
+        from muscat_db import chat
+        if room not in chat._allowed_rooms(_request_user(request)):
+            return JSONResponse({"users": [chat_agent.DISPLAY_NAME]})
+        users = chat._room_users(get_known_chat_usernames(), room)
         # Surface the codebase assistant so @bot autocompletes, even though it is
         # never a real (notifiable) chat user.
         if chat_agent.DISPLAY_NAME not in {u.lower() for u in users}:
@@ -4632,6 +4635,7 @@ def api_settings_ephem_sheet_status(request: Request):
             "ephem_cols": (cfg or {}).get("ephem_cols") or {},
             "tc_cols": (cfg or {}).get("tc_cols") or {},
             "secret_configured": bool(os.environ.get("MUSCAT_DB_SECRET")),
+            "shared_with_everyone": user == _shared_ephem_sheet_owner(),
         }
     )
 
@@ -5330,14 +5334,15 @@ def api_lco_windows(request: Request, payload: dict = Body(...)):
                 planets = _query_target_planets_toi(target)
             elif source in ("", "catalog"):
                 planets = _query_target_planets_catalog(target)
-            elif source in ("gsheet", "gsheet_tc"):
-                cfg = _user_ephem_sheet_cfg(request)
+            elif source in ("gsheet", "gsheet_tc", "shared_gsheet", "shared_gsheet_tc"):
+                _require_visible_object(_db_path(), target)
+                cfg = _user_ephem_sheet_cfg(request, shared=source.startswith("shared_"))
                 if not cfg:
                     return JSONResponse(
                         {"ok": False, "error": "no ephemeris Google Sheet configured (see Settings)"},
                         status_code=400,
                     )
-                if source == "gsheet":
+                if source in ("gsheet", "shared_gsheet"):
                     planets = _sheet_ephemeris(target, cfg)
                 else:
                     # Transit-centers tab -> linear fit; seed epoch assignment
@@ -6683,10 +6688,17 @@ def api_ephemeris_targets():
     return JSONResponse({"ok": True, "targets": targets})
 
 
-def _user_ephem_sheet_cfg(request) -> dict | None:
-    """Return the requesting user's ephemeris sheet config (tab defaults
-    applied), or None when no user / no sheet / unreadable."""
-    user = _request_user(request) if request else None
+def _shared_ephem_sheet_owner() -> str:
+    owner = (os.environ.get("MUSCAT_SHARED_EPHEM_SHEET_USER") or "jerome").strip()
+    return "" if owner.lower() == "none" else owner
+
+
+def _user_ephem_sheet_cfg(request, *, shared: bool = False) -> dict | None:
+    """Load the personal or designated shared source, with tab defaults.
+
+    Never accept an arbitrary source owner from a request.
+    """
+    user = _shared_ephem_sheet_owner() if shared else (_request_user(request) if request else None)
     if not user:
         return None
     try:
@@ -6918,7 +6930,8 @@ def api_ephemeris_target_info(target: str, request: Request):
     # Per-user Google Sheet ephemeris sources (optional). The ephemeris tab
     # feeds t0/period/duration directly; the transit-centers tab is linear-fit
     # against the best available seed ephemeris to derive t0/period.
-    sheet_cfg = _user_ephem_sheet_cfg(request)
+    sheets_visible = not _object_hidden(_db_path(), target, _viewer_denied())
+    sheet_cfg = _user_ephem_sheet_cfg(request) if sheets_visible else None
     sheet_ephem: dict = {}
     sheet_fit_ephem: dict = {}
     if sheet_cfg:
@@ -6937,6 +6950,17 @@ def api_ephemeris_target_info(target: str, request: Request):
         sheet_fit_ephem = _sheet_fit_ephemeris(target, sheet_cfg, seed_by_planet)
         seen_planets.update(sheet_ephem.keys())
         seen_planets.update(sheet_fit_ephem.keys())
+
+    shared_cfg = _user_ephem_sheet_cfg(request, shared=True) if sheets_visible else None
+    shared_ephem = _sheet_ephemeris(target, shared_cfg) if shared_cfg else {}
+    shared_seeds = {}
+    for pl in set(shared_ephem) | seen_planets:
+        seed = shared_ephem.get(pl) or ref_ephem.get(pl) or nasa_ephem.get(pl) or toi_ephem.get(pl) or {}
+        if seed.get("t0") is not None and seed.get("period"):
+            shared_seeds[pl] = seed
+    shared_fit = _sheet_fit_ephemeris(target, shared_cfg, shared_seeds) if shared_cfg else {}
+    seen_planets.update(shared_ephem)
+    seen_planets.update(shared_fit)
 
     # Ensure all seen planets are initialized in all ephemerides
     for pl in seen_planets:
@@ -6957,6 +6981,11 @@ def api_ephemeris_target_info(target: str, request: Request):
         "reference_ephemeris": ref_ephem,
         "nasa_ephemeris": nasa_ephem,
         "toi_ephemeris": toi_ephem,
+        "shared_sheet_configured": shared_cfg is not None,
+        "shared_sheet_owner": _shared_ephem_sheet_owner(),
+        "shared_sheet_is_mine": _request_user(request) == _shared_ephem_sheet_owner(),
+        "shared_sheet_ephemeris": shared_ephem,
+        "shared_sheet_fit_ephemeris": shared_fit,
         "sheet_configured": sheet_cfg is not None,
         "sheet_ephemeris": sheet_ephem,
         "sheet_fit_ephemeris": sheet_fit_ephem,

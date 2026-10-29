@@ -353,7 +353,8 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     created_at  REAL NOT NULL,
     edited_at   REAL,
     mentions    TEXT NOT NULL DEFAULT '[]',
-    visible_to  TEXT
+    visible_to  TEXT,
+    room        TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_chat_messages_created ON chat_messages(created_at);
 
@@ -516,6 +517,7 @@ _MIGRATIONS = [
     "ALTER TABLE target_overrides ADD COLUMN norm_name TEXT",
     # 2026-07-24: scope chat messages to specific users (e.g. job-finished)
     "ALTER TABLE chat_messages ADD COLUMN visible_to TEXT",
+    "ALTER TABLE chat_messages ADD COLUMN room TEXT",
     # 2026-07-25: bound download retries so one unavailable frame cannot block a
     # request from ever completing
     "ALTER TABLE lco_observation_frames ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0",
@@ -3172,6 +3174,7 @@ def _chat_row_to_dict(row: sqlite3.Row, reactions: dict[int, list[dict]]) -> dic
         "mentions": mentions if isinstance(mentions, list) else [],
         "reactions": reactions.get(row["id"], []),
         "visible_to": row["visible_to"] if "visible_to" in row.keys() else None,
+        "room": row["room"],
     }
 
 
@@ -3182,6 +3185,7 @@ def save_chat_message(
     kind: str = "user",
     created_at: float | None = None,
     visible_to: str | None = None,
+    room: str | None = None,
 ) -> dict:
     """Persist a chat message and return its stored representation (incl. id)."""
     path = db_path()
@@ -3190,9 +3194,9 @@ def save_chat_message(
     with get_conn(path, row_factory=sqlite3.Row) as conn:
         _ensure_chat_schema(conn, path)
         cur = conn.execute(
-            "INSERT INTO chat_messages(user_name, text, kind, created_at, mentions, visible_to) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (user_name, text, kind, ts, mentions_json, visible_to),
+            "INSERT INTO chat_messages(user_name, text, kind, created_at, mentions, visible_to, room) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (user_name, text, kind, ts, mentions_json, visible_to, room),
         )
         conn.commit()
         msg_id = cur.lastrowid
@@ -3207,6 +3211,7 @@ def save_chat_message(
         "mentions": sorted(set(mentions or [])),
         "reactions": [],
         "visible_to": visible_to,
+        "room": room,
     }
 
 
@@ -3217,13 +3222,15 @@ def get_recent_chat_messages(
     addressed_only: bool = False,
     since: float | None = None,
     until: float | None = None,
+    rooms: list[str] | None = None,
 ) -> list[dict]:
     """Return persisted messages from the last ``days`` (oldest first), with
     reactions attached. ``limit`` caps the payload for a very busy window.
     When ``user`` is given, messages with a ``visible_to`` restriction are
     filtered to only those addressed to that user (plus all public messages).
     ``addressed_only`` (a scoped viewer, issue #202) drops the public ones
-    too, leaving only messages addressed to ``user``. Explicit ``since`` and
+    too. ``rooms`` adds authorized group rooms; other group histories are never
+    returned implicitly. Explicit ``since`` and
     ``until`` bounds let reconnects describe exactly which window was read."""
     path = db_path()
     window_days = CHAT_BACKFILL_DAYS if days is None else days
@@ -3231,27 +3238,23 @@ def get_recent_chat_messages(
     since = until - window_days * 86400 if since is None else since
     with get_conn(path, row_factory=sqlite3.Row) as conn:
         _ensure_chat_schema(conn, path)
-        if user and addressed_only:
-            rows = conn.execute(
-                "SELECT * FROM chat_messages WHERE created_at >= ? AND created_at <= ? "
-                "AND visible_to = ? "
-                "ORDER BY created_at DESC, id DESC LIMIT ?",
-                (since, until, user, limit),
-            ).fetchall()
-        elif user:
-            rows = conn.execute(
-                "SELECT * FROM chat_messages WHERE created_at >= ? AND created_at <= ? "
-                "AND (visible_to IS NULL OR visible_to = ?) "
-                "ORDER BY created_at DESC, id DESC LIMIT ?",
-                (since, until, user, limit),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT * FROM chat_messages WHERE created_at >= ? AND created_at <= ? "
-                "AND visible_to IS NULL "
-                "ORDER BY created_at DESC, id DESC LIMIT ?",
-                (since, until, limit),
-            ).fetchall()
+        # Callers supply authorized group rooms; public history remains the
+        # default for legacy callers and is excluded for scoped viewers.
+        shared = [] if addressed_only else ["room IS NULL"]
+        params = [since, until]
+        if rooms:
+            shared.append(f"room IN ({','.join('?' for _ in rooms)})")
+            params.extend(rooms)
+        visibility = "(visible_to IS NULL AND (" + " OR ".join(shared or ["0"]) + "))"
+        if user:
+            visibility += " OR visible_to = ?"
+            params.append(user)
+        params.append(limit)
+        rows = conn.execute(
+            "SELECT * FROM chat_messages WHERE created_at >= ? AND created_at <= ? "
+            f"AND ({visibility}) ORDER BY created_at DESC, id DESC LIMIT ?",
+            params,
+        ).fetchall()
         rows = list(reversed(rows))
         reactions = _reactions_by_message(conn, [r["id"] for r in rows])
         return [_chat_row_to_dict(r, reactions) for r in rows]

@@ -105,8 +105,14 @@
         <option value="nasa">NASA catalog</option>
         <option value="toi">TOI catalog</option>
         <option value="linear">linear fit</option>
+        <option value="shared_gsheet" disabled>Shared Google Sheet — fetch ephemeris to check availability</option>
+        <option value="shared_gsheet_tc" disabled>Shared Google Sheet — transit-center fit (unavailable)</option>
+        <option value="gsheet" disabled>My Google Sheet (private) — configure in Settings</option>
+        <option value="gsheet_tc" disabled>My Google Sheet (private) — transit-center fit (unavailable)</option>
         <option value="upload">Uploaded mid-times</option>
-      </select></div>
+      </select>
+      <span class="hint" id="sheet-source-hint">Configure your personal source in <a href="/settings">Settings</a>. Shared sources require a configured team sheet.</span>
+    </div>
     <div class="lco-field"><label for="sch-coords">RA, Dec (deg) <span class="ephem-src none" id="src-coords">—</span> <span class="help-tooltip" title="Target coordinates in decimal degrees (RA, Dec). Auto-filled by Fetch ephemeris from the catalog.">?</span></label><input id="sch-coords" type="text" placeholder="e.g. 97.64, 29.67"></div>
     <div class="lco-field"><label for="sch-range-start">Range start (UTC) <span class="help-tooltip" title="Start of the scheduling search window in UTC. Only transits with mid-point inside this range are considered.">?</span></label><input id="sch-range-start" type="date"></div>
     <div class="lco-field"><label for="sch-range-end">Range end (UTC) <span class="help-tooltip" title="End of the scheduling search window in UTC.">?</span></label><input id="sch-range-end" type="date"></div>
@@ -1194,14 +1200,23 @@
       opt.textContent = 'TTV model: ' + (r.run_name || 'default');
       sel.appendChild(opt);
     });
-    if (info.sheet_configured) {
-      var gs = document.createElement('option');
-      gs.value = 'gsheet'; gs.textContent = 'Google Sheet';
-      sel.appendChild(gs);
-      var gt = document.createElement('option');
-      gt.value = 'gsheet_tc'; gt.textContent = 'Sheet transit centers (linear fit)';
-      sel.appendChild(gt);
-    }
+    var sharedLabel = info.shared_sheet_configured
+      ? 'Shared Google Sheet (' + (info.shared_sheet_owner || 'team') + ')'
+      : 'Shared Google Sheet';
+    var personalLabel = info.shared_sheet_is_mine
+      ? 'My Google Sheet (shared with everyone)' : 'My Google Sheet (private)';
+    [
+      ['shared_gsheet', sharedLabel, info.shared_sheet_configured],
+      ['shared_gsheet_tc', sharedLabel + ' — transit-center fit', info.shared_sheet_configured],
+      ['gsheet', personalLabel, info.sheet_configured],
+      ['gsheet_tc', personalLabel + ' — transit-center fit', info.sheet_configured]
+    ].forEach(function (item) {
+      var option = document.createElement('option');
+      option.value = item[0];
+      option.disabled = !item[2];
+      option.textContent = item[1] + (item[2] ? '' : ' — not configured');
+      sel.appendChild(option);
+    });
     (info.datasets || []).forEach(function (d, i) {
       if (d.planets_fitted && d.planets_fitted.indexOf(planet) !== -1) {
         var opt = document.createElement('option');
@@ -1210,7 +1225,7 @@
         sel.appendChild(opt);
       }
     });
-    var has = Array.prototype.some.call(sel.options, function (o) { return o.value === prev; });
+    var has = Array.prototype.some.call(sel.options, function (o) { return o.value === prev && !o.disabled; });
     sel.value = has ? prev : '';
   }
 
@@ -1363,38 +1378,41 @@
       return;
     }
 
-    if (source === 'gsheet') {
-      var g = (info.sheet_ephemeris || {})[planet] || {};
+    var sharedSheet = source.indexOf('shared_') === 0;
+    var sheetLabel = sharedSheet ? 'Shared Google Sheet (' + info.shared_sheet_owner + ')' : (info.shared_sheet_is_mine ? 'My Google Sheet (shared with everyone)' : 'My Google Sheet (private)');
+    var sheetBadge = sharedSheet ? 'SHARED SHEET' : 'MY SHEET';
+    if (source === 'gsheet' || source === 'shared_gsheet') {
+      var g = ((sharedSheet ? info.shared_sheet_ephemeris : info.sheet_ephemeris) || {})[planet] || {};
       if (g.t0 == null || g.period == null) {
         setVal('sch-t0', ''); setVal('sch-period', '');
         setFieldSource('sch-t0', ''); setFieldSource('sch-period', '');
         saveOptions();
-        msg('msg-windows', 'No Google Sheet ephemeris for ' + planet, 'err');
+        msg('msg-windows', 'No ' + sheetLabel + ' ephemeris for ' + planet, 'err');
         return;
       }
       setVal('sch-t0', tupleString(g.t0, g.t0_unc));
       setVal('sch-period', tupleString(g.period, g.period_unc));
-      setFieldSource('sch-t0', 'SHEET'); setFieldSource('sch-period', 'SHEET');
-      if (g.duration != null) { dur = g.duration; setVal('sch-duration', tupleString(g.duration, g.duration_unc)); setFieldSource('sch-duration', 'SHEET'); }
+      setFieldSource('sch-t0', sheetBadge); setFieldSource('sch-period', sheetBadge);
+      if (g.duration != null) { dur = g.duration; setVal('sch-duration', tupleString(g.duration, g.duration_unc)); setFieldSource('sch-duration', sheetBadge); }
       saveOptions();
-      msg('msg-windows', 'Google Sheet: t0=' + g.t0 + ', P=' + g.period + ' d' + (dur != null ? ', dur=' + dur + ' h' : ''), 'ok');
+      msg('msg-windows', sheetLabel + ': t0=' + g.t0 + ', P=' + g.period + ' d' + (dur != null ? ', dur=' + dur + ' h' : ''), 'ok');
       return;
     }
 
-    if (source === 'gsheet_tc') {
-      var gt = (info.sheet_fit_ephemeris || {})[planet] || {};
+    if (source === 'gsheet_tc' || source === 'shared_gsheet_tc') {
+      var gt = ((sharedSheet ? info.shared_sheet_fit_ephemeris : info.sheet_fit_ephemeris) || {})[planet] || {};
       if (gt.t0 == null || gt.period == null) {
         setVal('sch-t0', ''); setVal('sch-period', '');
         setFieldSource('sch-t0', ''); setFieldSource('sch-period', '');
         saveOptions();
-        msg('msg-windows', 'No Sheet transit-center fit for ' + planet + ' (needs ≥2 epochs and a seed period)', 'err');
+        msg('msg-windows', 'No ' + sheetLabel + ' transit-center fit for ' + planet + ' (needs ≥2 epochs and a seed period)', 'err');
         return;
       }
       setVal('sch-t0', tupleString(gt.t0, gt.t0_unc));
       setVal('sch-period', tupleString(gt.period, gt.period_unc));
-      setFieldSource('sch-t0', 'SHEET'); setFieldSource('sch-period', 'SHEET');
+      setFieldSource('sch-t0', sheetBadge); setFieldSource('sch-period', sheetBadge);
       saveOptions();
-      msg('msg-windows', 'Sheet linear fit: t0=' + gt.t0 + ', P=' + gt.period + ' d' + (dur != null ? ', dur=' + dur + ' h' : ''), 'ok');
+      msg('msg-windows', sheetLabel + ' linear fit: t0=' + gt.t0 + ', P=' + gt.period + ' d' + (dur != null ? ', dur=' + dur + ' h' : ''), 'ok');
       return;
     }
 

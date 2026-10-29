@@ -607,6 +607,35 @@ As of the 2026-07 dry run: **10,328 frames** would move (sinistro 7,427 across 1
 directory pairs, muscat3 2,861 across 3, muscat4 40 across 1), with 28 `offset`,
 6 `stray` and 7,083 `conflict` reports left for review.
 
+### Collaborator chat and ephemeris sheets
+
+The chat room selector separates the public team conversation from explicit
+access-group rooms. A room such as `group:unc` is visible only to that group's
+explicit members, with group exclusions respected. Admins also need membership;
+unscoped team access does not grant access to group conversations.
+Scoped viewers never receive public messages,
+history, mentions, typing, or presence. Private job notices and `@bot` remain
+private. Hidden `user:*` groups do not create chat rooms.
+
+On `/lco/schedule`, **Shared Google Sheet (jerome)** uses Jerome's saved
+sheet configuration. **My Google Sheet (private)** uses only the signed-in
+user's configuration from Settings. Each also offers a transit-center linear
+fit. The shared owner sees their personal option labeled **shared with
+everyone**, not private. Sources remain distinct when both are configured. Unconfigured sheet sources
+remain visible but disabled, with a link to Settings beside the dropdown.
+
+`MUSCAT_SHARED_EPHEM_SHEET_USER` selects the shared owner (default `jerome`);
+set it to `none` to disable the shared source. Changing or clearing
+the owner's sheet changes the shared source for everyone. The app exposes
+per-target ephemerides, not the sheet URL or editing credentials, and checks
+target visibility before reading a sheet. Never-observed targets remain
+queryable under the existing target-access policy. Sharing a sheet therefore
+makes its ephemerides available beyond the owner's group; do not put data
+that must remain owner-only in that shared source. Other users' sheet
+configurations remain private within the app. Google permissions are separate:
+the importer requires a published or link-readable sheet.
+
+
 ### Target LCO archive inventory
 
 Open **LCO archive** on a target page to find reduced science observations
