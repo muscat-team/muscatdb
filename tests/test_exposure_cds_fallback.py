@@ -11,7 +11,7 @@ from muscat_db import exposure, exofop, web, http_client
 @pytest.fixture
 def outage(monkeypatch):
     exofop._exofop_cache.clear()
-    monkeypatch.setattr(exposure.SkyCoord, 'from_name', Mock(side_effect=RuntimeError('CDS down')))
+    monkeypatch.setattr(exposure, '_query_sesame_coords', Mock(side_effect=RuntimeError('CDS down')))
     monkeypatch.setattr(exposure, '_query_vizier_catalog', Mock(side_effect=RuntimeError('CDS down')))
     get = Mock(return_value=Mock(json=lambda: {
         'basic_info': {'tic_id': '166527623'},
@@ -263,19 +263,21 @@ def timed_lookup():
 
 
 def test_hung_name_resolution_still_reaches_the_exofop_fallback(outage, tight_budget, stall, monkeypatch):
-    monkeypatch.setattr(exposure.SkyCoord, 'from_name', Mock(side_effect=stall()))
+    monkeypatch.setattr(exposure, '_query_sesame_coords', Mock(side_effect=stall()))
     result, elapsed = timed_lookup()
+    exposure._query_sesame_coords.assert_called()
     assert result['ok'] is True and 'TIC' in result['source']
     assert elapsed < 1.0
 
 
 def test_every_stage_hung_still_answers_within_the_total_budget(outage, tight_budget, stall, monkeypatch):
     get, post = outage
-    monkeypatch.setattr(exposure.SkyCoord, 'from_name', Mock(side_effect=stall()))
+    monkeypatch.setattr(exposure, '_query_sesame_coords', Mock(side_effect=stall()))
     get.side_effect = stall()
     post.side_effect = stall()
     post.sdss_get.side_effect = stall()
     result, elapsed = timed_lookup()
+    exposure._query_sesame_coords.assert_called()
     assert result['ok'] is False
     assert elapsed < 1.5
 
@@ -284,10 +286,11 @@ def test_stages_left_without_budget_never_contact_their_service(outage, tight_bu
     """Resolution and TIC hang through the whole budget: SDSS and Gaia, which
     would come next, are not sent at all rather than queued behind it."""
     monkeypatch.setattr(exposure, '_LOOKUP_TOTAL_TIMEOUT_S', 0.5)
-    monkeypatch.setattr(exposure.SkyCoord, 'from_name', Mock(side_effect=stall()))
+    monkeypatch.setattr(exposure, '_query_sesame_coords', Mock(side_effect=stall()))
     post = outage[1]
     post.side_effect = stall()
     timed_lookup()
+    exposure._query_sesame_coords.assert_called()
     assert post.call_count == 1  # TIC only, not the Gaia DR3 cone
     post.sdss_get.assert_not_called()
 
