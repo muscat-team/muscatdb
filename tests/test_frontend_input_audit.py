@@ -223,7 +223,8 @@ def test_lco_schedule_inputs_registered_for_persistence():
     # render from the row checkboxes; persisting it would be meaningless.
     # 'sch-clone-id' is a one-shot action trigger (enter an id -> clone into the
     # form): it must NOT persist/restore, so it is deliberately unregistered.
-    excluded = {"win-all", "sch-clone-id"}
+    # A file input cannot be restored by script; what it loads persists via sch-midtimes.
+    excluded = {"win-all", "sch-clone-id", "sch-midtimes-file"}
     missing = controls - registered - excluded
     assert not missing, (
         f"lco_schedule.html inputs not registered in TEXT_IDS/CHECK_IDS "
@@ -249,7 +250,7 @@ def test_lco_prediction_inputs_invalidate_generated_windows():
     html = _read_template("lco_schedule.html")
     registered = _js_string_array(html, "WINDOW_PREDICTION_IDS")
     expected = {
-        "sch-target", "sch-planet", "sch-source", "sch-coords",
+        "sch-target", "sch-planet", "sch-source", "sch-coords", "sch-midtimes",
         "sch-range-start", "sch-range-end", "sch-t0", "sch-period",
         "sch-duration", "sch-pad-before", "sch-pad-after",
         "sch-include-padding", "sch-sites", "sch-twilight",

@@ -293,7 +293,7 @@ def test_gaia_to_griz_transform_returns_none_without_color():
 # ── resolve_target_coords / _target_name_variants ────────────────────────────
 # Sesame (queried via SkyCoord.from_name) is inconsistently case/separator
 # sensitive across catalog conventions -- confirmed empirically against the
-# live service (see docstrings in exposure.py). These tests stub from_name to
+# live service (see docstrings in exposure.py). These tests stub the Sesame transport to
 # simulate exactly the accept/reject pattern observed live, so the retry
 # logic is verified deterministically and without a network dependency.
 
@@ -314,7 +314,7 @@ def _stub_from_name(accepted: dict[str, tuple[float, float]]):
 
 def test_resolve_target_coords_succeeds_on_first_attempt_without_fallback():
     fake = _stub_from_name({"HD 209458": (330.79, 18.88)})
-    with patch.object(exposure.SkyCoord, "from_name", side_effect=fake) as mock_from_name:
+    with patch.object(exposure, "_query_sesame_coords", side_effect=fake) as mock_from_name:
         result = exposure.resolve_target_coords("HD 209458")
     assert result == (330.79, 18.88)
     mock_from_name.assert_called_once_with("HD 209458")
@@ -324,7 +324,7 @@ def test_resolve_target_coords_falls_back_to_hyphenated_uppercase_variant():
     # Mirrors the live "kelt 9" -> fail, "KELT-9" -> ok pattern (case doesn't
     # matter for KELT, only the hyphen does).
     fake = _stub_from_name({"KELT-9": (307.96, 39.94)})
-    with patch.object(exposure.SkyCoord, "from_name", side_effect=fake):
+    with patch.object(exposure, "_query_sesame_coords", side_effect=fake):
         result = exposure.resolve_target_coords("kelt 9")
     assert result == (307.96, 39.94)
 
@@ -333,21 +333,21 @@ def test_resolve_target_coords_falls_back_to_spaced_uppercase_variant():
     # Mirrors the live "gj 12" -> fail, "GJ 12" -> ok pattern (case matters
     # for GJ, but only for the space-separated form).
     fake = _stub_from_name({"GJ 12": (3.96, 13.56)})
-    with patch.object(exposure.SkyCoord, "from_name", side_effect=fake):
+    with patch.object(exposure, "_query_sesame_coords", side_effect=fake):
         result = exposure.resolve_target_coords("gj 12")
     assert result == (3.96, 13.56)
 
 
 def test_resolve_target_coords_strips_surrounding_whitespace():
     fake = _stub_from_name({"GJ 12": (3.96, 13.56)})
-    with patch.object(exposure.SkyCoord, "from_name", side_effect=fake):
+    with patch.object(exposure, "_query_sesame_coords", side_effect=fake):
         result = exposure.resolve_target_coords("  GJ 12  ")
     assert result == (3.96, 13.56)
 
 
 def test_resolve_target_coords_returns_none_when_all_variants_fail():
     fake = _stub_from_name({})
-    with patch.object(exposure.SkyCoord, "from_name", side_effect=fake) as mock_from_name:
+    with patch.object(exposure, "_query_sesame_coords", side_effect=fake) as mock_from_name:
         result = exposure.resolve_target_coords("bogus 12")
     assert result is None
     # original + the (deduped) generated variants, nothing more
@@ -359,7 +359,7 @@ def test_resolve_target_coords_gives_up_for_names_without_a_catalog_prefix():
     # catalog-prefix pattern, so no variants are generated -- only the
     # original spelling is tried.
     fake = _stub_from_name({})
-    with patch.object(exposure.SkyCoord, "from_name", side_effect=fake) as mock_from_name:
+    with patch.object(exposure, "_query_sesame_coords", side_effect=fake) as mock_from_name:
         result = exposure.resolve_target_coords("2MASS J06024559-2652519")
     assert result is None
     mock_from_name.assert_called_once_with("2MASS J06024559-2652519")
@@ -562,3 +562,16 @@ def test_fits_exists_finds_each_supported_suffix(tmp_path, monkeypatch):
 
     assert exposure._fits_exists("muscat3", "260101", "missing") is None
     assert exposure._fits_exists("not-an-instrument", "260101", "a") is None
+
+
+def test_sesame_timeout_stops_spelling_retries(monkeypatch):
+    import httpx
+    calls = []
+
+    def query(name):
+        calls.append(name)
+        raise httpx.ReadTimeout("CDS unavailable")
+
+    monkeypatch.setattr(exposure, "_query_sesame_coords", query)
+    assert exposure.resolve_target_coords("TOI 12345") is None
+    assert calls == ["TOI 12345"]

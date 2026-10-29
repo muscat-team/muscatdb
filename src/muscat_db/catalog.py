@@ -22,6 +22,7 @@ import math
 import os
 import pathlib
 import re
+import time
 import zipfile
 from contextlib import contextmanager
 
@@ -762,7 +763,7 @@ def _target_crossmatch_coords(
 
       1. Local TOI/NExScI catalog CSVs — may return several near-identical rows
          when a target appears in both catalogs.
-      2. SIMBAD name resolution (cached) when the target is in neither catalog.
+      2. SIMBAD, then ExoFOP name resolution when absent from both catalogs.
       3. Header pointing centre as a last resort — the per-target ``coord_repr``
          median RA/Dec carried on each dataset. Ranked last because muscat/muscat2
          frames have no WCS and can sit arcmin-scale off the true position.
@@ -773,8 +774,7 @@ def _target_crossmatch_coords(
         coords = _target_catalog_coord_candidates(target_name)
         if coords:
             return coords
-        # Not in either catalog — fall back to SIMBAD. _resolve_archive_coords is
-        # the shared "catalog then SIMBAD" resolver and caches the SIMBAD lookup.
+        # The shared resolver tries SIMBAD, then ExoFOP, after local catalogs.
         resolved = _resolve_archive_coords(target_name)
         if resolved is not None:
             ra, dec = float(resolved[0]), float(resolved[1])
@@ -1885,8 +1885,8 @@ def _resolve_archive_coords(target: str) -> tuple[float, float, str] | None:
     """Resolve a target name to (ra_deg, dec_deg, source) for archive searches.
 
     Tries the offline NASA/TOI catalogs first (fast, cached, no network), then
-    falls back to SIMBAD name resolution. Returns None when the name cannot be
-    resolved by any source. Both results are cached.
+    falls back to SIMBAD and then ExoFOP name resolution. Returns None when
+    the name cannot be resolved by any source. Successful results are cached.
     """
     resolved = resolve_target_astrometry(target)
     if resolved is None:
@@ -1894,13 +1894,16 @@ def _resolve_archive_coords(target: str) -> tuple[float, float, str] | None:
     return resolved["ra"], resolved["dec"], resolved["source"]
 
 
-def resolve_target_astrometry(target: str) -> dict | None:
+def resolve_target_astrometry(target: str, *, allow_remote: bool = True) -> dict | None:
     """``_resolve_archive_coords`` with the position's epoch and proper motion.
 
     Returns ``{"ra", "dec", "source", "epoch", "pmra", "pmdec"}``: epoch is a
     Julian year (CATALOG_EPOCH for nasa/toi, SIMBAD_EPOCH for simbad) and the
     proper motions are mas/yr with pmra including cos(dec), or None when the
     source has none (SIMBAD's name resolver returns a position only).
+    With allow_remote=False, only local catalogs and cached successes are used.
+    Local catalogs take precedence, then SIMBAD, then ExoFOP. ExoFOP positions
+    retain an unknown epoch/proper motion rather than inheriting SIMBAD's epoch.
     """
     # The name as given first, then (for an LCO key-project decoration such as
     # "TIC 434398831.11 (TOI 32.11)") each half, so a host listed under only
@@ -1918,9 +1921,36 @@ def resolve_target_astrometry(target: str) -> dict | None:
     cache_key = "simbad_" + target.strip().upper()
     cached = _CATALOG_CACHE.get(cache_key, _CACHE_MISS)
     if cached is _CACHE_MISS:
-        cached = _simbad_coords(target, candidates)
-        _CATALOG_CACHE[cache_key] = cached
+        if not allow_remote:
+            return None
+        retry_key = "retry_" + cache_key
+        if time.monotonic() < _CATALOG_CACHE.get(retry_key, 0):
+            cached = None
+        else:
+            cached = _simbad_coords(target, candidates)
+            if cached is not None:
+                _CATALOG_CACHE[cache_key] = cached
+            else:
+                # Suppress repeated outage requests, but allow recovery.
+                _CATALOG_CACHE[retry_key] = time.monotonic() + 30
     if cached is None:
+        from muscat_db import exofop
+
+        for name in candidates:
+            data = exofop.fetch_target_by_name(name)
+            position = data.get("coordinates") if isinstance(data, dict) else None
+            if not isinstance(position, dict):
+                continue
+            raw_ra, raw_dec = position.get("ra"), position.get("dec")
+            if isinstance(raw_ra, bool) or isinstance(raw_dec, bool):
+                continue
+            ra, dec = _safe_float(raw_ra), _safe_float(raw_dec)
+            if ra is None or dec is None or not (0 <= ra < 360 and -90 <= dec <= 90):
+                continue
+            # ExoFOP's response does not supply an astrometric epoch here.
+            # Never label this position as SIMBAD J2000 or invent proper motion.
+            return {"ra": ra, "dec": dec, "source": "exofop", "epoch": None,
+                    "pmra": None, "pmdec": None}
         return None
     ra, dec, source = cached
     return {"ra": ra, "dec": dec, "source": source, "epoch": SIMBAD_EPOCH, "pmra": None, "pmdec": None}

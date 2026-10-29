@@ -3162,6 +3162,7 @@ class TestRoutes:
         # fallback in resolve_target_coords() would otherwise fire (and fail)
         # on every run; stub it to fail fast instead of over the network.
         monkeypatch.setattr("muscat_db.exposure.resolve_target_coords", lambda name: None)
+        monkeypatch.setattr("muscat_db.exofop.fetch_target_by_name", lambda name: None)
         r2 = client.get("/api/ephemeris/target-info?target=test_star")
         assert r2.status_code == 200
         res = r2.json()
@@ -3624,6 +3625,15 @@ class TestKeyProjectDecoratedTargetCoord:
 
     DECORATED = "TIC460950389.01(TOI6715.01)"
 
+    @pytest.fixture(autouse=True)
+    def _no_offline_catalog_hit(self, monkeypatch):
+        # The offline pass runs before the stubbed remote resolver. CI downloads
+        # data/, which lists TOI6715.01, so without this the outcome would depend
+        # on whether the catalog CSVs are present.
+        from muscat_db import catalog
+
+        monkeypatch.setattr(catalog, "_query_target_coordinates", lambda name: None)
+
     def test_auto_resolves_coord_for_decorated_name(self, monkeypatch):
         monkeypatch.setattr(
             phot, "_resolve_archive_coords",
@@ -3649,13 +3659,13 @@ class TestKeyProjectDecoratedTargetCoord:
         i = cmd.index("--target_coord")
         assert cmd[i + 1] == "159.157968"
 
-    def test_plain_name_never_triggers_auto_resolve(self, monkeypatch):
-        def _boom(name):
-            raise AssertionError("must not auto-resolve a plain (undecorated) name")
-
-        monkeypatch.setattr(phot, "_resolve_archive_coords", _boom)
-        cmd = phot.build_command("muscat3", "260101", "TOI-1")
-        assert "--target_coord" not in cmd
+    def test_decorated_name_is_resolved_as_given(self, monkeypatch):
+        # A decoration is not a planet letter: the whole name goes to the
+        # resolver, which tries each of its halves.
+        calls = []
+        monkeypatch.setattr(phot, "_resolve_archive_coords", lambda name: calls.append(name))
+        phot.build_command("sinistro", "240417", self.DECORATED)
+        assert calls == [self.DECORATED]
 
     def test_unresolvable_decorated_name_falls_back_to_name_only(self, monkeypatch):
         monkeypatch.setattr(phot, "_resolve_archive_coords", lambda name: None)

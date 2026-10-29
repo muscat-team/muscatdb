@@ -94,3 +94,82 @@ def test_optimize_needs_a_target_or_coordinates(page):
     page.fill("#fov-dec", "")
     page.click("#fov-run")
     expect(page.locator("#fov-msg")).to_have_text("Enter a target name or RA and Dec.")
+
+
+@pytest.mark.parametrize("failure", ["blocked", "pending-script", "pending-init", "rejected-init"])
+def test_cds_outage_keeps_resolve_and_run_working(page, gaia, failure):
+    def unavailable(route):
+        if failure == "blocked":
+            route.abort("blockedbyclient")
+        elif failure == "pending-script":
+            return  # Leave the download pending beyond the viewer deadline.
+        else:
+            init = "new Promise(() => {})" if failure == "pending-init" else "Promise.reject(new Error('CDS unavailable'))"
+            route.fulfill(body=f"window.A = {{init: {init}}};", content_type="application/javascript")
+
+    page.route("https://aladin.cds.unistra.fr/**", unavailable)
+    page.goto("/fov", wait_until="domcontentloaded")
+    page.fill("#fov-target", "TOI-1000")
+    page.click("#fov-resolve")
+    expect(page.locator("#fov-msg")).to_have_text(f"Resolved to RA {RA}°, Dec {DEC}°")
+    page.select_option("#fov-inst", "muscat3")
+    with page.expect_response("**/api/fov/optimize") as response:
+        page.click("#fov-run")
+    assert response.value.json()["ok"]
+    expect(page.locator("#fov-results")).to_be_visible()
+    expect(page.locator("#fov-sky-status")).to_have_text(
+        "Sky view unavailable (CDS unreachable)", timeout=12_000,
+    )
+
+
+def test_late_viewer_initialization_plots_existing_results(page, gaia):
+    from pathlib import Path
+
+    stub = (Path(__file__).parent / "stubs" / "aladin.js").read_text()
+    stub = stub.replace("init: Promise.resolve()", "init: new Promise(resolve => { window.finishSkyInit = resolve; })")
+    page.route("**/aladin.js", lambda route: route.fulfill(body=stub, content_type="application/javascript"))
+    page.goto("/fov")
+    page.fill("#fov-target", "TOI-1000")
+    page.select_option("#fov-inst", "muscat3")
+    with page.expect_response("**/api/fov/optimize") as response:
+        page.click("#fov-run")
+    n = response.value.json()["n_comps"]
+    expect(page.locator("#fov-results")).to_be_visible()
+    assert page.evaluate("A.__calls.length") == 0
+    page.evaluate("finishSkyInit()")
+    expect(page.locator("#fov-sky-status")).to_have_text("")
+    plotted = page.evaluate("A.__calls.filter(c => c.fn === 'catalog.addSources').map(c => c.n)")
+    assert plotted[:2] == [1, n]
+
+
+@pytest.mark.parametrize("resolve_first", [True, False])
+def test_fov_uses_exofop_when_catalogs_and_cds_cannot_resolve(page, gaia, monkeypatch, resolve_first):
+    from types import SimpleNamespace
+    from muscat_db import catalog, exofop, exposure
+
+    catalog._CATALOG_CACHE.clear()
+    exofop._exofop_cache.clear()
+    monkeypatch.setattr(catalog, "_query_target_coordinates", lambda name: None)
+    monkeypatch.setattr(exposure, "resolve_target_coords", lambda name: None)
+    calls = []
+
+    def get(url, **kwargs):
+        assert url.startswith("https://exofop.ipac.caltech.edu/")
+        calls.append(url)
+        return SimpleNamespace(json=lambda: {"basic_info": {"tic_id": "12345"},
+                                           "coordinates": {"ra": RA, "dec": DEC}})
+
+    monkeypatch.setattr(catalog, "_sync_get", get)
+    page.route("https://aladin.cds.unistra.fr/**", lambda route: route.abort("blockedbyclient"))
+    page.goto("/fov")
+    page.fill("#fov-target", "TOI-12345")
+    page.select_option("#fov-inst", "muscat3")
+    if resolve_first:
+        page.click("#fov-resolve")
+        expect(page.locator("#fov-msg")).to_have_text(f"Resolved to RA {RA}°, Dec {DEC}°")
+    with page.expect_response("**/api/fov/optimize") as resp:
+        page.click("#fov-run")
+    assert resp.value.json()["ok"]
+    expect(page.locator("#fov-results")).to_be_visible()
+    assert calls
+    exofop._exofop_cache.clear()

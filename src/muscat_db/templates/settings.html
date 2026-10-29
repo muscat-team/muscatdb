@@ -113,17 +113,17 @@
     <div class="opt-grid">
       <div class="opt">
         <label for="ephem-sheet-url">Sheet URL or ID</label>
-        <input id="ephem-sheet-url" type="text" autocomplete="off" spellcheck="false" placeholder="https://docs.google.com/spreadsheets/d/…">
+        <input id="ephem-sheet-url" type="text" autocomplete="off" spellcheck="false" placeholder="e.g. https://docs.google.com/spreadsheets/d/…">
         <span class="hint">Publish the sheet (File → Share → Publish to web, or "anyone with the link"). Only docs.google.com links are accepted; the URL is encrypted server-side. Adds "Google Sheet" ephemeris sources on the <a href="/lco/schedule">LCO schedule</a> page.</span>
       </div>
       <div class="opt">
         <label for="ephem-sheet-ephem-tab">Ephemeris tab</label>
-        <input id="ephem-sheet-ephem-tab" type="text" autocomplete="off" spellcheck="false" placeholder="ephemeris">
+        <input id="ephem-sheet-ephem-tab" type="text" autocomplete="off" spellcheck="false" placeholder="default: ephemeris">
         <span class="hint">Tab with columns target, t0, period, duration (+ optional uncertainties).</span>
       </div>
       <div class="opt">
         <label for="ephem-sheet-tc-tab">Transit-centers tab</label>
-        <input id="ephem-sheet-tc-tab" type="text" autocomplete="off" spellcheck="false" placeholder="tc">
+        <input id="ephem-sheet-tc-tab" type="text" autocomplete="off" spellcheck="false" placeholder="default: tc">
         <span class="hint">Tab with columns target, planet, epoch, tc, tc_unc (linear-fit source).</span>
       </div>
     </div>
@@ -445,8 +445,8 @@
         .then(function (r) { return r.json().then(function (d) { d._status = r.status; return d; }); })
         .then(function (d) {
           if (!d.ok) { status.textContent = d.detail || d.error || 'Sheet status unavailable.'; return; }
-          if (d.ephem_tab) ephemTabInput.placeholder = d.ephem_tab;
-          if (d.tc_tab) tcTabInput.placeholder = d.tc_tab;
+          if (d.ephem_tab) ephemTabInput.placeholder = 'default: ' + d.ephem_tab;
+          if (d.tc_tab) tcTabInput.placeholder = 'default: ' + d.tc_tab;
           currentEphemCols = d.ephem_cols || {};
           currentTcCols = d.tc_cols || {};
           sheetConfigured = !!d.configured;

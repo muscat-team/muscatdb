@@ -47,5 +47,33 @@ window.MuscatFetch = (function () {
     );
   }
 
-  return { fetchJson: fetchJson, messageForStatus: messageForStatus };
+  // Read a complete archive response while displaying NDJSON progress events.
+  async function readProgress(response, onProgress) {
+    if (!(response.headers.get('Content-Type') || '').includes('application/x-ndjson')) {
+      return response.json();
+    }
+    let result = null, pending = '';
+    const reader = response.body.getReader(), decoder = new TextDecoder();
+    function event(line) {
+      if (!line.trim()) return;
+      const message = JSON.parse(line);
+      if (message.progress) onProgress(message.progress);
+      else if (message.ok === false) throw new Error(message.error || 'Archive search failed');
+      else if (message.ok) result = message;
+    }
+    try {
+      while (true) {
+        const chunk = await reader.read();
+        pending += decoder.decode(chunk.value, {stream: !chunk.done});
+        const lines = pending.split('\n'); pending = lines.pop();
+        lines.forEach(event);
+        if (chunk.done) break;
+      }
+      event(pending);
+    } finally { await reader.cancel(); }
+    if (!result) throw new Error('Archive search ended before completion');
+    return result;
+  }
+
+  return { fetchJson: fetchJson, messageForStatus: messageForStatus, readProgress: readProgress };
 })();
