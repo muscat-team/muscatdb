@@ -1886,7 +1886,7 @@ def _resolve_archive_coords(target: str) -> tuple[float, float, str] | None:
 
     Tries the offline NASA/TOI catalogs first (fast, cached, no network), then
     falls back to SIMBAD name resolution. Returns None when the name cannot be
-    resolved by any source. Both results are cached.
+    resolved by any source. Only successful remote resolutions are cached.
     """
     resolved = resolve_target_astrometry(target)
     if resolved is None:
@@ -1894,13 +1894,14 @@ def _resolve_archive_coords(target: str) -> tuple[float, float, str] | None:
     return resolved["ra"], resolved["dec"], resolved["source"]
 
 
-def resolve_target_astrometry(target: str) -> dict | None:
+def resolve_target_astrometry(target: str, *, allow_remote: bool = True) -> dict | None:
     """``_resolve_archive_coords`` with the position's epoch and proper motion.
 
     Returns ``{"ra", "dec", "source", "epoch", "pmra", "pmdec"}``: epoch is a
     Julian year (CATALOG_EPOCH for nasa/toi, SIMBAD_EPOCH for simbad) and the
     proper motions are mas/yr with pmra including cos(dec), or None when the
     source has none (SIMBAD's name resolver returns a position only).
+    With allow_remote=False, only local catalogs and cached successes are used.
     """
     # The name as given first, then (for an LCO key-project decoration such as
     # "TIC 434398831.11 (TOI 32.11)") each half, so a host listed under only
@@ -1918,8 +1919,13 @@ def resolve_target_astrometry(target: str) -> dict | None:
     cache_key = "simbad_" + target.strip().upper()
     cached = _CATALOG_CACHE.get(cache_key, _CACHE_MISS)
     if cached is _CACHE_MISS:
+        if not allow_remote:
+            return None
         cached = _simbad_coords(target, candidates)
-        _CATALOG_CACHE[cache_key] = cached
+        # The resolver returns None for both unknown names and transport errors.
+        # Caching that ambiguous result makes a brief CDS outage permanent.
+        if cached is not None:
+            _CATALOG_CACHE[cache_key] = cached
     if cached is None:
         return None
     ra, dec, source = cached
