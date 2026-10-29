@@ -638,13 +638,33 @@
     // Update URL slug for bookmarking/sharing.
     window.history.replaceState(null, '', window.location.pathname + encodeOptions(opts));
   }
+  // Values that only make sense for the target they were resolved for: kept
+  // from localStorage only while a URL slug names that same target.
+  var TARGET_SCOPED_KEYS = EPHEM_FIELDS.concat(['sch-planet', 'sch-source', 'sch-midtimes', '_ephemTarget', '_fieldSources']);
+  // Set when a slug opened a different target than the stored form's, so the
+  // stored windows (computed for that other target) are not restored either.
+  var slugSwitchedTarget = false;
+
+  function withoutKeys(obj, keys) {
+    var out = {};
+    Object.keys(obj).forEach(function (k) { if (keys.indexOf(k) === -1) out[k] = obj[k]; });
+    return out;
+  }
+
   function restoreOptions() {
-    // Priority: URL slug > localStorage > defaults.
-    var saved = decodeSlug();
-    if (!saved) {
-      try { saved = JSON.parse(localStorage.getItem(OPT_KEY) || 'null'); } catch (e) { saved = null; }
+    // localStorage holds the whole form; a URL slug (bookmark, shared link, or
+    // the hash a reload keeps) carries only a few fields and overrides those.
+    // Priority per field: URL slug > localStorage > defaults.
+    var stored = null;
+    try { stored = JSON.parse(localStorage.getItem(OPT_KEY) || 'null'); } catch (e) { stored = null; }
+    var slug = decodeSlug();
+    if (stored && slug && slug['sch-target'] !== undefined &&
+        String(slug['sch-target']).trim() !== String(stored['sch-target'] || '').trim()) {
+      stored = withoutKeys(stored, TARGET_SCOPED_KEYS);
+      slugSwitchedTarget = true;
     }
-    if (!saved) return;
+    if (!stored && !slug) return;
+    var saved = Object.assign({}, stored || {}, slug || {});
     TEXT_IDS.forEach(function (id) { if (saved[id] !== undefined && saved[id] !== '') setVal(id, saved[id]); });
     CHECK_IDS.forEach(function (id) { if (saved[id] !== undefined) setChk(id, saved[id]); });
     // Exp times are only valid when restored settings match current settings.
@@ -2035,6 +2055,7 @@
   }
 
   function restoreScheduleState() {
+    if (slugSwitchedTarget) return;  // the stored windows belong to another target
     var saved;
     try { saved = JSON.parse(localStorage.getItem(STATE_KEY) || 'null'); } catch (e) { saved = null; }
     if (!saved) return;

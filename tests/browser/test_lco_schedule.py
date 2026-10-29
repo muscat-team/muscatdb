@@ -204,11 +204,13 @@ def test_uploaded_midtimes_are_rated_and_filtered(page, tmp_path):
     assert lines[0].startswith("epoch,mid_utc,mid_bjd_tdb,mid_unc_min")
     assert [line.split(",")[6] for line in lines[1:]] == ["none", "full", "partial"]
 
-    # the list and the source survive navigating back to the page (localStorage;
-    # a bare reload keeps the URL slug, which carries only a few fields)
-    page.goto("/lco/schedule")
-    assert page.input_value("#sch-source") == "upload"
-    assert page.input_value("#sch-midtimes") == UPLOADED.strip()
+    # the list and the source survive a reload (which keeps the URL slug) and
+    # a fresh visit, like the rest of the form
+    for revisit in (page.reload, lambda: page.goto("/lco/schedule")):
+        revisit()
+        assert page.input_value("#sch-source") == "upload"
+        assert page.input_value("#sch-midtimes") == UPLOADED.strip()
+        expect(page.locator("#windows-body tr")).to_have_count(3)
 
 
 def test_a_bad_uploaded_line_is_reported_by_number(page):
@@ -232,3 +234,44 @@ def test_other_sources_hide_the_upload_box(page):
     expect(page.locator("#sch-midtimes")).to_be_visible()
     page.select_option("#sch-source", "nasa")
     expect(page.locator("#sch-midtimes")).to_be_hidden()
+
+
+def test_reload_keeps_fields_outside_the_url_slug(page):
+    """The slug carries only target/coords/range/...; a reload keeps it, so the
+    stored form has to fill in everything else rather than be discarded."""
+    page.problems.allowed.extend(NO_TOKEN)
+    page.goto("/lco/schedule")
+    page.fill("#sch-coords", f"{RA}, {DEC}")
+    page.fill("#sch-pad-before", "17")
+    page.select_option("#sch-twilight", "nautical")
+    page.select_option("#win-filter", "none")
+    assert "#" in page.url  # the slug is in place
+    page.reload()
+    assert page.input_value("#sch-pad-before") == "17"
+    assert page.input_value("#sch-twilight") == "nautical"
+    assert page.input_value("#win-filter") == "none"
+    assert page.input_value("#sch-coords") == f"{RA}, {DEC}"
+
+
+def test_a_link_to_another_target_drops_the_stored_targets_ephemeris(page):
+    """Opening a shared #target= link must not pair that target with the t0,
+    period, source or windows resolved for the target stored in this browser."""
+    page.problems.allowed.extend(NO_TOKEN + ("HTTP 404", "status of 404"))
+    page.goto("/lco/schedule")
+    _generate_windows(page)
+    expect(page.locator("#windows-body tr")).to_have_count(4)
+    stored_t0 = page.input_value("#sch-t0")
+    page.select_option("#sch-source", "upload")
+    page.fill("#sch-midtimes", "2461505.5")
+    page.fill("#sch-pad-before", "17")
+    page.locator("#sch-pad-before").blur()
+
+    page.goto("about:blank")  # a hash-only change would not reload the page
+    page.goto("/lco/schedule#target=NOT-A-STORED-TARGET")
+    assert page.input_value("#sch-target") == "NOT-A-STORED-TARGET"
+    assert page.input_value("#sch-t0") != stored_t0
+    assert page.input_value("#sch-source") != "upload"
+    assert page.input_value("#sch-midtimes") == ""
+    expect(page.locator("#windows-body tr")).to_have_count(0)
+    # settings that are not about the target still carry over
+    assert page.input_value("#sch-pad-before") == "17"
