@@ -3624,6 +3624,15 @@ class TestKeyProjectDecoratedTargetCoord:
 
     DECORATED = "TIC460950389.01(TOI6715.01)"
 
+    @pytest.fixture(autouse=True)
+    def _no_offline_catalog_hit(self, monkeypatch):
+        # The offline pass runs before the stubbed remote resolver. CI downloads
+        # data/, which lists TOI6715.01, so without this the outcome would depend
+        # on whether the catalog CSVs are present.
+        from muscat_db import catalog
+
+        monkeypatch.setattr(catalog, "_query_target_coordinates", lambda name: None)
+
     def test_auto_resolves_coord_for_decorated_name(self, monkeypatch):
         monkeypatch.setattr(
             phot, "_resolve_archive_coords",
