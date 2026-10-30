@@ -50,7 +50,7 @@ jobs:
       - name: Run fast test suite
         env:
           MUSCAT_REQUIRE_BROWSER: "1"
-        run: uv run pytest --tb=short -q
+        run: uv run pytest -n auto --tb=short -q
 
   test-postgres:
     name: pytest (postgres control plane)
@@ -114,7 +114,7 @@ jobs:
       - name: Run tests with coverage
         env:
           MUSCAT_REQUIRE_BROWSER: "1"
-        run: uv run pytest --tb=short -q --cov=src/muscat_db --cov-report=xml --cov-report=term-missing --cov-fail-under=68
+        run: uv run pytest -n auto --tb=short -q --cov=src/muscat_db --cov-report=xml --cov-report=term-missing --cov-fail-under=68
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
         with:
