@@ -291,5 +291,7 @@ def test_chat_room_selection_filters_messages_and_routes_posts(page):
     assert sent[-1]['data']['room'] == 'group:unc'
     assert sent[-1]['data']['text'] == 'Hello UNC'
     page.reload()
+    # The room preference is keyed by user name, which /whoami fills in after load.
+    page.evaluate("window.MuscatWhoami")
     page.evaluate("window.__chatTransport.receive('chat_rooms', {rooms: ['chat:public', 'group:unc']})")
     expect(page.locator('#chat-room')).to_have_value('group:unc')
