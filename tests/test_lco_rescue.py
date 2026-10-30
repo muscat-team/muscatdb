@@ -305,3 +305,31 @@ def test_proposal_usage_counts_accepted_and_submitted(rescue):
     poll(rescue)
     usage = lco_rescue.proposal_usage(path)
     assert usage == [{"proposal": "P1", "attempts": 1, "submitted": 1, "reserved_minutes": 90.0}]
+
+
+def test_failed_registration_does_not_block_archive_monitoring(rescue, monkeypatch):
+    path, _, _, _, calls = rescue
+    attempts = []
+
+    def fail(*a, **kw):
+        attempts.append(a)
+        raise ValueError("Replacement response must contain exactly one child request")
+
+    monkeypatch.setattr(lco_rescue, "_register", fail)
+    poll(rescue)
+    searches = []
+
+    def search(*a, **kw):
+        searches.append(a)
+        return {"results": []}
+
+    monkeypatch.setattr(lco, "archive_search_all", search)
+    attempts.clear()
+    poll(rescue)
+    assert searches
+    assert len(attempts) == 1
+    assert len(calls) == 2
+    state = row(path)
+    assert state["error_count"] == 0
+    assert "registration failed" in state["rescue_reason"]
+    assert "exactly one child" in state["rescue_reason"]

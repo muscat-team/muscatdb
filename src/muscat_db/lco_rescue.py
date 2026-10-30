@@ -111,7 +111,9 @@ def resume_accepted(request, *, path, now):
             "SELECT payload_json,params_json,result_json FROM lco_rescue_attempts WHERE original_id=? AND state='accepted'",
             (request_id,),
         ).fetchone()
-    if attempt:
+    if not attempt:
+        return
+    try:
         _register(
             path,
             request_id,
@@ -120,6 +122,12 @@ def resume_accepted(request, *, path, now):
             json.loads(attempt[2]),
             request.get("user_name"),
             now,
+        )
+    except Exception as exc:
+        _reason(
+            path,
+            request_id,
+            f"replacement accepted but registration failed; retrying next poll: {exc}",
         )
 
 
@@ -132,20 +140,10 @@ def recover(request, group, child, frames, *, path, now):
     try:
         with get_conn(path) as conn:
             attempt = conn.execute(
-                "SELECT state,payload_json,params_json,result_json FROM lco_rescue_attempts WHERE original_id=?",
+                "SELECT 1 FROM lco_rescue_attempts WHERE original_id=?",
                 (request_id,),
             ).fetchone()
         if attempt:
-            if attempt[0] == "accepted":
-                _register(
-                    path,
-                    request_id,
-                    json.loads(attempt[1]),
-                    json.loads(attempt[2]),
-                    json.loads(attempt[3]),
-                    request.get("user_name"),
-                    now,
-                )
             return
         policy = rescue_policy(params["auto_resubmit"], request["proposal"])
         if policy is None:

@@ -3416,7 +3416,7 @@
     var reqs = deriveRequests();
     var totalSeconds = reqs.reduce(function (sum, r) { return sum + windowDurationSec(r.start, r.end); }, 0);
     el('strategy-summary').textContent = strategyOptions() ? reqs.length + ' requests · ' + (totalSeconds / 3600).toFixed(3) + ' h total window time before observability clipping (including repeated time and padding).' : 'Invalid strategy: use 2–10 requests, a positive shift, and non-negative padding.';
-    el('btn-create-draft').disabled = !strategyOptions();
+    el('btn-create-draft').disabled = !selectedWindowIndices().length || !strategyOptions();
     el('sch-strategy-count').disabled = val('sch-strategy') === 'single';
     el('sch-strategy-offset').disabled = val('sch-strategy') !== 'overlapping';
     el('sch-strategy-before').disabled = val('sch-strategy') !== 'chunked';

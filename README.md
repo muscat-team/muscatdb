@@ -719,7 +719,10 @@ the original target and constraints, checks IPP, and cancels a superseded pendin
 single-request group before booking the shorter `_auto` request. If the original
 is completed or its request/group is canceled, no replacement is submitted,
 including cancellations made directly in the LCO portal. An expired window
-cannot be extended beyond its original end.
+cannot be extended beyond its original end. Because the original is canceled
+before the replacement is submitted, a failed or uncertain submission can leave
+no active booking for that transit; the monitor records the reason and does not
+retry, so check the LCO portal and rebook by hand if needed.
 
 The [LCO API reference](https://developers.lco.global/#data-format-definition)
 does not expose another proposal's conflicting observation through telescope
