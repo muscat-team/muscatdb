@@ -30,7 +30,7 @@ def test_lazy_load_grouping_date_persistence_and_download(page, archive):
     assert len(archive) == 1
     assert not archive[0].get('start') and not archive[0].get('end')
     expect(page.locator('#target-lco-help')).to_contain_text('Dates are optional')
-    expect(page.locator('#target-lco-table tbody tr').first.locator('td').nth(6)).to_have_text('30')
+    expect(page.locator('#target-lco-table tbody tr').first.locator('td').nth(7)).to_have_text('30')
     expect(page.locator('#target-lco-table')).to_contain_text('Proprietary')
     posted = []
     def download(route):
@@ -126,7 +126,7 @@ def test_exposure_rounding_deduplicates_and_photometry_icon_navigates(page, arch
     page.route('**/api/lco/archive/target?**', lambda r: r.fulfill(json={'ok': True, 'rows': [row]}))
     page.goto('/target?name=TOI-1000')
     page.locator('#target-lco-details > summary').click()
-    expect(page.locator('#target-lco-table tbody tr td').nth(6)).to_have_text('70, 120')
+    expect(page.locator('#target-lco-table tbody tr td').nth(7)).to_have_text('70, 120')
     link = page.locator('#target-lco-table').get_by_role('link', name='Photometry', exact=True)
     expect(link).to_have_text('🔭')
     link.click()
@@ -151,3 +151,21 @@ def test_archive_layout_keeps_status_separate_and_tables_content_sized(page, arc
         assert table.evaluate("el => getComputedStyle(el).tableLayout") == 'auto'
         assert table.evaluate("el => getComputedStyle(el).borderCollapse") == 'collapse'
     page.screenshot(path=str(tmp_path / f'target-archive-{width}.png'), full_page=True)
+
+
+def test_object_column_uses_archive_header_names_as_text(page, archive, monkeypatch):
+    def search(*a, **kw):
+        yield [dict(frame(1, 101), OBJECT='Header alias'),
+               dict(frame(2, 101), OBJECT='<b>Other alias</b>'),
+               dict(frame(3, 101), OBJECT='Header alias'),
+               dict(frame(4, 102), OBJECT=None)]
+    monkeypatch.setattr(lco, 'archive_cursor_pages', search)
+    page.goto('/target?name=TOI-1000')
+    page.locator('#target-lco-details > summary').click()
+    expect(page.locator('#target-lco-table tbody tr')).to_have_count(2)
+    headers = page.locator('#target-lco-table thead th').all_inner_texts()
+    assert headers[:2] == ['Night', 'Object']
+    cells = page.locator('#target-lco-table tbody tr td:nth-child(2)')
+    expect(cells.nth(0)).to_have_text('—')
+    expect(cells.nth(1)).to_have_text('<b>Other alias</b>, Header alias')
+    assert cells.locator('b').count() == 0

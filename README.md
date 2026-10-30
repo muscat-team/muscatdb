@@ -643,6 +643,9 @@ covering its coordinates, including nights never reported to ExoFOP. The panel
 starts searching automatically when opened; wait for the progress message to finish.
 Leave both optional dates blank to search all nights. Each row groups a night, instrument and LCO request,
 with filters, exposure times, proposal, frame count and proprietary status.
+The **Object** column lists distinct FITS `OBJECT` values reported by the archive
+for that group, preserving header names rather than substituting the searched
+target name. Missing values display as **—**.
 Exposure times are rounded to the nearest second and deduplicated for display
 (for example, 69.937–70.081 seconds appears as 70); raw metadata is unchanged.
 Local presence uses the individual frame filenames in the database; a partial

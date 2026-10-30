@@ -146,7 +146,7 @@ def inventory_events(target: str, user_name: str | None, *, denied=frozenset(), 
         request = str(frame.get('request_id') or '')
         key = (night, instrument, request, site, telescope, proposal)
         group = groups.setdefault(key, dict(date=night, instrument=instrument, request_id=request,
-            site=site, telescope=telescope, proposal=proposal, filters=set(), exposures=set(),
+            site=site, telescope=telescope, proposal=proposal, filters=set(), exposures=set(), objects=set(),
             filenames=set(), frame_count=0, proprietary=False))
         # Archive pagination can overlap; count each physical frame once.
         filename = _stem(str(frame.get('filename') or frame.get('basename') or ''))
@@ -155,6 +155,9 @@ def inventory_events(target: str, user_name: str | None, *, denied=frozenset(), 
             continue
         group['filenames'].add(identity)
         group['frame_count'] += 1
+        object_name = str(frame.get('OBJECT') or '').strip()
+        if object_name:
+            group['objects'].add(object_name)
         group['filters'].add(str(frame.get('FILTER') or ''))
         if frame.get('EXPTIME') is not None:
             group['exposures'].add(str(frame['EXPTIME']))
@@ -187,6 +190,7 @@ def inventory_events(target: str, user_name: str | None, *, denied=frozenset(), 
         group['local_frames'] = len(matched)
         group['local_target'] = next((local[pair][name] for name in matched if local[pair][name]), target)
         group['exists'] = group['local_frames'] == group['frame_count']
+        group['objects'] = sorted(group['objects'])
         group['filters'] = sorted(group['filters'])
         group['exposures'] = sorted(group['exposures'])
         group['reported'] = any(

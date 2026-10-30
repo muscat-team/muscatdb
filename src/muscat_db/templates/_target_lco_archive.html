@@ -17,7 +17,7 @@
   <p class="hint target-lco-report-help"><strong>Reported on ExoFOP:</strong> a matching instrument, site and night (±1 day). This does not identify a particular request.</p>
   <div class="csv-wrap">
     <table id="target-lco-table" hidden data-no-resize>
-      <thead><tr><th>Night</th><th>Instrument</th><th>Site</th><th>Telescope</th><th>Filters</th><th>Frames</th><th>Exposure (s)</th><th>Proposal</th><th>Request ID</th><th>Access</th><th>In muscat-db</th><th>Reported on ExoFOP</th><th>Action</th></tr></thead>
+      <thead><tr><th>Night</th><th title="FITS OBJECT values reported by the archive">Object</th><th>Instrument</th><th>Site</th><th>Telescope</th><th>Filters</th><th>Frames</th><th>Exposure (s)</th><th>Proposal</th><th>Request ID</th><th>Access</th><th>In muscat-db</th><th>Reported on ExoFOP</th><th>Action</th></tr></thead>
       <tbody></tbody>
     </table>
   </div>
@@ -87,7 +87,7 @@
       if (!data.ok) throw new Error(data.error || 'Archive search failed');
       data.rows.forEach(row => {
         const tr = document.createElement('tr');
-        [row.date, row.instrument, row.site, row.telescope, row.filters.join(', '), row.frame_count,
+        [row.date, (row.objects || []).join(', ') || '—', row.instrument, row.site, row.telescope, row.filters.join(', '), row.frame_count,
           exposure(row.exposures), row.proposal, row.request_id,
           row.proprietary ? 'Proprietary' : 'Public / unspecified',
           row.exists ? 'Yes' : row.local_frames ? 'Partial (' + row.local_frames + ')' : 'No',
