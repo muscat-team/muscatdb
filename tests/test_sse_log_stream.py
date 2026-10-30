@@ -16,6 +16,7 @@ the completed response body.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import threading
@@ -212,3 +213,91 @@ class TestTtvFitLogStream:
             assert events[-1]["state"] == "done"
         finally:
             self._clear()
+
+
+class _FakeRequest:
+    """Stands in for the Starlette request: the client never disconnects."""
+
+    async def is_disconnected(self):
+        return False
+
+
+class TestStreamEventLoop:
+    """Issue #325 item 7: the generator runs its blocking status read off the
+    event loop, and a failure inside it ends the stream instead of escaping."""
+
+    def test_slow_status_read_does_not_delay_other_coroutines(self):
+        def slow_status():
+            time.sleep(0.3)
+            return {"state": "done"}
+
+        async def scenario():
+            delays: list[float] = []
+
+            async def timer():
+                t0 = time.monotonic()
+                await asyncio.sleep(0.01)
+                delays.append(time.monotonic() - t0)
+
+            timer_task = asyncio.create_task(timer())
+            # Let the timer reach its sleep before the stream starts reading.
+            await asyncio.sleep(0)
+            events = [chunk async for chunk in web._sse_job_stream(_FakeRequest(), slow_status)]
+            await timer_task
+            return events, delays
+
+        events, delays = asyncio.run(scenario())
+        assert events and b'"state":"done"' in events[-1]
+        # Blocked on the loop, the 10 ms timer would fire only after the full
+        # 300 ms status read.
+        assert delays[0] < 0.15, f"timer delayed {delays[0]:.3f}s by the status read"
+
+    def test_status_read_failure_ends_the_stream_cleanly(self):
+        calls: list[int] = []
+
+        def flaky_status():
+            calls.append(1)
+            if len(calls) == 1:
+                return {"state": "running", "log": "started"}
+            raise RuntimeError("job store unavailable")
+
+        async def scenario():
+            return [chunk async for chunk in web._sse_job_stream(_FakeRequest(), flaky_status)]
+
+        events = asyncio.run(scenario())
+        assert len(events) == 1
+        assert _parse_sse_events(events[0].decode())[0]["state"] == "running"
+        assert calls == [1, 1]
+
+    @pytest.mark.parametrize("route, module, params", [
+        ("/api/photometry/log-stream", phot, {"inst": INST, "date": DATE, "target": TARGET}),
+        ("/api/transit-fit/log-stream", fit, {"inst": INST, "date": DATE, "target": TARGET}),
+    ])
+    def test_routes_leave_reconciliation_to_the_background_loop(self, mock_db, monkeypatch, route, module, params):
+        synced: list[int] = []
+        monkeypatch.setattr(module, "sync_jobs", lambda: synced.append(1))
+        monkeypatch.setattr(module, "job_status", lambda *a, **kw: {"state": "done", "log": ""})
+        response = TestClient(app).get(route, params=params)
+        assert response.status_code == 200
+        assert _parse_sse_events(response.text)[-1]["state"] == "done"
+        assert synced == [], "the stream must not reconcile jobs itself"
+
+    def test_visibility_lookup_runs_as_the_requesting_viewer(self, mock_db, monkeypatch):
+        """The visibility check now runs on a worker thread; it must still see
+        the viewer the auth middleware set for this request."""
+        monkeypatch.setenv("MUSCAT_PROXY_SECRET", "proxy-secret")
+        seen: list[str | None] = []
+
+        def fake_hidden(level, inst, date, target, run_id=""):
+            seen.append(web._CURRENT_USER.get())
+            return False
+
+        monkeypatch.setattr(web, "_run_hidden", fake_hidden)
+        monkeypatch.setattr(phot, "job_status", lambda *a, **kw: {"state": "done", "log": ""})
+        response = TestClient(app, client=("127.0.0.1", 12345)).get(
+            "/api/photometry/log-stream",
+            params={"inst": INST, "date": DATE, "target": TARGET},
+            headers={"X-Forwarded-User": "alice", "X-MuSCAT-Proxy-Secret": "proxy-secret"},
+        )
+        assert response.status_code == 200
+        assert seen == ["alice"]

@@ -2026,9 +2026,27 @@ class ExofopTimeSeriesTest(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         exofop._exofop_cache.clear()
 
-    def test_fetch_time_series_empty_on_error(self):
+    def test_fetch_time_series_reports_error(self):
         with patch("muscat_db.exofop.catalog._sync_get", side_effect=RuntimeError("boom")):
-            self.assertEqual(exofop.fetch_time_series("6715"), [])
+            with self.assertRaisesRegex(RuntimeError, "ExoFOP lookup failed"):
+                exofop.fetch_time_series("6715")
+        exofop._exofop_cache.clear()
+
+    def test_time_series_failure_is_not_cached_and_successful_empty_is_distinct(self):
+        exofop._exofop_cache.clear()
+        class Response:
+            def json(self):
+                return {"time_series": []}
+        with patch("muscat_db.exofop.resolve_toi_number", return_value="6715"), \
+                patch("muscat_db.exofop.catalog._sync_get", side_effect=[
+                    RuntimeError("offline"), Response()]) as get:
+            failed = exofop.build_time_series_report("TOI-6715")
+            self.assertFalse(failed["ok"])
+            self.assertIn("ExoFOP lookup failed", failed["error"])
+            empty = exofop.build_time_series_report("TOI-6715")
+            self.assertTrue(empty["ok"])
+            self.assertEqual(empty["time_series"], [])
+            self.assertEqual(get.call_count, 2)
         exofop._exofop_cache.clear()
 
     def test_camera_names_parse_to_instrument(self):

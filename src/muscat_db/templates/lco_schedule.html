@@ -1409,7 +1409,7 @@
         setVal('sch-t0', ''); setVal('sch-period', '');
         setFieldSource('sch-t0', ''); setFieldSource('sch-period', '');
         saveOptions();
-        msg('msg-windows', 'No ' + sheetLabel + ' transit-center fit for ' + planet + ' (needs ≥2 epochs and a seed period)', 'err');
+        msg('msg-windows', 'No ' + sheetLabel + ' transit-center fit for ' + planet + (gt.error ? ': ' + gt.error : ' (needs ≥2 epochs and a seed period)'), 'err');
         return;
       }
       setVal('sch-t0', tupleString(gt.t0, gt.t0_unc));
@@ -3479,16 +3479,39 @@
     return items.reduce(function (chain, item) { return chain.then(function () { return fn(item); }); }, Promise.resolve());
   }
 
+  // Drafts are built from the current settings, submitted rows included: the
+  // booking is kept server side (Submitted Request Monitoring), so a settings
+  // change after a submit can go out as a second request from the same row.
+  // Drafting over a submitted row by accident would book the window twice, so
+  // it is confirmed once, naming the request IDs already booked.
   el('btn-create-draft').addEventListener('click', function () {
-    var reqs = deriveRequests().filter(function (r) { return reqStateFor(r.key).status !== 'submitted'; });
+    var reqs = deriveRequests();
     if (!reqs.length) { msg('msg-ipp', 'Tick at least one transit with a plan to draft.', 'err'); return; }
+    var submitted = reqs.filter(function (r) { return reqStateFor(r.key).status === 'submitted'; });
+    if (!submitted.length) { createDrafts(reqs); return; }
+    var ids = [];
+    submitted.forEach(function (r) { ids = ids.concat(reqStateFor(r.key).ids || []); });
+    var which = submitted.length === reqs.length
+      ? (reqs.length === 1 ? 'This request was' : 'All ' + reqs.length + ' of these requests were')
+      : submitted.length + ' of these ' + reqs.length + ' requests ' + (submitted.length === 1 ? 'was' : 'were');
+    var idText = ids.length ? ' (request ID' + (ids.length > 1 ? 's' : '') + ' ' + ids.join(', ') + ')' : '';
+    showConfirmModal(
+      'Draft over ' + submitted.length + ' submitted request' + (submitted.length > 1 ? 's' : '') + '?',
+      which + ' already submitted' + idText + '. The booked request' + (submitted.length > 1 ? 's stay' : ' stays') +
+        ' listed under Submitted Request Monitoring; submitting a new draft books the same window again. Create new drafts anyway?',
+      { confirmLabel: 'Create drafts', confirmClass: 'btn danger' }
+    ).then(function (confirmed) { if (confirmed) createDrafts(reqs); });
+  });
+
+  function createDrafts(reqs) {
     var failed = 0;
     msg('msg-ipp', 'Building ' + reqs.length + ' draft(s)…');
     runSequential(reqs, function (req) {
       var st = reqStateFor(req.key);
       return MuscatFetch.fetchJson('/api/lco/build', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(paramsFor(req)) })
         .then(function (d) {
-          st.hash = null; st.adjusted = null;
+          // A redrafted row describes a new request, so the old booking's IDs go.
+          st.hash = null; st.adjusted = null; st.ids = null;
           if (!d.ok) { st.payload = null; st.status = 'error'; st.message = d.error || 'build failed'; failed++; return; }
           st.payload = d.payload; st.badJson = false; st.status = 'draft'; st.message = '';
         })
@@ -3498,7 +3521,7 @@
       saveScheduleState();
       msg('msg-ipp', failed ? failed + ' of ' + reqs.length + ' draft(s) failed — see Status.' : reqs.length + ' draft(s) created. Review (JSON), then Check settings.', failed ? 'err' : 'ok');
     });
-  });
+  }
 
   el('btn-dry-run').addEventListener('click', function () {
     var reqs = deriveRequests().filter(function (r) {

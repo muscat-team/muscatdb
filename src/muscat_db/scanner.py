@@ -65,7 +65,14 @@ def _is_obsdate_dir(name: str) -> bool:
     return True
 
 # FITS header blocks are 2880 bytes; almost all real headers fit in <=8 blocks.
-_FITS_HEADER_MAX_BYTES = 2880 * 16
+_FITS_BLOCK_BYTES = 2880
+_FITS_HEADER_MAX_BYTES = _FITS_BLOCK_BYTES * 16
+# Cards needed to size a data unit so the next HDU's header can be located
+# without reading the data. NAXIS is capped at 999 by the standard but real
+# frames never exceed a handful of axes.
+_HDU_SIZE_KEYS = frozenset({"BITPIX", "NAXIS", "PCOUNT", "GCOUNT", *(f"NAXIS{i}" for i in range(1, 10))})
+# Upper bound on extensions walked for missing keys; BANZAI MEFs have four.
+_FITS_MAX_EXTENSIONS = 32
 
 # A single-CCD instrument (sinistro, sbig, qhy600) has no sibling CCD to prove
 # a date directory is genuinely readable, so an existing CSV's own mtime is
@@ -98,15 +105,19 @@ def _normalize_numeric(val: str) -> str:
     return str(f)
 
 
-def _parse_fits_cards(text: str, wanted: set[str]) -> tuple[dict[str, str], bool]:
-    """Parse 80-char FITS header cards. Returns (values, end_found)."""
+def _parse_fits_cards(text: str, wanted: set[str]) -> tuple[dict[str, str], int]:
+    """Parse 80-char FITS header cards.
+
+    Returns ``(values, end_pos)`` where ``end_pos`` is the character offset of
+    the ``END`` card, or ``-1`` when no ``END`` card lies within ``text``.
+    """
     result: dict[str, str] = {}
-    end_found = False
+    end_pos = -1
     for i in range(0, len(text) - 79, 80):
         card = text[i:i + 80]
         key = card[:8].strip()
         if key == "END":
-            end_found = True
+            end_pos = i
             break
         if key not in wanted or card[8:10] != "= ":
             continue
@@ -120,36 +131,109 @@ def _parse_fits_cards(text: str, wanted: set[str]) -> tuple[dict[str, str], bool
             slash = val_part.find("/")
             val = (val_part[:slash] if slash >= 0 else val_part).strip()
             result[key] = _normalize_numeric(val)
-    return result, end_found
+    return result, end_pos
+
+
+def _blocks(nbytes: int) -> int:
+    """Round ``nbytes`` up to a whole number of FITS blocks."""
+    return -(-nbytes // _FITS_BLOCK_BYTES) * _FITS_BLOCK_BYTES
+
+
+def _hdu_data_bytes(cards: dict[str, str]) -> int | None:
+    """Size of the data unit described by ``cards``, padded to whole blocks.
+
+    Follows the FITS standard's formula ``|BITPIX|/8 * GCOUNT * (PCOUNT +
+    NAXIS1 * ... * NAXISn)``; PCOUNT and GCOUNT default to 0 and 1 as the
+    standard requires for primary HDUs. Returns ``None`` when the structural
+    cards are missing or malformed, so the caller stops walking instead of
+    seeking to a bogus offset.
+    """
+    try:
+        bitpix = abs(int(cards["BITPIX"]))
+        naxis = int(cards["NAXIS"])
+        if naxis == 0:
+            return 0
+        n = 1
+        for i in range(1, naxis + 1):
+            n *= int(cards[f"NAXIS{i}"])
+        pcount = int(cards.get("PCOUNT", "0"))
+        gcount = int(cards.get("GCOUNT", "1"))
+    except (KeyError, ValueError):
+        return None
+    if bitpix % 8 or n < 0 or pcount < 0 or gcount < 1:
+        return None
+    return _blocks(bitpix // 8 * gcount * (pcount + n))
+
+
+def _fill_from_extensions(
+    f, primary_cards: dict[str, str], primary_end: int, values: dict[str, str], keys: list[str],
+) -> None:
+    """Fill keys blank after the primary header from extension headers, in place.
+
+    Each extension header is read with the same bounded window as the primary
+    header and the walk stops at the first HDU that cannot be sized or has no
+    ``END`` card, so a truncated or pathological file costs at most a few
+    short reads and never reaches astropy. Values already present in
+    ``values`` are never overwritten, which keeps primary-header precedence.
+    """
+    missing = [k for k in keys if not values.get(k)]
+    data_bytes = _hdu_data_bytes(primary_cards)
+    if not missing or data_bytes is None:
+        return
+    offset = _blocks(primary_end + 80) + data_bytes
+    for _ in range(_FITS_MAX_EXTENSIONS):
+        try:
+            f.seek(offset)
+            data = f.read(_FITS_HEADER_MAX_BYTES)
+        except OSError:
+            return
+        if not data.startswith(b"XTENSION="):
+            return
+        cards, end_pos = _parse_fits_cards(data.decode("ascii", errors="replace"), {*missing, *_HDU_SIZE_KEYS})
+        if end_pos < 0:
+            return
+        for k in missing:
+            if cards.get(k):
+                values[k] = cards[k]
+        missing = [k for k in missing if not values.get(k)]
+        data_bytes = _hdu_data_bytes(cards)
+        if not missing or data_bytes is None:
+            return
+        offset += _blocks(end_pos + 80) + data_bytes
 
 
 def _read_fits_header_raw(filepath: str, keys: list[str]) -> dict[str, str] | None:
-    """Fast path: read FITS primary-HDU header cards directly from disk.
+    """Fast path: read FITS header cards directly from disk.
 
-    Returns ``None`` to signal that astropy should be tried (well-formed primary
-    HDU with no requested keys — typical of MEF files). Returns an empty-values
-    dict for corrupt files (no ``END`` card within the first ~46 KB) so the
-    caller skips the file instead of feeding it to astropy, which can hang on
+    The primary header is read first. When it holds some but not all of the
+    requested keys, extension headers are walked for the rest (see
+    ``_fill_from_extensions``); the primary header still wins where both have a
+    key. Returns ``None`` to signal that astropy should be tried (well-formed
+    primary HDU with no requested keys at all). Returns an empty-values dict
+    for corrupt files (no ``END`` card within the first ~46 KB) so the caller
+    skips the file instead of feeding it to astropy, which can hang on
     pathological headers.
     """
     try:
         with open(filepath, "rb") as f:
             data = f.read(_FITS_HEADER_MAX_BYTES)
+            if len(data) < 80 or not data.startswith(b"SIMPLE  ="):
+                return None
+            text = data.decode("ascii", errors="replace")
+            cards, end_pos = _parse_fits_cards(text, {*keys, *_HDU_SIZE_KEYS})
+            values = {k: cards[k] for k in keys if k in cards}
+            if not values:
+                if end_pos >= 0:
+                    # Well-formed primary HDU with none of our keys → MEF, try astropy.
+                    return None
+                # No END card and no values → corrupt/truncated header. Return
+                # empties so the caller skips it; astropy is liable to hang on these.
+                return {k: "" for k in keys}
+            if end_pos >= 0 and not all(values.get(k) for k in keys):
+                _fill_from_extensions(f, cards, end_pos, values, keys)
     except OSError:
         return None
-    if len(data) < 80 or not data.startswith(b"SIMPLE  ="):
-        return None
-    text = data.decode("ascii", errors="replace")
-    values, end_found = _parse_fits_cards(text, set(keys))
-    if values:
-        # Got at least one requested key — use whatever we parsed.
-        return {k: values.get(k, "") for k in keys}
-    if end_found:
-        # Well-formed primary HDU with none of our keys → MEF, try astropy.
-        return None
-    # No END card and no values → corrupt/truncated header. Return empties so
-    # the caller skips it; astropy is liable to hang on these.
-    return {k: "" for k in keys}
+    return {k: values.get(k, "") for k in keys}
 
 
 def _read_fits_header_astropy(filepath: str, keys: list[str]) -> dict[str, str]:
@@ -384,14 +468,17 @@ def scan_date(
     alike. A zero-file result leaves an existing entry alone -- no files is
     not proof the earlier failure was resolved (the directory may be gone).
     """
+    root = None if data_root is None else os.fspath(data_root)
     try:
         result = _scan_date(inst_name, obsdate, max_workers, progress, data_root)
     except Exception as exc:
-        scan_failures.record(OBSLOG_BASE, inst_name, obsdate, f"{type(exc).__name__}: {exc}")
+        scan_failures.record(
+            OBSLOG_BASE, inst_name, obsdate, f"{type(exc).__name__}: {exc}", data_root=root,
+        )
         raise
     if result.get("write_errors"):
         scan_failures.record(
-            OBSLOG_BASE, inst_name, obsdate, "; ".join(result["write_errors"]),
+            OBSLOG_BASE, inst_name, obsdate, "; ".join(result["write_errors"]), data_root=root,
         )
         if "total" not in result:
             return {}  # nothing was written; callers read truthy as "had data"

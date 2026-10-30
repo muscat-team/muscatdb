@@ -1,17 +1,23 @@
 <details class="adv" id="target-lco-details" style="margin-top: 1rem;">
   <summary>LCO archive</summary>
-  <p class="hint">Science frames at reduction level 91 covering this target, including observations absent from ExoFOP. Results reflect your LCO token and proposal access. Archive metadata is cached for one hour.</p>
-  <form id="target-lco-form" class="lco-actions">
-    <label>Start (UT) <input id="target-lco-start" type="date"></label>
-    <label>End (UT, inclusive) <input id="target-lco-end" type="date"></label>
+  <div class="target-lco-intro">
+    <p>Science frames covering this target, including observations absent from ExoFOP.</p>
+    <p class="hint">Reduction level 91 · Results depend on your LCO token and proposal access · Archive metadata is cached for one hour.</p>
+  </div>
+  <p id="target-lco-help" class="hint">Opening this section starts a search automatically. Please wait while the archive is queried. Dates are optional: leave both blank to search all nights.</p>
+  <form id="target-lco-form" class="target-lco-filters" aria-describedby="target-lco-help">
+    <label for="target-lco-start">Start (UT, optional)<input id="target-lco-start" type="date"></label>
+    <label for="target-lco-end">End (UT, inclusive, optional)<input id="target-lco-end" type="date"></label>
     <button class="btn sm" type="submit">Search</button>
-    <a href="/jobs">Jobs / download progress</a>
   </form>
-  <p id="target-lco-status" class="hint" role="status">Open this section to search the LCO archive.</p>
-  <p class="hint">“Reported” matches an ExoFOP observation by instrument, site and night (±1 day); it does not identify a particular request.</p>
+  <div class="target-lco-feedback">
+    <p id="target-lco-status" role="status" aria-live="polite">Open this section to search the LCO archive.</p>
+    <a href="/jobs">Jobs / download progress →</a>
+  </div>
+  <p class="hint target-lco-report-help"><strong>Reported on ExoFOP:</strong> a matching instrument, site and night (±1 day). This does not identify a particular request.</p>
   <div class="csv-wrap">
-    <table id="target-lco-table" hidden style="width: max-content;">
-      <thead><tr><th>Night</th><th>Instrument</th><th>Site</th><th>Telescope</th><th>Filters</th><th>Frames</th><th>Exposure (s)</th><th>Proposal</th><th>Request ID</th><th>Access</th><th>In muscat-db</th><th>Reported on ExoFOP</th><th>Action</th></tr></thead>
+    <table id="target-lco-table" hidden data-no-resize>
+      <thead><tr><th>Night</th><th title="FITS OBJECT values reported by the archive">Object</th><th>Instrument</th><th>Site</th><th>Telescope</th><th>Filters</th><th>Frames</th><th>Exposure (s)</th><th>Proposal</th><th>Request ID</th><th>Access</th><th>In muscat-db</th><th>Reported on ExoFOP</th><th>Action</th></tr></thead>
       <tbody></tbody>
     </table>
   </div>
@@ -42,7 +48,9 @@
     const td = document.createElement('td'); td.textContent = text; tr.appendChild(td); return td;
   }
   function exposure(values) {
-    return values.map(v => Number.isFinite(Number(v)) ? String(Number(Number(v).toFixed(6))) : v).join(', ');
+    // Round before deduplicating; keep the raw archive metadata unchanged.
+    return [...new Set(values.map(v => Number.isFinite(Number(v))
+      ? String(Math.round(Number(v))) : v))].sort((a, b) => Number(a) - Number(b)).join(', ');
   }
   async function download(row, button, action) {
     button.disabled = true;
@@ -56,9 +64,11 @@
       button.textContent = 'Queued';
       const link = document.createElement('a'); link.href = '/jobs';
       link.textContent = ' View progress'; action.appendChild(link);
-      status.textContent = 'Download queued. After ingest, reload this panel to open photometry.';
+      status.dataset.state = 'queued';
+      status.textContent = 'Download queued. Follow progress in Jobs. When download and ingest finish, use Search to refresh this panel and open 🔭 photometry.';
       loaded = false;
     } catch (error) {
+      status.dataset.state = 'error';
       status.textContent = error.message; button.disabled = false;
     }
   }
@@ -66,23 +76,24 @@
     if (busy) return;
     busy = true; form.querySelector('button').disabled = true;
     saveDates(); table.hidden = true; table.tBodies[0].replaceChildren();
-    status.textContent = 'Searching LCO archive…';
+    status.dataset.state = 'searching';
+    status.textContent = 'Searching LCO archive… Please wait.';
     try {
       const query = new URLSearchParams({target, stream: true,
         start: document.getElementById(fields[0]).value,
         end: document.getElementById(fields[1]).value});
       const response = await fetch('/api/lco/archive/target?' + query);
-      const data = await MuscatFetch.readProgress(response, text => { status.textContent = text; });
+      const data = await MuscatFetch.readProgress(response, text => { status.textContent = text + ' Please wait.'; });
       if (!data.ok) throw new Error(data.error || 'Archive search failed');
       data.rows.forEach(row => {
         const tr = document.createElement('tr');
-        [row.date, row.instrument, row.site, row.telescope, row.filters.join(', '), row.frame_count,
+        [row.date, (row.objects || []).join(', ') || '—', row.instrument, row.site, row.telescope, row.filters.join(', '), row.frame_count,
           exposure(row.exposures), row.proposal, row.request_id,
           row.proprietary ? 'Proprietary' : 'Public / unspecified',
           row.exists ? 'Yes' : row.local_frames ? 'Partial (' + row.local_frames + ')' : 'No',
           row.reported === null ? 'Unknown' : row.reported ? 'Yes' : 'No matching report'
         ].forEach(value => cell(tr, value));
-        const action = cell(tr, '');
+        const action = cell(tr, ''); action.className = 'target-lco-actions';
         if (!row.exists && /^\d+$/.test(row.request_id)) {
           const button = document.createElement('button'); button.type = 'button';
           button.className = 'btn sm'; button.textContent = 'Download';
@@ -93,15 +104,18 @@
           const link = document.createElement('a');
           link.href = '/photometry?' + new URLSearchParams({inst: row.instrument,
             date: row.date.replaceAll('-', '').slice(2), target: row.local_target || target});
-          link.textContent = ' Photometry'; action.appendChild(link);
+          link.textContent = '🔭'; link.title = 'Photometry';
+          link.setAttribute('aria-label', 'Photometry'); action.appendChild(link);
         }
         table.tBodies[0].appendChild(tr);
       });
       table.hidden = !data.rows.length;
+      status.dataset.state = 'complete';
       status.textContent = data.rows.length ? data.rows.length + ' archive datasets.' : 'No visible archive datasets found.';
       if (data.truncated) status.textContent += ' Incomplete: search budget reached; narrow the dates and search again.';
       loaded = !data.truncated;
     } catch (error) {
+      status.dataset.state = 'error';
       loaded = false; status.textContent = error.message + ' Use Search to retry.';
     } finally {
       busy = false; form.querySelector('button').disabled = false;
