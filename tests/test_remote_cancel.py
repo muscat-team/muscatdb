@@ -136,6 +136,70 @@ def test_web_cancel_with_no_job_at_all_still_reports_nothing_to_cancel(
     assert killed == []
 
 
+def _enqueue(type_: str) -> str:
+    inst, date = _inst_date(type_)
+    run_id = "default" if type_ == "ttv_fit" else ""
+    get_job_store().enqueue(
+        type_=type_, inst=inst, date=date, target=TARGET, started_at=100.0,
+        run_type="full", run_id=run_id, run_name="default" if type_ == "ttv_fit" else "",
+    )
+    return _row(type_)["key"]
+
+
+@pytest.mark.parametrize(("type_", "cancel", "sync"), _scenarios())
+def test_web_cancel_of_a_queued_job_cancels_the_row(type_, cancel, sync, jobs_db, killed):
+    _enqueue(type_)
+
+    result = cancel()
+
+    assert result["ok"] is True
+    assert "requested" not in result
+    row = _row(type_)
+    assert row["state"] == "cancelled"
+    assert row["returncode"] == -1
+    assert row["error_desc"] == "Cancelled by user"
+    assert killed == []
+
+
+@pytest.mark.parametrize(("type_", "cancel", "sync"), _scenarios())
+def test_web_cancel_of_a_queued_job_claimed_meanwhile_requests_instead_of_overwriting(
+    type_, cancel, sync, jobs_db, killed, monkeypatch
+):
+    """A worker claims the pending row after the web process has read it as
+    pending and before it writes. The claim must win: the row stays running
+    under the worker, its slot stays claimed, and the cancel is left as a
+    request for the worker to act on (issue #325, item 5)."""
+    key = _enqueue(type_)
+    store = get_job_store()
+    real_all = store.all
+    raced = []
+
+    def all_then_claim():
+        rows = real_all()
+        if not raced:
+            raced.append(True)
+            # The worker's claim_slot(pending_key=) moves the row to running
+            # under its own instance id, inside one write; stand in for that
+            # other process by stamping the row the same way.
+            with pytest.MonkeyPatch.context() as other_process:
+                other_process.setattr(job_store, "current_instance_id", lambda: OTHER_HOST)
+                assert store.claim_slot(type_, key.split(":", 1)[1], 1, pending_key=key) is True
+        return rows
+
+    monkeypatch.setattr(store, "all", all_then_claim)
+
+    result = cancel()
+
+    assert result["ok"] is True
+    assert result.get("requested") is True
+    assert killed == []
+    row = _row(type_)
+    assert row["state"] == "running"
+    assert row["instance_id"] == OTHER_HOST
+    assert [r["target"] for r in store.cancel_requested(type_, OTHER_HOST)] == [TARGET]
+    assert store.reconcile_slots(type_) == 0
+
+
 def test_photometry_worker_acts_on_a_pending_cancel_request(jobs_db, killed, tmp_path, monkeypatch):
     rdir = tmp_path / INST / DATE
     rdir.mkdir(parents=True)

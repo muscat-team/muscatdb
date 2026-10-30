@@ -7,6 +7,9 @@ run-id / path-segment helpers are exercised here directly.
 
 import importlib
 import os
+import signal
+import subprocess
+import sys
 import time
 
 import pytest
@@ -357,6 +360,102 @@ class TestIsPidRunning:
 
     def test_implausible_pid_is_not_running(self):
         assert jobs.is_pid_running(999_999_999) is False
+
+
+def _group_gone(pgid: int, timeout: float = 3.0) -> bool:
+    """Wait for every member of *pgid* to be gone (orphans are reaped by the
+    system, so a SIGKILLed child leaves the table a moment after the signal)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not jobs.is_process_group_alive(pgid):
+            return True
+        time.sleep(0.05)
+    return False
+
+
+# A job whose parent exits at once but leaves a child, in the same session,
+# that ignores SIGTERM: the shape of a pipeline whose multiprocessing worker
+# outlives the interpreter that launched it.
+_PARENT_WITH_IMMORTAL_CHILD = (
+    "import subprocess, sys; "
+    "subprocess.Popen([sys.executable, '-c', "
+    "'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)'])"
+)
+_PARENT_WITH_BRIEF_CHILD = (
+    "import subprocess, sys; "
+    "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(0.3)'])"
+)
+
+
+class TestKillAfter:
+    """kill_after() must confirm the whole process group is gone, not just the
+    parent it holds a handle to (issue #325, item 6)."""
+
+    @pytest.fixture
+    def launch(self):
+        procs = []
+
+        def _launch(script):
+            proc = subprocess.Popen(
+                [sys.executable, "-c", script], start_new_session=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            procs.append(proc)
+            return proc
+
+        yield _launch
+        for proc in procs:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                pass
+
+    def test_kills_a_child_that_outlives_the_parent(self, launch):
+        proc = launch(_PARENT_WITH_IMMORTAL_CHILD)
+        proc.wait(timeout=10)
+        assert jobs.is_process_group_alive(proc.pid), "the child should still be in the group"
+
+        jobs.kill_after(proc, grace=0.5)
+
+        assert _group_gone(proc.pid)
+
+    def test_returns_once_the_group_is_gone_without_waiting_out_the_grace(self, launch):
+        proc = launch(_PARENT_WITH_BRIEF_CHILD)
+        proc.wait(timeout=10)
+
+        t0 = time.monotonic()
+        jobs.kill_after(proc, grace=10.0)
+
+        assert time.monotonic() - t0 < 5.0
+        assert not jobs.is_process_group_alive(proc.pid)
+
+    @pytest.mark.parametrize("reaped_first", [False, True], ids=["zombie", "reaped"])
+    def test_never_signals_a_group_the_job_did_not_lead(self, monkeypatch, reaped_first):
+        # Not start_new_session: the child shares this test runner's group,
+        # so after it exits the "group" is us. kill_after must leave it alone,
+        # whether it still holds the zombie or a sync_jobs poll reaped it.
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])
+        if reaped_first:
+            proc.wait(timeout=10)
+        else:
+            time.sleep(0.5)  # exited, but unreaped until kill_after's wait
+        real_killpg = os.killpg
+        sent = []
+
+        def spy(pgid, sig):
+            if sig != 0:
+                sent.append((pgid, sig))
+            return real_killpg(pgid, sig)
+
+        monkeypatch.setattr(os, "killpg", spy)
+
+        jobs.kill_after(proc, grace=0.2)
+
+        assert sent == []
 
 
 class TestPidFileProcessAlive:

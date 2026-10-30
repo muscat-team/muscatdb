@@ -136,6 +136,20 @@ class JobRepository(Protocol):
         ``running`` until the owner records the terminal state itself."""
         ...
 
+    def cancel_pending(self, key: str) -> bool:
+        """Mark the row at *key* ``cancelled`` iff it is still ``pending``;
+        return whether a row changed.
+
+        The state check and the write are one statement, so a worker's
+        :meth:`JobConcurrency.claim_slot` (``pending_key``) that moved the
+        row to ``running`` in between leaves it running and this returns
+        False. A caller that reads ``pending`` and then saves ``cancelled``
+        unconditionally would overwrite that claim: the row reads cancelled,
+        reconciliation drops the worker's slot, and the worker keeps running
+        with no request on record (issue #325, item 5). On False the caller
+        falls back to :meth:`request_cancel`, which the holder honors."""
+        ...
+
     def cancel_requested(self, type_: str, instance_id: str) -> list[dict]:
         """Running *type_* rows held by *instance_id* that have a cancel
         request newer than their own ``started_at``.
@@ -306,6 +320,15 @@ _START_PENDING_SQL = (
     "WHERE key = {p} AND state = 'pending'"
 )
 
+# cancel_pending, shared by both backends. The same state = 'pending' guard as
+# _START_PENDING_SQL, from the other side: a row the claim already moved to
+# running is left alone (0 rows) and the caller requests the cancel instead.
+_CANCEL_PENDING_SQL = (
+    "UPDATE jobs SET state = 'cancelled', returncode = {rc}, elapsed = 0, "
+    "error_desc = 'Cancelled by user', heartbeat_at = {p} "
+    "WHERE key = {p} AND state = 'pending'"
+)
+
 
 class DatabaseJobStore(JobRepository, JobQueue, JobConcurrency):
     """``jobs``-table-backed store. Delegates record writes/reads to
@@ -411,6 +434,17 @@ class DatabaseJobStore(JobRepository, JobQueue, JobConcurrency):
             )
             conn.commit()
             return cur.rowcount > 0
+
+    def cancel_pending(self, key: str) -> bool:
+        with database.get_conn() as conn:
+            cur = conn.execute(
+                _CANCEL_PENDING_SQL.format(p="?", rc=_CANCELLED_RC),
+                (time.time(), key),
+            )
+            conn.commit()
+        if cur.rowcount:
+            database.clear_all_caches()
+        return cur.rowcount > 0
 
     def cancel_requested(self, type_: str, instance_id: str) -> list[dict]:
         return _requested_cancels(self.active(), type_, instance_id)
@@ -909,6 +943,14 @@ class PostgresJobStore(JobRepository, JobQueue, JobConcurrency):
         with self._pool.connection() as conn:
             cur = conn.execute(
                 "UPDATE jobs SET cancel_requested_at = %s WHERE key = %s AND state = 'running'",
+                (time.time(), key),
+            )
+            return cur.rowcount > 0
+
+    def cancel_pending(self, key: str) -> bool:
+        with self._pool.connection() as conn:
+            cur = conn.execute(
+                _CANCEL_PENDING_SQL.format(p="%s", rc=_CANCELLED_RC),
                 (time.time(), key),
             )
             return cur.rowcount > 0

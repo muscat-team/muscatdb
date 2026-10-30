@@ -625,20 +625,54 @@ def next_reconcile_attempt(attempts: int) -> tuple[str, int]:
 # --------------------------- process-group control ---------------------------
 
 
-def kill_after(proc: subprocess.Popen, grace: float = 6.0) -> None:
-    """Escalate to SIGKILL on the process group if SIGTERM was ignored."""
+def _led_process_group(proc: subprocess.Popen) -> int | None:
+    """The process group *proc* leads, or ``None`` when it does not lead one.
+
+    Every pipeline launches with ``start_new_session=True``, so the job's pid
+    is also its group id; that still holds once the parent has been reaped and
+    ``getpgid`` can no longer answer. A process that merely shares this
+    server's own group is never reported, since signalling that group would
+    kill the server."""
+    try:
+        pgid = os.getpgid(proc.pid)
+    except OSError:
+        pgid = proc.pid
+    if pgid != proc.pid or pgid == os.getpgrp():
+        return None
+    return pgid
+
+
+def kill_after(proc: subprocess.Popen, grace: float = 6.0, poll_interval: float = 0.1) -> None:
+    """Escalate to SIGKILL on the process group if SIGTERM was ignored.
+
+    The parent exiting is not confirmation: the group it led can keep running
+    (a ``conda run`` wrapper's interpreter, multiprocessing workers that
+    ignore or outlive SIGTERM), so the whole group gets the same *grace*,
+    counted from the SIGTERM, and is SIGKILLed if any member is still alive
+    when it runs out (issue #325, item 6)."""
+    deadline = time.monotonic() + grace
+    pgid = _led_process_group(proc)
     try:
         proc.wait(timeout=grace)
-        return
     except subprocess.TimeoutExpired:
-        pass
-    try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except (ProcessLookupError, PermissionError, OSError):
         try:
-            proc.kill()
-        except OSError:
-            pass
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            try:
+                proc.kill()
+            except OSError:
+                pass
+        return
+    if pgid is None:
+        return
+    while is_process_group_alive(pgid):
+        if time.monotonic() >= deadline:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except OSError:
+                pass
+            return
+        time.sleep(poll_interval)
 
 
 def terminate_pg(proc: subprocess.Popen) -> None:
