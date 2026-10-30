@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import datetime
 import concurrent.futures
+import copy
 import hashlib
 import ipaddress
 import json
@@ -1953,23 +1954,16 @@ _LCO_VISIBILITY_EDGE_MARGIN_S = 900
 _EDGE_PROBE_S = 300
 
 
-def _repeat_duration(params: dict) -> int | None:
-    """Seconds a REPEAT_EXPOSE config should repeat within its observing window.
+def _window_repeat_duration(params: dict) -> int | None:
+    """Seconds the windows of ``params`` fit: the longest repeat_duration allowed.
 
-    An explicit ``repeat_duration`` wins. Otherwise derive it from the shortest
-    selected window (so one value fits every window), less the setup overhead.
-    When ``_clip_windows_to_observability`` capped a window's usable span (its
-    LCO-visible span, already shy of the observability edge margin), that cap is
-    applied before the setup overhead is deducted.
-    Returns ``None`` when it cannot be determined (no windows / bad timestamps).
+    Derived from the shortest selected window (so one value fits every window),
+    less the setup overhead. When ``_clip_windows_to_observability`` capped a
+    window's usable span (its LCO-visible span, already shy of the
+    observability edge margin), that cap is applied before the setup overhead
+    is deducted. Returns ``None`` when it cannot be determined (no windows /
+    bad timestamps).
     """
-    explicit = params.get("repeat_duration")
-    if explicit:
-        try:
-            return int(float(explicit))
-        except (TypeError, ValueError):
-            pass
-
     caps = params.get("_observable_repeat_duration") or {}
     durations = []
     for i, w in enumerate(params.get("windows") or []):
@@ -1989,6 +1983,74 @@ def _repeat_duration(params: dict) -> int | None:
     if not durations:
         return None
     return max(min(durations), 60)
+
+
+def _repeat_duration(params: dict) -> int | None:
+    """Seconds a REPEAT_EXPOSE config should repeat within its observing window.
+
+    An explicit ``repeat_duration`` (the schedule page's Observing duration
+    field, or a split leg's fitted override) wins, as long as it fits the
+    window: one longer than :func:`_window_repeat_duration` would be rejected
+    by LCO's dry run with a message that names neither, so it is refused here.
+    Without one, the window fit itself is used.
+    """
+    fit = _window_repeat_duration(params)
+    explicit = params.get("repeat_duration")
+    if explicit in (None, ""):
+        return fit
+    try:
+        seconds = int(float(explicit))
+    except (TypeError, ValueError):
+        raise LcoError(f"Observing duration must be a number of seconds, not {explicit!r}", status=400) from None
+    if seconds <= 0:
+        raise LcoError("Observing duration must be positive", status=400)
+    if fit is not None and seconds > fit:
+        raise LcoError(
+            f"Observing duration {seconds} s exceeds the {fit} s the window fits "
+            f"(its span less the {_REPEAT_EXPOSE_SETUP_OVERHEAD_S} s setup overhead and any "
+            "visibility margin); shorten it or widen the window",
+            status=400,
+        )
+    return seconds
+
+
+def window_repeat_duration(kind: str, params: dict) -> int | None:
+    """The repeat_duration :func:`build_requestgroup` would derive for ``params``.
+
+    The schedule page shows this per request as the default of its Observing
+    duration field and refuses anything longer, so the derivation (window
+    clipping under the request's own constraints, edge margins, setup
+    overhead) lives here only. ``params`` is left untouched. ``None`` when the
+    request is not a REPEAT_EXPOSE block or no window is usable.
+    """
+    config_type = params.get("type") or ("REPEAT_EXPOSE" if kind in ("muscat", "muscat3", "muscat4") else "EXPOSE")
+    if config_type != "REPEAT_EXPOSE":
+        return None
+    trial = copy.deepcopy(params)
+    trial.pop("repeat_duration", None)
+    trial["type"] = config_type
+    _clip_windows_to_observability(kind, trial, *_request_constraints(kind, trial))
+    return _window_repeat_duration(trial)
+
+
+def _request_constraints(kind: str, params: dict) -> tuple:
+    """``(max_airmass, min_lunar_distance, max_lunar_phase)`` as submitted.
+
+    The form's values when set, else the instrument's defaults. LCO's
+    ``max_lunar_phase`` is the Moon's illuminated fraction (0 new .. 1 full) to
+    schedule under; 1.0 is LCO's default (no phase restriction).
+    """
+    if kind in ("muscat", "muscat3", "muscat4"):
+        default_max_airmass = 2.5
+        default_min_lunar_distance = 18
+    else:
+        default_max_airmass = 1.6
+        default_min_lunar_distance = 30
+    return (
+        _value_or_default(params.get("max_airmass"), default_max_airmass),
+        _value_or_default(params.get("min_lunar_distance"), default_min_lunar_distance),
+        _value_or_default(params.get("max_lunar_phase"), 1.0),
+    )
 
 
 def _config_type_block(params: dict, default_type: str) -> dict:
@@ -2464,20 +2526,7 @@ def build_requestgroup(kind: str, params: dict, configurations: list[dict] | Non
 
     # These constraints are defined at the request level, but get copied into
     # the configuration level by this function, as per the LCO examples.
-    
-    # Set default airmass and lunar distance based on instrument kind
-    if kind in ("muscat", "muscat3", "muscat4"):
-        default_max_airmass = 2.5
-        default_min_lunar_distance = 18
-    else:
-        default_max_airmass = 1.6
-        default_min_lunar_distance = 30
-
-    max_airmass = _value_or_default(params.get("max_airmass"), default_max_airmass)
-    min_lunar_distance = _value_or_default(params.get("min_lunar_distance"), default_min_lunar_distance)
-    # LCO max_lunar_phase: max Moon illuminated fraction (0=new .. 1=full) to
-    # schedule under. 1.0 is LCO's default (no phase restriction).
-    max_lunar_phase = _value_or_default(params.get("max_lunar_phase"), 1.0)
+    max_airmass, min_lunar_distance, max_lunar_phase = _request_constraints(kind, params)
     _clip_windows_to_observability(kind, params, max_airmass, min_lunar_distance, max_lunar_phase)
 
     constraints = {

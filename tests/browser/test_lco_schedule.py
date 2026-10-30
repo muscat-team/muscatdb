@@ -380,3 +380,88 @@ def test_upload_disables_ignored_controls_and_skips_their_validation(page):
     page.select_option('#sch-source', '')
     expect(page.locator('#sch-t0')).to_be_enabled()
     expect(page.locator('#sch-period')).to_be_enabled()
+
+
+def _observing_field(page):
+    return page.locator("#requests-body .req-obs-duration")
+
+
+def _plot_end_input(page):
+    return page.locator('#vis-prop-legs input[data-edge="end"]')
+
+
+def test_observing_duration_follows_the_window_until_set_by_hand(page, lco_account):
+    """The field shows the window fit, tracks a resize, sends a shorter value as
+    repeat_duration, refuses a longer one, and Reset returns it to the fit."""
+    page.goto("/lco/schedule")
+    expect(page.locator("#msg-proposals")).to_have_text("Loaded 1 proposals")
+    page.select_option("#sch-proposal", PROPOSAL)
+    page.fill("#sch-target", "TOI-1000")
+    page.locator("#sch-target").blur()
+    expect(page.locator("#sch-period")).not_to_have_value("")
+    page.fill("#sch-coords", f"{RA}, {DEC}")  # by hand, so the plot link needs no lookup
+    page.fill("#sch-range-start", RANGE[0])
+    page.fill("#sch-range-end", RANGE[1])
+    with page.expect_response("**/api/lco/windows", timeout=60_000):
+        page.click("#btn-gen-windows")
+
+    row = page.locator("#windows-body tr", has_text="Full @ ELP")
+    with page.expect_response("**/api/lco/observing-duration"):
+        row.locator("input[type=checkbox]").check()
+    field = _observing_field(page)
+    expect(field).to_be_enabled()
+    note = page.locator("#requests-body .req-obs-note")
+    expect(note).to_contain_text("follows the window")
+    default_h = float(field.input_value())
+    fit_s = int(note.inner_text().split(" s")[0])
+    assert abs(fit_s / 3600 - default_h) < 0.006
+    request = page.locator("#requests-body tr").first
+    span_text = request.locator("td").nth(5).inner_text()
+    hours, minutes = span_text.split("(")[1].rstrip(")").replace("m", "").split("h ")
+    span_s = int(hours) * 3600 + int(minutes) * 60
+    assert fit_s < span_s  # the fit is shy of the window span (setup overhead, edge margin)
+
+    # Shorten the window by an hour from the plot's typed end time: the default follows.
+    with page.expect_response("**/api/lco/visibility"):
+        row.locator(".vis-link").click()
+    end_input = _plot_end_input(page)
+    expect(end_input).to_be_enabled()
+    end = datetime.datetime.strptime(end_input.input_value(), "%Y-%m-%d %H:%M")
+    new_end = (end - datetime.timedelta(hours=1)).strftime("%Y-%m-%d %H:%M")
+    with page.expect_response("**/api/lco/observing-duration"):
+        end_input.fill(new_end)
+        end_input.press("Tab")
+    expect(field).not_to_have_value(f"{default_h:.2f}")
+    shorter_h = float(field.input_value())
+    assert abs((default_h - shorter_h) - 1.0) < 0.02
+    expect(note).to_contain_text("follows the window")
+
+    # A shorter manual value is what Create drafts sends as repeat_duration.
+    field.fill("1")
+    field.press("Tab")
+    expect(note).to_contain_text("3600 s")
+    expect(note).to_contain_text("set by hand")
+    with page.expect_request("**/api/lco/build") as built:
+        page.click("#btn-create-draft")
+    assert built.value.post_data_json["repeat_duration"] == 3600
+    expect(request).to_contain_text("draft")
+    request.locator(".req-json").click()
+    expect(page.locator("#requests-body .req-payload")).to_contain_text('"repeat_duration": 3600')
+
+    # Longer than the window fits is refused on the row, not sent.
+    field.fill(f"{shorter_h + 0.5:.2f}")
+    field.press("Tab")
+    expect(note).to_contain_text("longer than the")
+    page.click("#btn-create-draft")
+    expect(request).to_contain_text("Observing duration: longer than")
+    expect(page.locator("#msg-ipp")).to_contain_text("1 of 1 draft(s) failed")
+
+    # Reset restores the fit and the value survives a reload.
+    page.locator("#requests-body .req-obs-reset").click()
+    expect(field).to_have_value(f"{shorter_h:.2f}")
+    expect(note).to_contain_text("follows the window")
+    field.fill("1.5")
+    field.press("Tab")
+    page.reload()
+    expect(_observing_field(page)).to_have_value("1.50")
+    expect(page.locator("#requests-body .req-obs-note")).to_contain_text("set by hand")
