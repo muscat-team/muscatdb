@@ -12,6 +12,8 @@ from muscat_db.database import SCHEMA
 
 @pytest.fixture
 def rescue(monkeypatch, tmp_path):
+    from muscat_db import chat
+    monkeypatch.setattr(chat, "emit_persisted_system_message", lambda *a, **kw: None)
     path = str(tmp_path / "rescue.db")
     with sqlite3.connect(path) as conn:
         conn.executescript(SCHEMA)
@@ -107,9 +109,10 @@ def poll(rescue):
 def test_dropped_observation_resubmits_once_across_restart(rescue):
     path, _, _, _, calls = rescue
     poll(rescue)
-    assert [call[0] for call in calls] == ["cancel", "submit"]
-    payload = calls[1][1]
-    assert payload["name"] == "Transit_auto"
+    assert [call[0] for call in calls] == ["submit", "cancel"]
+    payload = calls[0][1]
+    assert payload["name"].startswith("Transit_auto_")
+    assert len(payload["name"]) <= 50
     assert payload["requests"][0]["windows"][0]["start"] == "2026-11-01T10:30:00Z"
     assert (
         payload["requests"][0]["configurations"][0]["repeat_duration"]
@@ -158,14 +161,18 @@ def test_uncertain_post_is_not_retried(rescue, monkeypatch):
     monkeypatch.setattr(lco, "submit_requestgroup", timeout)
     poll(rescue)
     poll(rescue)
-    assert [c[0] for c in calls] == ["cancel", "submit"]
-    assert "manual reconciliation" in row(path)["rescue_reason"]
+    assert [c[0] for c in calls] == ["submit"]
+    assert "reconciliation pending" in row(path)["rescue_reason"]
 
 
 def test_proposal_budget_is_shared_and_reservation_is_atomic(rescue):
     path, now, *_ = rescue
     assert lco_rescue._claim(path, 101, "P1", 60, 100, {}, {}, now)
+    group = copy.deepcopy(rescue[2])
+    group["requests"][0]["id"] = 102
+    lco_monitor.record_submission(group, {"proposal": "P1"}, "alice", path=path, now=now)
     assert not lco_rescue._claim(path, 102, "P1", 60, 100, {}, {}, now)
+    assert "budget exhausted" in row(path, 102)["rescue_reason"]
     assert not lco_rescue._claim(path, 101, "P1", 1, 100, {}, {}, now)
 
 
@@ -207,7 +214,7 @@ def test_observed_exposure_and_visibility_are_excluded(rescue, monkeypatch):
     _, now, group, *_ = rescue
     frames = lco.archive_search_all({})["results"]
     lco_rescue.recover(request, group, group["requests"][0], frames, path=path, now=now)
-    assert calls[1][1]["requests"][0]["windows"][0]["start"] == "2026-11-01T11:00:00Z"
+    assert calls[0][1]["requests"][0]["windows"][0]["start"] == "2026-11-01T11:00:00Z"
 
 
 def test_observability_clipping_rechecks_original_threshold(rescue, monkeypatch):
@@ -240,9 +247,9 @@ def test_accepted_response_can_be_registered_after_restart(rescue, monkeypatch):
 
     monkeypatch.setattr(lco_rescue, "_register", fail)
     poll(rescue)
-    assert len(calls) == 2
+    assert len(calls) == 1
     monkeypatch.setattr(lco_rescue, "_register", real_register)
-    poll(rescue)
+    poll((path, rescue[1] + 301, *rescue[2:]))
     assert row(path, 202)["supersedes_request_id"] == 101
     assert len(calls) == 2
 
@@ -285,7 +292,7 @@ def test_registration_recovery_precedes_terminal_archive_fast_path(rescue, monke
         )
     monkeypatch.setattr(lco_rescue, "_register", real_register)
     monkeypatch.setattr(lco_monitor, "_process_datasets", lambda *a, **kw: None)
-    lco_monitor.process_request(row(path), path=path, now=now)
+    lco_monitor.process_request(row(path), path=path, now=now + 301)
     assert row(path, 202)["supersedes_request_id"] == 101
 
 
@@ -325,10 +332,10 @@ def test_failed_registration_does_not_block_archive_monitoring(rescue, monkeypat
 
     monkeypatch.setattr(lco, "archive_search_all", search)
     attempts.clear()
-    poll(rescue)
+    poll((path, rescue[1] + 301, *rescue[2:]))
     assert searches
     assert len(attempts) == 1
-    assert len(calls) == 2
+    assert len(calls) == 1
     state = row(path)
     assert state["error_count"] == 0
     assert "registration failed" in state["rescue_reason"]
@@ -343,7 +350,7 @@ def test_inline_registration_failure_reports_retry_not_manual_reconciliation(res
 
     monkeypatch.setattr(lco_rescue, "_register", fail)
     poll(rescue)
-    assert len(calls) == 2
+    assert len(calls) == 1
     reason = row(path)["rescue_reason"]
     assert "retrying next poll" in reason
     assert "manual reconciliation" not in reason

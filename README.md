@@ -712,17 +712,21 @@ per-proposal automatic submission counts and reservations, replacement links,
 and reasons a request was not replaced. Each original can produce at most one
 replacement; replacements do not themselves opt into recovery.
 
-The monitor reads request-scoped observation history, defers while LCO has a
-pending or running observation, and considers dropped/failed attempts only when
-there is a future observable remainder. It excludes known exposure time, uses
-the original target and constraints, checks IPP, and cancels a superseded pending
-single-request group before booking the shorter `_auto` request. If the original
-is completed or its request/group is canceled, no replacement is submitted,
-including cancellations made directly in the LCO portal. An expired window
-cannot be extended beyond its original end. Because the original is canceled
-before the replacement is submitted, a failed or uncertain submission can leave
-no active booking for that transit; the monitor records the reason and does not
-retry, so check the LCO portal and rebook by hand if needed.
+The monitor reads request-scoped observation history and defers while LCO has a
+pending or running observation. Canceled observations do not trigger recovery;
+NOT_ATTEMPTED observations qualify only after their recorded end. A pending
+original is preserved if its full duration plus setup fits any remaining
+observable window. Recovery requires a pinned site so this check covers the
+original's allowed location. It excludes known exposure time, retains the
+original target and constraints, checks IPP, and never extends the original
+window or observing duration.
+
+The replacement is submitted, durably recorded, and registered for monitoring
+before the original is canceled. If the original is now scheduled or running,
+both are preserved and the submitter receives a private duplicate-risk notice.
+Cancellation failures are retried at most once per five minutes. Completed or
+canceled originals are never canceled again. Before submission, completed or
+canceled requests/groups are never replaced, including portal cancellations.
 
 The [LCO API reference](https://developers.lco.global/#data-format-definition)
 does not expose another proposal's conflicting observation through telescope
@@ -735,11 +739,19 @@ show that failed observations can already be rescheduled by LCO while their
 request remains pending. Checks immediately before replacement reduce that race;
 this remains best-effort scheduling, not a guarantee of telescope time.
 
-A durable reservation precedes cancellation/submission. If the process crashes
-or an external response is lost, it does **not** repeat the submission. Inspect
-the original and `_auto` request in the LCO portal and reconcile manually. A
-saved successful response can be registered locally on a later poll without a
-second submission. Never delete a reservation merely to retry an uncertain POST.
+A durable reservation and unique replacement name precede submission. Confirmed
+validation/auth rejection releases the budget but retains the one-attempt record.
+A timeout, server error, or crash never causes a second submission. Recovery
+searches the submitter's proposal for that exact name and verifies the full
+submitted payload before registering a discovered replacement. Missing,
+ambiguous, or incomplete search results retain the reservation for manual
+reconciliation. Legacy attempts without a unique name also require manual
+reconciliation. Accepted replacements remain charged even if cleanup fails.
+
+Private in-app notices report uncertain outcomes, rejection, registration or
+cleanup failures, and successful recovery. Notices are durably deduplicated.
+Pending reconciliation is swept even when the original's monitoring has ended,
+and its tracking cannot be deleted until reconciliation completes.
 
 Restart the web service after deployment to load the new HTML/JavaScript;
 Python `--reload` does not watch templates.

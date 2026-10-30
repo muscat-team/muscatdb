@@ -5963,7 +5963,10 @@ def _modifiable_lco_request(request: Request, request_id: int, payload: dict) ->
 @lco_router.delete("/monitored-requests/{request_id}", response_class=JSONResponse)
 def api_lco_delete_monitored_request(request: Request, request_id: int, payload: dict = Body(...)):
     _modifiable_lco_request(request, request_id, payload)
-    lco_monitor.delete_request(request_id)
+    try:
+        lco_monitor.delete_request(request_id)
+    except lco.LcoError as exc:
+        return _lco_error_response(exc)
     return JSONResponse({"ok": True})
 
 

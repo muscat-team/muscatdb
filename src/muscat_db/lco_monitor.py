@@ -816,6 +816,15 @@ def get_request(request_id: int, path: str | None = None) -> dict | None:
 def delete_request(request_id: int, path: str | None = None) -> None:
     """Remove tracking only; science tables and files are never touched."""
     with get_conn(path or db_path()) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if conn.execute(
+            "SELECT 1 FROM lco_rescue_attempts a WHERE a.state IN "
+            "('reserved','uncertain','accepted','cleanup_pending') AND "
+            "(a.original_id=? OR a.original_id IN "
+            "(SELECT supersedes_request_id FROM lco_observation_requests WHERE request_id=?))",
+            (request_id, request_id),
+        ).fetchone():
+            raise lco.LcoError("Rescue reconciliation must finish before removing tracking", status=409)
         conn.execute("DELETE FROM lco_observation_frames WHERE request_id=?", (request_id,))
         conn.execute("DELETE FROM lco_observation_requests WHERE request_id=?", (request_id,))
         conn.commit()

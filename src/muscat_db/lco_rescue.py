@@ -2,7 +2,7 @@
 
 One committed reservation permits at most one external submission. A timeout
 or crash after claiming is deliberately not retried: LCO has no idempotency
-key, so an operator must reconcile ambiguous outcomes in the observing portal.
+key. Ambiguous outcomes are reconciled by a persisted unique name, never reposted.
 """
 
 from __future__ import annotations
@@ -12,13 +12,17 @@ import datetime as dt
 import json
 import math
 import os
+import uuid
+import logging
+from urllib.parse import urlencode
 
 from muscat_db import lco
 from muscat_db.database import get_conn
 from muscat_db.lco_autoschedule import replacement_window, rescue_policy, _timestamp
 
 _RESUME_RETRY_S = 300.0
-_TERMINAL_MONITOR_STATES = ("complete", "terminal_no_data")
+logger = logging.getLogger(__name__)
+
 
 def _json(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
@@ -49,6 +53,10 @@ def _observations(request_id, user, token):
 def _claim(path, request_id, proposal, seconds, budget, payload, params, now):
     with get_conn(path) as conn:
         conn.execute("BEGIN IMMEDIATE")
+        if not conn.execute(
+            "SELECT 1 FROM lco_observation_requests WHERE request_id=?", (request_id,)
+        ).fetchone():
+            return False
         if conn.execute(
             "SELECT 1 FROM lco_rescue_attempts WHERE original_id=?", (request_id,)
         ).fetchone():
@@ -70,7 +78,10 @@ def _claim(path, request_id, proposal, seconds, budget, payload, params, now):
         )
         conn.execute(
             "UPDATE lco_observation_requests SET rescue_reason=? WHERE request_id=?",
-            ("rescue reserved; interrupted attempts require manual reconciliation", request_id),
+            (
+                "rescue reserved; interrupted attempts will be reconciled without another submission",
+                request_id,
+            ),
         )
         conn.commit()
         return True
@@ -99,54 +110,225 @@ def _register(path, request_id, payload, params, result, user, now):
             (f"auto-resubmitted as #{ids[0]}", request_id),
         )
         conn.execute(
-            "UPDATE lco_rescue_attempts SET state='submitted', updated_at=? WHERE original_id=?",
+            "UPDATE lco_rescue_attempts SET state=?, updated_at=? WHERE original_id=?",
+            (
+                "cleanup_pending" if params.get("_rescue_protocol") == 2 else "submitted",
+                now,
+                request_id,
+            ),
+        )
+        conn.commit()
+
+
+def _notify(path, request, event, text, now):
+    """Persist a private notice and its deduplication key in one transaction."""
+    owner = (request.get("user_name") or "").strip()
+    if not owner:
+        return
+    try:
+        with get_conn(path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute(
+                "SELECT 1 FROM lco_rescue_notices WHERE original_id=? AND event=?",
+                (request["request_id"], event),
+            ).fetchone():
+                return
+            cursor = conn.execute(
+                "INSERT INTO chat_messages(user_name,text,kind,created_at,mentions,visible_to) "
+                "VALUES('system',?,'system',?,'[]',?)",
+                (f"LCO rescue #{request['request_id']}: {text}", now, owner),
+            )
+            message_id = cursor.lastrowid
+            conn.execute(
+                "INSERT INTO lco_rescue_notices(original_id,event,message_id) VALUES(?,?,?)",
+                (request["request_id"], event, message_id),
+            )
+            conn.commit()
+        from muscat_db import chat
+
+        chat.emit_persisted_system_message(
+            {
+                "id": message_id,
+                "user": "system",
+                "text": f"LCO rescue #{request['request_id']}: {text}",
+                "kind": "system",
+                "ts": now,
+                "edited": False,
+                "edited_at": None,
+                "reactions": [],
+                "mentions": [],
+                "visible_to": owner,
+                "room": None,
+            },
+            owner,
+        )
+    except Exception:
+        logger.exception("Failed to deliver private rescue notice")
+
+
+def _matches(expected, actual):
+    """Match submitted fields, allowing response metadata and UTC formatting."""
+    if isinstance(expected, dict):
+        return isinstance(actual, dict) and all(
+            key in actual
+            and (
+                _timestamp(value) == _timestamp(actual[key])
+                if key in {"start", "end"}
+                else _matches(value, actual[key])
+            )
+            for key, value in expected.items()
+        )
+    if isinstance(expected, list):
+        return (
+            isinstance(actual, list)
+            and len(expected) == len(actual)
+            and all(_matches(a, b) for a, b in zip(expected, actual))
+        )
+    return expected == actual
+
+
+def _reconcile(payload, params, user, token):
+    # Portal's name filter is icontains. Require exact name and payload, and
+    # never follow pagination: an incomplete/ambiguous search is not evidence.
+    if params.get("_rescue_protocol") != 2:
+        raise ValueError("Legacy attempt needs manual reconciliation")
+    query = urlencode({"proposal": payload["proposal"], "name": payload["name"], "limit": 100})
+    page = lco._lco_api_request(
+        f"https://observe.lco.global/api/requestgroups/?{query}",
+        user_name=user,
+        token=token,
+        require_own_token=True,
+    )
+    if not isinstance(page, dict) or page.get("next") or not isinstance(page.get("results"), list):
+        raise ValueError("Incomplete replacement search; manual reconciliation may be needed")
+    matches = [
+        r for r in page["results"] if isinstance(r, dict) and r.get("name") == payload["name"]
+    ]
+    if len(matches) != 1:
+        raise ValueError("Replacement search is missing or ambiguous; no second submission")
+    result = lco.get_requestgroup(
+        matches[0]["id"], user_name=user, token=token, require_own_token=True
+    )
+    if not _matches(payload, result) or result.get("id") != matches[0]["id"]:
+        raise ValueError("Replacement search payload differs; manual reconciliation required")
+    return result
+
+
+def _cleanup(request, *, path, now, user, token):
+    request_id = int(request["request_id"])
+    group = lco.get_requestgroup(
+        request["requestgroup_id"],
+        user_name=user,
+        token=token,
+        require_own_token=True,
+    )
+    children = group.get("requests") or []
+    if len(children) != 1 or str(children[0].get("id")) != str(request_id):
+        raise ValueError("Original membership changed; potential duplicate requires inspection")
+    state = str(children[0].get("state") or group.get("state") or "").upper()
+    group_state = str(group.get("state") or "").upper()
+    if state == "COMPLETED" or group_state == "COMPLETED":
+        _notify(
+            path,
+            request,
+            "completed_original",
+            "Original completed after replacement acceptance; potential duplicate. Inspect both requests.",
+            now,
+        )
+    terminal = {"CANCELED", "COMPLETED", "WINDOW_EXPIRED", "FAILURE_LIMIT_REACHED"}
+    if state not in terminal and group_state not in terminal:
+        if state != "PENDING" or any(
+            str(o.get("state")).upper() in {"PENDING", "IN_PROGRESS"}
+            for o in _observations(request_id, user, token)
+        ):
+            raise ValueError("Original is scheduled or running; potential duplicate preserved")
+        if os.environ.get("MUSCAT_LCO_ALLOW_SUBMIT") != "1":
+            raise ValueError("Live submission disabled; potential duplicate preserved")
+        canceled = lco._lco_api_request(
+            f"https://observe.lco.global/api/requestgroups/{int(request['requestgroup_id'])}/cancel/",
+            method="POST",
+            user_name=user,
+            token=token,
+            require_own_token=True,
+        )
+        if str(canceled.get("state") or "").upper() != "CANCELED":
+            raise ValueError("Original cancellation not confirmed; potential duplicate")
+    with get_conn(path) as conn:
+        conn.execute(
+            "UPDATE lco_rescue_attempts SET state='submitted',updated_at=? WHERE original_id=?",
             (now, request_id),
         )
         conn.commit()
 
 
-def resume_accepted(request, *, path, now):
-    """Register a saved success even when archive monitoring can finish early."""
+def resume_accepted(request, *, path, now, immediate=False):
+    """Reconcile a single POST, register success, then safely retire the original."""
     request_id = int(request["request_id"])
     with get_conn(path) as conn:
         attempt = conn.execute(
-            "SELECT payload_json,params_json,result_json FROM lco_rescue_attempts WHERE original_id=? AND state='accepted'",
+            "SELECT state,payload_json,params_json,result_json,updated_at FROM lco_rescue_attempts WHERE original_id=?",
             (request_id,),
         ).fetchone()
-    if not attempt:
+    if not attempt or attempt[0] not in {"reserved", "uncertain", "accepted", "cleanup_pending"}:
         return
+    state, payload_json, params_json, result_json, updated_at = attempt
+    if not immediate and now - updated_at < _RESUME_RETRY_S:
+        return
+    with get_conn(path) as conn:
+        conn.execute(
+            "UPDATE lco_rescue_attempts SET updated_at=? WHERE original_id=?", (now, request_id)
+        )
+        conn.commit()
+    payload, params = json.loads(payload_json), json.loads(params_json)
     try:
-        _register(
+        user = request.get("user_name")
+        if not user:
+            raise ValueError("A submitter with a saved personal token is required")
+        if state in {"reserved", "uncertain"}:
+            token = lco._get_lco_api_token(user, require_own_token=True)
+            result = _reconcile(payload, params, user, token)
+            with get_conn(path) as conn:
+                conn.execute(
+                    "UPDATE lco_rescue_attempts SET state='accepted',result_json=? WHERE original_id=?",
+                    (_json(result), request_id),
+                )
+                conn.commit()
+            result_json, state = _json(result), "accepted"
+        if state == "accepted":
+            _register(path, request_id, payload, params, json.loads(result_json), user, now)
+            if params.get("_rescue_protocol") != 2:
+                return  # Legacy accepted submissions already canceled their original.
+            state = "cleanup_pending"
+        token = lco._get_lco_api_token(user, require_own_token=True)
+        _cleanup(request, path=path, now=now, user=user, token=token)
+        replacement_id = json.loads(result_json)["requests"][0]["id"]
+        _reason(path, request_id, f"auto-resubmitted as #{replacement_id}")
+        _notify(
             path,
-            request_id,
-            json.loads(attempt[0]),
-            json.loads(attempt[1]),
-            json.loads(attempt[2]),
-            request.get("user_name"),
+            request,
+            "submitted",
+            f"Replacement #{replacement_id} is tracked; original cleanup is complete.",
             now,
         )
     except Exception as exc:
-        with get_conn(path) as conn:
-            conn.execute(
-                "UPDATE lco_rescue_attempts SET updated_at=? WHERE original_id=? AND state='accepted'",
-                (now, request_id),
-            )
-            conn.commit()
-        _reason(
-            path,
-            request_id,
-            f"replacement accepted but registration failed; retrying next poll: {exc}",
-        )
+        if state == "accepted":
+            reason = f"replacement accepted but registration failed; retrying next poll: {exc}"
+        elif state == "cleanup_pending":
+            reason = f"replacement tracked; original cleanup pending; potential duplicate: {exc}"
+        else:
+            reason = f"uncertain rescue; reconciliation pending; no second submission: {exc}"
+        _reason(path, request_id, reason)
+        _notify(path, request, state, reason, now)
 
 
 def resume_terminal_accepted(*, path, now, limit):
-    """Retry registrations whose original no longer receives monitoring polls."""
+    """Bounded restart recovery independent of the original's monitor state."""
     with get_conn(path, row_factory=None) as conn:
         cursor = conn.execute(
             "SELECT r.* FROM lco_rescue_attempts a JOIN lco_observation_requests r "
-            "ON r.request_id=a.original_id WHERE a.state='accepted' "
-            "AND r.monitor_state IN (?,?) AND a.updated_at<=? ORDER BY a.updated_at LIMIT ?",
-            (*_TERMINAL_MONITOR_STATES, now - _RESUME_RETRY_S, limit),
+            "ON r.request_id=a.original_id WHERE a.state IN ('reserved','uncertain','accepted','cleanup_pending') "
+            "AND a.updated_at<=? ORDER BY a.updated_at LIMIT ?",
+            (now - _RESUME_RETRY_S, limit),
         )
         columns = [description[0] for description in cursor.description]
         requests = [dict(zip(columns, row)) for row in cursor.fetchall()]
@@ -203,7 +385,12 @@ def recover(request, group, child, frames, *, path, now):
         dropped = [
             o
             for o in history
-            if str(o.get("state")).upper() in {"ABORTED", "FAILED", "NOT_ATTEMPTED", "CANCELED"}
+            if str(o.get("state")).upper() in {"ABORTED", "FAILED"}
+            or (
+                str(o.get("state")).upper() == "NOT_ATTEMPTED"
+                and o.get("end")
+                and _timestamp(o["end"]).timestamp() <= now
+            )
         ]
         if not dropped and state not in {"WINDOW_EXPIRED", "FAILURE_LIMIT_REACHED"}:
             return
@@ -255,12 +442,49 @@ def recover(request, group, child, frames, *, path, now):
         cfg = configurations[0]
         site = replacement.get("location", {}).get("site")
         if not site:
-            sites = {o.get("site") for o in dropped if o.get("site")}
-            if len(sites) != 1:
-                raise ValueError("A unique recovery site is required for observability checking")
-            site = sites.pop()
-            replacement.setdefault("location", {})["site"] = site
+            raise ValueError(
+                "An explicitly pinned site is required to establish original viability"
+            )
+        if int(replacement.get("configuration_repeats", 1)) != 1:
+            raise ValueError("Repeated configuration cycles are not supported for rescue")
         target, constraints = cfg["target"], cfg.get("constraints") or {}
+        remaining = [
+            {"start": max(_timestamp(w["start"]), _timestamp(now_iso)).isoformat(), "end": w["end"]}
+            for w in original
+            if _timestamp(w["end"]).timestamp() > now
+        ]
+        viability = {
+            "windows": remaining,
+            "site": site,
+            "type": "REPEAT_EXPOSE",
+            "ra": target["ra"],
+            "dec": target["dec"],
+            "twilight": params.get("twilight"),
+        }
+        lco._clip_windows_to_observability(
+            params.get("kind"),
+            viability,
+            constraints.get("max_airmass", 1.6),
+            constraints.get("min_lunar_distance", 30),
+            constraints.get("max_lunar_phase", 1),
+            strict=True,
+        )
+        original_seconds = float(cfg["repeat_duration"]) + lco._REPEAT_EXPOSE_SETUP_OVERHEAD_S
+        if (
+            not math.isfinite(original_seconds)
+            or original_seconds <= lco._REPEAT_EXPOSE_SETUP_OVERHEAD_S
+        ):
+            raise ValueError("Invalid original duration")
+        if state == "PENDING" and any(
+            (_timestamp(w["end"]) - _timestamp(w["start"])).total_seconds() >= original_seconds
+            for w in viability["windows"]
+        ):
+            _reason(
+                path,
+                request_id,
+                "not resubmitted: original still fits a remaining observable window",
+            )
+            return
         clipped = {
             "windows": [selected],
             "site": site,
@@ -293,9 +517,11 @@ def recover(request, group, child, frames, *, path, now):
             raise ValueError("Remainder too short for setup and one minute of observing")
         clipped["windows"] = [selected]
         replacement["windows"] = [selected]
-        cfg["repeat_duration"] = lco._repeat_duration(clipped)
+        cfg["repeat_duration"] = min(float(cfg["repeat_duration"]), lco._repeat_duration(clipped))
         payload["name"] = (
-            str(payload.get("name") or request.get("name") or "request")[:45] + "_auto"
+            str(payload.get("name") or request.get("name") or "request")[:12]
+            + "_auto_"
+            + uuid.uuid4().hex
         )
         ipp = lco.max_allowable_ipp(payload, user, token=token)
         if not isinstance(ipp, dict) or not ipp or ipp.get("errors"):
@@ -346,6 +572,7 @@ def recover(request, group, child, frames, *, path, now):
         replacement_params = {
             **params,
             "auto_resubmit": {},
+            "_rescue_protocol": 2,
             "name": payload["name"],
             "windows": [selected],
         }
@@ -361,16 +588,6 @@ def recover(request, group, child, frames, *, path, now):
         ):
             return
         try:
-            if str(fresh.get("state") or "").upper() == "PENDING":
-                canceled = lco._lco_api_request(
-                    f"https://observe.lco.global/api/requestgroups/{int(request['requestgroup_id'])}/cancel/",
-                    method="POST",
-                    user_name=user,
-                    token=token,
-                    require_own_token=True,
-                )
-                if str(canceled.get("state") or "").upper() != "CANCELED":
-                    raise ValueError("Superseded original cancellation was not confirmed")
             result = lco.submit_requestgroup(payload, user, token=token)
             with get_conn(path) as conn:
                 conn.execute(
@@ -379,11 +596,32 @@ def recover(request, group, child, frames, *, path, now):
                 )
                 conn.commit()
         except Exception as exc:
-            _reason(
-                path, request_id, f"rescue outcome requires manual reconciliation; no retry: {exc}"
+            # Only definite validation/auth rejection releases allocation. Timeouts
+            # (including HTTP 408), 5xx and malformed successes remain uncertain.
+            rejected = isinstance(exc, lco.LcoError) and exc.status in {
+                400,
+                401,
+                403,
+                404,
+                405,
+                422,
+            }
+            attempt_state = "rejected" if rejected else "uncertain"
+            reason = (
+                "rescue rejected; original preserved; budget released"
+                if rejected
+                else "rescue uncertain; original preserved; reconciliation pending; no second submission"
             )
+            with get_conn(path) as conn:
+                conn.execute(
+                    "UPDATE lco_rescue_attempts SET state=?,reserved_seconds=CASE WHEN ? THEN 0 ELSE reserved_seconds END,reason=?,updated_at=? WHERE original_id=?",
+                    (attempt_state, rejected, reason, now, request_id),
+                )
+                conn.commit()
+            _reason(path, request_id, reason)
+            _notify(path, request, attempt_state, reason, now)
             return
-        resume_accepted(request, path=path, now=now)
+        resume_accepted(request, path=path, now=now, immediate=True)
     except Exception as exc:
         _reason(path, request_id, f"not resubmitted: {exc}")
 
@@ -391,7 +629,7 @@ def recover(request, group, child, frames, *, path, now):
 def proposal_usage(path):
     with get_conn(path) as conn:
         rows = conn.execute(
-            "SELECT proposal,COUNT(*),SUM(CASE WHEN state IN ('accepted','submitted') THEN 1 ELSE 0 END),SUM(reserved_seconds) FROM lco_rescue_attempts GROUP BY proposal"
+            "SELECT proposal,COUNT(*),SUM(CASE WHEN state IN ('accepted','cleanup_pending','submitted') THEN 1 ELSE 0 END),SUM(reserved_seconds) FROM lco_rescue_attempts GROUP BY proposal"
         ).fetchall()
     return [
         {

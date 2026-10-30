@@ -852,6 +852,11 @@ def _deliver_system_message(text: str, owner: str) -> None:
     except Exception:
         logger.exception("failed to persist system chat message")
         return
+    emit_persisted_system_message(msg, owner)
+
+
+def emit_persisted_system_message(msg: dict, owner: str) -> None:
+    """Deliver a message already committed by its owning transaction."""
     loop = _valid_loop()
     if loop is None:
         return

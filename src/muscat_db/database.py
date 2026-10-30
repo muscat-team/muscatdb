@@ -319,6 +319,13 @@ CREATE TABLE IF NOT EXISTS lco_rescue_attempts (
     updated_at REAL NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS lco_rescue_notices (
+    original_id INTEGER NOT NULL,
+    event TEXT NOT NULL,
+    message_id INTEGER NOT NULL,
+    PRIMARY KEY(original_id, event)
+);
+
 CREATE TABLE IF NOT EXISTS lco_monitor_leases (
     name        TEXT PRIMARY KEY,
     owner       TEXT NOT NULL,
@@ -1031,6 +1038,7 @@ _APP_OWNED_TABLES = (
     "lco_observation_requests",
     "lco_observation_frames",
     "lco_rescue_attempts",
+    "lco_rescue_notices",
     "chat_messages",
     "chat_reactions",
     "target_tags",
