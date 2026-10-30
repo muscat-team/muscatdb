@@ -2018,6 +2018,10 @@
   // applies one shape per parameter across every flare.
   var FLARE_PARAMS = ['tpeak', 'fwhm', 'ampl'];
   var FLARE_ROW_DEFAULTS = { tpeak: ['', '0.1'], fwhm: ['0.02', '0.01'], ampl: ['0.01', '0.01'] };
+  // The same defaults read as low,high bounds under a Uniform prior. They
+  // bracket the Gaussian value, since the Gaussian pair would read as low >
+  // high there and block the run.
+  var FLARE_ROW_UNIFORM_DEFAULTS = { fwhm: ['0.0', '0.1'], ampl: ['0.0', '0.05'] };
 
   function flarePriorMode(param) {
     var sel = document.getElementById('opt-flare_' + param + '_prior');
@@ -2060,6 +2064,13 @@
     return [((range[0] + range[1]) / 2).toFixed(5), FLARE_ROW_DEFAULTS.tpeak[1]];
   }
 
+  // Default pair for a new row, valid for the prior shape selected now.
+  function defaultFlarePair(param) {
+    if (param === 'tpeak') return defaultFlareTpeak();
+    var table = flarePriorMode(param) === 'uniform' ? FLARE_ROW_UNIFORM_DEFAULTS : FLARE_ROW_DEFAULTS;
+    return table[param].slice();
+  }
+
   function flareCellPlaceholder(param, which) {
     if (flarePriorMode(param) === 'uniform') return which === 'val' ? 'low' : 'high';
     return which === 'val' ? 'value' : 'unc';
@@ -2090,7 +2101,7 @@
     tr.className = 'flare-row';
     var html = '<td class="flare-index"></td>';
     FLARE_PARAMS.forEach(function (param) {
-      var pair = values[param] || (param === 'tpeak' ? defaultFlareTpeak() : FLARE_ROW_DEFAULTS[param].slice());
+      var pair = values[param] || defaultFlarePair(param);
       html += '<td>' + flareCellHtml(param, 'val', pair[0]) + flareCellHtml(param, 'unc', pair[1]) + '</td>';
     });
     html += '<td><button class="btn sm danger flare-remove-btn" type="button">Remove</button></td>';
@@ -2135,7 +2146,8 @@
       var values = {};
       FLARE_PARAMS.forEach(function (param) {
         var pairs = byParam[param];
-        values[param] = pairs[i] || (pairs.length === 1 ? pairs[0] : null) || FLARE_ROW_DEFAULTS[param].slice();
+        values[param] = pairs[i] || (pairs.length === 1 ? pairs[0] : null) ||
+          (param === 'tpeak' ? FLARE_ROW_DEFAULTS.tpeak.slice() : defaultFlarePair(param));
       });
       addFlareRow(values);
     }

@@ -443,6 +443,28 @@ def test_flare_outside_the_data_blocks_the_run_until_the_row_is_removed(page, fi
     assert fitter["start"][-1]["options"]["flare_tpeak"] == f"{FLARE_MID},0.1"
 
 
+def test_flare_row_added_under_uniform_priors_passes_validation(page, fitter):
+    _ready_to_fit(page)
+    _enable_flares(page)
+    page.select_option("#opt-flare_fwhm_prior", "uniform")
+    page.select_option("#opt-flare_ampl_prior", "uniform")
+    page.click("#flare-add-btn")
+    # The Gaussian defaults would read as low > high here; the new row gets
+    # bounds that bracket them instead.
+    expect(_flare_cell(page, 1, "fwhm", "val")).to_have_value("0.0")
+    expect(_flare_cell(page, 1, "fwhm", "unc")).to_have_value("0.1")
+    expect(_flare_cell(page, 1, "ampl", "val")).to_have_value("0.0")
+    expect(_flare_cell(page, 1, "ampl", "unc")).to_have_value("0.05")
+
+    with page.expect_response("**/api/transit-fit/run"):
+        page.click("#run-test-btn")
+    assert not page.locator("#flare-rows-error").is_visible()
+    assert page.locator("#flare-rows .flare-cell.is-invalid").count() == 0
+    options = fitter["start"][-1]["options"]
+    assert options["flare_fwhm"].endswith("; 0.0,0.1")
+    assert options["flare_ampl"].endswith("; 0.0,0.05")
+
+
 def test_flare_prior_shape_converts_every_row(page):
     _ready_to_fit(page)
     _enable_flares(page)
