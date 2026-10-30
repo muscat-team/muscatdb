@@ -645,6 +645,12 @@ def process_due(
         requests = [dict(zip(columns, row)) for row in cursor.fetchall()]
     for request in requests:
         process_request(request, path=path, now=now)
+    try:
+        from muscat_db import lco_rescue
+
+        lco_rescue.resume_terminal_accepted(path=path, now=now, limit=limit)
+    except Exception as exc:
+        logger.warning("LCO rescue registration sweep failed: %s", exc)
     return len(requests)
 
 

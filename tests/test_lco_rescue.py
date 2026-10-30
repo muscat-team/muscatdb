@@ -333,3 +333,52 @@ def test_failed_registration_does_not_block_archive_monitoring(rescue, monkeypat
     assert state["error_count"] == 0
     assert "registration failed" in state["rescue_reason"]
     assert "exactly one child" in state["rescue_reason"]
+
+
+def test_inline_registration_failure_reports_retry_not_manual_reconciliation(rescue, monkeypatch):
+    path, _, _, _, calls = rescue
+
+    def fail(*a, **kw):
+        raise RuntimeError("database interrupted")
+
+    monkeypatch.setattr(lco_rescue, "_register", fail)
+    poll(rescue)
+    assert len(calls) == 2
+    reason = row(path)["rescue_reason"]
+    assert "retrying next poll" in reason
+    assert "manual reconciliation" not in reason
+
+
+def test_accepted_registration_is_swept_after_original_turns_terminal(rescue, monkeypatch):
+    path, now, _, _, calls = rescue
+    real_register = lco_rescue._register
+
+    def fail(*a, **kw):
+        raise RuntimeError("database interrupted")
+
+    monkeypatch.setattr(lco_rescue, "_register", fail)
+    poll(rescue)
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "UPDATE lco_observation_requests SET monitor_state='terminal_no_data',next_poll_at=? WHERE request_id=101",
+            (now + 10**6,),
+        )
+    monkeypatch.setattr(lco_rescue, "_register", real_register)
+    processed = []
+    monkeypatch.setattr(
+        lco_monitor, "process_request", lambda request, **kw: processed.append(request)
+    )
+    lco_monitor.process_due(path=path, now=now + 1)
+    with sqlite3.connect(path) as conn:
+        assert not conn.execute(
+            "SELECT 1 FROM lco_observation_requests WHERE request_id=202"
+        ).fetchone()
+    lco_monitor.process_due(path=path, now=now + lco_rescue._RESUME_RETRY_S + 1)
+    assert row(path, 202)["supersedes_request_id"] == 101
+    assert "auto-resubmitted as #202" in row(path)["rescue_reason"]
+    assert all(request["request_id"] != 101 for request in processed)
+    assert len(calls) == 2
+    sweeps = lco_rescue.resume_terminal_accepted(
+        path=path, now=now + 10 * lco_rescue._RESUME_RETRY_S, limit=10
+    )
+    assert sweeps == 0

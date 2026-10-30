@@ -17,6 +17,8 @@ from muscat_db import lco
 from muscat_db.database import get_conn
 from muscat_db.lco_autoschedule import replacement_window, rescue_policy, _timestamp
 
+_RESUME_RETRY_S = 300.0
+_TERMINAL_MONITOR_STATES = ("complete", "terminal_no_data")
 
 def _json(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
@@ -124,11 +126,33 @@ def resume_accepted(request, *, path, now):
             now,
         )
     except Exception as exc:
+        with get_conn(path) as conn:
+            conn.execute(
+                "UPDATE lco_rescue_attempts SET updated_at=? WHERE original_id=? AND state='accepted'",
+                (now, request_id),
+            )
+            conn.commit()
         _reason(
             path,
             request_id,
             f"replacement accepted but registration failed; retrying next poll: {exc}",
         )
+
+
+def resume_terminal_accepted(*, path, now, limit):
+    """Retry registrations whose original no longer receives monitoring polls."""
+    with get_conn(path, row_factory=None) as conn:
+        cursor = conn.execute(
+            "SELECT r.* FROM lco_rescue_attempts a JOIN lco_observation_requests r "
+            "ON r.request_id=a.original_id WHERE a.state='accepted' "
+            "AND r.monitor_state IN (?,?) AND a.updated_at<=? ORDER BY a.updated_at LIMIT ?",
+            (*_TERMINAL_MONITOR_STATES, now - _RESUME_RETRY_S, limit),
+        )
+        columns = [description[0] for description in cursor.description]
+        requests = [dict(zip(columns, row)) for row in cursor.fetchall()]
+    for request in requests:
+        resume_accepted(request, path=path, now=now)
+    return len(requests)
 
 
 def recover(request, group, child, frames, *, path, now):
@@ -354,11 +378,12 @@ def recover(request, group, child, frames, *, path, now):
                     (_json(result), now, request_id),
                 )
                 conn.commit()
-            _register(path, request_id, payload, replacement_params, result, user, now)
         except Exception as exc:
             _reason(
                 path, request_id, f"rescue outcome requires manual reconciliation; no retry: {exc}"
             )
+            return
+        resume_accepted(request, path=path, now=now)
     except Exception as exc:
         _reason(path, request_id, f"not resubmitted: {exc}")
 
