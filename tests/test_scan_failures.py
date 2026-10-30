@@ -109,6 +109,26 @@ def test_scan_date_records_failure_from_any_caller_and_reraises(obslog, fake_fil
     assert _keys(obslog) == {("muscat3", "260101")}
 
 
+def test_failure_under_a_non_default_root_records_that_root(obslog, fake_files, tmp_path):
+    """The LCO download path scans with data_root pointing at the download
+    tree, and a retry on the default root would look in the wrong place and
+    find nothing. The entry carries the root so the retry can use it; a
+    default-root failure carries no root."""
+    _, broken = fake_files
+    broken.add("sinistro")
+    lco_root = tmp_path / "lco"
+
+    with pytest.raises(OSError):
+        scanner.scan_date("sinistro", "260101", max_workers=1, data_root=lco_root)
+    (entry,) = scan_failures.pending(str(obslog))
+    assert entry["data_root"] == str(lco_root)
+
+    with pytest.raises(OSError):
+        scanner.scan_date("sinistro", "260101", max_workers=1)
+    (entry,) = scan_failures.pending(str(obslog))
+    assert "data_root" not in entry
+
+
 def test_clean_rescan_clears_the_failure(obslog, fake_files):
     files, broken = fake_files
     broken.add("muscat")

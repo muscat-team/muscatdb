@@ -384,14 +384,17 @@ def scan_date(
     alike. A zero-file result leaves an existing entry alone -- no files is
     not proof the earlier failure was resolved (the directory may be gone).
     """
+    root = None if data_root is None else os.fspath(data_root)
     try:
         result = _scan_date(inst_name, obsdate, max_workers, progress, data_root)
     except Exception as exc:
-        scan_failures.record(OBSLOG_BASE, inst_name, obsdate, f"{type(exc).__name__}: {exc}")
+        scan_failures.record(
+            OBSLOG_BASE, inst_name, obsdate, f"{type(exc).__name__}: {exc}", data_root=root,
+        )
         raise
     if result.get("write_errors"):
         scan_failures.record(
-            OBSLOG_BASE, inst_name, obsdate, "; ".join(result["write_errors"]),
+            OBSLOG_BASE, inst_name, obsdate, "; ".join(result["write_errors"]), data_root=root,
         )
         if "total" not in result:
             return {}  # nothing was written; callers read truthy as "had data"
