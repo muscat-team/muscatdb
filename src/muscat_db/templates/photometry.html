@@ -1759,8 +1759,11 @@
       } else if (s.state === 'done') {
         stopPolling();
         setRunning(false);
-        logEl.innerHTML = MuscatDom.ansiToHtml((s.log || '') + '\n\n✓ done (' + s.elapsed + 's) — reloading…');
-        MuscatStorage.set(logKey(), logEl.textContent);
+        // Persist the raw text, not logEl.textContent: textContent has the
+        // ANSI escapes stripped, so a reload would restore a colorless log.
+        var doneText = (s.log || '') + '\n\n✓ done (' + s.elapsed + 's) — reloading…';
+        logEl.innerHTML = MuscatDom.ansiToHtml(doneText);
+        MuscatStorage.set(logKey(), doneText);
         if (typeof window.showLoading === 'function') {
           window.showLoading('Reloading…');
         }
@@ -1778,7 +1781,7 @@
         stopPolling();
         setRunning(false);
         logEl.innerHTML = MuscatDom.ansiToHtml(terminalLogText(s));
-        MuscatStorage.set(logKey(), logEl.textContent);
+        MuscatStorage.set(logKey(), terminalLogText(s));
         if (typeof window.showLoading === 'function') {
           window.showLoading('Reloading…');
         }
@@ -1795,7 +1798,7 @@
         stopPolling();
         setRunning(false); clearJob();
         logEl.innerHTML = MuscatDom.ansiToHtml(terminalLogText(s));
-        MuscatStorage.set(logKey(), logEl.textContent);
+        MuscatStorage.set(logKey(), terminalLogText(s));
         if (typeof window.showLoading === 'function') {
           window.showLoading('Reloading…');
         }
