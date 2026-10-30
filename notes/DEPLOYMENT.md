@@ -806,6 +806,9 @@ The **linchpin assumption** for multi-host workers: `/ut2` and everything under 
 
 ### Verified accessible on workers
 - Conda environments: `$HOME/miniconda3/envs/prose`, `$HOME/miniconda3/envs/timer`, `$HOME/miniconda3/envs/harmonic`
+  (`deploy/conda/{prose,timer,harmonic}.yml` record each env as exported from ut2, a
+  snapshot of what resolved that day rather than a recreation recipe; the pinned
+  production installs are recorded under `deploy/conda/production/`)
 - External tools: `$HOME/github/research/project/ext_tools/{prose2,timer,harmonic}`
   (see [Engine checkouts](#engine-checkouts) for the remote each must track)
 - Repo: `$HOME/github/research/project/muscat-db/`
