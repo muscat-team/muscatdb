@@ -5541,6 +5541,22 @@ def api_lco_build(payload: dict = Body(...)):
         return _lco_error_response(e)
 
 
+@lco_router.post("/observing-duration", response_class=JSONResponse)
+def api_lco_observing_duration(payload: dict = Body(...)):
+    """The ``repeat_duration`` a request built from these params would submit.
+
+    Backs the schedule page's Observing duration field: its default, and the
+    longest value it accepts, are the number ``build_requestgroup`` derives from
+    the request's window, so the rule is not repeated in JavaScript. ``null``
+    when the request is not a REPEAT_EXPOSE block. No external call is made.
+    """
+    try:
+        seconds = lco.window_repeat_duration(payload.get("kind"), payload)
+        return JSONResponse({"ok": True, "repeat_duration": seconds})
+    except lco.LcoError as e:
+        return _lco_error_response(e)
+
+
 def _requestgroup_from_payload(payload: dict) -> dict:
     """The edited requestgroup the observer submitted, else one built from params.
 
