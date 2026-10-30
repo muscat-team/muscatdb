@@ -3453,6 +3453,11 @@
         .catch(function (e) { return { error: errText(e) }; })
         .then(function (fit) {
           if (obsFitPending[req.key] === sig) delete obsFitPending[req.key];
+          // A response for a window or constraint the request has since left
+          // is dropped whole: writing it would replace the cached fit and cut
+          // a duration the observer set against the newer window.
+          var current = deriveRequests().filter(function (r) { return r.key === req.key; })[0];
+          if (!current || observingFitSig(current) !== sig) return;
           var st = reqStateFor(req.key);
           fit.sig = sig;
           st.obsFit = fit;

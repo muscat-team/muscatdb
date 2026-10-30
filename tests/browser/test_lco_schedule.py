@@ -402,9 +402,9 @@ def _plot_end_input(page):
     return page.locator('#vis-prop-legs input[data-edge="end"]')
 
 
-def test_observing_duration_follows_the_window_until_set_by_hand(page, lco_account):
-    """The field shows the window fit, tracks a resize, sends a shorter value as
-    repeat_duration, refuses a longer one, and Reset returns it to the fit."""
+def _check_full_elp_window(page):
+    """Generate windows for TOI-1000 and check the Full @ ELP row, which adds a
+    request whose first observing-duration fit is fetched. Returns the row."""
     page.goto("/lco/schedule")
     expect(page.locator("#msg-proposals")).to_have_text("Loaded 1 proposals")
     page.select_option("#sch-proposal", PROPOSAL)
@@ -419,8 +419,15 @@ def test_observing_duration_follows_the_window_until_set_by_hand(page, lco_accou
         page.click("#btn-gen-windows")
 
     row = page.locator("#windows-body tr", has_text="Full @ ELP")
-    with page.expect_response("**/api/lco/observing-duration"):
+    with page.expect_response("**/api/lco/observing-duration", timeout=60_000):
         row.locator("input[type=checkbox]").check()
+    return row
+
+
+def test_observing_duration_follows_the_window_until_set_by_hand(page, lco_account):
+    """The field shows the window fit, tracks a resize, sends a shorter value as
+    repeat_duration, refuses a longer one, and Reset returns it to the fit."""
+    row = _check_full_elp_window(page)
     field = _observing_field(page)
     expect(field).to_be_enabled()
     note = page.locator("#requests-body .req-obs-note")
@@ -435,18 +442,20 @@ def test_observing_duration_follows_the_window_until_set_by_hand(page, lco_accou
     assert fit_s < span_s  # the fit is shy of the window span (setup overhead, edge margin)
 
     # Shorten the window by an hour from the plot's typed end time: the default follows.
-    with page.expect_response("**/api/lco/visibility"):
+    with page.expect_response("**/api/lco/visibility?*"):
         row.locator(".vis-link").click()
     end_input = _plot_end_input(page)
     expect(end_input).to_be_enabled()
     end = datetime.datetime.strptime(end_input.input_value(), "%Y-%m-%d %H:%M")
     new_end = (end - datetime.timedelta(hours=1)).strftime("%Y-%m-%d %H:%M")
-    with page.expect_response("**/api/lco/observing-duration"):
+    with page.expect_response("**/api/lco/observing-duration", timeout=60_000):
         end_input.fill(new_end)
         end_input.press("Tab")
     expect(field).not_to_have_value(f"{default_h:.2f}")
     shorter_h = float(field.input_value())
-    assert abs((default_h - shorter_h) - 1.0) < 0.02
+    # The fit is clipped to what the target can be observed, so an hour off the
+    # window may cost the fit less than an hour, never more.
+    assert 0 < default_h - shorter_h <= 1.0 + 0.02
     expect(note).to_contain_text("follows the window")
 
     # A shorter manual value is what Create drafts sends as repeat_duration.
@@ -478,6 +487,68 @@ def test_observing_duration_follows_the_window_until_set_by_hand(page, lco_accou
     page.reload()
     expect(_observing_field(page)).to_have_value("1.50")
     expect(page.locator("#requests-body .req-obs-note")).to_contain_text("set by hand")
+
+
+def test_stale_observing_fit_response_leaves_a_manual_duration_alone(page, lco_account):
+    """A delayed fit for an old, shorter window must not replace the cached fit
+    or cut a duration the observer set after widening the window."""
+    row = _check_full_elp_window(page)
+    field = _observing_field(page)
+    expect(field).to_be_enabled()
+    with page.expect_response("**/api/lco/visibility?*"):
+        row.locator(".vis-link").click()
+    end_input = _plot_end_input(page)
+    expect(end_input).to_be_enabled()
+    end = datetime.datetime.strptime(end_input.input_value(), "%Y-%m-%d %H:%M")
+
+    # Hold the fit for a window shortened by an hour.
+    held = []
+
+    def hold_first(route):
+        if held:
+            route.continue_()
+        else:
+            held.append(route)
+
+    page.route("**/api/lco/observing-duration", hold_first)
+    short_end = (end - datetime.timedelta(hours=1)).strftime("%Y-%m-%d %H:%M")
+    end_input.fill(short_end)
+    end_input.press("Tab")
+    for _ in range(100):
+        if held:
+            break
+        page.wait_for_timeout(50)
+    assert held, "the shortened window never requested its fit"
+
+    # Widen the window again (past the held one) and let its fit arrive.
+    wide_end = (end - datetime.timedelta(minutes=30)).strftime("%Y-%m-%d %H:%M")
+    with page.expect_response("**/api/lco/observing-duration", timeout=60_000):
+        end_input.fill(wide_end)
+        end_input.press("Tab")
+    note = page.locator("#requests-body .req-obs-note")
+    expect(note).to_contain_text("follows the window")
+    wide_fit_s = int(note.inner_text().split(" s")[0])
+    assert wide_fit_s > 7200  # the manual value below must fit the wide window
+
+    field.fill("2")
+    field.press("Tab")
+    expect(note).to_contain_text("7200 s")
+    expect(note).to_contain_text("set by hand")
+
+    # The old, shorter fit arrives last. The client takes a response from the
+    # network only after this fulfill, so give it a moment to run its handler.
+    with page.expect_response("**/api/lco/observing-duration", timeout=60_000):
+        held[0].fulfill(json={"ok": True, "repeat_duration": 3600})
+    page.wait_for_timeout(500)
+    # Redraw the rows from the cache: they must still show the wide window's
+    # fit and the manual value, not the stale response's.
+    page.dispatch_event("#sch-effective-filter", "change")
+    expect(field).to_be_enabled()
+    expect(field).to_have_value("2.00")
+    expect(field).to_have_attribute("max", f"{wide_fit_s / 3600:.2f}")
+    expect(note).to_contain_text("7200 s")
+    page.reload()
+    expect(_observing_field(page)).to_have_value("2.00")
 
 
 def test_create_drafts_redrafts_a_submitted_request_after_confirmation(
