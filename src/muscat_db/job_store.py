@@ -298,6 +298,14 @@ def _requested_cancels(active_rows: list[dict], type_: str, instance_id: str) ->
     return out
 
 
+@runtime_checkable
+class JobStore(JobRepository, JobQueue, JobConcurrency, Protocol):
+    """What ``get_job_store()`` hands out: one object implementing all three
+    Protocols. Callers use repository, queue and concurrency methods on the
+    same store, so none of the three alone describes it, and naming a concrete
+    backend here would tie every caller to SQLite."""
+
+
 # claim_slot's pending_key step, shared by both backends; {p} is the driver's
 # placeholder. The state = 'pending' guard is the whole point: 0 rows means
 # the row was already taken, so the caller rolls the slot back.
@@ -1202,10 +1210,10 @@ class PostgresJobStore(JobRepository, JobQueue, JobConcurrency):
 # this module never requires psycopg or a reachable Postgres) from
 # MUSCAT_CONTROL_PLANE on first get_job_store() call, then cached -- swap it
 # explicitly with set_job_store() for tests or a future backend.
-_STORE: JobRepository | JobQueue | JobConcurrency | None = None
+_STORE: JobStore | None = None
 
 
-def _make_default_store() -> JobRepository:
+def _make_default_store() -> JobStore:
     backend = os.environ.get("MUSCAT_CONTROL_PLANE", "sqlite").strip().lower()
     if backend == "sqlite":
         return DatabaseJobStore()
@@ -1216,12 +1224,12 @@ def _make_default_store() -> JobRepository:
     )
 
 
-def get_job_store() -> DatabaseJobStore:
+def get_job_store() -> JobStore:
     """Return the process-wide job store (the C2 seam)."""
     global _STORE
     if _STORE is None:
         _STORE = _make_default_store()
-    return _STORE  # type: ignore[return-value]
+    return _STORE
 
 
 def uses_shared_control_plane() -> bool:
