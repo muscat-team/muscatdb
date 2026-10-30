@@ -214,3 +214,43 @@ def _reset_web_catalog_caches():
             if cache is not None and hasattr(cache, "clear"):
                 cache.clear()
     yield
+
+
+def _clear_job_registries() -> None:
+    """Empty the in-memory job registries of every pipeline module already imported."""
+    import sys
+
+    for module, registry, lock in (
+        ("photometry", "_JOBS", "_LOCK"),
+        ("transit_fit", "_FIT_JOBS", "_FIT_LOCK"),
+        ("ttv_fit", "_TTV_JOBS", "_TTV_LOCK"),
+    ):
+        mod = sys.modules.get(f"muscat_db.{module}")
+        jobs = getattr(mod, registry, None)
+        if jobs is None:
+            continue
+        with getattr(mod, lock):
+            for job in jobs.values():
+                try:
+                    job.logf.close()
+                except (AttributeError, OSError, ValueError):
+                    pass
+            jobs.clear()
+
+
+@pytest.fixture(autouse=True)
+def _reset_job_registries():
+    """Keep jobs launched by one test out of the next test's registries.
+
+    ``sync_jobs`` relaunches a pending row into ``_JOBS``, ``_FIT_JOBS`` or
+    ``_TTV_JOBS`` and nothing removes the job when the test ends. Whichever test
+    next runs in the same process then finds a stand-in process that never
+    exits: under ``pytest -n`` the order differs run to run, so
+    ``cancel_ttv_fit("HIP67522")`` intermittently found a leftover job instead of
+    the row the test had saved. A monkeypatched registry is restored before this
+    teardown runs (autouse fixtures are set up first, so torn down last), so the
+    clear always reaches the real dicts.
+    """
+    _clear_job_registries()
+    yield
+    _clear_job_registries()
