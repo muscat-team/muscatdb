@@ -640,12 +640,15 @@ the importer requires a published or link-readable sheet.
 
 Open **LCO archive** on a target page to find reduced science observations
 covering its coordinates, including nights never reported to ExoFOP. The panel
-loads only when opened. Each row groups a night, instrument and LCO request,
+starts searching automatically when opened; wait for the progress message to finish.
+Leave both optional dates blank to search all nights. Each row groups a night, instrument and LCO request,
 with filters, exposure times, proposal, frame count and proprietary status.
+Exposure times are rounded to the nearest second and deduplicated for display
+(for example, 69.937–70.081 seconds appears as 70); raw metadata is unchanged.
 Local presence uses the individual frame filenames in the database; a partial
 request remains downloadable. **Download** queues the existing whole-request
 download and ingest workflow. Follow progress in **Jobs**, then search again
-or reopen the panel to see the **Photometry** link.
+or reopen the panel to see the **🔭** photometry link.
 
 Archive metadata is cached for one hour per coordinates, user, token and date
 range; local presence and proposal access are checked on each load. A viewer

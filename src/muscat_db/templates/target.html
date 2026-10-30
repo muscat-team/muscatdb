@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block title %}{% if target_name %}{{ target_name }} — MuSCAT-db{% else %}Targets — MuSCAT-db{% endif %}{% endblock %}
 {% block content %}
+<div class="target-page">
 
 {% if target_name %}
   {# Single target view #}
@@ -38,7 +39,7 @@
 
       {% if datasets %}
       <div class="csv-wrap">
-      <table id="datasets-table">
+      <table data-no-resize id="datasets-table">
         <thead>
           <tr>
             <th data-sort-attr="date">Date</th>
@@ -258,7 +259,7 @@
         <a id="exofop-obslog-jobs" href="/jobs" style="display: none; font-size: 0.85rem;">To Jobs</a>
       </div>
       <div class="csv-wrap" id="exofop-obslog-wrap" style="display: none;">
-        <table id="exofop-obslog-table">
+        <table data-no-resize id="exofop-obslog-table">
           <thead>
             <tr><th>Planet</th><th>Telescope</th><th>Camera</th><th>Filter</th><th>Date (UT)</th><th>Frames</th><th>Status</th><th>Download</th></tr>
           </thead>
@@ -777,6 +778,7 @@
         const wrap = document.createElement('div');
         wrap.className = 'csv-wrap';
         const table = document.createElement('table');
+        table.setAttribute('data-no-resize', '');
         table.id = 'harps-rv-table';
         const thead = document.createElement('thead');
         const headRow = document.createElement('tr');
@@ -887,6 +889,7 @@
         const wrap = document.createElement('div');
         wrap.className = 'csv-wrap';
         const table = document.createElement('table');
+        table.setAttribute('data-no-resize', '');
         table.id = 'jwst-table';
         const thead = document.createElement('thead');
         const headRow = document.createElement('tr');
@@ -1005,6 +1008,7 @@
         const wrap = document.createElement('div');
         wrap.className = 'csv-wrap';
         const table = document.createElement('table');
+        table.setAttribute('data-no-resize', '');
         table.id = 'spectra-table';
         const thead = document.createElement('thead');
         const headRow = document.createElement('tr');
@@ -1128,6 +1132,7 @@
         wrap.appendChild(link);
         wrap.className = 'csv-wrap';
         const table = document.createElement('table');
+        table.setAttribute('data-no-resize', '');
         table.id = 'eso-archive-table';
         const thead = document.createElement('thead');
         const headRow = document.createElement('tr');
@@ -1272,6 +1277,7 @@
         wrap.appendChild(link);
         wrap.className = 'csv-wrap';
         const table = document.createElement('table');
+        table.setAttribute('data-no-resize', '');
         table.id = 'lamost-archive-table';
         const thead = document.createElement('thead');
         const headRow = document.createElement('tr');
@@ -1391,6 +1397,7 @@
         const wrap  = document.createElement('div');
         wrap.className = 'csv-wrap';
         const table = document.createElement('table');
+        table.setAttribute('data-no-resize', '');
         table.id = 'lamost-rv-table';
         const thead   = document.createElement('thead');
         const headRow = document.createElement('tr');
@@ -1485,7 +1492,7 @@
   </div>
 
   <div class="csv-wrap">
-  <table id="targets-list">
+  <table data-no-resize id="targets-list">
     <thead>
       <tr>
         <th data-sort-attr="name">Normalized Name</th>
@@ -1540,4 +1547,5 @@
   </script>
 {% endif %}
 
+</div>
 {% endblock %}
