@@ -54,7 +54,7 @@ def test_obslog_and_archive_directories_get_a_listing_instead_of_404(tmp_path):
 
 def test_mount_is_skipped_when_the_synced_directory_is_absent(tmp_path):
     """Hosts without the /ut2 mount (e.g. a dev machine or CI) must still
-    start cleanly, with no dead /lc-monitor route registered."""
+    start cleanly, and /lc-monitor answers 404 while the tree is absent."""
     test_app = FastAPI()
     missing_dir = tmp_path / "does-not-exist"
 
@@ -62,26 +62,50 @@ def test_mount_is_skipped_when_the_synced_directory_is_absent(tmp_path):
     assert TestClient(test_app).get("/lc-monitor/").status_code == 404
 
 
+def test_dashboard_appears_without_a_restart_once_the_synced_directory_arrives(
+    mock_db, monkeypatch, tmp_path,
+):
+    """The sync job that fills MUSCAT2_HTML_DIR runs outside muscat-db, so the
+    directory can show up after the server started. Both the mount and the
+    instrument page link used to be decided once at import, which left the
+    dashboard hidden until a restart."""
+    html_dir = tmp_path / "html"
+    test_app = FastAPI()
+    assert _mount_muscat2_quicklook(test_app, html_dir) is False
+    monkeypatch.setattr("muscat_db.web.MUSCAT2_HTML_DIR", html_dir)
+    client = TestClient(app)
+    assert "Live LC Monitor" not in client.get("/muscat2").text
+
+    (html_dir / "airmass_plot").mkdir(parents=True)
+    (html_dir / "index.html").write_text("<h1>MuSCAT2 dashboard</h1>", encoding="utf-8")
+    (html_dir / "airmass_plot" / "index.html").write_text("<p>airmass</p>", encoding="utf-8")
+
+    assert 'href="/lc-monitor/"' in client.get("/muscat2").text
+    mounted = TestClient(test_app)
+    assert "MuSCAT2 dashboard" in mounted.get("/lc-monitor/").text
+    assert mounted.get("/airmass_plot/index.html").status_code == 200
+
+
 def test_instrument_page_links_to_the_dashboard_only_for_muscat2_when_available(
-    mock_db, monkeypatch,
+    mock_db, monkeypatch, tmp_path,
 ):
     client = TestClient(app)
 
-    monkeypatch.setattr("muscat_db.web.LC_MONITOR_AVAILABLE", True)
+    monkeypatch.setattr("muscat_db.web.MUSCAT2_HTML_DIR", tmp_path)
     assert 'href="/lc-monitor/"' in client.get("/muscat2").text
     assert "Live LC Monitor" not in client.get("/muscat3").text
 
-    monkeypatch.setattr("muscat_db.web.LC_MONITOR_AVAILABLE", False)
+    monkeypatch.setattr("muscat_db.web.MUSCAT2_HTML_DIR", tmp_path / "absent")
     assert "Live LC Monitor" not in client.get("/muscat2").text
 
 
-def test_obs_page_links_to_the_dashboard(mock_db, monkeypatch):
+def test_obs_page_links_to_the_dashboard(mock_db, monkeypatch, tmp_path):
     client = TestClient(app)
 
-    monkeypatch.setattr("muscat_db.web.LC_MONITOR_AVAILABLE", True)
+    monkeypatch.setattr("muscat_db.web.MUSCAT2_HTML_DIR", tmp_path)
     assert 'href="/lc-monitor/"' in client.get("/obs").text
 
-    monkeypatch.setattr("muscat_db.web.LC_MONITOR_AVAILABLE", False)
+    monkeypatch.setattr("muscat_db.web.MUSCAT2_HTML_DIR", tmp_path / "absent")
     assert 'href="/lc-monitor/"' in client.get("/obs").text
 
 

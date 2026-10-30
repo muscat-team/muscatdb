@@ -783,6 +783,9 @@
         cell.innerHTML =
           '<span class="note-text">' + escapeHtml(note) + '</span>' +
           '<span class="note-placeholder"' + (note ? ' style="display:none;"' : '') + '>+ add note</span>';
+        const row = cell.closest('tr');
+        if (row) row.dataset.note = note;
+        cell.dispatchEvent(new Event('note-updated', {bubbles: true}));
       }
       const escapeHtml = MuscatDom.escapeHtml;
 

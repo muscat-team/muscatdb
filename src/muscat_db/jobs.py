@@ -22,6 +22,7 @@ cycle: ``photometry`` and ``transit_fit`` import from here, never the reverse.
 
 from __future__ import annotations
 
+import io
 import logging
 import os
 import re
@@ -298,15 +299,49 @@ def watchdog_desc(reason: str) -> str:
     )
 
 
+# Block size for reading a log backwards. A 200-line tail of a typical
+# pipeline log fits in one or two blocks.
+_TAIL_BLOCK_BYTES = 64 * 1024
+
+
+def _line_breaks(block: bytes) -> int:
+    """Count the line breaks universal-newline decoding would see in *block*:
+    ``\n``, lone ``\r`` and ``\r\n`` each count once."""
+    return block.count(b"\n") + block.count(b"\r") - block.count(b"\r\n")
+
+
 def tail(path: Path, n: int = 200) -> str:
-    """Return the last *n* lines of a log file, or ``""`` if unreadable/absent."""
-    if not path.is_file():
+    """Return the last *n* lines of a log file, or ``""`` if unreadable/absent.
+
+    Reads backwards from the end of the file in blocks until at least ``n + 1``
+    line breaks are in hand, so the cost scales with the size of the tail, not
+    the size of the log (issue #325: a 200-line tail of a 31 MiB log took about
+    40 ms when every line was iterated). The bytes are then decoded exactly as
+    ``open(path, errors="replace")`` would, with universal newlines, so a lone
+    ``\r`` from a progress bar still counts as a line break, as it always has.
+    """
+    if not path.is_file() or n <= 0:
         return ""
     try:
-        with open(path, errors="replace") as f:
-            return "".join(deque(f, maxlen=n))
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            pos = f.tell()
+            blocks: list[bytes] = []
+            breaks = 0
+            while pos > 0 and breaks <= n:
+                size = min(_TAIL_BLOCK_BYTES, pos)
+                pos -= size
+                f.seek(pos)
+                block = f.read(size)
+                breaks += _line_breaks(block)
+                # A CRLF split across two blocks was counted once per half.
+                if block.endswith(b"\r") and blocks and blocks[-1].startswith(b"\n"):
+                    breaks -= 1
+                blocks.append(block)
     except OSError:
         return ""
+    text = io.TextIOWrapper(io.BytesIO(b"".join(reversed(blocks))), errors="replace")
+    return "".join(deque(text, maxlen=n))
 
 
 def log_has_terminal_marker(path: Path | None, cfg: FinalizeConfig) -> bool:
@@ -532,27 +567,35 @@ _MAX_RECONCILE_ATTEMPTS = max(1, int(os.environ.get("MUSCAT_JOB_MAX_RECONCILE_AT
 
 
 def is_pid_running(pid: int) -> bool:
-    """True if *pid* names a still-live process. A permission or lookup
-    failure both mean "no live process visible to us" -- treated the same as
-    "not running" so a check against a foreign or already-reaped pid never
-    raises."""
+    """True if *pid* names a still-live process.
+
+    Only ESRCH (no such process) reads as "not running". EPERM means the
+    kernel found a live process that this account may not signal, and
+    treating that as dead would let reconciliation relaunch a job into a run
+    directory another account's process is still writing to. Any other
+    failure is also taken as "running": a wrong guess that way only delays
+    a requeue, while a wrong guess the other way duplicates work."""
     try:
         os.kill(pid, 0)
-        return True
-    except OSError:
+    except ProcessLookupError:
         return False
+    except OSError:
+        return True
+    return True
 
 
 def is_process_group_alive(pgid: int) -> bool:
     """True if any process is still a member of process group *pgid*.
 
-    Same failure semantics as :func:`is_pid_running`: a lookup or permission
-    failure reads as "nothing live visible to us"."""
+    Same failure semantics as :func:`is_pid_running`: only ESRCH means the
+    group is gone."""
     try:
         os.killpg(pgid, 0)
-        return True
-    except OSError:
+    except ProcessLookupError:
         return False
+    except OSError:
+        return True
+    return True
 
 
 def pid_file_process_alive(pid_file: Path) -> bool:

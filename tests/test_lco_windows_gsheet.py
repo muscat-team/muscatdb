@@ -98,7 +98,7 @@ def test_windows_gsheet_tc_source_runs_linear_fit(monkeypatch, tmp_path, source,
                 {"planet": "b", "source_epoch": 0, "tc": 2459000.5, "tc_unc": 0.001},
                 {"planet": "b", "source_epoch": 10, "tc": 2459030.5, "tc_unc": 0.001},
             ],
-            "time_system": None,
+            "time_system": {"value": "BJD_TDB", "confirmed": True, "supported": True},
         },
     )
     monkeypatch.setattr(
@@ -227,3 +227,107 @@ def test_shared_source_can_be_disabled_without_disabling_personal_sheet(monkeypa
     })
     response = client.post("/api/lco/windows", headers=AUTH_HEADERS, json={**_WINDOW_BODY, "source": "gsheet"})
     assert response.status_code == 200
+
+
+# --- transit-center linear fit: time scale and fit validity -----------------
+
+_TC_CFG = {"url": SHEET_URL, "ephem_tab": "ephemeris", "tc_tab": "tc", "ephem_cols": {}, "tc_cols": {}}
+_TDB = {"value": "BJD_TDB", "confirmed": True, "supported": True}
+_UTC = {"value": "BJD_UTC", "confirmed": True, "supported": False}
+_UNSPECIFIED = {"value": "Unspecified", "confirmed": False, "supported": True}
+_TWO_EPOCHS = [
+    {"planet": "b", "source_epoch": 0, "tc": 2459000.5, "tc_unc": 0.001},
+    {"planet": "b", "source_epoch": 10, "tc": 2459030.5, "tc_unc": 0.001},
+]
+
+
+def _stub_tc_rows(monkeypatch, rows, time_system):
+    monkeypatch.setattr(
+        web.gsheet_ephemeris,
+        "query_target_transit_centers",
+        lambda target, url, tab, col_map=None: {"rows": rows, "time_system": time_system},
+    )
+
+
+def test_sheet_fit_accepts_bjd_tdb_rows(monkeypatch):
+    _stub_tc_rows(monkeypatch, _TWO_EPOCHS, _TDB)
+    out = web._sheet_fit_ephemeris("WASP-12", _TC_CFG, {})
+    assert out["b"]["period"] == pytest.approx(3.0)
+    assert out["b"]["t0"] == pytest.approx(2459000.5)
+    assert "error" not in out["b"]
+
+
+def test_sheet_fit_rejects_bjd_utc_rows(monkeypatch):
+    # The parser marks BJD_UTC as unsupported; the fit must not consume those
+    # times as if they were BJD_TDB.
+    _stub_tc_rows(monkeypatch, _TWO_EPOCHS, _UTC)
+    out = web._sheet_fit_ephemeris("WASP-12", _TC_CFG, {})
+    assert "t0" not in out["b"] and "period" not in out["b"]
+    assert "BJD_UTC" in out["b"]["error"]
+
+
+@pytest.mark.parametrize("time_system", [_UNSPECIFIED, None])
+def test_sheet_fit_refuses_unspecified_time_scale(monkeypatch, time_system):
+    _stub_tc_rows(monkeypatch, _TWO_EPOCHS, time_system)
+    out = web._sheet_fit_ephemeris("WASP-12", _TC_CFG, {})
+    assert "t0" not in out["b"] and "period" not in out["b"]
+    assert "BJD_TDB" in out["b"]["error"]
+
+
+def test_sheet_fit_without_a_fit_publishes_no_period(monkeypatch):
+    # Two measurements at the same epoch and no seed: the regression is
+    # singular, so no period exists. The 1.0 d reference must not leak out.
+    rows = [
+        {"planet": "b", "source_epoch": 5, "tc": 2459015.5, "tc_unc": 0.001},
+        {"planet": "b", "source_epoch": 5, "tc": 2459015.6, "tc_unc": 0.001},
+    ]
+    _stub_tc_rows(monkeypatch, rows, _TDB)
+    out = web._sheet_fit_ephemeris("WASP-12", _TC_CFG, {})
+    assert "period" not in out["b"] and "t0" not in out["b"]
+    assert out["b"]["error"]
+
+
+def test_sheet_fit_does_not_echo_seed_as_fit(monkeypatch):
+    # A single transit center cannot be fit; the seed ephemeris must not be
+    # returned under the fit's name.
+    _stub_tc_rows(monkeypatch, _TWO_EPOCHS[:1], _TDB)
+    out = web._sheet_fit_ephemeris("WASP-12", _TC_CFG, {"b": {"t0": 2459000.5, "period": 3.0}})
+    assert "period" not in out["b"] and "t0" not in out["b"]
+    assert out["b"]["error"]
+
+
+def test_windows_gsheet_tc_source_rejects_unsupported_time_scale(monkeypatch, tmp_path):
+    client = _authed_client(monkeypatch, tmp_path)
+    set_user_ephem_sheet("alice", SHEET_URL)
+    _stub_tc_rows(monkeypatch, _TWO_EPOCHS, _UTC)
+    monkeypatch.setattr(
+        web.gsheet_ephemeris, "query_target_ephemeris", lambda target, url, tab, col_map=None: {}
+    )
+    monkeypatch.setattr(
+        web, "_query_target_planets_catalog",
+        lambda target: {"b": {"t0": 2459000.5, "period": 3.0, "duration": 2.4}},
+    )
+    resp = client.post(
+        "/api/lco/windows", headers=AUTH_HEADERS, json={**_WINDOW_BODY, "source": "gsheet_tc"}
+    )
+    assert resp.status_code == 400, resp.text
+    assert "BJD_UTC" in resp.json()["error"]
+
+
+def test_target_info_reports_sheet_fit_error(monkeypatch, tmp_path):
+    client = _authed_client(monkeypatch, tmp_path)
+    set_user_ephem_sheet("alice", SHEET_URL)
+    monkeypatch.setenv("MUSCAT_SHARED_EPHEM_SHEET_USER", "none")
+    monkeypatch.setattr(web.fit, "sync_jobs", lambda: None)
+    monkeypatch.setattr(web.fit, "_discover_orphan_fits", lambda keys: [])
+    monkeypatch.setattr(web, "_target_coordinates", lambda target: None)
+    for name in ("_query_target_planets_catalog", "_query_target_planets_nasa", "_query_target_planets_toi"):
+        monkeypatch.setattr(web, name, lambda target: {})
+    monkeypatch.setattr(web.ttv, "list_ttv_runs", lambda target: [])
+    monkeypatch.setattr(web, "_sheet_ephemeris", lambda target, cfg: {})
+    _stub_tc_rows(monkeypatch, _TWO_EPOCHS, _UNSPECIFIED)
+    response = client.get("/api/ephemeris/target-info", params={"target": "WASP-12"}, headers=AUTH_HEADERS)
+    assert response.status_code == 200, response.text
+    entry = response.json()["sheet_fit_ephemeris"]["b"]
+    assert "period" not in entry
+    assert "BJD_TDB" in entry["error"]

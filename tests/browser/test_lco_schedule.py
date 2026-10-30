@@ -109,6 +109,18 @@ def lco_account(monkeypatch):
             return {"1M0-SCICAM-SINISTRO": {}, "0M4-SCICAM-QHY600": {}, "2M0-SCICAM-MUSCAT": {}}
         if url == "https://observe.lco.global/api/requestgroups/max_allowable_ipp/":
             return {PROPOSAL: {"1M0": {"semester": "2026B", "max_allowable_ipp_value": 1.5}}}
+        if url == "https://observe.lco.global/api/requestgroups/" and method == "POST":
+            # A booking: one child request per submitted request, IDs from 101.
+            return {
+                "id": 10,
+                "name": data.get("name"),
+                "proposal": PROPOSAL,
+                "state": "PENDING",
+                "requests": [
+                    {"id": 101 + i, "state": "PENDING", "windows": child.get("windows") or []}
+                    for i, child in enumerate(data.get("requests") or [])
+                ],
+            }
         raise AssertionError(f"unexpected LCO call: {method} {url}")
 
     monkeypatch.setattr(lco, "_lco_api_request", lco_api_request)
@@ -466,3 +478,59 @@ def test_observing_duration_follows_the_window_until_set_by_hand(page, lco_accou
     page.reload()
     expect(_observing_field(page)).to_have_value("1.50")
     expect(page.locator("#requests-body .req-obs-note")).to_contain_text("set by hand")
+
+
+def test_create_drafts_redrafts_a_submitted_request_after_confirmation(
+    page, lco_account, monkeypatch
+):
+    """A settings change after a submit yields a second request from the same
+    row: Create drafts asks once, naming the booked request IDs, then builds
+    from the new settings while the earlier booking stays in monitoring."""
+    monkeypatch.setenv("MUSCAT_LCO_ALLOW_SUBMIT", "1")
+    page.goto("/lco/schedule")
+    expect(page.locator("#msg-proposals")).to_have_text("Loaded 1 proposals")
+    page.select_option("#sch-proposal", PROPOSAL)
+    _generate_windows(page)
+    page.locator("#windows-body tr", has_text="Full @ ELP").locator("input[type=checkbox]").check()
+    request = page.locator("#requests-body tr").first
+    expect(request).to_contain_text("not drafted")
+
+    page.fill("#sch-effective-exptime", "60")
+    page.locator("#sch-effective-exptime").blur()
+    with page.expect_request("**/api/lco/build") as build:
+        page.click("#btn-create-draft")
+    assert build.value.post_data_json["exposure_time"] == 60
+    with page.expect_response("**/api/lco/ipp"):
+        page.click("#btn-dry-run")
+    expect(request).to_contain_text("checked")
+    page.click("#btn-submit")
+    expect(page.locator("#message-modal-ok")).to_have_text("Submit")
+    with page.expect_response("**/api/lco/submit") as resp:
+        page.click("#message-modal-ok")
+    assert resp.value.status == 200
+    expect(request).to_contain_text("submitted")
+    expect(request.locator("a", has_text="101")).to_have_count(1)
+    expect(page.locator("#monitor-body tr", has_text="101")).to_have_count(1)
+    assert ("POST", "https://observe.lco.global/api/requestgroups/") in lco_account
+
+    # The change leaves the booked row alone; drafting again is what redoes it.
+    page.fill("#sch-effective-exptime", "90")
+    page.locator("#sch-effective-exptime").blur()
+    expect(request).to_contain_text("submitted")
+
+    # Declining the confirmation keeps the booked row as it was.
+    page.click("#btn-create-draft")
+    expect(page.locator("#message-modal-text")).to_contain_text("already submitted")
+    expect(page.locator("#message-modal-text")).to_contain_text("101")
+    page.click("#message-modal-cancel")
+    expect(request).to_contain_text("submitted")
+
+    page.click("#btn-create-draft")
+    expect(page.locator("#message-modal-ok")).to_have_text("Create drafts")
+    with page.expect_request("**/api/lco/build") as build:
+        page.click("#message-modal-ok")
+    assert build.value.post_data_json["exposure_time"] == 90
+    expect(request).to_contain_text("draft")
+    expect(request).not_to_contain_text("submitted")
+    expect(page.locator("#msg-ipp")).to_contain_text("1 draft(s) created")
+    expect(page.locator("#monitor-body tr", has_text="101")).to_have_count(1)
