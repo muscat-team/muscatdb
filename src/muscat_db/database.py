@@ -2947,6 +2947,28 @@ def get_persisted_jobs() -> list[dict]:
         return result
 
 
+def get_persisted_job(key: str) -> dict | None:
+    """Return the row for *key*, or ``None``, via the primary-key index.
+
+    ``key`` is the table's primary key, so at most one row matches. Unlike
+    scanning :func:`get_persisted_jobs`, the work does not grow with history.
+    """
+    path = db_path()
+    with get_conn(path) as conn:
+        _ensure_jobs_migrated(conn, path)
+        cur = conn.execute("SELECT * FROM jobs WHERE key = ?", (key,))
+        columns = [d[0] for d in cur.description]
+        row = cur.fetchone()
+        if row is None:
+            return None
+        item = dict(zip(columns, row))
+        item["inst"] = item["instrument"]
+        item["date"] = item["obsdate"]
+        if not str(item.get("run_name") or "").strip():
+            item["run_name"] = str(item.get("run_id") or "").strip()
+        return item
+
+
 def get_active_persisted_jobs() -> list[dict]:
     """Return only live job rows using the active-state index.
 
