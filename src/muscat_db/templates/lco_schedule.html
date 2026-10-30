@@ -373,6 +373,22 @@
   </div>
 
   <div class="lco-tab-panel" data-panel="science">
+    <div class="lco-row">
+      <div class="lco-field"><label for="sch-strategy">Strategy</label><select id="sch-strategy"><option value="single">Single</option><option value="overlapping">Overlapping</option><option value="chunked">Chunked</option></select></div>
+      <div class="lco-field"><label for="sch-strategy-count">Requests per window</label><input id="sch-strategy-count" type="number" min="2" max="10" step="1" value="2"></div>
+      <div class="lco-field"><label for="sch-strategy-offset">Overlap shift (min)</label><input id="sch-strategy-offset" type="number" min="0.01" step="any" value="5"></div>
+      <div class="lco-field"><label for="sch-strategy-before">Chunk padding before (min)</label><input id="sch-strategy-before" type="number" min="0" step="any" value="10"></div>
+      <div class="lco-field"><label for="sch-strategy-after">Chunk padding after (min)</label><input id="sch-strategy-after" type="number" min="0" step="any" value="10"></div>
+    </div>
+    <p class="lco-note">Overlapping keeps the full duration and shifts each request later. Chunked divides the selected window into equal pieces, then pads each piece; adjacent padded requests can overlap. All are independent bookings.</p>
+    <p class="lco-note" id="strategy-summary" aria-live="polite"></p>
+    <div class="lco-row">
+      <div class="lco-field"><label><input id="sch-auto-resubmit" type="checkbox"> Auto-resubmit dropped observations</label></div>
+      <div class="lco-field"><label for="sch-rescue-min-fraction">Minimum original-window fraction</label><input id="sch-rescue-min-fraction" type="number" min="0" max="1" step="0.05" value="0.5"></div>
+      <div class="lco-field"><label for="sch-rescue-min-minutes">Minimum remainder (min)</label><input id="sch-rescue-min-minutes" type="number" min="0" step="any" value="30"></div>
+    </div>
+    <p class="lco-note">Applied to each newly drafted request. Every positive threshold must be met; both zero disables recovery. At most one replacement, using your saved token and a server-configured proposal rescue budget. Canceled request groups are never revived. The replacement is submitted first; the original is canceled afterwards only if it is still unscheduled, and a scheduled or running original is kept. Requires a pinned site and one REPEAT_EXPOSE configuration.</p>
+
     <p class="lco-note" style="margin-top: 0;">One LCO request per ticked transit, following the plan chosen in its row
       (a relay is two requests). Each request is drafted, checked with LCO and submitted on its own; set
       each one's instrument and name here, and the shared settings under Imaging Request.</p>
@@ -442,6 +458,7 @@
   <summary><h3>Submitted Request Monitoring</h3></summary>
   <p class="lco-note">Accepted requests are checked after their observing window. Final BANZAI products are downloaded incrementally; scan and database ingestion start after every raw frame has a level-91 counterpart.</p>
   <div class="lco-table-wrap">
+    <p class="lco-note" id="rescue-usage"></p>
     <table class="lco-table" id="monitor-table" data-no-resize style="width: auto;">
       <thead><tr><th>Request</th><th>Target</th><th>Instrument</th><th>LCO state</th><th>Pipeline</th><th>Frames</th><th>Last update</th><th>Detail</th><th>Action</th></tr></thead>
       <tbody id="monitor-body"><tr><td colspan="9" style="color: var(--text-dim); text-align: center;">Loading…</td></tr></tbody>
@@ -588,10 +605,12 @@
     'sch-sin-count','sch-site','sch-plan-policy',
     'sch-type','sch-observation-type','sch-guiding-config','sch-defocus',
     'sch-effective-filter','sch-effective-exptime','sch-effective-mode',
-    'sch-obs-airmass','sch-moon-sep','sch-max-lunar-phase','sch-ipp','sch-test-budget','sch-test-window'
+    'sch-obs-airmass','sch-moon-sep','sch-max-lunar-phase','sch-ipp','sch-test-budget','sch-test-window',
+    'sch-strategy','sch-strategy-count','sch-strategy-offset','sch-strategy-before','sch-strategy-after',
+    'sch-rescue-min-fraction','sch-rescue-min-minutes'
   ];
 
-  var CHECK_IDS = ['sch-include-padding', 'sch-rank'];
+  var CHECK_IDS = ['sch-include-padding', 'sch-rank', 'sch-auto-resubmit'];
 
   // Every value that contributes to /api/lco/windows. Editing any of these
   // invalidates the rendered prediction; win-filter is deliberately absent
@@ -1953,6 +1972,41 @@
 
   function requestKey(idx, planId, leg) { return idx + '|' + planId + '|' + leg; }
 
+  function strategyOptions() {
+    var mode = val('sch-strategy') || 'single';
+    var count = mode === 'single' ? 1 : num('sch-strategy-count');
+    var offset = num('sch-strategy-offset');
+    var before = num('sch-strategy-before'), after = num('sch-strategy-after');
+    if (!Number.isInteger(count) || count < (mode === 'single' ? 1 : 2) || count > 10) return null;
+    if (mode === 'overlapping' && !(offset > 0 && Number.isFinite(offset))) return null;
+    if (mode === 'chunked' && ![before, after].every(function (n) { return n !== null && Number.isFinite(n) && n >= 0; })) return null;
+    return {mode: mode, count: count, offset: offset, before: before, after: after};
+  }
+
+  function expandStrategy(req) {
+    var opt = strategyOptions();
+    if (!opt) return [];
+    if (opt.mode === 'single') return [req];
+    var start = utcMs(req.start), end = utcMs(req.end), span = end - start;
+    var out = [];
+    for (var i = 0; i < opt.count; i++) {
+      var a, b;
+      if (opt.mode === 'overlapping') {
+        a = start + i * opt.offset * 60000; b = end + i * opt.offset * 60000;
+      } else {
+        a = start + span * i / opt.count - opt.before * 60000;
+        b = start + span * (i + 1) / opt.count + opt.after * 60000;
+      }
+      if (!Number.isFinite(a) || !Number.isFinite(b) || a >= b || Math.abs(a) > 8.64e15 || Math.abs(b) > 8.64e15) return [];
+      out.push(Object.assign({}, req, {
+        key: req.key + '|' + JSON.stringify(opt) + '|' + i,
+        start: new Date(a).toISOString(), end: new Date(b).toISOString(),
+        strategySuffix: '_' + opt.mode + (i + 1)
+      }));
+    }
+    return out;
+  }
+
   function deriveRequests() {
     var out = [];
     selectedWindowIndices().forEach(function (idx) {
@@ -1965,8 +2019,10 @@
           legs: p.type === 'relay' ? 2 : 1, site: leg.site || '', sites: leg.sites || null,
           start: leg.start, end: leg.end
         };
-        req.kind = requestKindFor(req);
-        out.push(req);
+        expandStrategy(req).forEach(function (expanded) {
+          expanded.kind = requestKindFor(expanded);
+          out.push(expanded);
+        });
       });
     });
     return out;
@@ -2003,7 +2059,7 @@
 
   function requestName(req) {
     var st = reqState[req.key];
-    return st && st.nameEdited && st.name ? st.name : autoRequestName(req);
+    return st && st.nameEdited && st.name ? st.name : autoRequestName(req) + (req.strategySuffix || "");
   }
 
   // Instruments the current requests use (else the Instrument dropdown).
@@ -3063,6 +3119,9 @@
       guiding_config: val('sch-guiding-config'),
       defocus: num('sch-defocus')
     };
+    p.auto_resubmit = chk('sch-auto-resubmit') ? {
+      min_fraction: num('sch-rescue-min-fraction'), min_minutes: num('sch-rescue-min-minutes'), max_attempts: 1
+    } : {};
     Object.assign(p, coordsAstrometry());
     if (kind === 'muscat' || kind === 'muscat3' || kind === 'muscat4') {
       p.exposure_times = {};
@@ -3242,6 +3301,9 @@
       var rows = d.requests || [];
       monitoredRows = {};
       rows.forEach(function (row) { monitoredRows[row.request_id] = row; });
+      el('rescue-usage').textContent = (d.rescue_usage || []).map(function (r) {
+        return r.proposal + ': ' + r.submitted + ' automatic submissions, ' + r.attempts + ' reserved attempts, ' + Number(r.reserved_minutes).toFixed(2) + ' min reserved';
+      }).join(' · ');
       if (!rows.length) {
         body.innerHTML = '<tr><td colspan="9" style="color: var(--text-dim); text-align: center;">No scheduler requests are being monitored yet.</td></tr>';
         return;
@@ -3249,6 +3311,9 @@
       body.innerHTML = rows.map(function (row) {
         var href = 'https://observe.lco.global/requests/' + encodeURIComponent(row.request_id);
         var frames = escapeHtml(row.downloaded_count + ' downloaded · ' + row.reduced_frame_count + '/' + row.raw_frame_count + ' reduced');
+        var rescueDetail = row.supersedes_request_id ? 'auto-resubmitted from <a href="https://observe.lco.global/requests/' + encodeURIComponent(row.supersedes_request_id) + '" target="_blank" rel="noopener">#' + escapeHtml(row.supersedes_request_id) + '</a>' : escapeHtml(row.rescue_reason || '');
+        var replacementMatch = (row.rescue_reason || '').match(/^auto-resubmitted as #(\d+)$/);
+        if (replacementMatch) rescueDetail = 'auto-resubmitted as <a href="https://observe.lco.global/requests/' + replacementMatch[1] + '" target="_blank" rel="noopener">#' + replacementMatch[1] + '</a>';
         var detail = row.last_error ? '<span style="color: var(--red);">' + escapeHtml(row.last_error) + '</span>' : '—';
         return '<tr>' +
           '<td><a href="' + href + '" target="_blank" rel="noopener">' + escapeHtml(row.request_id) + '</a></td>' +
@@ -3258,7 +3323,7 @@
           '<td>' + escapeHtml(row.monitor_state || '—') + '</td>' +
           '<td>' + frames + '</td>' +
           '<td>' + escapeHtml(monitorDate(row.updated_at)) + '</td>' +
-          '<td>' + detail + '</td>' +
+          '<td>' + (rescueDetail ? rescueDetail + '<br>' : '') + detail + '</td>' +
           '<td class="monitor-actions">' + monitorActions(row) + '</td></tr>';
       }).join('');
     }).catch(function () {});
@@ -3418,6 +3483,15 @@
     var body = el('requests-body');
     if (!body) return;
     var reqs = deriveRequests();
+    var totalSeconds = reqs.reduce(function (sum, r) { return sum + windowDurationSec(r.start, r.end); }, 0);
+    el('strategy-summary').textContent = strategyOptions() ? reqs.length + ' requests · ' + (totalSeconds / 3600).toFixed(3) + ' h total window time before observability clipping (including repeated time and padding).' : 'Invalid strategy: use 2–10 requests, a positive shift, and non-negative padding.';
+    el('btn-create-draft').disabled = !selectedWindowIndices().length || !strategyOptions();
+    el('sch-strategy-count').disabled = val('sch-strategy') === 'single';
+    el('sch-strategy-offset').disabled = val('sch-strategy') !== 'overlapping';
+    el('sch-strategy-before').disabled = val('sch-strategy') !== 'chunked';
+    el('sch-strategy-after').disabled = val('sch-strategy') !== 'chunked';
+    el('sch-rescue-min-fraction').disabled = !chk('sch-auto-resubmit');
+    el('sch-rescue-min-minutes').disabled = !chk('sch-auto-resubmit');
     el('requests-table').style.display = reqs.length ? '' : 'none';
     el('requests-empty').style.display = reqs.length ? 'none' : '';
     var focused = document.activeElement && body.contains(document.activeElement) ? document.activeElement : null;

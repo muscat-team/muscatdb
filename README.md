@@ -683,3 +683,82 @@ checkboxes select only the displayed frames. Search settings persist in the
 browser; large result sets remain in memory only for the current visit and must
 be searched again after returning. Small results still restore as before. Whole
 request downloads retain their existing safety limits.
+
+### LCO scheduling strategies and automatic recovery
+
+The schedule page previews each independent request and the sum of its window
+lengths before **Create drafts → Check settings → Submit**. **Overlapping**
+keeps the full length and shifts successive requests by the selected number of
+minutes. **Chunked** divides each selected window (or relay leg) into equal
+pieces and adds the specified padding around every piece. The pieces are
+disjoint before padding; padded requests can overlap and spend additional time.
+Each request still goes through observability clipping and the LCO dry-run.
+
+**Auto-resubmit dropped observations** is off by default. Enable it for newly
+drafted requests and set a minimum fraction of the original window and/or a
+minimum number of minutes. Every positive threshold must be met; both zero
+means off. Recovery requires one REPEAT_EXPOSE configuration in a single-request
+group, the submitter's saved personal token, `MUSCAT_LCO_ALLOW_SUBMIT=1`, and an
+administrator-configured proposal budget, for example:
+
+```bash
+MUSCAT_LCO_RESCUE_BUDGET_MINUTES='{"LCO2026B-001":120}'
+```
+
+The budget is cumulative across users and restarts, measured conservatively in
+replacement-window minutes. Reserved and uncertain attempts consume it too;
+raising it is an explicit configuration change. The monitor table shows
+per-proposal automatic submission counts and reservations, replacement links,
+and reasons a request was not replaced. Each original can produce at most one
+replacement; replacements do not themselves opt into recovery.
+
+The monitor reads request-scoped observation history and defers while LCO has a
+pending or running observation. Canceled observations do not trigger recovery;
+NOT_ATTEMPTED observations qualify only after their recorded end. A pending
+original is preserved if its full duration plus setup fits any remaining
+observable window. Recovery requires a pinned site so this check covers the
+original's allowed location, and opting in without a pinned site or with
+`configuration_repeats` other than 1 is rejected when the request is built,
+dry-run, or submitted. Each remaining original window is checked for
+observability on its own: a window confirmed to have no observable time is
+skipped, but any calculation error stops recovery. The replacement uses the
+largest observable piece of any remaining window. It excludes known exposure time, retains the
+original target and constraints, checks IPP, and never extends the original
+window or observing duration.
+
+The replacement is submitted, durably recorded, and registered for monitoring
+before the original is canceled. If the original is now scheduled or running,
+both are preserved and the submitter receives a private duplicate-risk notice.
+Cancellation failures are retried at most once per five minutes. Completed or
+canceled originals are never canceled again. Before submission, completed or
+canceled requests/groups are never replaced, including portal cancellations.
+
+The [LCO API reference](https://developers.lco.global/#data-format-definition)
+does not expose another proposal's conflicting observation through telescope
+states. Recovery therefore reacts to dropped observations, not an inferred
+conflict span. Verified conflict spans can be handled by the pure window
+calculator, but the monitor does not invent them. The upstream
+[request observation endpoint](https://github.com/observatorycontrolsystem/observation-portal/blob/main/observation_portal/requestgroups/viewsets.py)
+and [state transitions](https://github.com/observatorycontrolsystem/observation-portal/blob/main/observation_portal/common/state_changes.py)
+show that failed observations can already be rescheduled by LCO while their
+request remains pending. Checks immediately before replacement reduce that race;
+this remains best-effort scheduling, not a guarantee of telescope time.
+
+A durable reservation and unique replacement name precede submission. Confirmed
+validation/auth rejection releases the budget but retains the one-attempt record.
+A timeout, server error, or crash never causes a second submission. Recovery
+searches the submitter's proposal for that exact name and verifies the full
+submitted payload before registering a discovered replacement. Missing,
+ambiguous, or incomplete search results retain the reservation for manual
+reconciliation. Reconciliation searches start five minutes after the attempt and
+then back off exponentially to once a day, when the submitter is asked to
+resolve the attempt manually; the budget stays reserved throughout. Legacy attempts without a unique name also require manual
+reconciliation. Accepted replacements remain charged even if cleanup fails.
+
+Private in-app notices report uncertain outcomes, rejection, registration or
+cleanup failures, and successful recovery. Notices are durably deduplicated.
+Pending reconciliation is swept even when the original's monitoring has ended,
+and its tracking cannot be deleted until reconciliation completes.
+
+Restart the web service after deployment to load the new HTML/JavaScript;
+Python `--reload` does not watch templates.

@@ -71,6 +71,7 @@ document.addEventListener("DOMContentLoaded", () => {
         currentUser = u;
         refreshOwnership();
         restoreBotLog();
+        restoreStoredRoom();
     };
     if (window.MuscatWhoami && typeof window.MuscatWhoami.then === "function") {
         window.MuscatWhoami.then(onUserResolved);
@@ -615,10 +616,21 @@ document.addEventListener("DOMContentLoaded", () => {
         try { localStorage.setItem("muscat-chat-room:" + getCurrentUser(), activeRoom); } catch (e) {}
     };
     roomSelect.addEventListener("change", updateRoom);
+    const storedRoom = () => {
+        try { return localStorage.getItem("muscat-chat-room:" + getCurrentUser()); } catch (e) { return null; }
+    };
+    // Cached pages resolve identity via /whoami, which can land after
+    // chat_rooms; the room saved under the real user is only readable then.
+    const restoreStoredRoom = () => {
+        const preferred = storedRoom();
+        const offered = Array.from(roomSelect.options).some(o => o.value === preferred);
+        if (!offered || preferred === roomSelect.value) return;
+        roomSelect.value = preferred;
+        updateRoom();
+    };
     socket.on("chat_rooms", (d) => {
         const rooms = d.rooms || [];
-        let preferred = activeRoom;
-        try { preferred = localStorage.getItem("muscat-chat-room:" + getCurrentUser()) || preferred; } catch (e) {}
+        const preferred = storedRoom() || activeRoom;
         roomSelect.replaceChildren();
         rooms.forEach(room => {
             const option = document.createElement("option");

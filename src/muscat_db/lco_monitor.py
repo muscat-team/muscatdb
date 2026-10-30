@@ -24,7 +24,7 @@ from muscat_db.database import db_path, get_conn
 
 logger = logging.getLogger(__name__)
 
-TERMINAL_REQUEST_STATES = {"COMPLETED", "WINDOW_EXPIRED", "CANCELED"}
+TERMINAL_REQUEST_STATES = {"COMPLETED", "WINDOW_EXPIRED", "CANCELED", "FAILURE_LIMIT_REACHED"}
 TERMINAL_MONITOR_STATES = {"complete", "terminal_no_data", "canceled"}
 
 _POLL_S = max(60.0, float(os.environ.get("MUSCAT_LCO_MONITOR_POLL_S", "300")))
@@ -193,7 +193,8 @@ def list_requests(path: str | None = None, limit: int = 200) -> list[dict]:
             """SELECT request_id,requestgroup_id,name,proposal,target,instrument,user_name,
                       request_state,monitor_state,window_start,window_end,raw_frame_count,
                       reduced_frame_count,downloaded_count,next_poll_at,error_count,last_error,
-                      last_polled_at,created_at,updated_at,completed_at,payload_json
+                      last_polled_at,created_at,updated_at,completed_at,supersedes_request_id,rescue_reason,
+                      payload_json
                FROM lco_observation_requests ORDER BY created_at DESC LIMIT ?""",
             (max(1, min(int(limit), 1000)),),
         )
@@ -498,6 +499,9 @@ def process_request(request: dict, *, path: str | None = None, now: float | None
     if not active:
         return
     try:
+        from muscat_db import lco_rescue
+
+        lco_rescue.resume_accepted(request, path=path, now=now)
         job_id = str(request.get("download_job_id") or "")
         if job_id:
             try:
@@ -622,6 +626,8 @@ def process_request(request: dict, *, path: str | None = None, now: float | None
             )
             conn.commit()
 
+        lco_rescue.recover(request, group, child, raw_frames + reduced_frames, path=path, now=now)
+
         if pending:
             # Download under a dedicated key rather than the default "anonymous"
             # bucket: that bucket's small per-user cap is meant for interactive
@@ -692,6 +698,12 @@ def process_due(
         requests = [dict(zip(columns, row)) for row in cursor.fetchall()]
     for request in requests:
         process_request(request, path=path, now=now)
+    try:
+        from muscat_db import lco_rescue
+
+        lco_rescue.resume_terminal_accepted(path=path, now=now, limit=limit)
+    except Exception as exc:
+        logger.warning("LCO rescue registration sweep failed: %s", exc)
     return len(requests)
 
 
@@ -804,6 +816,15 @@ def get_request(request_id: int, path: str | None = None) -> dict | None:
 def delete_request(request_id: int, path: str | None = None) -> None:
     """Remove tracking only; science tables and files are never touched."""
     with get_conn(path or db_path()) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if conn.execute(
+            "SELECT 1 FROM lco_rescue_attempts a WHERE a.state IN "
+            "('reserved','uncertain','accepted','cleanup_pending') AND "
+            "(a.original_id=? OR a.original_id IN "
+            "(SELECT supersedes_request_id FROM lco_observation_requests WHERE request_id=?))",
+            (request_id, request_id),
+        ).fetchone():
+            raise lco.LcoError("Rescue reconciliation must finish before removing tracking", status=409)
         conn.execute("DELETE FROM lco_observation_frames WHERE request_id=?", (request_id,))
         conn.execute("DELETE FROM lco_observation_requests WHERE request_id=?", (request_id,))
         conn.commit()

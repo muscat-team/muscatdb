@@ -5482,9 +5482,31 @@ def api_lco_build(payload: dict = Body(...)):
     """
     try:
         rg = lco.build_requestgroup(payload.get("kind"), payload)
+        _validate_lco_rescue(payload, rg)
         return JSONResponse({"ok": True, "payload": rg, "payload_hash": lco.payload_hash(rg)})
     except lco.LcoError as e:
         return _lco_error_response(e)
+
+
+def _validate_lco_rescue(payload: dict, requestgroup: dict, user: str | None = None) -> bool:
+    from muscat_db.lco_autoschedule import rescue_policy
+
+    try:
+        policy = rescue_policy(payload.get("auto_resubmit"), requestgroup.get("proposal", ""))
+        if policy is None:
+            return False
+        children = requestgroup.get("requests") or []
+        if len(children) != 1 or len(children[0].get("configurations") or []) != 1 or children[0]["configurations"][0].get("type") != "REPEAT_EXPOSE":
+            raise ValueError("Auto-resubmit requires one request with one REPEAT_EXPOSE configuration")
+        if not str((children[0].get("location") or {}).get("site") or "").strip():
+            raise ValueError("Auto-resubmit requires an explicitly pinned site")
+        if int(children[0].get("configuration_repeats", 1)) != 1:
+            raise ValueError("Auto-resubmit requires configuration_repeats of 1")
+        if user is not None:
+            lco._get_lco_api_token(user, require_own_token=True)
+        return True
+    except (ValueError, TypeError) as exc:
+        raise lco.LcoError(str(exc), status=400) from exc
 
 
 def _requestgroup_from_payload(payload: dict) -> dict:
@@ -5507,6 +5529,7 @@ def api_lco_ipp(request: Request, payload: dict = Body(...)):
     try:
         user = _request_user(request)
         rg = _requestgroup_from_payload(payload)
+        _validate_lco_rescue(payload, rg, user)
         ipp = lco.max_allowable_ipp(rg, user)
         body = {"ok": True}
         # LCO saw less visible time than the request lasts: cut repeat_duration
@@ -5530,7 +5553,7 @@ def _record_lco_submission(result: dict, requestgroup: dict, params: dict, user:
     while the enclosing submission response remains successful so a user does
     not retry and accidentally create a duplicate booking.
     """
-    monitor_payload = {**params, "requests": requestgroup.get("requests") or []}
+    monitor_payload = {**params, "requests": requestgroup.get("requests") or [], "_requestgroup": requestgroup}
     try:
         rows = lco_monitor.record_submission(result, monitor_payload, user)
         return {"ok": True, "request_ids": [row["request_id"] for row in rows]}
@@ -5767,6 +5790,9 @@ def api_lco_submit(request: Request, payload: dict = Body(...)):
                 status_code=409,
             )
         user = _request_user(request)
+        rescue_enabled = _validate_lco_rescue(payload, rg, user)
+        if rescue_enabled and not user:
+            raise lco.LcoError("Auto-resubmit requires a logged-in submitter with a saved personal token", status=403)
         result = lco.submit_requestgroup(rg, user)
         monitoring = _record_lco_submission(result, rg, payload, user)
         return JSONResponse({"ok": True, "result": result, "monitoring": monitoring})
@@ -5920,7 +5946,10 @@ def api_lco_monitored_requests(request: Request):
         row["relay_request_id"] = next((r["request_id"] for r in rows
             if r["requestgroup_id"] == row["relay_requestgroup_id"] and r["can_modify"]
             and r["request_state"] not in lco_monitor.TERMINAL_REQUEST_STATES), None)
-    return JSONResponse({"ok": True, "requests": rows})
+    from muscat_db.lco_rescue import proposal_usage
+
+    usage = [r for r in proposal_usage(_db_path()) if not _is_denied(r.get("proposal"), denied)]
+    return JSONResponse({"ok": True, "requests": rows, "rescue_usage": usage})
 
 
 def _modifiable_lco_request(request: Request, request_id: int, payload: dict) -> dict:
@@ -5938,7 +5967,10 @@ def _modifiable_lco_request(request: Request, request_id: int, payload: dict) ->
 @lco_router.delete("/monitored-requests/{request_id}", response_class=JSONResponse)
 def api_lco_delete_monitored_request(request: Request, request_id: int, payload: dict = Body(...)):
     _modifiable_lco_request(request, request_id, payload)
-    lco_monitor.delete_request(request_id)
+    try:
+        lco_monitor.delete_request(request_id)
+    except lco.LcoError as exc:
+        return _lco_error_response(exc)
     return JSONResponse({"ok": True})
 
 

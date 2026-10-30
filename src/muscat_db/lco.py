@@ -115,6 +115,10 @@ class LcoError(Exception):
         return {"ok": False, "error": self.message, "detail": self.detail, "status": self.status}
 
 
+class WindowNotObservable(LcoError):
+    """A window was evaluated and has no observable time at its site."""
+
+
 def _get_lco_api_token(user_name: str | None = None, *, require_own_token: bool = False) -> str:
     """Return the LCO API token for *user_name*.
 
@@ -2050,7 +2054,7 @@ def _clip_window(window: dict, site: str, observable_interval) -> tuple[dict, in
     return clipped, max(int((usable_end - usable_start).total_seconds()), 60)
 
 
-def _clip_windows_to_observability(kind: str, params: dict, max_airmass, min_lunar_distance, max_lunar_phase=1.0) -> None:
+def _clip_windows_to_observability(kind: str, params: dict, max_airmass, min_lunar_distance, max_lunar_phase=1.0, *, strict=False) -> None:
     """Clip each REPEAT_EXPOSE window to the portion observable at its site.
 
     ``generate_windows`` pads windows around mid-transit with no site awareness,
@@ -2115,7 +2119,7 @@ def _clip_windows_to_observability(kind: str, params: dict, max_airmass, min_lun
                     usable.append(cap if cap is not None else int(
                         (_parse_utc(w_s["end"]) - _parse_utc(w_s["start"])).total_seconds()))
                 if not usable:
-                    raise LcoError(
+                    raise WindowNotObservable(
                         f"Window {idx + 1} is not observable at any of "
                         f"{', '.join(x.upper() for x in multi[idx])}",
                         status=400,
@@ -2128,7 +2132,7 @@ def _clip_windows_to_observability(kind: str, params: dict, max_airmass, min_lun
                 continue
             result = _clip_window(window, site, interval_at)
             if result is None:
-                raise LcoError(
+                raise WindowNotObservable(
                     f"Window {idx + 1} is not observable at {site.upper()} — "
                     "choose a different window, site, or loosen airmass/moon constraints",
                     status=400,
@@ -2143,6 +2147,8 @@ def _clip_windows_to_observability(kind: str, params: dict, max_airmass, min_lun
     except LcoError:
         raise
     except (ImportError, TypeError, ValueError, KeyError) as exc:
+        if strict:
+            raise LcoError(f"Cannot verify replacement observability: {exc}", status=400) from exc
         # Falling through leaves the windows unclipped, so _repeat_duration is
         # derived from the full padded span and can overrun the target's actual
         # visibility -- LCO then rejects the request with a message that points

@@ -380,3 +380,99 @@ def test_upload_disables_ignored_controls_and_skips_their_validation(page):
     page.select_option('#sch-source', '')
     expect(page.locator('#sch-t0')).to_be_enabled()
     expect(page.locator('#sch-period')).to_be_enabled()
+
+
+@pytest.mark.parametrize('strategy', ['overlapping', 'chunked'])
+def test_strategy_preview_and_rescue_settings_persist(page, lco_account, strategy):
+    page.goto('/lco/schedule')
+    _generate_windows(page)
+    page.locator('#windows-body tr', has_text='Full @ ELP').locator('input[type=checkbox]').check()
+    expect(page.locator('#requests-body tr')).to_have_count(1)
+    expect(page.locator('#sch-auto-resubmit')).not_to_be_checked()
+    page.select_option('#sch-strategy', strategy)
+    page.fill('#sch-strategy-count', '3')
+    page.locator('#sch-strategy-count').blur()
+    expect(page.locator('#requests-body tr')).to_have_count(3)
+    expect(page.locator('#strategy-summary')).to_contain_text('3 requests')
+    page.check('#sch-auto-resubmit')
+    page.fill('#sch-rescue-min-minutes', '25')
+    page.locator('#sch-rescue-min-minutes').blur()
+    page.reload()
+    expect(page.locator('#sch-strategy')).to_have_value(strategy)
+    expect(page.locator('#sch-strategy-count')).to_have_value('3')
+    expect(page.locator('#sch-rescue-min-minutes')).to_have_value('25')
+    expect(page.locator('#sch-auto-resubmit')).to_be_checked()
+    expect(page.locator('#requests-body tr')).to_have_count(3)
+
+    # Capture form params, not the preview labels, so the test verifies the
+    # actual windows and opt-in thresholds sent to the draft endpoint.
+    sent = []
+    def build(route):
+        sent.append(route.request.post_data_json)
+        route.fulfill(json={'ok': True, 'payload': {'requests': []}})
+    page.route('**/api/lco/build', build)
+    page.click('#btn-create-draft')
+    expect(page.locator('#msg-ipp')).to_contain_text('3 draft(s) created')
+    assert len(sent) == 3
+    windows = [p['windows'][0] for p in sent]
+    start = [datetime.datetime.fromisoformat(w['start'].replace('Z', '+00:00')) for w in windows]
+    end = [datetime.datetime.fromisoformat(w['end'].replace('Z', '+00:00')) for w in windows]
+    assert len({p['name'] for p in sent}) == 3
+    assert all(p['auto_resubmit']['min_minutes'] == 25 for p in sent)
+    if strategy == 'overlapping':
+        assert (start[1] - start[0]).total_seconds() == 300
+        assert (end[2] - end[1]).total_seconds() == 300
+        assert end[0] - start[0] == end[2] - start[2]
+    else:
+        # Ten minutes of padding on both sides means 20 minutes of overlap.
+        assert (end[0] - start[1]).total_seconds() == pytest.approx(1200, abs=0.002)
+        assert (end[1] - start[2]).total_seconds() == pytest.approx(1200, abs=0.002)
+
+
+def test_rescue_monitor_shows_links_reasons_and_proposal_count(page):
+    page.problems.allowed.extend(NO_TOKEN)
+    page.route('**/api/lco/monitored-requests', lambda route: route.fulfill(json={
+        'ok': True,
+        'requests': [
+            {'request_id': 101, 'target': 'TOI-123', 'rescue_reason': 'auto-resubmitted as #202'},
+            {'request_id': 202, 'target': 'TOI-123', 'supersedes_request_id': 101},
+            {'request_id': 303, 'target': 'TOI-456', 'rescue_reason': 'not resubmitted: proposal rescue budget exhausted'},
+        ],
+        'rescue_usage': [{'proposal': 'P1', 'submitted': 1, 'attempts': 1, 'reserved_minutes': 90}],
+    }))
+    page.goto('/lco/schedule')
+    expect(page.locator('#monitor-body')).to_contain_text('auto-resubmitted from #101')
+    expect(page.locator('#monitor-body a', has_text='#202')).to_have_attribute('href', 'https://observe.lco.global/requests/202')
+    expect(page.locator('#monitor-body')).to_contain_text('not resubmitted: proposal rescue budget exhausted')
+    expect(page.locator('#rescue-usage')).to_contain_text('P1: 1 automatic submissions, 1 reserved attempts, 90.00 min reserved')
+
+
+def test_create_drafts_needs_a_ticked_window_and_a_valid_strategy(page, lco_account):
+    page.goto('/lco/schedule')
+    _generate_windows(page)
+    expect(page.locator('#windows-body tr').first).to_be_attached()
+    draft = page.locator('#btn-create-draft')
+    expect(draft).to_be_disabled()
+    page.select_option('#sch-strategy', 'overlapping')
+    expect(draft).to_be_disabled()
+    box = page.locator('#windows-body tr', has_text='Full @ ELP').locator('input[type=checkbox]')
+    box.check()
+    expect(draft).to_be_enabled()
+    page.fill('#sch-strategy-count', '1')
+    page.locator('#sch-strategy-count').blur()
+    expect(draft).to_be_disabled()
+    page.fill('#sch-strategy-count', '3')
+    page.locator('#sch-strategy-count').blur()
+    expect(draft).to_be_enabled()
+    box.uncheck()
+    expect(draft).to_be_disabled()
+    expect(draft).to_have_attribute('title', 'Generate windows and tick a row in the windows table first')
+
+
+def test_rescue_note_describes_submit_first_cleanup(page):
+    page.problems.allowed.extend(NO_TOKEN)
+    page.goto('/lco/schedule')
+    note = page.locator('p.lco-note', has_text='At most one replacement')
+    expect(note).to_contain_text('The replacement is submitted first')
+    expect(note).to_contain_text('a scheduled or running original is kept')
+    expect(note).not_to_contain_text('canceled before replacement')

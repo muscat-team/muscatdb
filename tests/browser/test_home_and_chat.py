@@ -293,3 +293,23 @@ def test_chat_room_selection_filters_messages_and_routes_posts(page):
     page.reload()
     page.evaluate("window.__chatTransport.receive('chat_rooms', {rooms: ['chat:public', 'group:unc']})")
     expect(page.locator('#chat-room')).to_have_value('group:unc')
+
+
+def test_chat_room_preference_restored_when_identity_resolves_late(page):
+    # /targets is a cached page, so the user name comes from /whoami. Hold it
+    # until chat_rooms has been applied to reproduce the CI ordering.
+    held = []
+    page.goto('/targets')
+    page.evaluate("localStorage.setItem('muscat-chat-room:admin', 'group:unc')")
+    page.route('**/whoami', lambda route: held.append(route))
+    page.reload()
+    page.wait_for_function('window.__chatTransport')
+    page.evaluate("window.__chatTransport.receive('chat_rooms', {rooms: ['chat:public', 'group:unc']})")
+    expect(page.locator('#chat-room')).to_have_value('chat:public')
+    for _ in range(100):
+        if held:
+            break
+        page.wait_for_timeout(50)
+    assert held, '/whoami was not requested'
+    held[-1].fulfill(json={'user': 'admin'})
+    expect(page.locator('#chat-room')).to_have_value('group:unc')
