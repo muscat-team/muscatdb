@@ -16,7 +16,7 @@ import pytest
 pytest.importorskip("mkdocs")
 
 from muscat_db.static_site import build_site
-from tests.test_static_site import _build_tiny_db
+from muscat_db.static_site import build_tiny_db as _build_tiny_db
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 _TOUR_HREF = re.compile(r"""(?:href|src)=["'](/muscatdb/home/[^"']*)["']""")
