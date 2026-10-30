@@ -5498,6 +5498,10 @@ def _validate_lco_rescue(payload: dict, requestgroup: dict, user: str | None = N
         children = requestgroup.get("requests") or []
         if len(children) != 1 or len(children[0].get("configurations") or []) != 1 or children[0]["configurations"][0].get("type") != "REPEAT_EXPOSE":
             raise ValueError("Auto-resubmit requires one request with one REPEAT_EXPOSE configuration")
+        if not str((children[0].get("location") or {}).get("site") or "").strip():
+            raise ValueError("Auto-resubmit requires an explicitly pinned site")
+        if int(children[0].get("configuration_repeats", 1)) != 1:
+            raise ValueError("Auto-resubmit requires configuration_repeats of 1")
         if user is not None:
             lco._get_lco_api_token(user, require_own_token=True)
         return True

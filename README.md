@@ -717,7 +717,12 @@ pending or running observation. Canceled observations do not trigger recovery;
 NOT_ATTEMPTED observations qualify only after their recorded end. A pending
 original is preserved if its full duration plus setup fits any remaining
 observable window. Recovery requires a pinned site so this check covers the
-original's allowed location. It excludes known exposure time, retains the
+original's allowed location, and opting in without a pinned site or with
+`configuration_repeats` other than 1 is rejected when the request is built,
+dry-run, or submitted. Each remaining original window is checked for
+observability on its own: a window confirmed to have no observable time is
+skipped, but any calculation error stops recovery. The replacement uses the
+largest observable piece of any remaining window. It excludes known exposure time, retains the
 original target and constraints, checks IPP, and never extends the original
 window or observing duration.
 
@@ -745,7 +750,9 @@ A timeout, server error, or crash never causes a second submission. Recovery
 searches the submitter's proposal for that exact name and verifies the full
 submitted payload before registering a discovered replacement. Missing,
 ambiguous, or incomplete search results retain the reservation for manual
-reconciliation. Legacy attempts without a unique name also require manual
+reconciliation. Reconciliation searches start five minutes after the attempt and
+then back off exponentially to once a day, when the submitter is asked to
+resolve the attempt manually; the budget stays reserved throughout. Legacy attempts without a unique name also require manual
 reconciliation. Accepted replacements remain charged even if cleanup fails.
 
 Private in-app notices report uncertain outcomes, rejection, registration or

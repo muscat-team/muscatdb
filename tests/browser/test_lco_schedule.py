@@ -467,3 +467,12 @@ def test_create_drafts_needs_a_ticked_window_and_a_valid_strategy(page, lco_acco
     box.uncheck()
     expect(draft).to_be_disabled()
     expect(draft).to_have_attribute('title', 'Generate windows and tick a row in the windows table first')
+
+
+def test_rescue_note_describes_submit_first_cleanup(page):
+    page.problems.allowed.extend(NO_TOKEN)
+    page.goto('/lco/schedule')
+    note = page.locator('p.lco-note', has_text='At most one replacement')
+    expect(note).to_contain_text('The replacement is submitted first')
+    expect(note).to_contain_text('a scheduled or running original is kept')
+    expect(note).not_to_contain_text('canceled before replacement')

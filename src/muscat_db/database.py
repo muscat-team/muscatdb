@@ -316,7 +316,9 @@ CREATE TABLE IF NOT EXISTS lco_rescue_attempts (
     result_json TEXT NOT NULL DEFAULT '{}',
     reason TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL,
-    updated_at REAL NOT NULL
+    updated_at REAL NOT NULL,
+    next_retry_at REAL NOT NULL DEFAULT 0,
+    retry_count INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS lco_rescue_notices (
@@ -537,6 +539,8 @@ def _catalog_index_needed(conn: sqlite3.Connection, sql: str) -> bool:
 _MIGRATIONS = [
     "ALTER TABLE lco_observation_requests ADD COLUMN supersedes_request_id INTEGER",
     "ALTER TABLE lco_observation_requests ADD COLUMN rescue_reason TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE lco_rescue_attempts ADD COLUMN next_retry_at REAL NOT NULL DEFAULT 0",
+    "ALTER TABLE lco_rescue_attempts ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0",
     # 2026-07-12: group simultaneous multi-telescope sinistro nights separately
     "ALTER TABLE summaries ADD COLUMN telescope TEXT",
     # 2026-07-24: user override for normalized target names

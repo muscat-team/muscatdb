@@ -21,6 +21,8 @@ from muscat_db.database import get_conn
 from muscat_db.lco_autoschedule import replacement_window, rescue_policy, _timestamp
 
 _RESUME_RETRY_S = 300.0
+_MAX_RECONCILE_S = 86400.0
+_RECONCILING = ("reserved", "uncertain")
 logger = logging.getLogger(__name__)
 
 
@@ -73,8 +75,17 @@ def _claim(path, request_id, proposal, seconds, budget, payload, params, now):
             conn.commit()
             return False
         conn.execute(
-            "INSERT INTO lco_rescue_attempts(original_id,proposal,reserved_seconds,state,payload_json,params_json,created_at,updated_at) VALUES(?,?,?,'reserved',?,?,?,?)",
-            (request_id, proposal, seconds, _json(payload), _json(params), now, now),
+            "INSERT INTO lco_rescue_attempts(original_id,proposal,reserved_seconds,state,payload_json,params_json,created_at,updated_at,next_retry_at) VALUES(?,?,?,'reserved',?,?,?,?,?)",
+            (
+                request_id,
+                proposal,
+                seconds,
+                _json(payload),
+                _json(params),
+                now,
+                now,
+                now + _RESUME_RETRY_S,
+            ),
         )
         conn.execute(
             "UPDATE lco_observation_requests SET rescue_reason=? WHERE request_id=?",
@@ -110,7 +121,7 @@ def _register(path, request_id, payload, params, result, user, now):
             (f"auto-resubmitted as #{ids[0]}", request_id),
         )
         conn.execute(
-            "UPDATE lco_rescue_attempts SET state=?, updated_at=? WHERE original_id=?",
+            "UPDATE lco_rescue_attempts SET state=?, updated_at=? WHERE original_id=? AND state='accepted'",
             (
                 "cleanup_pending" if params.get("_rescue_protocol") == 2 else "submitted",
                 now,
@@ -255,10 +266,26 @@ def _cleanup(request, *, path, now, user, token):
             raise ValueError("Original cancellation not confirmed; potential duplicate")
     with get_conn(path) as conn:
         conn.execute(
-            "UPDATE lco_rescue_attempts SET state='submitted',updated_at=? WHERE original_id=?",
+            "UPDATE lco_rescue_attempts SET state='submitted',updated_at=? WHERE original_id=? AND state='cleanup_pending'",
             (now, request_id),
         )
         conn.commit()
+
+
+def _clip(kind, base, window, constraints):
+    """Clip one window; only WindowNotObservable means confirmed invisibility."""
+    params = {**base, "windows": [dict(window)]}
+    lco._clip_windows_to_observability(
+        kind,
+        params,
+        constraints.get("max_airmass", 1.6),
+        constraints.get("min_lunar_distance", 30),
+        constraints.get("max_lunar_phase", 1),
+        strict=True,
+    )
+    if len(params.get("windows") or []) != 1:
+        raise ValueError("Observability check returned an unexpected window set")
+    return params
 
 
 def resume_accepted(request, *, path, now, immediate=False):
@@ -266,19 +293,28 @@ def resume_accepted(request, *, path, now, immediate=False):
     request_id = int(request["request_id"])
     with get_conn(path) as conn:
         attempt = conn.execute(
-            "SELECT state,payload_json,params_json,result_json,updated_at FROM lco_rescue_attempts WHERE original_id=?",
+            "SELECT state,payload_json,params_json,result_json,next_retry_at,retry_count FROM lco_rescue_attempts WHERE original_id=?",
             (request_id,),
         ).fetchone()
-    if not attempt or attempt[0] not in {"reserved", "uncertain", "accepted", "cleanup_pending"}:
+    if not attempt or attempt[0] not in {*_RECONCILING, "accepted", "cleanup_pending"}:
         return
-    state, payload_json, params_json, result_json, updated_at = attempt
-    if not immediate and now - updated_at < _RESUME_RETRY_S:
+    state, payload_json, params_json, result_json, next_retry_at, retry_count = attempt
+    if not immediate and now < next_retry_at:
         return
+    if state in _RECONCILING:
+        retry_count += 1
+        delay = min(_RESUME_RETRY_S * 2 ** min(retry_count, 32), _MAX_RECONCILE_S)
+    else:
+        delay = _RESUME_RETRY_S
     with get_conn(path) as conn:
-        conn.execute(
-            "UPDATE lco_rescue_attempts SET updated_at=? WHERE original_id=?", (now, request_id)
-        )
+        claimed = conn.execute(
+            "UPDATE lco_rescue_attempts SET updated_at=?,next_retry_at=?,retry_count=? "
+            "WHERE original_id=? AND state=? AND next_retry_at=?",
+            (now, now + delay, retry_count, request_id, state, next_retry_at),
+        ).rowcount
         conn.commit()
+    if claimed != 1:
+        return
     payload, params = json.loads(payload_json), json.loads(params_json)
     try:
         user = request.get("user_name")
@@ -288,11 +324,14 @@ def resume_accepted(request, *, path, now, immediate=False):
             token = lco._get_lco_api_token(user, require_own_token=True)
             result = _reconcile(payload, params, user, token)
             with get_conn(path) as conn:
-                conn.execute(
-                    "UPDATE lco_rescue_attempts SET state='accepted',result_json=? WHERE original_id=?",
-                    (_json(result), request_id),
-                )
+                advanced = conn.execute(
+                    "UPDATE lco_rescue_attempts SET state='accepted',result_json=?,next_retry_at=? "
+                    "WHERE original_id=? AND state IN ('reserved','uncertain')",
+                    (_json(result), now + _RESUME_RETRY_S, request_id),
+                ).rowcount
                 conn.commit()
+            if advanced != 1:
+                return
             result_json, state = _json(result), "accepted"
         if state == "accepted":
             _register(path, request_id, payload, params, json.loads(result_json), user, now)
@@ -316,9 +355,21 @@ def resume_accepted(request, *, path, now, immediate=False):
         elif state == "cleanup_pending":
             reason = f"replacement tracked; original cleanup pending; potential duplicate: {exc}"
         else:
-            reason = f"uncertain rescue; reconciliation pending; no second submission: {exc}"
+            reason = (
+                f"uncertain rescue; reconciliation pending; no second submission; next check in "
+                f"{round(delay / 60)} min: {exc}"
+            )
         _reason(path, request_id, reason)
         _notify(path, request, state, reason, now)
+        if state in _RECONCILING and delay >= _MAX_RECONCILE_S:
+            _notify(
+                path,
+                request,
+                "manual_review",
+                f"Reconciliation of {payload.get('name')} is now checked daily; budget stays "
+                "reserved. Inspect the LCO portal and resolve it manually.",
+                now,
+            )
 
 
 def resume_terminal_accepted(*, path, now, limit):
@@ -327,8 +378,8 @@ def resume_terminal_accepted(*, path, now, limit):
         cursor = conn.execute(
             "SELECT r.* FROM lco_rescue_attempts a JOIN lco_observation_requests r "
             "ON r.request_id=a.original_id WHERE a.state IN ('reserved','uncertain','accepted','cleanup_pending') "
-            "AND a.updated_at<=? ORDER BY a.updated_at LIMIT ?",
-            (now - _RESUME_RETRY_S, limit),
+            "AND a.next_retry_at<=? ORDER BY a.next_retry_at LIMIT ?",
+            (now, limit),
         )
         columns = [description[0] for description in cursor.description]
         requests = [dict(zip(columns, row)) for row in cursor.fetchall()]
@@ -448,27 +499,24 @@ def recover(request, group, child, frames, *, path, now):
         if int(replacement.get("configuration_repeats", 1)) != 1:
             raise ValueError("Repeated configuration cycles are not supported for rescue")
         target, constraints = cfg["target"], cfg.get("constraints") or {}
-        remaining = [
-            {"start": max(_timestamp(w["start"]), _timestamp(now_iso)).isoformat(), "end": w["end"]}
-            for w in original
-            if _timestamp(w["end"]).timestamp() > now
-        ]
-        viability = {
-            "windows": remaining,
+        base = {
             "site": site,
             "type": "REPEAT_EXPOSE",
             "ra": target["ra"],
             "dec": target["dec"],
             "twilight": params.get("twilight"),
         }
-        lco._clip_windows_to_observability(
-            params.get("kind"),
-            viability,
-            constraints.get("max_airmass", 1.6),
-            constraints.get("min_lunar_distance", 30),
-            constraints.get("max_lunar_phase", 1),
-            strict=True,
-        )
+        remaining = [
+            {"start": max(_timestamp(w["start"]), _timestamp(now_iso)).isoformat(), "end": w["end"]}
+            for w in original
+            if _timestamp(w["end"]).timestamp() > now
+        ]
+        observable = []
+        for window in remaining:
+            try:
+                observable.append(_clip(params.get("kind"), base, window, constraints)["windows"][0])
+            except lco.WindowNotObservable:
+                continue
         original_seconds = float(cfg["repeat_duration"]) + lco._REPEAT_EXPOSE_SETUP_OVERHEAD_S
         if (
             not math.isfinite(original_seconds)
@@ -477,7 +525,7 @@ def recover(request, group, child, frames, *, path, now):
             raise ValueError("Invalid original duration")
         if state == "PENDING" and any(
             (_timestamp(w["end"]) - _timestamp(w["start"])).total_seconds() >= original_seconds
-            for w in viability["windows"]
+            for w in observable
         ):
             _reason(
                 path,
@@ -485,26 +533,13 @@ def recover(request, group, child, frames, *, path, now):
                 "not resubmitted: original still fits a remaining observable window",
             )
             return
-        clipped = {
-            "windows": [selected],
-            "site": site,
-            "type": "REPEAT_EXPOSE",
-            "ra": target["ra"],
-            "dec": target["dec"],
-            "twilight": params.get("twilight"),
-        }
-        lco._clip_windows_to_observability(
-            params.get("kind"),
-            clipped,
-            constraints.get("max_airmass", 1.6),
-            constraints.get("min_lunar_distance", 30),
-            constraints.get("max_lunar_phase", 1),
-            strict=True,
-        )
+        if not observable:
+            _reason(path, request_id, "not resubmitted: no remaining window is observable")
+            return
         selected = replacement_window(
             original,
             now=now_iso,
-            observable_windows=clipped["windows"],
+            observable_windows=observable,
             observed_until=observed_until.isoformat() if observed_until else None,
             min_fraction=policy["min_fraction"],
             min_minutes=policy["min_minutes"],
@@ -512,6 +547,7 @@ def recover(request, group, child, frames, *, path, now):
         if not selected:
             _reason(path, request_id, "not resubmitted: observable remainder below thresholds")
             return
+        clipped = _clip(params.get("kind"), base, selected, constraints)
         seconds = (_timestamp(selected["end"]) - _timestamp(selected["start"])).total_seconds()
         if seconds < lco._REPEAT_EXPOSE_SETUP_OVERHEAD_S + 60:
             raise ValueError("Remainder too short for setup and one minute of observing")
@@ -591,8 +627,9 @@ def recover(request, group, child, frames, *, path, now):
             result = lco.submit_requestgroup(payload, user, token=token)
             with get_conn(path) as conn:
                 conn.execute(
-                    "UPDATE lco_rescue_attempts SET state='accepted',result_json=?,updated_at=? WHERE original_id=?",
-                    (_json(result), now, request_id),
+                    "UPDATE lco_rescue_attempts SET state='accepted',result_json=?,updated_at=?,next_retry_at=? "
+                    "WHERE original_id=? AND state IN ('reserved','uncertain')",
+                    (_json(result), now, now + _RESUME_RETRY_S, request_id),
                 )
                 conn.commit()
         except Exception as exc:
@@ -613,11 +650,14 @@ def recover(request, group, child, frames, *, path, now):
                 else "rescue uncertain; original preserved; reconciliation pending; no second submission"
             )
             with get_conn(path) as conn:
-                conn.execute(
-                    "UPDATE lco_rescue_attempts SET state=?,reserved_seconds=CASE WHEN ? THEN 0 ELSE reserved_seconds END,reason=?,updated_at=? WHERE original_id=?",
-                    (attempt_state, rejected, reason, now, request_id),
-                )
+                changed = conn.execute(
+                    "UPDATE lco_rescue_attempts SET state=?,reserved_seconds=CASE WHEN ? THEN 0 ELSE reserved_seconds END,"
+                    "reason=?,updated_at=?,next_retry_at=? WHERE original_id=? AND state='reserved'",
+                    (attempt_state, rejected, reason, now, now + _RESUME_RETRY_S, request_id),
+                ).rowcount
                 conn.commit()
+            if changed != 1:
+                return
             _reason(path, request_id, reason)
             _notify(path, request, attempt_state, reason, now)
             return

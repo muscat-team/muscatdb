@@ -115,6 +115,10 @@ class LcoError(Exception):
         return {"ok": False, "error": self.message, "detail": self.detail, "status": self.status}
 
 
+class WindowNotObservable(LcoError):
+    """A window was evaluated and has no observable time at its site."""
+
+
 def _get_lco_api_token(user_name: str | None = None, *, require_own_token: bool = False) -> str:
     """Return the LCO API token for *user_name*.
 
@@ -2115,7 +2119,7 @@ def _clip_windows_to_observability(kind: str, params: dict, max_airmass, min_lun
                     usable.append(cap if cap is not None else int(
                         (_parse_utc(w_s["end"]) - _parse_utc(w_s["start"])).total_seconds()))
                 if not usable:
-                    raise LcoError(
+                    raise WindowNotObservable(
                         f"Window {idx + 1} is not observable at any of "
                         f"{', '.join(x.upper() for x in multi[idx])}",
                         status=400,
@@ -2128,7 +2132,7 @@ def _clip_windows_to_observability(kind: str, params: dict, max_airmass, min_lun
                 continue
             result = _clip_window(window, site, interval_at)
             if result is None:
-                raise LcoError(
+                raise WindowNotObservable(
                     f"Window {idx + 1} is not observable at {site.upper()} — "
                     "choose a different window, site, or loosen airmass/moon constraints",
                     status=400,

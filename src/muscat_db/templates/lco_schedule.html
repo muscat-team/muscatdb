@@ -387,7 +387,7 @@
       <div class="lco-field"><label for="sch-rescue-min-fraction">Minimum original-window fraction</label><input id="sch-rescue-min-fraction" type="number" min="0" max="1" step="0.05" value="0.5"></div>
       <div class="lco-field"><label for="sch-rescue-min-minutes">Minimum remainder (min)</label><input id="sch-rescue-min-minutes" type="number" min="0" step="any" value="30"></div>
     </div>
-    <p class="lco-note">Applied to each newly drafted request. Every positive threshold must be met; both zero disables recovery. At most one replacement, using your saved token and a server-configured proposal rescue budget. Canceled request groups are never revived. A superseded pending request is canceled before replacement. Requires REPEAT_EXPOSE.</p>
+    <p class="lco-note">Applied to each newly drafted request. Every positive threshold must be met; both zero disables recovery. At most one replacement, using your saved token and a server-configured proposal rescue budget. Canceled request groups are never revived. The replacement is submitted first; the original is canceled afterwards only if it is still unscheduled, and a scheduled or running original is kept. Requires a pinned site and one REPEAT_EXPOSE configuration.</p>
 
     <p class="lco-note" style="margin-top: 0;">One LCO request per ticked transit, following the plan chosen in its row
       (a relay is two requests). Each request is drafted, checked with LCO and submitted on its own; set
