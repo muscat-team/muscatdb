@@ -205,6 +205,7 @@ ENV_VARS: tuple[EnvVar, ...] = (
         "(default), /api/lco/submit refuses even with a valid dry-run + confirm; "
         "set to '1' only when intentionally going live.",
     ),
+    EnvVar("MUSCAT_LCO_RESCUE_BUDGET_MINUTES", "{}", "JSON proposal-to-minutes cumulative automatic-replacement budgets; empty disables recovery"),
     EnvVar("MUSCAT_LCO_MONITOR_ENABLED", "1", "Run the restart-safe submitted-request monitor"),
     EnvVar("MUSCAT_LCO_MONITOR_POLL_S", "300", "Initial LCO request/archive polling interval (seconds)"),
     EnvVar("MUSCAT_LCO_MONITOR_FAST_AFTER_WINDOW_S", "7200", "Keep the initial cadence this long after a request window (seconds)"),

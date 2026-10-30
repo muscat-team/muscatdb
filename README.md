@@ -683,3 +683,60 @@ checkboxes select only the displayed frames. Search settings persist in the
 browser; large result sets remain in memory only for the current visit and must
 be searched again after returning. Small results still restore as before. Whole
 request downloads retain their existing safety limits.
+
+### LCO scheduling strategies and automatic recovery
+
+The schedule page previews each independent request and the sum of its window
+lengths before **Create drafts → Check settings → Submit**. **Overlapping**
+keeps the full length and shifts successive requests by the selected number of
+minutes. **Chunked** divides each selected window (or relay leg) into equal
+pieces and adds the specified padding around every piece. The pieces are
+disjoint before padding; padded requests can overlap and spend additional time.
+Each request still goes through observability clipping and the LCO dry-run.
+
+**Auto-resubmit dropped observations** is off by default. Enable it for newly
+drafted requests and set a minimum fraction of the original window and/or a
+minimum number of minutes. Every positive threshold must be met; both zero
+means off. Recovery requires one REPEAT_EXPOSE configuration in a single-request
+group, the submitter's saved personal token, `MUSCAT_LCO_ALLOW_SUBMIT=1`, and an
+administrator-configured proposal budget, for example:
+
+```bash
+MUSCAT_LCO_RESCUE_BUDGET_MINUTES='{"LCO2026B-001":120}'
+```
+
+The budget is cumulative across users and restarts, measured conservatively in
+replacement-window minutes. Reserved and uncertain attempts consume it too;
+raising it is an explicit configuration change. The monitor table shows
+per-proposal automatic submission counts and reservations, replacement links,
+and reasons a request was not replaced. Each original can produce at most one
+replacement; replacements do not themselves opt into recovery.
+
+The monitor reads request-scoped observation history, defers while LCO has a
+pending or running observation, and considers dropped/failed attempts only when
+there is a future observable remainder. It excludes known exposure time, uses
+the original target and constraints, checks IPP, and cancels a superseded pending
+single-request group before booking the shorter `_auto` request. If the original
+is completed or its request/group is canceled, no replacement is submitted,
+including cancellations made directly in the LCO portal. An expired window
+cannot be extended beyond its original end.
+
+The [LCO API reference](https://developers.lco.global/#data-format-definition)
+does not expose another proposal's conflicting observation through telescope
+states. Recovery therefore reacts to dropped observations, not an inferred
+conflict span. Verified conflict spans can be handled by the pure window
+calculator, but the monitor does not invent them. The upstream
+[request observation endpoint](https://github.com/observatorycontrolsystem/observation-portal/blob/main/observation_portal/requestgroups/viewsets.py)
+and [state transitions](https://github.com/observatorycontrolsystem/observation-portal/blob/main/observation_portal/common/state_changes.py)
+show that failed observations can already be rescheduled by LCO while their
+request remains pending. Checks immediately before replacement reduce that race;
+this remains best-effort scheduling, not a guarantee of telescope time.
+
+A durable reservation precedes cancellation/submission. If the process crashes
+or an external response is lost, it does **not** repeat the submission. Inspect
+the original and `_auto` request in the LCO portal and reconcile manually. A
+saved successful response can be registered locally on a later poll without a
+second submission. Never delete a reservation merely to retry an uncertain POST.
+
+Restart the web service after deployment to load the new HTML/JavaScript;
+Python `--reload` does not watch templates.

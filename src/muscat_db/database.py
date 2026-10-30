@@ -261,6 +261,8 @@ CREATE TABLE IF NOT EXISTS lco_observation_requests (
     target              TEXT NOT NULL DEFAULT '',
     instrument          TEXT NOT NULL DEFAULT '',
     user_name           TEXT NOT NULL DEFAULT '',
+    supersedes_request_id INTEGER,
+    rescue_reason       TEXT NOT NULL DEFAULT '',
     request_state       TEXT NOT NULL DEFAULT 'PENDING',
     monitor_state       TEXT NOT NULL DEFAULT 'monitoring',
     window_start        TEXT NOT NULL DEFAULT '',
@@ -300,6 +302,21 @@ CREATE TABLE IF NOT EXISTS lco_observation_frames (
     PRIMARY KEY (request_id, frame_id),
     FOREIGN KEY (request_id) REFERENCES lco_observation_requests(request_id)
         ON DELETE CASCADE
+);
+
+-- A committed reservation precedes any external cancellation/submission.
+-- Uncertain outcomes retain their reservation and are never automatically retried.
+CREATE TABLE IF NOT EXISTS lco_rescue_attempts (
+    original_id INTEGER PRIMARY KEY,
+    proposal TEXT NOT NULL,
+    reserved_seconds REAL NOT NULL,
+    state TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    params_json TEXT NOT NULL,
+    result_json TEXT NOT NULL DEFAULT '{}',
+    reason TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS lco_monitor_leases (
@@ -511,6 +528,8 @@ def _catalog_index_needed(conn: sqlite3.Connection, sql: str) -> bool:
 # Each migration is attempted unconditionally; "duplicate column" errors are
 # silently swallowed so the function is safe to call multiple times.
 _MIGRATIONS = [
+    "ALTER TABLE lco_observation_requests ADD COLUMN supersedes_request_id INTEGER",
+    "ALTER TABLE lco_observation_requests ADD COLUMN rescue_reason TEXT NOT NULL DEFAULT ''",
     # 2026-07-12: group simultaneous multi-telescope sinistro nights separately
     "ALTER TABLE summaries ADD COLUMN telescope TEXT",
     # 2026-07-24: user override for normalized target names
@@ -1011,6 +1030,7 @@ _APP_OWNED_TABLES = (
     "test_observations",
     "lco_observation_requests",
     "lco_observation_frames",
+    "lco_rescue_attempts",
     "chat_messages",
     "chat_reactions",
     "target_tags",
