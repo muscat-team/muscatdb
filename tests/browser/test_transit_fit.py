@@ -376,3 +376,89 @@ def test_run_selector_loads_the_selected_fit_results(page, live_server):
         assert 'fit-extra' in page.locator('img[src*="/fit.png"]').first.get_attribute('src')
     finally:
         shutil.rmtree(extra)
+
+
+# Middle of the seeded light curves (2461314.80 to 2461314.918, see seed.LIGHTCURVE).
+FLARE_MID = "2461314.85900"
+
+
+def _flare_cell(page, row: int, param: str, which: str):
+    return page.locator("#flare-rows .flare-row").nth(row).locator(
+        f".flare-cell[data-param='{param}'][data-which='{which}']"
+    )
+
+
+def _enable_flares(page) -> None:
+    reveal(page, "#opt-include_flare")
+    page.locator("#opt-include_flare").check()
+
+
+def test_flare_rows_default_to_the_data_and_persist_after_reload(page, fitter):
+    _ready_to_fit(page)
+    _enable_flares(page)
+    # A new flare starts at the middle of the selected light curves.
+    expect(_flare_cell(page, 0, "tpeak", "val")).to_have_value(FLARE_MID)
+    page.click("#flare-add-btn")
+    assert page.locator("#flare-rows .flare-row").count() == 2
+    _flare_cell(page, 0, "tpeak", "val").fill("2461314.82")
+    _flare_cell(page, 0, "tpeak", "unc").fill("0.005")
+    _flare_cell(page, 1, "tpeak", "val").fill("2461314.90")
+    _flare_cell(page, 1, "tpeak", "unc").fill("0.005")
+    _flare_cell(page, 1, "ampl", "val").fill("0.02")
+
+    page.goto("/jobs")
+    page.goto(URL)
+    reveal(page, "#opt-include_flare")
+    assert page.is_checked("#opt-include_flare")
+    assert page.locator("#flare-rows .flare-row").count() == 2
+    expect(_flare_cell(page, 0, "tpeak", "val")).to_have_value("2461314.82")
+    expect(_flare_cell(page, 1, "tpeak", "val")).to_have_value("2461314.90")
+    expect(_flare_cell(page, 1, "ampl", "val")).to_have_value("0.02")
+
+    with page.expect_response("**/api/transit-fit/run"):
+        page.click("#run-test-btn")
+    options = fitter["start"][-1]["options"]
+    assert options["include_flare"] == "true"
+    assert options["flare_tpeak"] == "2461314.82,0.005; 2461314.90,0.005"
+    assert options["flare_fwhm"] == "0.02,0.01; 0.02,0.01"
+    assert options["flare_ampl"] == "0.01,0.01; 0.02,0.01"
+
+
+def test_flare_outside_the_data_blocks_the_run_until_the_row_is_removed(page, fitter):
+    _ready_to_fit(page)
+    _enable_flares(page)
+    page.click("#flare-add-btn")
+    _flare_cell(page, 1, "tpeak", "val").fill("2460000.5")
+
+    page.click("#run-test-btn")
+    assert "Flare 2 tpeak" in page.inner_text("#flare-rows-error")
+    assert fitter["start"] == []
+
+    page.locator(".flare-remove-btn").nth(1).click()
+    assert page.locator("#flare-rows .flare-row").count() == 1
+    # The last flare stays: Use Flare with no rows is not a valid setup.
+    assert page.locator(".flare-remove-btn").first.is_disabled()
+    with page.expect_response("**/api/transit-fit/run"):
+        page.click("#run-test-btn")
+    assert fitter["start"][-1]["options"]["flare_tpeak"] == f"{FLARE_MID},0.1"
+
+
+def test_flare_prior_shape_converts_every_row(page):
+    _ready_to_fit(page)
+    _enable_flares(page)
+    page.click("#flare-add-btn")
+    _flare_cell(page, 0, "ampl", "val").fill("0.01")
+    _flare_cell(page, 0, "ampl", "unc").fill("0.001")
+    _flare_cell(page, 1, "ampl", "val").fill("0.02")
+    _flare_cell(page, 1, "ampl", "unc").fill("0.002")
+    page.select_option("#opt-flare_ampl_prior", "uniform")
+    # Gaussian mean,unc becomes the 3-sigma bounds on both rows.
+    expect(_flare_cell(page, 0, "ampl", "val")).to_have_value("0.007")
+    expect(_flare_cell(page, 0, "ampl", "unc")).to_have_value("0.013")
+    expect(_flare_cell(page, 1, "ampl", "val")).to_have_value("0.014")
+    expect(_flare_cell(page, 1, "ampl", "unc")).to_have_value("0.026")
+    assert _flare_cell(page, 1, "ampl", "val").get_attribute("placeholder") == "low"
+    # A BJD keeps its precision through the conversion.
+    page.select_option("#opt-flare_tpeak_prior", "uniform")
+    expect(_flare_cell(page, 0, "tpeak", "val")).to_have_value("2461314.55900")
+    expect(_flare_cell(page, 0, "tpeak", "unc")).to_have_value("2461315.15900")

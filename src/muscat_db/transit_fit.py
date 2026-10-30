@@ -612,12 +612,137 @@ def _uniform_bounds(options: dict, param: str, planet: str, first_planet: str) -
     return [lo if lo is not None else lo_default, hi if hi is not None else hi_default]
 
 
-def validate_fit_options(options: dict | None) -> str | None:
+# The flare model's per-flare parameters, in the order the page shows them.
+_FLARE_PARAMS = ("tpeak", "fwhm", "ampl")
+
+
+def _parse_flare_rows(raw, param: str) -> tuple[list[tuple[float, float]] | None, str | None]:
+    """Parse one flare field, ``value,unc`` pairs joined by ``;``, into rows.
+
+    Returns ``(rows, None)`` or ``(None, error)``. The error names the row, so a
+    typo in a table of several flares points at the right line instead of
+    silently changing the number of flares.
+    """
+    pairs = [p.strip() for p in str(raw or "").split(";")]
+    while pairs and pairs[-1] == "":
+        pairs.pop()
+    rows: list[tuple[float, float]] = []
+    for i, pair in enumerate(pairs, start=1):
+        parts = [x.strip() for x in pair.split(",")]
+        if len(parts) != 2 or not parts[0] or not parts[1]:
+            return None, f"flare {param} row {i} must be two numbers (value,unc or low,high)"
+        a, b = _to_float(parts[0]), _to_float(parts[1])
+        if a is None or b is None or not math.isfinite(a) or not math.isfinite(b):
+            return None, f"flare {param} row {i} must be two numbers (value,unc or low,high)"
+        rows.append((a, b))
+    return rows, None
+
+
+def _validate_flares(o: dict, time_range: tuple[float, float] | None) -> str | None:
+    """Check the flare rows: complete, numeric, consistent counts, and ``tpeak``
+    inside the light curves when *time_range* is known.
+
+    timer sizes the model from ``tpeak`` and accepts ``fwhm``/``ampl`` either
+    one per flare or as a single value shared by every flare, so the count rule
+    here is the same one. A Uniform ``tpeak`` row holds ``low,high`` bounds and
+    only has to overlap the data; a Gaussian mean has to lie inside it.
+    """
+    if o.get("include_flare") != "true":
+        return None
+    rows_by_param: dict[str, list[tuple[float, float]]] = {}
+    priors: dict[str, str] = {}
+    for param in _FLARE_PARAMS:
+        prior = str(o.get(f"flare_{param}_prior") or "gaussian").strip().lower()
+        if prior not in _PRIOR_CHOICES:
+            return f"flare {param} prior must be gaussian or uniform"
+        priors[param] = prior
+        rows, err = _parse_flare_rows(o.get(f"flare_{param}"), param)
+        if err:
+            return err
+        if not rows:
+            return f"flare {param} is required when Use Flare is on (one value,unc pair per flare)"
+        for i, (a, b) in enumerate(rows, start=1):
+            if prior == "uniform":
+                if not a < b:
+                    return f"flare {param} uniform bounds (row {i}) must have low < high"
+            elif b <= 0:
+                return f"flare {param} uncertainty (row {i}) must be greater than 0"
+            if param == "fwhm" and (b if prior == "uniform" else a) <= 0:
+                return f"flare fwhm (row {i}) must be greater than 0"
+        rows_by_param[param] = rows
+
+    n_flares = len(rows_by_param["tpeak"])
+    for param in ("fwhm", "ampl"):
+        n = len(rows_by_param[param])
+        if n not in (1, n_flares):
+            return (
+                f"flare {param} has {n} rows but tpeak has {n_flares}: give one {param} "
+                "per flare, or a single value shared by every flare"
+            )
+
+    if time_range is not None:
+        lo, hi = time_range
+        for i, (a, b) in enumerate(rows_by_param["tpeak"], start=1):
+            inside = (a < hi and b > lo) if priors["tpeak"] == "uniform" else (lo <= a <= hi)
+            if not inside:
+                return (
+                    f"flare tpeak (row {i}) lies outside the selected light curves "
+                    f"({lo:.5f} to {hi:.5f} BJD_TDB)"
+                )
+    return None
+
+
+def lightcurve_time_range(csvs) -> tuple[float, float] | None:
+    """Return the earliest and latest ``BJD_TDB`` across the light-curve CSVs.
+
+    ``None`` when no file has a readable ``BJD_TDB`` column, so callers treat
+    the range as unknown rather than refusing input they cannot check.
+    """
+    lo = hi = None
+    for path in csvs:
+        try:
+            with open(path, newline="") as fh:
+                reader = csv.reader(fh)
+                header = next(reader, None)
+                if not header or "BJD_TDB" not in header:
+                    continue
+                col = header.index("BJD_TDB")
+                for row in reader:
+                    if len(row) <= col:
+                        continue
+                    t = _to_float(row[col])
+                    if t is None or not math.isfinite(t):
+                        continue
+                    lo = t if lo is None or t < lo else lo
+                    hi = t if hi is None or t > hi else hi
+        except (OSError, csv.Error):
+            continue
+    return None if lo is None else (lo, hi)
+
+
+def validate_flare_times(options: dict | None, csvs) -> str | None:
+    """Refuse a flare ``tpeak`` that lies outside the selected light curves.
+
+    Runs once the launch knows which CSVs are in the fit. No-op when flares are
+    off or the files carry no ``BJD_TDB`` column.
+    """
+    o = options or {}
+    if o.get("include_flare") != "true":
+        return None
+    time_range = lightcurve_time_range(csvs)
+    if time_range is None:
+        return None
+    return _validate_flares(o, time_range)
+
+
+def validate_fit_options(options: dict | None, time_range: tuple[float, float] | None = None) -> str | None:
     """Return a user-facing error string for invalid fitting options, else ``None``.
 
     Validates every field in the "Fitting Configurations & Parameters" form so
     bad input is rejected with a clear message instead of crashing the pipeline
     or writing a malformed sys.yaml. An empty field keeps the pipeline default.
+    *time_range* is the light curves' ``(earliest, latest)`` BJD_TDB when known;
+    it lets the flare ``tpeak`` check run here as well as at launch.
     """
     o = options or {}
 
@@ -768,6 +893,10 @@ def validate_fit_options(options: dict | None) -> str | None:
                 return f"GP {param} uniform bounds must have low < high"
             if prior == "gaussian" and second <= 0:
                 return f"GP {param} uncertainty must be greater than 0"
+
+    err = _validate_flares(o, time_range)
+    if err:
+        return err
 
     return None
 
@@ -1427,6 +1556,10 @@ def compute_logp(inst: str, date: str, target: str, options: dict, selected_csvs
     if err:
         return {"ok": False, "error": err}
 
+    err = validate_flare_times(options, csvs)
+    if err:
+        return {"ok": False, "error": err}
+
     timer_py = _conda_env_python(timer_conda_env())
     if not timer_py:
         return {"ok": False, "error": "timer conda environment not found"}
@@ -1554,6 +1687,12 @@ def start_fit(
             return {"ok": False, "error": "No lightcurves selected for fitting."}
 
     err = validate_no_duplicate_datasets(inst, date, csvs, fixed_params=set(_resolved_fixed_params(options)))
+    if err:
+        return {"ok": False, "error": err}
+
+    # A flare peak outside the data can only be checked once the light curves
+    # are known, so it runs here, still before the run directory is touched.
+    err = validate_flare_times(options, csvs)
     if err:
         return {"ok": False, "error": err}
 

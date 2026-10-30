@@ -108,6 +108,19 @@
     color: var(--red); font-size: 0.75rem; margin-top: 0.15rem; line-height: 1.2; display: none;
   }
   .field-error.visible { display: block; }
+  /* One row per flare; columns hug their inputs instead of filling the panel. */
+  #flare-table { width: auto; margin: 0.25rem 0 0; }
+  #flare-table th, #flare-table td { padding: 0.3rem 0.5rem; vertical-align: middle; }
+  #flare-table th { font-weight: 500; }
+  #flare-table .flare-cell {
+    width: 7.5rem; min-width: 0; margin-right: 0.3rem; font-size: 0.85rem; padding: 0.3rem 0.4rem;
+  }
+  #flare-table .flare-cell[data-param="tpeak"][data-which="val"] { width: 9.5rem; }
+  #flare-table .flare-index { color: var(--text-dim); font-size: 0.8rem; text-align: right; }
+  #flare-table select {
+    background: var(--input-bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px;
+    padding: 0.2rem 0.4rem; font-size: 0.8rem; margin-left: 0.4rem;
+  }
 
   .ephem-src {
     display: inline-block; font-size: 0.62rem; font-weight: 600;
@@ -256,7 +269,7 @@
     </div>
     <div class="lightcurve-grid">
       {% for csv in csvs %}
-        <div class="lightcurve-card csv-card" data-csv-path="{{ csv.path }}" data-csv-name="{{ csv.name }}" role="button" tabindex="0">
+        <div class="lightcurve-card csv-card" data-csv-path="{{ csv.path }}" data-csv-name="{{ csv.name }}" data-tmin="{{ '%.5f' % csv.t_min if csv.t_min is not none else '' }}" data-tmax="{{ '%.5f' % csv.t_max if csv.t_max is not none else '' }}" role="button" tabindex="0">
           <input type="checkbox" class="csv-checkbox" checked style="margin-right: 0.5rem;">
           <span class="lc-name">📄 {{ csv.name }}{% if csv.run_id %} <span style="font-size: 0.8rem; color: var(--text-dim);">({{ csv.run_id }})</span>{% endif %}</span>
           <span class="lc-date">Created: {{ csv.created_at }}</span>
@@ -584,7 +597,7 @@
         </details>
 
         <details class="opt-collapse">
-        <summary>Flare Model <span class="help-tooltip" title="Model sudden flux flares (stellar flares). Parameters support lists (comma-separated for multi-flare) or single values. The flare block is only written to fit.yaml when Use Flare is on.">?</span></summary>
+        <summary>Flare Model <span class="help-tooltip" title="Model stellar flares, one table row per flare: peak time, full width at half maximum and amplitude, each entered as value,unc (Gaussian) or low,high (Uniform). The prior shape is chosen per parameter and applies to every flare, as timer requires. The flare block is only written to fit.yaml when Use Flare is on.">?</span></summary>
         <div style="grid-column: 1 / -1; display: flex; gap: 1.25rem; flex-wrap: wrap; align-items: flex-end; padding-bottom: 0.45rem;">
           <div class="opt check" style="margin-top: 0; white-space: nowrap;">
             <input type="checkbox" id="opt-include_flare">
@@ -595,36 +608,37 @@
             <label for="opt-chromatic_flare">Chromatic Flare <span class="help-tooltip" title="Fit chromatic flare amplitude.">?</span></label>
           </div>
         </div>
-        <div class="transit-option-grid" style="grid-column: 1 / -1; display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.25rem;">
-          <div class="opt">
-            <label for="opt-flare_tpeak">tpeak prior <span class="help-tooltip" title="Prior on peak time of the flare (BJD_TDB). Gaussian: enter value,unc. Uniform: enter low,high bounds. Use ; to separate multiple flares.">?</span></label>
-            <div style="display: flex; gap: 0.5rem; align-items: center;">
-              <input type="text" id="opt-flare_tpeak" value="0.0,0.1" placeholder="value,unc" style="flex: 3; width: 100%; min-width: 0;" disabled>
-              <select id="opt-flare_tpeak_prior" title="Prior shape — Gaussian: enter value,unc. Uniform: enter low,high bounds." style="flex: 2; width: 100%; min-width: 0; background: var(--input-bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 0.35rem 0.5rem; font-size: 0.85rem;" disabled>
-                <option value="gaussian">Gaussian</option>
-                <option value="uniform">Uniform</option>
-              </select>
-            </div>
-          </div>
-          <div class="opt">
-            <label for="opt-flare_fwhm">fwhm prior <span class="help-tooltip" title="Prior on full-width at half-maximum of the flare (days). Gaussian: enter value,unc. Uniform: enter low,high bounds. Use ; to separate multiple flares.">?</span></label>
-            <div style="display: flex; gap: 0.5rem; align-items: center;">
-              <input type="text" id="opt-flare_fwhm" value="0.02,0.01" placeholder="value,unc" style="flex: 3; width: 100%; min-width: 0;" disabled>
-              <select id="opt-flare_fwhm_prior" title="Prior shape — Gaussian: enter value,unc. Uniform: enter low,high bounds." style="flex: 2; width: 100%; min-width: 0; background: var(--input-bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 0.35rem 0.5rem; font-size: 0.85rem;" disabled>
-                <option value="gaussian">Gaussian</option>
-                <option value="uniform">Uniform</option>
-              </select>
-            </div>
-          </div>
-          <div class="opt">
-            <label for="opt-flare_ampl">ampl prior <span class="help-tooltip" title="Prior on amplitude of the flare (flux units). Gaussian: enter value,unc. Uniform: enter low,high bounds. Use ; to separate multiple flares.">?</span></label>
-            <div style="display: flex; gap: 0.5rem; align-items: center;">
-              <input type="text" id="opt-flare_ampl" value="0.01,0.01" placeholder="value,unc" style="flex: 3; width: 100%; min-width: 0;" disabled>
-              <select id="opt-flare_ampl_prior" title="Prior shape — Gaussian: enter value,unc. Uniform: enter low,high bounds." style="flex: 2; width: 100%; min-width: 0; background: var(--input-bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 0.35rem 0.5rem; font-size: 0.85rem;" disabled>
-                <option value="gaussian">Gaussian</option>
-                <option value="uniform">Uniform</option>
-              </select>
-            </div>
+        <div id="flare-rows-wrap" style="grid-column: 1 / -1; overflow-x: auto;">
+          <table id="flare-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>tpeak <span class="help-tooltip" title="Peak time of the flare (BJD_TDB). Gaussian: value,unc. Uniform: low,high bounds. A new row starts at the middle of the selected light curves; the run is refused when a peak lies outside them.">?</span>
+                  <select id="opt-flare_tpeak_prior" title="Prior shape for every flare's tpeak" disabled>
+                    <option value="gaussian">Gaussian</option>
+                    <option value="uniform">Uniform</option>
+                  </select>
+                </th>
+                <th>fwhm <span class="help-tooltip" title="Full width at half maximum of the flare (days). Gaussian: value,unc. Uniform: low,high bounds.">?</span>
+                  <select id="opt-flare_fwhm_prior" title="Prior shape for every flare's fwhm" disabled>
+                    <option value="gaussian">Gaussian</option>
+                    <option value="uniform">Uniform</option>
+                  </select>
+                </th>
+                <th>ampl <span class="help-tooltip" title="Amplitude of the flare (relative flux). Gaussian: value,unc. Uniform: low,high bounds.">?</span>
+                  <select id="opt-flare_ampl_prior" title="Prior shape for every flare's ampl" disabled>
+                    <option value="gaussian">Gaussian</option>
+                    <option value="uniform">Uniform</option>
+                  </select>
+                </th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="flare-rows"></tbody>
+          </table>
+          <div style="display: flex; gap: 0.75rem; align-items: center; margin-top: 0.4rem;">
+            <button class="btn sm" type="button" id="flare-add-btn" disabled>Add flare</button>
+            <span class="field-error" id="flare-rows-error" style="margin-top: 0;"></span>
           </div>
         </div>
         </details>
@@ -1020,11 +1034,14 @@
       bump_ampl_prior: val('opt-bump_ampl_prior'),
       include_flare: chk('opt-include_flare') ? 'true' : 'false',
       chromatic_flare: chk('opt-chromatic_flare') ? 'true' : 'false',
-      flare_tpeak: val('opt-flare_tpeak'),
+      // Flare rows are joined per parameter as "value,unc; value,unc", the
+      // format the backend has always parsed, so saved options and the API
+      // are unchanged.
+      flare_tpeak: flareFieldValue('tpeak'),
       flare_tpeak_prior: val('opt-flare_tpeak_prior'),
-      flare_fwhm: val('opt-flare_fwhm'),
+      flare_fwhm: flareFieldValue('fwhm'),
       flare_fwhm_prior: val('opt-flare_fwhm_prior'),
-      flare_ampl: val('opt-flare_ampl'),
+      flare_ampl: flareFieldValue('ampl'),
       flare_ampl_prior: val('opt-flare_ampl_prior'),
       teff: val('opt-teff'),
       teff_unc: val('opt-teff_unc'),
@@ -1647,6 +1664,14 @@
     var container = document.getElementById('planet-cards-container');
     if (container) container.innerHTML = '';
 
+    // The prior selects are restored first so the rows take their placeholders
+    // (value,unc or low,high) from the saved shape.
+    ['flare_tpeak_prior', 'flare_fwhm_prior', 'flare_ampl_prior'].forEach(function (id) {
+      var el = document.getElementById('opt-' + id);
+      if (el && saved && saved[id] !== undefined) el.value = saved[id];
+    });
+    setFlareRowsFromStrings(saved);
+
     if (!saved) {
       var defaultLetter = (DEFAULTS && DEFAULTS.planets) ? DEFAULTS.planets : 'b';
       // Default: every star/planet field empty (populated only when the user
@@ -1660,7 +1685,7 @@
      'tune','draws','chains','cores','spline_knots','clip_nsig','chunk_thresh','trim_beg','trim_end',
      'gp_log_amp_prior','gp_log_scale_prior',
      'bump_tcenter','bump_tcenter_prior','bump_width','bump_width_prior','bump_ampl','bump_ampl_prior',
-     'flare_tpeak','flare_tpeak_prior','flare_fwhm','flare_fwhm_prior','flare_ampl','flare_ampl_prior',
+     'flare_tpeak_prior','flare_fwhm_prior','flare_ampl_prior',
      'fit_basis'].forEach(function (id) {
       var el = document.getElementById('opt-'+id);
       if (el && saved[id] !== undefined) el.value = saved[id];
@@ -1758,9 +1783,9 @@
                          'opt-bump_tcenter':'0.0,0.1','opt-bump_tcenter_prior':'gaussian',
                          'opt-bump_width':'0.02,0.01','opt-bump_width_prior':'gaussian',
                          'opt-bump_ampl':'0.01,0.01','opt-bump_ampl_prior':'gaussian',
-                         'opt-flare_tpeak':'0.0,0.1','opt-flare_tpeak_prior':'gaussian',
-                         'opt-flare_fwhm':'0.02,0.01','opt-flare_fwhm_prior':'gaussian',
-                         'opt-flare_ampl':'0.01,0.01','opt-flare_ampl_prior':'gaussian',
+                         'opt-flare_tpeak_prior':'gaussian',
+                         'opt-flare_fwhm_prior':'gaussian',
+                         'opt-flare_ampl_prior':'gaussian',
                          'opt-fit_basis':'duration'};
       Object.keys(numDefaults).forEach(function (id) { var el = document.getElementById(id); if (el) el.value = numDefaults[id]; });
 
@@ -1773,6 +1798,9 @@
       Object.keys(checkDefaults).forEach(function (id) { var el = document.getElementById(id); if (el) el.checked = checkDefaults[id]; });
       refreshGpPriorControls();
       refreshBumpPriorControls();
+      // Back to a single flare row with the default priors (tpeak at the
+      // middle of the selected data).
+      setFlareRowsFromStrings(null);
       refreshFlarePriorControls();
       updateDependentFields();
 
@@ -1984,60 +2012,246 @@
     });
   }
 
-  var FLARE_PRIOR_SPECS = [
-    { field: 'opt-flare_tpeak', prior: 'opt-flare_tpeak_prior' },
-    { field: 'opt-flare_fwhm', prior: 'opt-flare_fwhm_prior' },
-    { field: 'opt-flare_ampl', prior: 'opt-flare_ampl_prior' }
-  ];
+  // ----- flare rows -----
+  // One table row per flare (tpeak, fwhm, ampl, each a value and an
+  // uncertainty). The prior shape lives in the column header because timer
+  // applies one shape per parameter across every flare.
+  var FLARE_PARAMS = ['tpeak', 'fwhm', 'ampl'];
+  var FLARE_ROW_DEFAULTS = { tpeak: ['', '0.1'], fwhm: ['0.02', '0.01'], ampl: ['0.01', '0.01'] };
+
+  function flarePriorMode(param) {
+    var sel = document.getElementById('opt-flare_' + param + '_prior');
+    return sel && sel.value === 'uniform' ? 'uniform' : 'gaussian';
+  }
+
+  function flareRows() {
+    return Array.prototype.slice.call(document.querySelectorAll('#flare-rows .flare-row'));
+  }
+
+  function flareCell(tr, param, which) {
+    return tr.querySelector('.flare-cell[data-param="' + param + '"][data-which="' + which + '"]');
+  }
+
+  // Earliest and latest BJD_TDB over the selected light curves, read from the
+  // data-tmin/data-tmax attributes the server puts on each card. Null when no
+  // card carries a span (for example a CSV without a BJD_TDB column).
+  function selectedTimeRange() {
+    var cards = Array.prototype.slice.call(document.querySelectorAll('.csv-card'));
+    var picked = cards.filter(function (c) {
+      var cb = c.querySelector('.csv-checkbox');
+      return cb && cb.checked;
+    });
+    if (!picked.length) picked = cards;
+    var lo = null, hi = null;
+    picked.forEach(function (c) {
+      var a = parseFloat(c.getAttribute('data-tmin')), b = parseFloat(c.getAttribute('data-tmax'));
+      if (isFinite(a) && (lo === null || a < lo)) lo = a;
+      if (isFinite(b) && (hi === null || b > hi)) hi = b;
+    });
+    return (lo === null || hi === null) ? null : [lo, hi];
+  }
+
+  // A new flare starts at the middle of the data (Gaussian) or spanning it
+  // (Uniform); without a known range the peak time is left for the user.
+  function defaultFlareTpeak() {
+    var range = selectedTimeRange();
+    if (!range) return FLARE_ROW_DEFAULTS.tpeak.slice();
+    if (flarePriorMode('tpeak') === 'uniform') return [range[0].toFixed(5), range[1].toFixed(5)];
+    return [((range[0] + range[1]) / 2).toFixed(5), FLARE_ROW_DEFAULTS.tpeak[1]];
+  }
+
+  function flareCellPlaceholder(param, which) {
+    if (flarePriorMode(param) === 'uniform') return which === 'val' ? 'low' : 'high';
+    return which === 'val' ? 'value' : 'unc';
+  }
+
+  function flareCellHtml(param, which, value) {
+    var safe = String(value === undefined || value === null ? '' : value).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+    return '<input type="text" class="flare-cell" data-param="' + param + '" data-which="' + which +
+      '" value="' + safe + '" placeholder="' + flareCellPlaceholder(param, which) + '">';
+  }
+
+  function renumberFlareRows() {
+    var rows = flareRows();
+    var enabled = chk('opt-include_flare');
+    rows.forEach(function (tr, i) {
+      tr.querySelector('.flare-index').textContent = String(i + 1);
+      // The last remaining flare cannot be removed: Use Flare with no rows is
+      // not a valid configuration.
+      tr.querySelector('.flare-remove-btn').disabled = !enabled || rows.length === 1;
+    });
+  }
+
+  function addFlareRow(values) {
+    var body = document.getElementById('flare-rows');
+    if (!body) return null;
+    values = values || {};
+    var tr = document.createElement('tr');
+    tr.className = 'flare-row';
+    var html = '<td class="flare-index"></td>';
+    FLARE_PARAMS.forEach(function (param) {
+      var pair = values[param] || (param === 'tpeak' ? defaultFlareTpeak() : FLARE_ROW_DEFAULTS[param].slice());
+      html += '<td>' + flareCellHtml(param, 'val', pair[0]) + flareCellHtml(param, 'unc', pair[1]) + '</td>';
+    });
+    html += '<td><button class="btn sm danger flare-remove-btn" type="button">Remove</button></td>';
+    tr.innerHTML = html;
+    tr.querySelector('.flare-remove-btn').addEventListener('click', function () {
+      tr.remove();
+      renumberFlareRows();
+      clearFlareRowsError();
+      saveOptions();
+    });
+    body.appendChild(tr);
+    refreshFlareRowsEnabled();
+    return tr;
+  }
+
+  // Rows of one parameter joined as "value,unc; value,unc", the format the
+  // backend parses and the one the previous free-text fields stored.
+  function flareFieldValue(param) {
+    return flareRows().map(function (tr) {
+      return flareCell(tr, param, 'val').value.trim() + ',' + flareCell(tr, param, 'unc').value.trim();
+    }).join('; ');
+  }
+
+  // Rebuild the table from saved per-parameter strings; null gives one
+  // default row. A single saved fwhm or ampl pair is shared by every flare,
+  // which is how timer reads a one-element list.
+  function setFlareRowsFromStrings(saved) {
+    var body = document.getElementById('flare-rows');
+    if (!body) return;
+    body.innerHTML = '';
+    var byParam = {};
+    var count = 0;
+    FLARE_PARAMS.forEach(function (param) {
+      var raw = saved && saved['flare_' + param] !== undefined && saved['flare_' + param] !== null
+        ? String(saved['flare_' + param]) : '';
+      var pairs = raw.split(';').map(function (s) { return s.trim(); }).filter(function (s) { return s !== ''; });
+      byParam[param] = pairs.map(splitPair);
+      if (byParam[param].length > count) count = byParam[param].length;
+    });
+    if (count === 0) { addFlareRow(); return; }
+    for (var i = 0; i < count; i++) {
+      var values = {};
+      FLARE_PARAMS.forEach(function (param) {
+        var pairs = byParam[param];
+        values[param] = pairs[i] || (pairs.length === 1 ? pairs[0] : null) || FLARE_ROW_DEFAULTS[param].slice();
+      });
+      addFlareRow(values);
+    }
+  }
+
+  function refreshFlareRowsEnabled() {
+    var wrap = document.getElementById('flare-rows-wrap');
+    if (!wrap) return;
+    var enabled = chk('opt-include_flare');
+    wrap.querySelectorAll('input, select, button').forEach(function (el) { el.disabled = !enabled; });
+    wrap.style.opacity = enabled ? '1' : '0.5';
+    renumberFlareRows();
+  }
+
+  function clearFlareRowsError() {
+    var errEl = document.getElementById('flare-rows-error');
+    if (errEl) { errEl.classList.remove('visible'); errEl.textContent = ''; }
+    document.querySelectorAll('#flare-rows .flare-cell.is-invalid').forEach(function (c) { c.classList.remove('is-invalid'); });
+  }
+
+  // Mirrors the backend check: every cell numeric, Gaussian unc > 0, Uniform
+  // low < high, and tpeak inside the selected light curves when their span is
+  // known. Returns the first offending input (for focus) or null when valid.
+  function validateFlareRows() {
+    clearFlareRowsError();
+    if (!chk('opt-include_flare')) return null;
+    var errEl = document.getElementById('flare-rows-error');
+    var rows = flareRows();
+    var fail = function (cells, message) {
+      cells.forEach(function (c) { c.classList.add('is-invalid'); });
+      if (errEl) { errEl.textContent = message; errEl.classList.add('visible'); }
+      return cells[0] || document.getElementById('flare-add-btn');
+    };
+    if (!rows.length) return fail([], 'Add at least one flare or turn Use Flare off');
+    var range = selectedTimeRange();
+    for (var i = 0; i < rows.length; i++) {
+      for (var k = 0; k < FLARE_PARAMS.length; k++) {
+        var param = FLARE_PARAMS[k];
+        var mode = flarePriorMode(param);
+        var v = flareCell(rows[i], param, 'val'), u = flareCell(rows[i], param, 'unc');
+        var a = Number(v.value.trim()), b = Number(u.value.trim());
+        var label = 'Flare ' + (i + 1) + ' ' + param;
+        if (v.value.trim() === '' || u.value.trim() === '' || !isFinite(a) || !isFinite(b)) {
+          return fail([v, u], label + ': enter two numbers (' + (mode === 'uniform' ? 'low and high' : 'value and unc') + ')');
+        }
+        if (mode === 'uniform' && !(a < b)) return fail([v, u], label + ': low must be less than high');
+        if (mode === 'gaussian' && b <= 0) return fail([u], label + ': uncertainty must be > 0');
+        if (param === 'fwhm' && (mode === 'uniform' ? b : a) <= 0) return fail([v], label + ': must be > 0');
+        if (param === 'tpeak' && range) {
+          var inside = mode === 'uniform' ? (a < range[1] && b > range[0]) : (a >= range[0] && a <= range[1]);
+          if (!inside) {
+            return fail([v, u], label + ': outside the selected light curves (' + range[0].toFixed(5) + ' to ' + range[1].toFixed(5) + ' BJD_TDB)');
+          }
+        }
+      }
+    }
+    return null;
+  }
 
   function refreshFlarePriorControls() {
-    FLARE_PRIOR_SPECS.forEach(function (spec) {
-      var field = document.getElementById(spec.field);
-      var prior = document.getElementById(spec.prior);
-      if (!field || !prior) return;
+    FLARE_PARAMS.forEach(function (param) {
+      var prior = document.getElementById('opt-flare_' + param + '_prior');
+      if (!prior) return;
       prior.dataset.mode = prior.value === 'uniform' ? 'uniform' : 'gaussian';
-      field.placeholder = prior.dataset.mode === 'uniform' ? 'low,high (use ; for multiple)' : 'mean,unc (use ; for multiple)';
+      document.querySelectorAll('#flare-rows .flare-cell[data-param="' + param + '"]').forEach(function (cell) {
+        cell.placeholder = flareCellPlaceholder(param, cell.dataset.which);
+      });
     });
+  }
+
+  // Keep a BJD at 5 decimals (about a second); a 4-significant-figure
+  // rounding would turn 2461314.86 into 2461000.
+  function fmtFlareValue(param, x) {
+    return param === 'tpeak' ? x.toFixed(5) : fmtSig(x, 4);
   }
 
   function setupFlarePriorSelectors() {
     refreshFlarePriorControls();
-    FLARE_PRIOR_SPECS.forEach(function (spec) {
-      var field = document.getElementById(spec.field);
-      var prior = document.getElementById(spec.prior);
-      if (!field || !prior) return;
+    FLARE_PARAMS.forEach(function (param) {
+      var prior = document.getElementById('opt-flare_' + param + '_prior');
+      if (!prior) return;
       prior.addEventListener('change', function () {
         var next = prior.value === 'uniform' ? 'uniform' : 'gaussian';
         var prev = prior.dataset.mode || 'gaussian';
         if (next !== prev) {
-          var val = field.value.trim();
-          if (val) {
-            var pairs = val.split(';').map(function (s) { return s.trim(); });
-            var newPairs = [];
-            var ok = true;
-            for (var k = 0; k < pairs.length; k++) {
-              var pair = splitPair(pairs[k]);
-              var a = Number(pair[0]), b = Number(pair[1]);
-              if (pair[0] !== '' && pair[1] !== '' && isFinite(a) && isFinite(b)) {
-                if (next === 'uniform') {
-                  newPairs.push(fmtSig(a - 3 * b, 4) + ',' + fmtSig(a + 3 * b, 4));
-                } else {
-                  newPairs.push(fmtSig((a + b) / 2, 4) + ',' + fmtSig((b - a) / 6, 4));
-                }
-              } else {
-                ok = false;
-                break;
-              }
+          // Convert each row in place: a Gaussian mean,unc becomes its 3-sigma
+          // bounds, and bounds become their midpoint and a sixth of the width.
+          flareRows().forEach(function (tr) {
+            var v = flareCell(tr, param, 'val'), u = flareCell(tr, param, 'unc');
+            var a = Number(v.value.trim()), b = Number(u.value.trim());
+            if (v.value.trim() === '' || u.value.trim() === '' || !isFinite(a) || !isFinite(b)) return;
+            if (next === 'uniform') {
+              v.value = fmtFlareValue(param, a - 3 * b);
+              u.value = fmtFlareValue(param, a + 3 * b);
+            } else {
+              v.value = fmtFlareValue(param, (a + b) / 2);
+              u.value = fmtFlareValue(param, (b - a) / 6);
             }
-            if (ok && newPairs.length > 0) {
-              field.value = newPairs.join('; ');
-            }
-          }
+          });
         }
         prior.dataset.mode = next;
-        field.placeholder = next === 'uniform' ? 'low,high (use ; for multiple)' : 'mean,unc (use ; for multiple)';
+        refreshFlarePriorControls();
       });
     });
+    var addBtn = document.getElementById('flare-add-btn');
+    if (addBtn) {
+      addBtn.addEventListener('click', function () {
+        var tr = addFlareRow();
+        clearFlareRowsError();
+        saveOptions();
+        if (tr) flareCell(tr, 'tpeak', 'val').focus();
+      });
+    }
+    // Typing in a row clears the row error, as the static fields do.
+    var body = document.getElementById('flare-rows');
+    if (body) body.addEventListener('input', clearFlareRowsError);
   }
 
   var CONTROL_DEPENDENCIES = [
@@ -2065,9 +2279,7 @@
       controller: 'opt-include_flare',
       targets: [
         'opt-chromatic_flare',
-        'opt-flare_tpeak', 'opt-flare_tpeak_prior',
-        'opt-flare_fwhm', 'opt-flare_fwhm_prior',
-        'opt-flare_ampl', 'opt-flare_ampl_prior'
+        'opt-flare_tpeak_prior', 'opt-flare_fwhm_prior', 'opt-flare_ampl_prior'
       ]
     }
   ];
@@ -2082,6 +2294,9 @@
         el.style.opacity = enabled ? '1' : '0.5';
       });
     });
+    // The flare rows are built at run time, so they follow Use Flare here
+    // rather than through the static id list above.
+    refreshFlareRowsEnabled();
   }
 
   restoreOptions();
@@ -2115,9 +2330,6 @@
     { id: 'opt-bump_tcenter', type: 'bump_pair', dependsOn: 'opt-include_bump' },
     { id: 'opt-bump_width',   type: 'bump_pair', dependsOn: 'opt-include_bump' },
     { id: 'opt-bump_ampl',    type: 'bump_pair', dependsOn: 'opt-include_bump' },
-    { id: 'opt-flare_tpeak',   type: 'bump_pair', dependsOn: 'opt-include_flare' },
-    { id: 'opt-flare_fwhm',    type: 'bump_pair', dependsOn: 'opt-include_flare' },
-    { id: 'opt-flare_ampl',    type: 'bump_pair', dependsOn: 'opt-include_flare' },
   ];
 
   function validateField(id, rules) {
@@ -2200,6 +2412,8 @@
     FIELD_RULES.forEach(function (rule) {
       if (!validateField(rule.id, rule)) { ok = false; if (!firstErr) firstErr = document.getElementById(rule.id); }
     });
+    var flareInvalid = validateFlareRows();
+    if (flareInvalid) { ok = false; if (!firstErr) firstErr = flareInvalid; }
     var planetCards = document.querySelectorAll('.planet-card');
     if (planetCards.length === 0) { ok = false; }
     planetCards.forEach(function (card) {

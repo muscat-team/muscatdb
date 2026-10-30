@@ -2865,8 +2865,12 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
                 mtime, created_at = 0.0, "Unknown"
             csite, ctelescope, cmode = fit.csv_site_mode(c.name, inst) if inst in phot.MULTISITE_INSTRUMENTS else (None, None, None)
             crun = _photometry_run_of_csv(c)
+            # The flare table defaults a new peak time to the middle of the
+            # selected data, so each card carries its curve's time span.
+            trange = fit.lightcurve_time_range([c])
             rows.append({"path": str(c), "name": c.name, "created_at": created_at,
-                         "_mtime": mtime, "_site": csite, "_telescope": ctelescope, "_mode": cmode, "run_id": crun})
+                         "_mtime": mtime, "_site": csite, "_telescope": ctelescope, "_mode": cmode, "run_id": crun,
+                         "t_min": trange[0] if trange else None, "t_max": trange[1] if trange else None})
 
         if inst in phot.MULTISITE_INSTRUMENTS:
             # A multi-site instrument's date+target can hold multiple sites /
@@ -2893,7 +2897,8 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
                     and (not sel_telescope or r["_telescope"] == sel_telescope)
                     and (not sel_mode or r["_mode"] == sel_mode)]
 
-        csvs = [{"path": r["path"], "name": r["name"], "created_at": r["created_at"], "run_id": r["run_id"]} for r in rows]
+        csvs = [{"path": r["path"], "name": r["name"], "created_at": r["created_at"], "run_id": r["run_id"],
+                 "t_min": r["t_min"], "t_max": r["t_max"]} for r in rows]
 
         # Existing runs (each isolated in its own dir); show one run's results at
         # a time, defaulting to the newest, selectable via the results-run chips.
