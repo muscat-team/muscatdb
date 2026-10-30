@@ -574,7 +574,14 @@ def test_transit_fit_results_summary_closes_its_layout_wrappers():
     """The downloads row must not be swallowed by an unclosed summary div."""
     html = _read_template("transit_fit.html")
     start = html.index("{% if outputs.summary %}")
-    end = html.index("{% endif %}", start)
+    # The block nests its own conditionals (the detection SNR branch), so the
+    # endif that closes it is the one that brings the if depth back to zero.
+    depth = 0
+    for m in re.finditer(r"{%\s*(if|endif)\b", html[start:]):
+        depth += 1 if m.group(1) == "if" else -1
+        if depth == 0:
+            end = start + m.start()
+            break
     summary_block = html[start:end]
 
     assert summary_block.count("<div") == summary_block.count("</div>")
