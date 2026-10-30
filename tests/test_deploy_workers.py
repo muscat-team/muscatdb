@@ -452,6 +452,25 @@ def test_down_refuses_when_the_installed_profile_is_not_the_selected_one(conf, c
     assert "prod" in err and "--profile prod" in err and "--force" in err
 
 
+def test_down_refusal_names_a_half_switched_host(conf, capsys):
+    prod = _prod_installed(conf)
+    # photometry was held busy during `up --profile prod`, so its env stayed on dev
+    dev = w.parse_config(_profiled(), profile="dev")
+    path = conf / "muscatdb" / "workers" / f"{w.instance('ut3', 'photometry')}.env"
+    path.write_text(w.render_env(dev, dev.hosts["ut3"], "muscat-ut3"))
+    runner = RecordingRunner({"muscat-ut3": "muscat-ut3"})
+    db = FakeDb(muscatdb_dev=[], muscatdb_prod=[])
+
+    for cfg in (prod, dev):
+        rc = w.cmd_down(cfg, [cfg.hosts["ut3"]], runner, db, force=False)
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "mixed profiles" in err
+        assert "transit_fit on prod" in err and "photometry on dev" in err
+        assert "--force" in err and "finish `up`" in err
+    assert runner.mutating("muscat-ut3") == []
+
+
 def test_down_checks_the_database_the_workers_are_installed_against(conf, capsys):
     prod = _prod_installed(conf)
     runner = RecordingRunner({"muscat-ut3": "muscat-ut3"})
