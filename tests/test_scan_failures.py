@@ -261,10 +261,17 @@ def test_ledger_is_not_picked_up_as_an_instrument_or_date(obslog, fake_files):
 # -- muscat-db scan-failures ---------------------------------------------------
 
 
-def test_scan_failures_cli_lists_pending_entries(obslog, fake_files):
+def test_scan_failures_cli_lists_pending_entries(obslog, fake_files, monkeypatch):
+    from rich.console import Console
     from typer.testing import CliRunner
 
     from muscat_db.cli import app
+
+    # cli.console fixes its width at import (COLUMNS is read once), so the env
+    # override below cannot widen it; the seven-column table wraps at 80 and
+    # splits the cell text. Swap in a wide console, which writes to the
+    # runner's captured stdout at print time.
+    monkeypatch.setattr(cli, "console", Console(highlight=False, width=200))
 
     _, broken = fake_files
     broken.add("qhy600")
