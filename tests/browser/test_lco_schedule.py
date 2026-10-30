@@ -400,6 +400,7 @@ def test_observing_duration_follows_the_window_until_set_by_hand(page, lco_accou
     page.locator("#sch-target").blur()
     expect(page.locator("#sch-period")).not_to_have_value("")
     page.fill("#sch-coords", f"{RA}, {DEC}")  # by hand, so the plot link needs no lookup
+    page.fill("#sch-duration", "3")  # the plot link refuses to open without a transit duration
     page.fill("#sch-range-start", RANGE[0])
     page.fill("#sch-range-end", RANGE[1])
     with page.expect_response("**/api/lco/windows", timeout=60_000):
