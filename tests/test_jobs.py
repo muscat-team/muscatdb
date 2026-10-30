@@ -358,6 +358,24 @@ class TestIsPidRunning:
     def test_implausible_pid_is_not_running(self):
         assert jobs.is_pid_running(999_999_999) is False
 
+    def test_pid_we_may_not_signal_is_running(self, monkeypatch):
+        """EPERM means the kernel found a live process we are not allowed to
+        signal (another account's). Reading that as "not running" would let
+        reconciliation relaunch into a run directory that process is still
+        writing to, so only ESRCH may count as dead."""
+        def kill(pid, sig):
+            raise PermissionError(1, "Operation not permitted")
+
+        monkeypatch.setattr(jobs.os, "kill", kill)
+        assert jobs.is_pid_running(4242) is True
+
+    def test_process_group_we_may_not_signal_is_alive(self, monkeypatch):
+        def killpg(pgid, sig):
+            raise PermissionError(1, "Operation not permitted")
+
+        monkeypatch.setattr(jobs.os, "killpg", killpg)
+        assert jobs.is_process_group_alive(4242) is True
+
 
 class TestPidFileProcessAlive:
     def test_missing_file_is_not_alive(self, tmp_path):

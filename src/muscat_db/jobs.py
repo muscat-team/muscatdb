@@ -532,27 +532,35 @@ _MAX_RECONCILE_ATTEMPTS = max(1, int(os.environ.get("MUSCAT_JOB_MAX_RECONCILE_AT
 
 
 def is_pid_running(pid: int) -> bool:
-    """True if *pid* names a still-live process. A permission or lookup
-    failure both mean "no live process visible to us" -- treated the same as
-    "not running" so a check against a foreign or already-reaped pid never
-    raises."""
+    """True if *pid* names a still-live process.
+
+    Only ESRCH (no such process) reads as "not running". EPERM means the
+    kernel found a live process that this account may not signal, and
+    treating that as dead would let reconciliation relaunch a job into a run
+    directory another account's process is still writing to. Any other
+    failure is also taken as "running": a wrong guess that way only delays
+    a requeue, while a wrong guess the other way duplicates work."""
     try:
         os.kill(pid, 0)
-        return True
-    except OSError:
+    except ProcessLookupError:
         return False
+    except OSError:
+        return True
+    return True
 
 
 def is_process_group_alive(pgid: int) -> bool:
     """True if any process is still a member of process group *pgid*.
 
-    Same failure semantics as :func:`is_pid_running`: a lookup or permission
-    failure reads as "nothing live visible to us"."""
+    Same failure semantics as :func:`is_pid_running`: only ESRCH means the
+    group is gone."""
     try:
         os.killpg(pgid, 0)
-        return True
-    except OSError:
+    except ProcessLookupError:
         return False
+    except OSError:
+        return True
+    return True
 
 
 def pid_file_process_alive(pid_file: Path) -> bool:
