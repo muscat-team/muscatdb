@@ -439,3 +439,99 @@ class TestNextReconcileAttempt:
         finally:
             monkeypatch.delenv("MUSCAT_JOB_MAX_RECONCILE_ATTEMPTS", raising=False)
             importlib.reload(jobs)
+
+
+# --------------------------- tail (issue #325, log-tail performance) ----------
+
+
+def _tail_reference(path, n):
+    """The original implementation: iterate every line and keep the last n."""
+    from collections import deque
+    with open(path, errors="replace") as f:
+        return "".join(deque(f, maxlen=n))
+
+
+def _write_synthetic_log(path, *, lines: int, trailing_newline: bool = True) -> None:
+    """A multi-MB log mixing the line endings a real pipeline log can contain:
+    plain LF, CRLF, lone CR from a progress bar, a byte that is not valid UTF-8,
+    and lines long enough to straddle a read block."""
+    with open(path, "wb") as f:
+        for i in range(lines):
+            if i % 97 == 0:
+                f.write(b"progress 10%\rprogress 50%\rprogress 100%\n")
+            elif i % 89 == 0:
+                f.write(f"INFO: windows style line {i}\r\n".encode())
+            elif i % 83 == 0:
+                f.write(b"INFO: bad byte \xff here\n")
+            elif i % 1009 == 0:
+                f.write(b"L" * 200_000 + b"\n")
+            else:
+                f.write(f"INFO: frame {i:06d} flux=1.000{i % 10}\n".encode())
+        if not trailing_newline:
+            f.write(b"INFO: final line without newline")
+
+
+class TestTail:
+    @pytest.mark.parametrize("trailing_newline", [True, False])
+    @pytest.mark.parametrize("n", [1, 2, 200, 1000, 5000])
+    def test_matches_reference_on_multi_mb_log(self, tmp_path, n, trailing_newline):
+        log = tmp_path / "run.log"
+        _write_synthetic_log(log, lines=60_000, trailing_newline=trailing_newline)
+        assert log.stat().st_size > 3 * 1024 * 1024
+        assert jobs.tail(log, n) == _tail_reference(log, n)
+
+    def test_n_exceeds_line_count_returns_whole_file(self, tmp_path):
+        log = tmp_path / "run.log"
+        _write_synthetic_log(log, lines=50)
+        assert jobs.tail(log, 10_000) == _tail_reference(log, 10_000)
+
+    def test_small_and_empty_files(self, tmp_path):
+        log = tmp_path / "run.log"
+        log.write_bytes(b"")
+        assert jobs.tail(log, 200) == ""
+        log.write_bytes(b"only line")
+        assert jobs.tail(log, 200) == "only line"
+        log.write_bytes(b"a\nb\n")
+        assert jobs.tail(log, 1) == "b\n"
+        assert jobs.tail(log, 0) == ""
+
+    def test_missing_file(self, tmp_path):
+        assert jobs.tail(tmp_path / "nope.log", 200) == ""
+
+    def test_reads_only_the_end_of_a_large_log(self, tmp_path, monkeypatch):
+        """The whole point of reading backwards: a 200-line tail of a multi-MB
+        log must not pull the entire file through memory. Count the bytes the
+        function actually reads by wrapping ``open`` in the jobs module."""
+        log = tmp_path / "run.log"
+        _write_synthetic_log(log, lines=60_000)
+        size = log.stat().st_size
+        read_bytes: list[int] = []
+        real_open = open
+
+        class _Counting:
+            def __init__(self, inner):
+                self._inner = inner
+
+            def read(self, *args):
+                data = self._inner.read(*args)
+                read_bytes.append(len(data))
+                return data
+
+            def __iter__(self):
+                for line in self._inner:
+                    read_bytes.append(len(line))
+                    yield line
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return self._inner.__exit__(*exc)
+
+        monkeypatch.setattr(jobs, "open", lambda *a, **kw: _Counting(real_open(*a, **kw)), raising=False)
+        out = jobs.tail(log, 200)
+        assert out == _tail_reference(log, 200)
+        assert sum(read_bytes) < size / 4, f"read {sum(read_bytes)} of {size} bytes"

@@ -427,7 +427,6 @@ _SSE_ACTIVE_STATES = frozenset({"running", "cancelling", "finalizing", "pending"
 async def _sse_job_stream(
     request: Request,
     status_fn: Callable[[], dict],
-    sync_fn: Callable[[], None] | None = None,
 ) -> AsyncIterator[bytes]:
     """Yield one SSE ``data:`` event per status change until the job is terminal.
 
@@ -438,15 +437,25 @@ async def _sse_job_stream(
     stream is not itself a signal to stop reconnecting (a browser's
     ``EventSource`` retries by default), so the frontend must close its side on
     the first terminal event rather than rely on the server not restarting it.
+
+    ``status_fn`` reads the job store and the log file, both blocking, so it
+    runs on a worker thread: a slow read then delays only this stream, not
+    every other request sharing the event loop (issue #325, item 7). The
+    stream never reconciles jobs itself; ``_job_reconciliation_loop`` owns
+    that on its own cadence, so an open tab no longer adds a reconciliation
+    pass per second. A failure inside ``status_fn`` is logged and ends the
+    stream; the browser's ``EventSource`` reconnects and gets a fresh read.
     """
     last_payload: str | None = None
     last_sent = time.monotonic()
     while True:
         if await request.is_disconnected():
             return
-        if sync_fn is not None:
-            sync_fn()
-        status = status_fn()
+        try:
+            status = await asyncio.to_thread(status_fn)
+        except Exception:
+            logger.exception("SSE job stream: status read failed, closing the stream")
+            return
         payload = json.dumps(status, separators=(",", ":"))
         now = time.monotonic()
         if payload != last_payload:
@@ -3673,11 +3682,10 @@ def transit_fit_status(inst: str, date: str, target: str, run: str = ""):
 async def transit_fit_log_stream(request: Request, inst: str, date: str, target: str, run: str = ""):
     """SSE counterpart to ``/status`` (architecture issue #51, step 4)."""
     run_id = (run or "").strip()
-    hidden = _run_hidden("transit_fit", inst, date, target, run_id)
+    hidden = await asyncio.to_thread(_run_hidden, "transit_fit", inst, date, target, run_id)
     return _sse_response(_sse_job_stream(
         request,
         lambda: dict(_NO_JOB_STATUS) if hidden else fit.job_status(inst, date, target, run_id=run_id),
-        sync_fn=fit.sync_jobs,
     ))
 
 
@@ -8206,11 +8214,10 @@ async def photometry_log_stream(request: Request, inst: str, date: str, target: 
     change instead of waiting for the client's next poll (architecture issue
     #51, step 4)."""
     run_id = (run or "").strip()
-    hidden = _run_hidden("photometry", inst, date, target, run_id)
+    hidden = await asyncio.to_thread(_run_hidden, "photometry", inst, date, target, run_id)
     return _sse_response(_sse_job_stream(
         request,
         lambda: dict(_NO_JOB_STATUS) if hidden else phot.job_status(inst, date, target, run_id=run_id),
-        sync_fn=phot.sync_jobs,
     ))
 
 
@@ -8705,7 +8712,7 @@ async def ttv_fit_log_stream(request: Request, target: str = "", run_name: str =
     if not target:
         raise HTTPException(status_code=400, detail="target is required")
     target = target.strip()
-    hidden = _ttv_run_hidden(target, run_name)
+    hidden = await asyncio.to_thread(_ttv_run_hidden, target, run_name)
     return _sse_response(_sse_job_stream(
         request, lambda: dict(_NO_JOB_STATUS) if hidden else ttv.job_status(target, run_name)
     ))
