@@ -315,7 +315,12 @@ def test_scoped_viewer_cannot_read_or_clone_other_proposals_lco_requests(client,
         {"request_id": 2, "proposal": "NOT-GRANTED", "target": "HIDDENTGT"},
         {"request_id": 3, "proposal": "", "target": "BLANK"},
     ]
-    monkeypatch.setattr(web.lco_monitor, "list_requests", lambda *a, **k: rows)
+    for row in rows:
+        web.lco_monitor.record_submission(
+            {"id": row["request_id"] + 10, "requests": [{"id": row["request_id"]}]},
+            {"proposal": row["proposal"], "target_name": row["target"], "kind": "sinistro"},
+            "andrew", path=str(db),
+        )
     listed = _get(client, "/api/lco/monitored-requests", user="andrew").json()["requests"]
     assert [r["request_id"] for r in listed] == [1]
 

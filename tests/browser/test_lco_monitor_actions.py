@@ -33,11 +33,11 @@ def test_complete_links_and_local_delete(page, monitoring):
         }
     assert row.get_by_role("button", name="Clone").evaluate('(b) => b.classList.contains("sm")')
     # A rejected confirmation has no side effects.
-    page.once("dialog", lambda dialog: dialog.dismiss())
     row.get_by_role("button", name="Delete", exact=True).click()
+    page.click("#message-modal-cancel")
     expect(row).to_have_count(1)
-    page.once("dialog", lambda dialog: dialog.accept())
     row.get_by_role("button", name="Delete", exact=True).click()
+    page.click("#message-modal-ok")
     expect(page.locator("#monitor-body")).to_contain_text("No scheduler requests")
     with sqlite3.connect(monitoring) as conn:
         assert conn.execute("SELECT COUNT(*) FROM lco_observation_frames").fetchone()[0] == 0
@@ -75,18 +75,12 @@ def test_cancel_relay_both_legs(page, monitoring, monkeypatch):
     calls = []
     monkeypatch.setattr(lco, "cancel_requestgroup", lambda group, user: calls.append((group, user)))
     page.goto("/lco/schedule")
-    prompts = []
-
-    def accept(dialog):
-        prompts.append(dialog.message)
-        dialog.accept()
-
-    page.on("dialog", accept)
     page.locator('[data-cancel-monitor="101"]').click()
+    page.click("#message-modal-ok")
+    expect(page.locator("#message-modal-text")).to_contain_text("other relay leg")
+    page.click("#message-modal-ok")
     expect(page.get_by_role("button", name="Cancel on LCO", exact=True)).to_have_count(0)
     assert calls == [(10, "admin"), (11, "admin")]
-    assert len(prompts) == 2
-    assert "other relay leg" in prompts[1]
     expect(page.locator("#monitor-body")).to_contain_text("CANCELED")
 
 
@@ -113,18 +107,15 @@ def test_relay_partial_failure_keeps_success_visible(page, monitoring, monkeypat
 
     monkeypatch.setattr(lco, "cancel_requestgroup", cancel)
     page.problems.allowed.append("HTTP 403: POST /api/lco/monitored-requests/102/cancel")
-    dialogs = []
-
-    def accept(dialog):
-        dialogs.append(dialog.message)
-        dialog.accept()
-
-    page.on("dialog", accept)
     page.goto("/lco/schedule")
     page.locator('[data-cancel-monitor="101"]').click()
+    page.click("#message-modal-ok")
+    expect(page.locator("#message-modal-text")).to_contain_text("other relay leg")
+    page.click("#message-modal-ok")
+    expect(page.locator("#message-modal-text")).to_contain_text("First leg canceled")
+    page.click("#message-modal-ok")
     expect(page.locator('[data-cancel-monitor="101"]')).to_have_count(0)
     expect(page.locator('[data-cancel-monitor="102"]')).to_be_visible()
-    assert any("First leg canceled" in message for message in dialogs)
 
 
 def test_telescope_opens_ingested_dataset(page, monitoring):
@@ -144,3 +135,19 @@ def test_telescope_opens_ingested_dataset(page, monitoring):
     expect(page.locator("#sel-inst")).to_have_value("muscat3")
     expect(page.locator("#sel-date")).to_have_value("261001")
     expect(page.locator("#sel-target")).to_have_value("TOI-1000")
+
+
+def test_cancel_one_relay_leg(page, monitoring, monkeypatch):
+    result, payload = _submission(request_id=102, requestgroup_id=11)
+    lco_monitor.record_submission(result, payload, "admin", path=str(monitoring))
+    lco_monitor.link_relay(10, 11, path=str(monitoring))
+    calls = []
+    monkeypatch.setattr(lco, "cancel_requestgroup", lambda group, user: calls.append(group))
+    page.goto("/lco/schedule")
+    page.locator('[data-cancel-monitor="101"]').click()
+    page.click("#message-modal-ok")
+    expect(page.locator("#message-modal-cancel")).to_have_text("Only this leg")
+    page.click("#message-modal-cancel")
+    expect(page.locator('[data-cancel-monitor="101"]')).to_have_count(0)
+    expect(page.locator('[data-cancel-monitor="102"]')).to_be_visible()
+    assert calls == [10]

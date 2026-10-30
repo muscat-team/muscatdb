@@ -3201,13 +3201,16 @@
     if (!row) return;
     var text = cancel ? 'Cancel request group ' + row.requestgroup_id + ' on LCO? This cancels all its unfinished requests and stops local polling. It cannot be undone.' :
       'Delete local tracking for request ' + id + '? This stops monitoring and removes its progress. The LCO booking and ingested science data are kept. Work already in progress may finish.';
-    if (!window.confirm(text)) return;
-    var partner = cancel && row.relay_request_id;
-    var cancelPartner = partner && window.confirm('Also cancel the other relay leg (request ' + partner + ') on LCO?');
     monitorActionPending = true;
     button.disabled = true;
     var primaryDone = false;
     try {
+      if (!await showConfirmModal(cancel ? 'Cancel on LCO?' : 'Delete local tracking?', text,
+          {confirmLabel: cancel ? 'Cancel on LCO' : 'Delete', confirmClass: 'btn danger'})) return;
+      var partner = cancel && row.relay_request_id;
+      var cancelPartner = partner && await showConfirmModal('Cancel the other relay leg?',
+        'Also cancel the other relay leg (request ' + partner + ') on LCO?',
+        {confirmLabel: 'Cancel both legs', cancelLabel: 'Only this leg', confirmClass: 'btn danger'});
       async function act(requestId) {
         var d = await MuscatFetch.fetchJson('/api/lco/monitored-requests/' + requestId + (cancel ? '/cancel' : ''), {
           method: cancel ? 'POST' : 'DELETE', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({confirm: true})
@@ -3218,7 +3221,7 @@
       primaryDone = true;
       if (cancelPartner) await act(partner);
     } catch (error) {
-      window.alert((primaryDone ? 'First leg canceled; the other leg could not be canceled: ' : '') + errText(error));
+      showMessageModal('Monitoring action failed', (primaryDone ? 'First leg canceled; the other leg could not be canceled: ' : '') + errText(error));
     } finally {
       monitorActionPending = false;
       button.disabled = false;
