@@ -667,7 +667,15 @@ Optional UT date filters (inclusive end date) narrow the search, and persist per
 target in the browser. ExoFOP-reported nights are included: a report does not
 account for every request, filter or telescope observed that night. ExoFOP indicators match instrument,
 site and night within one day, not individual request IDs. “No matching report”
-reflects the existing ExoFOP lookup, which may also return no rows during an outage.
+means a successful ExoFOP lookup found no matching report; an unavailable lookup
+shows **Unknown**. The ExoFOP obslog panel reports lookup errors and can retry
+when closed and reopened.
+
+ExoFOP row progress and cancellation follow only the exact job launched from
+that row, retained across reloads in the same browser tab. Other downloads are
+available on **Jobs**; rows never infer job ownership from instrument and night.
+Saving or deleting a dataset note immediately updates the Notes filter and the
+metadata used for sorting.
 
 
 ### Complete searches on the LCO archive page

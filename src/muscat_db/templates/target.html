@@ -227,6 +227,7 @@
             }
           }
 
+          document.getElementById('datasets-table').addEventListener('note-updated', filter);
           input.addEventListener('input', filter);
           colInputs.forEach(inp => inp.addEventListener('input', filter));
           filter();
@@ -292,33 +293,24 @@
         });
       }
 
-      // Observing-night labels (YYMMDD) a UT date may be filed under: the
-      // same +/-1 day window the server uses for its existence check.
-      function obsLabels(tsdate) {
-        const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(tsdate || ''));
-        if (!m) return [];
-        const base = Date.UTC(+m[1], +m[2] - 1, +m[3]);
-        return [-1, 0, 1].map(function (d) {
-          const t = new Date(base + d * 86400000);
-          return String(t.getUTCFullYear()).slice(2) +
-            String(t.getUTCMonth() + 1).padStart(2, '0') +
-            String(t.getUTCDate()).padStart(2, '0');
-        });
+      // Track only jobs launched by this exact report row. Instrument/night
+      // matching can attach another target's (or site's) job and cancel it.
+      function jobKey(r) {
+        return 'exofop-job:' + JSON.stringify([targetName, r.tsdate, r.site,
+          r.instrument, r.tstag, r.tsfilt, r.tstoi, r.tsplname]);
       }
-
+      function savedJob(key) {
+        try { return sessionStorage.getItem(key) || ''; } catch (_) { return ''; }
+      }
+      function rememberJob(x, id) {
+        x.jobId = id;
+        try {
+          if (id) sessionStorage.setItem(x.jobKey, id);
+          else sessionStorage.removeItem(x.jobKey);
+        } catch (_) {}
+      }
       function matchJob(jobs, x) {
-        if (!x.lco || !x.instrument || !x.dates.length) return null;
-        let best = null;
-        jobs.forEach(function (j) {
-          const insts = String(j.inst || '').toLowerCase().split(',');
-          const dates = String(j.date || '').split(',');
-          if (insts.indexOf(x.instrument) < 0) return;
-          if (!dates.some(function (d) { return x.dates.indexOf(d) >= 0; })) return;
-          // Prefer an active job over a finished one, then the newest.
-          const rank = (ACTIVE[j.state] ? 1e12 : 0) + (j.started_at || 0);
-          if (!best || rank > best.rank) best = { job: j, rank: rank };
-        });
-        return best ? best.job : null;
+        return x.jobId ? jobs.find(j => j.run_id === x.jobId) : null;
       }
 
       function setCells(tr, statusHtml, actionHtml) {
@@ -357,11 +349,18 @@
         syncTimer = null;
         const rows = Array.from(tbody.querySelectorAll('tr')).filter(function (tr) { return tr._exo && tr._exo.lco; });
         if (!rows.length) return;
-        fetch('/api/lco/archive/downloads').then(function (r) { return r.json(); }).then(function (d) {
+        const polledIds = new Map(rows.map(tr => [tr, tr._exo.jobId]));
+        fetch('/api/lco/archive/downloads').then(function (r) {
+          if (!r.ok) throw new Error('Download status unavailable');
+          return r.json();
+        }).then(function (d) {
+          if (!d.ok) throw new Error(d.error || 'Download status unavailable');
           const jobs = d.jobs || [];
           let anyActive = false, reload = false;
           rows.forEach(function (tr) {
             const x = tr._exo;
+            // A download may have been queued while this older poll was in flight.
+            if (x.jobId !== polledIds.get(tr)) return;
             const job = matchJob(jobs, x);
             if (job && ACTIVE[job.state]) {
               anyActive = true;
@@ -369,13 +368,11 @@
             } else if (job && x.jobId && job.run_id === x.jobId) {
               // The job this row was following has just finished.
               if (job.state === 'done') reload = true; else renderJob(tr, job);
-              x.jobId = '';
+              rememberJob(x, '');
             } else if (x.jobId) {
               // Job left the live list (e.g. server restart): re-check the DB.
-              x.jobId = '';
+              rememberJob(x, '');
               reload = true;
-            } else if (job && !x.exists && job.state !== 'done') {
-              renderJob(tr, job);
             }
           });
           if (reload) { load(); return; }
@@ -415,7 +412,7 @@
           const tr = document.createElement('tr');
           tr._exo = {
             lco: !!r.lco, instrument: String(r.instrument || '').toLowerCase(),
-            dates: obsLabels(r.tsdate), exists: exists, actionHtml: actionHtml, jobId: ''
+            exists: exists, actionHtml: actionHtml, jobKey: jobKey(r), jobId: savedJob(jobKey(r))
           };
           // tstoi ("TOI 1130.01") names the planet; tsplname ("TIC 254113311.01")
           // is the only label for a target that is not a TOI.
@@ -449,16 +446,21 @@
               (ticOverride ? '&tic=' + encodeURIComponent(ticOverride) : ''))
           .then(function (r) { return r.json(); })
           .then(function (d) {
-            loaded = true;
+            loaded = false;
             if (!d.ok) {
               wrap.style.display = 'none';
-              statusEl.textContent = d.error || 'No ExoFOP time-series cross-check for this target.';
+              statusEl.textContent = (d.error || d.detail || 'ExoFOP lookup failed.') +
+                ' Close and reopen this section to retry.';
               if (d.needs_tic) { ticForm.style.display = ''; ticInput.focus(); }
               return;
             }
             render(d);
+            loaded = true;
           })
-          .catch(function (e) { statusEl.textContent = 'ExoFOP check failed: ' + e; })
+          .catch(function (e) {
+            loaded = false;
+            statusEl.textContent = 'ExoFOP check failed: ' + e + ' Close and reopen this section to retry.';
+          })
           .finally(function () { loading = false; });
       }
 
@@ -487,6 +489,8 @@
               dl.disabled = false; dl.textContent = 'Download';
               return;
             }
+            const tr = dl.closest('tr');
+            rememberJob(tr._exo, d.job_id || '');
             msgEl.textContent = 'Download queued.';
             if (jobsLink) jobsLink.style.display = '';
             schedule(300);
