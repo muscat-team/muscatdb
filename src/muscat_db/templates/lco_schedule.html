@@ -119,14 +119,14 @@
     <div class="lco-field"><label for="sch-t0">t0 (BJD) <span class="ephem-src none" id="src-t0">—</span> <span class="help-tooltip" title="BJD_TDB. Enter mean,uncertainty. Populated by Fetch ephemeris; editable.">?</span></label><input id="sch-t0" type="text" inputmode="decimal" placeholder="e.g. 2459000.5,0.0003"></div>
     <div class="lco-field"><label for="sch-period">Period (d) <span class="ephem-src none" id="src-period">—</span> <span class="help-tooltip" title="Orbital period in days. Auto-filled by Fetch ephemeris. Enter mean,uncertainty (e.g. 1.0914,0.00001).">?</span></label><input id="sch-period" type="text" inputmode="decimal" placeholder="e.g. 1.0914,0.00001"></div>
     <div class="lco-field"><label for="sch-duration">Duration (hr) <span class="ephem-src none" id="src-duration">—</span> <span class="help-tooltip" title="From the catalog when available; override here. Enter mean,uncertainty.">?</span></label><input id="sch-duration" type="text" inputmode="decimal" placeholder="e.g. 2.5,0.1"></div>
-    <div class="lco-field"><label for="sch-pad-before">Pre-ingress (min) <span class="help-tooltip" title="Minutes to add before ingress (start of transit). Extends the scheduling window earlier to ensure baseline coverage.">?</span></label><input id="sch-pad-before" type="number" step="any" value="45"></div>
-    <div class="lco-field"><label for="sch-pad-after">Post-egress (min) <span class="help-tooltip" title="Minutes to add after egress (end of transit). Extends the scheduling window later to ensure baseline coverage.">?</span></label><input id="sch-pad-after" type="number" step="any" value="45"></div>
+    <div class="lco-field"><label for="sch-pad-before">Pre-ingress (min) <span class="help-tooltip" title="Minutes to add before ingress (start of transit). Extends the scheduling window earlier to ensure baseline coverage.">?</span></label><input id="sch-pad-before" type="number" step="any" value="60"></div>
+    <div class="lco-field"><label for="sch-pad-after">Post-egress (min) <span class="help-tooltip" title="Minutes to add after egress (end of transit). Extends the scheduling window later to ensure baseline coverage.">?</span></label><input id="sch-pad-after" type="number" step="any" value="60"></div>
     <div class="lco-field"><label for="sch-include-padding" style="margin: 0;">Include padding in obs check <span class="help-tooltip" title="When on, the padded baseline (start→end) must also be observable for a transit to rate 'full'. When off, padding is used only for the displayed span and the observability check spans just the transit (mid ± duration/2).">?</span></label>
       <input id="sch-include-padding" type="checkbox" checked></div>
   </div>
   <div class="lco-field" id="midtimes-block" style="display: none; margin-top: 0.6rem;">
-    <label for="sch-midtimes">Mid-transit times <span class="help-tooltip" title="One transit per line: tc, then optionally tc_err (days) and epoch, separated by commas, tabs or spaces. tc is a full BJD_TDB (e.g. 2461000.51234) or an ISO UTC time (e.g. 2026-11-03T04:12:00Z). A header line may name the columns in any order: tc, tc_err (days) or tc_err_min (minutes), epoch. Lines starting with # are ignored. Up to 1000 times; the duration and padding fields above apply to every row.">?</span></label>
-    <textarea id="sch-midtimes" class="lco-pre" rows="6" spellcheck="false" aria-label="Mid-transit times" placeholder="e.g.&#10;tc,tc_err_min,epoch&#10;2461000.51234,1.2,411&#10;2026-11-03T04:12:00Z,,412"></textarea>
+    <label for="sch-midtimes">Mid-transit times <span class="help-tooltip" title="One transit per line: tc, then optionally tc_err (days, the same unit as numeric tc), separated by commas, tabs or spaces. tc is a full BJD_TDB (e.g. 2461000.51234) or an ISO UTC time (e.g. 2026-11-03T04:12:00Z). A header line may name the columns in any order: tc, tc_err (days). Lines starting with # are ignored. Up to 1000 times; the duration and padding fields above apply to every row.">?</span></label>
+    <textarea id="sch-midtimes" class="lco-pre" rows="6" spellcheck="false" aria-label="Mid-transit times" placeholder="e.g.&#10;tc,tc_err&#10;2461000.51234,0.001&#10;2026-11-03T04:12:00Z,"></textarea>
     <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.3rem;">
       <label for="sch-midtimes-file" class="hint" style="margin: 0;">or load a file</label>
       <input id="sch-midtimes-file" type="file" accept=".csv,.tsv,.txt,.dat,text/csv,text/plain">
@@ -530,6 +530,7 @@
       var input = el(id);
       if (!input) return;
       input.readOnly = on;
+      input.disabled = on;
       input.classList.toggle('ephem-ignored', on);
       if (on) { input.title = EPHEM_IGNORED_TITLE; }
       else { input.removeAttribute('title'); }
@@ -692,16 +693,19 @@
 
   // The range is the only required input with no default: when both fields are
   // blank the windows request fails with "missing date/time value" and the
-  // table never updates. Seed a sensible default (today → +DEFAULT_RANGE_DAYS,
+  // table never updates. Seed a sensible default (today → one calendar month later,
   // UTC) so a first click always produces windows.
-  var DEFAULT_RANGE_DAYS = 60;
   function ymdUTC(date) { return date.toISOString().slice(0, 10); }
   function ensureDefaultRange() {
     var changed = false;
     if (!val('sch-range-start')) { setVal('sch-range-start', ymdUTC(new Date())); changed = true; }
     if (!val('sch-range-end')) {
-      var end = new Date();
-      end.setUTCDate(end.getUTCDate() + DEFAULT_RANGE_DAYS);
+      var end = new Date(val('sch-range-start') + 'T00:00:00Z');
+      var day = end.getUTCDate();
+      end.setUTCDate(1);
+      end.setUTCMonth(end.getUTCMonth() + 1);
+      var lastDay = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth() + 1, 0)).getUTCDate();
+      end.setUTCDate(Math.min(day, lastDay));
       setVal('sch-range-end', ymdUTC(end));
       changed = true;
     }
@@ -2737,6 +2741,8 @@
   el('sch-target').addEventListener('change', function () { refreshTargetFields({ silent: true }); });
   el('sch-target').addEventListener('blur', function () { refreshTargetFields({ silent: true }); });
   function syncMidtimesBlock() {
+    setEphemIgnored(isMidtimeSource(val('sch-source')));
+    el('sch-rank').disabled = String(val('sch-source')).indexOf('ttv:') !== 0;
     el('midtimes-block').style.display = val('sch-source') === 'upload' ? '' : 'none';
   }
   syncMidtimesBlock();
@@ -2913,8 +2919,8 @@
       msg('msg-windows', 'Minimum moon separation must be ≥ 0.', 'err'); return;
     }
 
-    if (!t0Tuple.ok) { msg('msg-windows', 't0 must be "mean" or "mean,uncertainty"', 'err'); return; }
-    if (!periodTuple.ok) { msg('msg-windows', 'Period must be "mean" or "mean,uncertainty"', 'err'); return; }
+    if (!isMidtimeSource(val('sch-source')) && !t0Tuple.ok) { msg('msg-windows', 't0 must be "mean" or "mean,uncertainty"', 'err'); return; }
+    if (!isMidtimeSource(val('sch-source')) && !periodTuple.ok) { msg('msg-windows', 'Period must be "mean" or "mean,uncertainty"', 'err'); return; }
     if (!durationTuple.ok) { msg('msg-windows', 'Duration must be "mean" or "mean,uncertainty"', 'err'); return; }
     msg('msg-windows', 'Generating…');
     // "ttv:<run>" selects a specific TTV run. The server takes mid-times from
@@ -3927,6 +3933,7 @@
   }).catch(function () {});
   loadProposals();
   restoreOptions();
+  syncMidtimesBlock();
   updateGenWindowsButtonState();
   ensureDefaultRange();
   applyKind();

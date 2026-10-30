@@ -5205,10 +5205,10 @@ def _upload_windows(payload: dict, duration) -> dict:
     for n, i in enumerate(order):
         r = rows[i]
         extra = {"mid_unc_min": r.unc_min} if r.unc_min is not None else {}
-        mids.append((r.epoch if parsed.has_epochs else n, bjds[i], extra))
+        mids.append((n, bjds[i], extra))
 
     windows = _windows_from_midtimes(mids, payload, float(duration),
-                                     relabel_epochs=not parsed.has_epochs)
+                                     relabel_epochs=True)
     return {
         "ok": True,
         "windows": windows,
