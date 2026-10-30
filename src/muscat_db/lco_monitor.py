@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import socket
+import sqlite3
 import threading
 import time
 import uuid
@@ -24,7 +25,7 @@ from muscat_db.database import db_path, get_conn
 logger = logging.getLogger(__name__)
 
 TERMINAL_REQUEST_STATES = {"COMPLETED", "WINDOW_EXPIRED", "CANCELED", "FAILURE_LIMIT_REACHED"}
-TERMINAL_MONITOR_STATES = {"complete", "terminal_no_data"}
+TERMINAL_MONITOR_STATES = {"complete", "terminal_no_data", "canceled"}
 
 _POLL_S = max(60.0, float(os.environ.get("MUSCAT_LCO_MONITOR_POLL_S", "300")))
 _FAST_POLL_AFTER_WINDOW_S = max(
@@ -192,12 +193,46 @@ def list_requests(path: str | None = None, limit: int = 200) -> list[dict]:
             """SELECT request_id,requestgroup_id,name,proposal,target,instrument,user_name,
                       request_state,monitor_state,window_start,window_end,raw_frame_count,
                       reduced_frame_count,downloaded_count,next_poll_at,error_count,last_error,
-                      last_polled_at,created_at,updated_at,completed_at,supersedes_request_id,rescue_reason
+                      last_polled_at,created_at,updated_at,completed_at,supersedes_request_id,rescue_reason,
+                      payload_json
                FROM lco_observation_requests ORDER BY created_at DESC LIMIT ?""",
             (max(1, min(int(limit), 1000)),),
         )
         columns = [description[0] for description in cursor.description]
-        return [dict(zip(columns, row)) for row in cursor.fetchall()]
+        rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+        for row in rows:
+            payload = json.loads(row.pop("payload_json"))
+            row["relay_requestgroup_id"] = payload.get("_relay_requestgroup_id")
+            row["datasets"] = []
+            if row["monitor_state"] == "complete":
+                # Scanner filenames omit .fits, while the archive records .fits.fz.
+                # Join actual ingested files: the submitted name need not equal OBJECT.
+                datasets = conn.execute(
+                    "SELECT DISTINCT instrument,obsdate FROM lco_observation_frames "
+                    "WHERE request_id=? AND state='ingested' ORDER BY instrument,obsdate",
+                    (row["request_id"],),
+                ).fetchall()
+                for instrument, obsdate in datasets:
+                    # Materialize the filename set once. Joining each monitor frame
+                    # to every science frame in its night makes large nights quadratic.
+                    objects = conn.execute(
+                        """SELECT DISTINCT object FROM frames
+                           WHERE instrument=? AND obsdate=? AND object IS NOT NULL AND object!=''
+                             AND filename IN (
+                               SELECT CASE
+                                 WHEN filename LIKE '%.fits.fz' THEN substr(filename,1,length(filename)-8)
+                                 WHEN filename LIKE '%.fits' THEN substr(filename,1,length(filename)-5)
+                                 ELSE filename END
+                               FROM lco_observation_frames
+                               WHERE request_id=? AND instrument=? AND obsdate=? AND state='ingested'
+                             ) ORDER BY object""",
+                        (instrument, obsdate, row["request_id"], instrument, obsdate),
+                    ).fetchall()
+                    row["datasets"].extend(
+                        {"instrument": instrument, "obsdate": obsdate, "target": obj[0]}
+                        for obj in objects
+                    )
+        return rows
 
 
 def get_request_payload(identifier: int, path: str | None = None) -> dict | None:
@@ -226,7 +261,10 @@ def get_request_payload(identifier: int, path: str | None = None) -> dict | None
         params = json.loads(row[0])
     except (ValueError, TypeError):
         return None
-    return params if isinstance(params, dict) else None
+    if isinstance(params, dict):
+        params.pop("_relay_requestgroup_id", None)
+        return params
+    return None
 
 
 def _frame_identity(frame: dict) -> str:
@@ -372,7 +410,7 @@ def _finish_download(request: dict, snapshot: dict, *, path: str, now: float) ->
         ).fetchone()[0]
         conn.execute(
             "UPDATE lco_observation_requests SET download_job_id='', monitor_state='monitoring', "
-            "downloaded_count=?, next_poll_at=?, updated_at=?, last_error=? WHERE request_id=?",
+            "downloaded_count=?, next_poll_at=?, updated_at=?, last_error=? WHERE request_id=? AND monitor_state!='canceled'",
             (
                 downloaded,
                 now if not errors else now + _error_delay(int(request.get("error_count") or 0) + 1),
@@ -396,7 +434,7 @@ def _process_datasets(request_id: int, *, path: str, now: float) -> None:
             (request_id,),
         ).fetchall()
         conn.execute(
-            "UPDATE lco_observation_requests SET monitor_state='processing', updated_at=? WHERE request_id=?",
+            "UPDATE lco_observation_requests SET monitor_state='processing', updated_at=? WHERE request_id=? AND monitor_state!='canceled'",
             (now, request_id),
         )
         conn.commit()
@@ -426,7 +464,7 @@ def _process_datasets(request_id: int, *, path: str, now: float) -> None:
         )
         conn.execute(
             "UPDATE lco_observation_requests SET monitor_state='complete', downloaded_count=reduced_frame_count, "
-            "download_job_id='', last_error='', completed_at=?, updated_at=? WHERE request_id=?",
+            "download_job_id='', last_error='', completed_at=?, updated_at=? WHERE request_id=? AND monitor_state!='canceled'",
             (now, now, request_id),
         )
         conn.commit()
@@ -440,7 +478,7 @@ def _mark_error(request_id: int, error: Exception, *, path: str, now: float) -> 
         count = int(current[0] if current else 0) + 1
         conn.execute(
             "UPDATE lco_observation_requests SET monitor_state='monitoring', error_count=?, last_error=?, "
-            "next_poll_at=?, updated_at=? WHERE request_id=?",
+            "next_poll_at=?, updated_at=? WHERE request_id=? AND monitor_state!='canceled'",
             (count, str(error)[:2000], now + _error_delay(count), now, request_id),
         )
         conn.commit()
@@ -451,6 +489,15 @@ def process_request(request: dict, *, path: str | None = None, now: float | None
     path = path or db_path()
     now = time.time() if now is None else now
     request_id = int(request["request_id"])
+    # Only an explicit local cancellation stops ingestion. A portal-canceled
+    # request can still have partial science data that the monitor must collect.
+    with get_conn(path) as conn:
+        active = conn.execute(
+            "SELECT 1 FROM lco_observation_requests WHERE request_id=? AND monitor_state!='canceled'",
+            (request_id,),
+        ).fetchone()
+    if not active:
+        return
     try:
         from muscat_db import lco_rescue
 
@@ -468,7 +515,7 @@ def process_request(request: dict, *, path: str | None = None, now: float | None
             if snapshot.get("state") in {"pending", "running"}:
                 with get_conn(path) as conn:
                     conn.execute(
-                        "UPDATE lco_observation_requests SET next_poll_at=?, updated_at=? WHERE request_id=?",
+                        "UPDATE lco_observation_requests SET next_poll_at=?, updated_at=? WHERE request_id=? AND monitor_state!='canceled'",
                         (now + _DOWNLOAD_CHECK_S, now, request_id),
                     )
                     conn.commit()
@@ -481,7 +528,7 @@ def process_request(request: dict, *, path: str | None = None, now: float | None
                 with get_conn(path) as conn:
                     conn.execute(
                         "UPDATE lco_observation_requests SET download_job_id='', monitor_state='monitoring', "
-                        "next_poll_at=?, updated_at=? WHERE request_id=?",
+                        "next_poll_at=?, updated_at=? WHERE request_id=? AND monitor_state!='canceled'",
                         (now, now, request_id),
                     )
                     conn.commit()
@@ -538,6 +585,12 @@ def process_request(request: dict, *, path: str | None = None, now: float | None
         )
 
         with get_conn(path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if not conn.execute(
+                "SELECT 1 FROM lco_observation_requests WHERE request_id=? AND monitor_state!='canceled'",
+                (request_id,),
+            ).fetchone():
+                return
             _upsert_reduced_frames(conn, request_id, reduced_frames, now)
             previous_terminal_seen = request.get("terminal_seen_at")
             terminal_seen = (
@@ -546,7 +599,7 @@ def process_request(request: dict, *, path: str | None = None, now: float | None
             conn.execute(
                 "UPDATE lco_observation_requests SET request_state=?, raw_frame_count=?, "
                 "reduced_frame_count=?, unchanged_polls=?, error_count=0, last_error='', "
-                "last_polled_at=?, terminal_seen_at=?, next_poll_at=?, updated_at=? WHERE request_id=?",
+                "last_polled_at=?, terminal_seen_at=?, next_poll_at=?, updated_at=? WHERE request_id=? AND monitor_state!='canceled'",
                 (
                     request_state,
                     raw_count,
@@ -568,7 +621,7 @@ def process_request(request: dict, *, path: str | None = None, now: float | None
                 (request_id,),
             ).fetchone()[0]
             conn.execute(
-                "UPDATE lco_observation_requests SET downloaded_count=? WHERE request_id=?",
+                "UPDATE lco_observation_requests SET downloaded_count=? WHERE request_id=? AND monitor_state!='canceled'",
                 (downloaded, request_id),
             )
             conn.commit()
@@ -590,7 +643,7 @@ def process_request(request: dict, *, path: str | None = None, now: float | None
             with get_conn(path) as conn:
                 conn.execute(
                     "UPDATE lco_observation_requests SET monitor_state='downloading', download_job_id=?, "
-                    "next_poll_at=?, updated_at=? WHERE request_id=?",
+                    "next_poll_at=?, updated_at=? WHERE request_id=? AND monitor_state!='canceled'",
                     (snapshot["job_id"], now + _DOWNLOAD_CHECK_S, now, request_id),
                 )
                 conn.commit()
@@ -620,7 +673,7 @@ def process_request(request: dict, *, path: str | None = None, now: float | None
                 with get_conn(path) as conn:
                     conn.execute(
                         "UPDATE lco_observation_requests SET monitor_state='terminal_no_data', completed_at=?, "
-                        "updated_at=?, next_poll_at=? WHERE request_id=?",
+                        "updated_at=?, next_poll_at=? WHERE request_id=? AND monitor_state!='canceled'",
                         (now, now, now, request_id),
                     )
                     conn.commit()
@@ -637,7 +690,7 @@ def process_due(
     now = time.time() if now is None else now
     with get_conn(path, row_factory=None) as conn:
         cursor = conn.execute(
-            "SELECT * FROM lco_observation_requests WHERE monitor_state NOT IN ('complete','terminal_no_data') "
+            "SELECT * FROM lco_observation_requests WHERE monitor_state NOT IN ('complete','terminal_no_data','canceled') "
             "AND next_poll_at<=? ORDER BY next_poll_at LIMIT ?",
             (now, limit),
         )
@@ -752,3 +805,44 @@ class ObservationMonitor:
                 _renew_lease(self.path, self.owner, time.time())
             except Exception:
                 logger.exception("LCO observation monitor lease renewal failed")
+
+
+def get_request(request_id: int, path: str | None = None) -> dict | None:
+    with get_conn(path or db_path(), row_factory=sqlite3.Row) as conn:
+        row = conn.execute("SELECT * FROM lco_observation_requests WHERE request_id=?", (request_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def delete_request(request_id: int, path: str | None = None) -> None:
+    """Remove tracking only; science tables and files are never touched."""
+    with get_conn(path or db_path()) as conn:
+        conn.execute("DELETE FROM lco_observation_frames WHERE request_id=?", (request_id,))
+        conn.execute("DELETE FROM lco_observation_requests WHERE request_id=?", (request_id,))
+        conn.commit()
+
+
+def mark_group_canceled(requestgroup_id: int, path: str | None = None) -> None:
+    with get_conn(path or db_path()) as conn:
+        conn.execute(
+            "UPDATE lco_observation_requests SET request_state='CANCELED', "
+            "monitor_state=CASE WHEN monitor_state='complete' THEN 'complete' ELSE 'canceled' END, "
+            "updated_at=?, last_error='' WHERE requestgroup_id=? "
+            "AND request_state NOT IN ('COMPLETED','WINDOW_EXPIRED','CANCELED')",
+            (time.time(), requestgroup_id),
+        )
+        conn.commit()
+
+
+def link_relay(group_a: int, group_b: int, path: str | None = None) -> None:
+    """Persist the exact partner, never infer a relay from target/name similarity."""
+    with get_conn(path or db_path()) as conn:
+        for group, partner in ((group_a, group_b), (group_b, group_a)):
+            rows = conn.execute(
+                "SELECT request_id,payload_json FROM lco_observation_requests WHERE requestgroup_id=?", (group,)
+            ).fetchall()
+            for request_id, payload_json in rows:
+                payload = json.loads(payload_json)
+                payload["_relay_requestgroup_id"] = partner
+                conn.execute("UPDATE lco_observation_requests SET payload_json=? WHERE request_id=?",
+                             (_json(payload), request_id))
+        conn.commit()

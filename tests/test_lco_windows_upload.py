@@ -75,14 +75,8 @@ def test_windows_carry_the_keys_the_pipeline_consumes():
 
 
 def test_uncertainty_fills_the_mid_unc_column():
-    w = _post(midtimes_text="tc,tc_err_min\n" + FULL + ",3.5\n").json()["windows"][0]
-    assert w["mid_unc_min"] == 3.5
-
-
-def test_uploaded_epochs_are_shown_as_given():
-    text = "tc,epoch\n2461502.55,412\n2461500.5,411\n"
-    windows = _post(midtimes_text=text).json()["windows"]
-    assert [(w["epoch"], w["epoch_abs"]) for w in windows] == [(411, 411), (412, 412)]
+    w = _post(midtimes_text="tc,tc_err\n" + FULL + ",0.001\n").json()["windows"][0]
+    assert w["mid_unc_min"] == 1.44
 
 
 def test_without_epochs_transits_are_numbered_in_time_order():

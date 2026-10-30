@@ -1901,3 +1901,5 @@ body.chat-popout #minimize-chat {
 /* Chat room selector also appears in the pop-out window. */
 #chat-room { margin: 0.35rem 0.6rem; max-width: calc(100% - 1.2rem); }
 #chat-messages .message[hidden] { display: none; }
+
+#monitor-table th:last-child, #monitor-table .monitor-actions { width: 1%; white-space: nowrap; }

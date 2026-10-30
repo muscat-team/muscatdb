@@ -661,6 +661,16 @@ graph TD
           </pre>
         </div>
         <p style="color: var(--text-dim); font-size: 0.9rem; line-height: 1.6;">
+          The monitoring table offers compact <strong>Clone</strong> actions and a 🔭 photometry link for
+          each ingested instrument/night after processing completes. Links use the ingested FITS object name.
+          Submitters and admins can <strong>Delete</strong> local tracking without deleting science data or
+          changing the LCO booking. <strong>Cancel on LCO</strong> separately cancels all unfinished requests
+          in the group, stops polling, and retains the row. Cancellation requires confirmation, the acting
+          user's own saved LCO token, and <code>MUSCAT_LCO_ALLOW_SUBMIT=1</code>.
+          New relay submissions offer a second confirmation to cancel the partner leg; older submissions
+          without a stored partner must be canceled individually. Work already downloading or ingesting may finish.
+        </p>
+        <p style="color: var(--text-dim); font-size: 0.9rem; line-height: 1.6;">
           Generated transit windows are invalidated whenever a target, ephemeris, date range, padding, site, or
           observability constraint changes. The old table and visibility plot are hidden until
           <strong>Generate windows</strong> is clicked again, so stale predictions cannot be submitted.

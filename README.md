@@ -48,7 +48,7 @@ error instead of failing the scheduling request.
 
 The schedule page can also take mid-transit times from outside muscat-db: choose
 **Uploaded mid-times** as the ephemeris source and paste or load a list (full
-BJD_TDB or ISO UTC per line, optionally `tc_err` and `epoch`). Each time is
+BJD_TDB or ISO UTC per line, optionally `tc_err` in days, separated by commas or whitespace). Each time is
 scheduled as given and gets the same per-site rating as a generated window; the
 **Show** filter selects full, partial, split or unobservable transits. A list
 with any malformed line, or more than 1000 times, is refused with the line

@@ -117,9 +117,10 @@ def test_frame_identity_keeps_simultaneous_muscat_cameras_distinct():
     assert lco_monitor._frame_identity(ep02_raw) != lco_monitor._frame_identity(ep03_raw)
 
 
-def test_monitor_downloads_final_frames_then_scans_and_ingests(monitor_db, tmp_path, monkeypatch):
+@pytest.mark.parametrize("terminal_state", ["COMPLETED", "CANCELED"])
+def test_monitor_downloads_final_frames_then_scans_and_ingests(monitor_db, tmp_path, monkeypatch, terminal_state):
     monkeypatch.setenv("MUSCAT_LCO_DIR", str(tmp_path))
-    result, payload = _submission(state="COMPLETED")
+    result, payload = _submission(state=terminal_state)
     lco_monitor.record_submission(result, payload, "alice", path=monitor_db, now=100)
     raw = _frame(0, 1)
     reduced = _frame(91, 1)

@@ -119,14 +119,14 @@
     <div class="lco-field"><label for="sch-t0">t0 (BJD) <span class="ephem-src none" id="src-t0">—</span> <span class="help-tooltip" title="BJD_TDB. Enter mean,uncertainty. Populated by Fetch ephemeris; editable.">?</span></label><input id="sch-t0" type="text" inputmode="decimal" placeholder="e.g. 2459000.5,0.0003"></div>
     <div class="lco-field"><label for="sch-period">Period (d) <span class="ephem-src none" id="src-period">—</span> <span class="help-tooltip" title="Orbital period in days. Auto-filled by Fetch ephemeris. Enter mean,uncertainty (e.g. 1.0914,0.00001).">?</span></label><input id="sch-period" type="text" inputmode="decimal" placeholder="e.g. 1.0914,0.00001"></div>
     <div class="lco-field"><label for="sch-duration">Duration (hr) <span class="ephem-src none" id="src-duration">—</span> <span class="help-tooltip" title="From the catalog when available; override here. Enter mean,uncertainty.">?</span></label><input id="sch-duration" type="text" inputmode="decimal" placeholder="e.g. 2.5,0.1"></div>
-    <div class="lco-field"><label for="sch-pad-before">Pre-ingress (min) <span class="help-tooltip" title="Minutes to add before ingress (start of transit). Extends the scheduling window earlier to ensure baseline coverage.">?</span></label><input id="sch-pad-before" type="number" step="any" value="45"></div>
-    <div class="lco-field"><label for="sch-pad-after">Post-egress (min) <span class="help-tooltip" title="Minutes to add after egress (end of transit). Extends the scheduling window later to ensure baseline coverage.">?</span></label><input id="sch-pad-after" type="number" step="any" value="45"></div>
+    <div class="lco-field"><label for="sch-pad-before">Pre-ingress (min) <span class="help-tooltip" title="Minutes to add before ingress (start of transit). Extends the scheduling window earlier to ensure baseline coverage.">?</span></label><input id="sch-pad-before" type="number" step="any" value="60"></div>
+    <div class="lco-field"><label for="sch-pad-after">Post-egress (min) <span class="help-tooltip" title="Minutes to add after egress (end of transit). Extends the scheduling window later to ensure baseline coverage.">?</span></label><input id="sch-pad-after" type="number" step="any" value="60"></div>
     <div class="lco-field"><label for="sch-include-padding" style="margin: 0;">Include padding in obs check <span class="help-tooltip" title="When on, the padded baseline (start→end) must also be observable for a transit to rate 'full'. When off, padding is used only for the displayed span and the observability check spans just the transit (mid ± duration/2).">?</span></label>
       <input id="sch-include-padding" type="checkbox" checked></div>
   </div>
   <div class="lco-field" id="midtimes-block" style="display: none; margin-top: 0.6rem;">
-    <label for="sch-midtimes">Mid-transit times <span class="help-tooltip" title="One transit per line: tc, then optionally tc_err (days) and epoch, separated by commas, tabs or spaces. tc is a full BJD_TDB (e.g. 2461000.51234) or an ISO UTC time (e.g. 2026-11-03T04:12:00Z). A header line may name the columns in any order: tc, tc_err (days) or tc_err_min (minutes), epoch. Lines starting with # are ignored. Up to 1000 times; the duration and padding fields above apply to every row.">?</span></label>
-    <textarea id="sch-midtimes" class="lco-pre" rows="6" spellcheck="false" aria-label="Mid-transit times" placeholder="e.g.&#10;tc,tc_err_min,epoch&#10;2461000.51234,1.2,411&#10;2026-11-03T04:12:00Z,,412"></textarea>
+    <label for="sch-midtimes">Mid-transit times <span class="help-tooltip" title="One transit per line: tc, then optionally tc_err (days, the same unit as numeric tc), separated by commas, tabs or spaces. tc is a full BJD_TDB (e.g. 2461000.51234) or an ISO UTC time (e.g. 2026-11-03T04:12:00Z). A header line may name the columns in any order: tc, tc_err (days). Lines starting with # are ignored. Up to 1000 times; the duration and padding fields above apply to every row.">?</span></label>
+    <textarea id="sch-midtimes" class="lco-pre" rows="6" spellcheck="false" aria-label="Mid-transit times" placeholder="e.g.&#10;tc,tc_err&#10;2461000.51234,0.001&#10;2026-11-03T04:12:00Z,"></textarea>
     <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.3rem;">
       <label for="sch-midtimes-file" class="hint" style="margin: 0;">or load a file</label>
       <input id="sch-midtimes-file" type="file" accept=".csv,.tsv,.txt,.dat,text/csv,text/plain">
@@ -459,7 +459,7 @@
   <p class="lco-note">Accepted requests are checked after their observing window. Final BANZAI products are downloaded incrementally; scan and database ingestion start after every raw frame has a level-91 counterpart.</p>
   <div class="lco-table-wrap">
     <p class="lco-note" id="rescue-usage"></p>
-    <table class="lco-table" id="monitor-table">
+    <table class="lco-table" id="monitor-table" data-no-resize style="width: auto;">
       <thead><tr><th>Request</th><th>Target</th><th>Instrument</th><th>LCO state</th><th>Pipeline</th><th>Frames</th><th>Last update</th><th>Detail</th><th>Action</th></tr></thead>
       <tbody id="monitor-body"><tr><td colspan="9" style="color: var(--text-dim); text-align: center;">Loading…</td></tr></tbody>
     </table>
@@ -547,6 +547,7 @@
       var input = el(id);
       if (!input) return;
       input.readOnly = on;
+      input.disabled = on;
       input.classList.toggle('ephem-ignored', on);
       if (on) { input.title = EPHEM_IGNORED_TITLE; }
       else { input.removeAttribute('title'); }
@@ -711,16 +712,19 @@
 
   // The range is the only required input with no default: when both fields are
   // blank the windows request fails with "missing date/time value" and the
-  // table never updates. Seed a sensible default (today → +DEFAULT_RANGE_DAYS,
+  // table never updates. Seed a sensible default (today → one calendar month later,
   // UTC) so a first click always produces windows.
-  var DEFAULT_RANGE_DAYS = 60;
   function ymdUTC(date) { return date.toISOString().slice(0, 10); }
   function ensureDefaultRange() {
     var changed = false;
     if (!val('sch-range-start')) { setVal('sch-range-start', ymdUTC(new Date())); changed = true; }
     if (!val('sch-range-end')) {
-      var end = new Date();
-      end.setUTCDate(end.getUTCDate() + DEFAULT_RANGE_DAYS);
+      var end = new Date(val('sch-range-start') + 'T00:00:00Z');
+      var day = end.getUTCDate();
+      end.setUTCDate(1);
+      end.setUTCMonth(end.getUTCMonth() + 1);
+      var lastDay = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth() + 1, 0)).getUTCDate();
+      end.setUTCDate(Math.min(day, lastDay));
       setVal('sch-range-end', ymdUTC(end));
       changed = true;
     }
@@ -2793,6 +2797,8 @@
   el('sch-target').addEventListener('change', function () { refreshTargetFields({ silent: true }); });
   el('sch-target').addEventListener('blur', function () { refreshTargetFields({ silent: true }); });
   function syncMidtimesBlock() {
+    setEphemIgnored(isMidtimeSource(val('sch-source')));
+    el('sch-rank').disabled = String(val('sch-source')).indexOf('ttv:') !== 0;
     el('midtimes-block').style.display = val('sch-source') === 'upload' ? '' : 'none';
   }
   syncMidtimesBlock();
@@ -2969,8 +2975,8 @@
       msg('msg-windows', 'Minimum moon separation must be ≥ 0.', 'err'); return;
     }
 
-    if (!t0Tuple.ok) { msg('msg-windows', 't0 must be "mean" or "mean,uncertainty"', 'err'); return; }
-    if (!periodTuple.ok) { msg('msg-windows', 'Period must be "mean" or "mean,uncertainty"', 'err'); return; }
+    if (!isMidtimeSource(val('sch-source')) && !t0Tuple.ok) { msg('msg-windows', 't0 must be "mean" or "mean,uncertainty"', 'err'); return; }
+    if (!isMidtimeSource(val('sch-source')) && !periodTuple.ok) { msg('msg-windows', 'Period must be "mean" or "mean,uncertainty"', 'err'); return; }
     if (!durationTuple.ok) { msg('msg-windows', 'Duration must be "mean" or "mean,uncertainty"', 'err'); return; }
     msg('msg-windows', 'Generating…');
     // "ttv:<run>" selects a specific TTV run. The server takes mid-times from
@@ -3227,11 +3233,74 @@
     return isNaN(date.getTime()) ? '—' : date.toISOString().replace('T', ' ').slice(0, 19) + 'Z';
   }
 
+  var monitoredRows = {};
+  var monitorActionPending = false;
+  var terminalRequestStates = ['COMPLETED', 'WINDOW_EXPIRED', 'CANCELED'];
+
+  function monitorActions(row) {
+    var id = escapeHtml(row.request_id);
+    var html = '<button class="btn sm" type="button" data-clone-id="' + id + '">Clone</button>';
+    if (row.monitor_state === 'complete') {
+      (row.datasets || []).forEach(function (dataset) {
+        var query = new URLSearchParams({inst: dataset.instrument, date: dataset.obsdate, target: dataset.target});
+        var label = 'Photometry: ' + dataset.instrument + ' ' + dataset.obsdate + ' ' + dataset.target;
+        html += ' <a class="btn sm" href="/photometry?' + escapeHtml(query.toString()) +
+          '" title="' + escapeHtml(label) + '" aria-label="' + escapeHtml(label) + '">🔭</a>';
+      });
+    }
+    if (row.can_modify) {
+      if (terminalRequestStates.indexOf(row.request_state) < 0) {
+        html += ' <button class="btn sm danger" type="button" data-cancel-monitor="' + id + '">Cancel on LCO</button>';
+      }
+      html += ' <button class="btn sm danger" type="button" data-delete-monitor="' + id + '">Delete</button>';
+    }
+    return html;
+  }
+
+  el('monitor-body').addEventListener('click', async function (event) {
+    var button = event.target.closest('[data-cancel-monitor], [data-delete-monitor]');
+    if (!button || monitorActionPending) return;
+    var cancel = button.hasAttribute('data-cancel-monitor');
+    var id = button.getAttribute(cancel ? 'data-cancel-monitor' : 'data-delete-monitor');
+    var row = monitoredRows[id];
+    if (!row) return;
+    var text = cancel ? 'Cancel request group ' + row.requestgroup_id + ' on LCO? This cancels all its unfinished requests and stops local polling. It cannot be undone.' :
+      'Delete local tracking for request ' + id + '? This stops monitoring and removes its progress. The LCO booking and ingested science data are kept. Work already in progress may finish.';
+    monitorActionPending = true;
+    button.disabled = true;
+    var primaryDone = false;
+    try {
+      if (!await showConfirmModal(cancel ? 'Cancel on LCO?' : 'Delete local tracking?', text,
+          {confirmLabel: cancel ? 'Cancel on LCO' : 'Delete', confirmClass: 'btn danger'})) return;
+      var partner = cancel && row.relay_request_id;
+      var cancelPartner = partner && await showConfirmModal('Cancel the other relay leg?',
+        'Also cancel the other relay leg (request ' + partner + ') on LCO?',
+        {confirmLabel: 'Cancel both legs', cancelLabel: 'Only this leg', confirmClass: 'btn danger'});
+      async function act(requestId) {
+        var d = await MuscatFetch.fetchJson('/api/lco/monitored-requests/' + requestId + (cancel ? '/cancel' : ''), {
+          method: cancel ? 'POST' : 'DELETE', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({confirm: true})
+        });
+        if (!d.ok) throw new Error(d.error || d.detail || 'Action failed');
+      }
+      await act(id);
+      primaryDone = true;
+      if (cancelPartner) await act(partner);
+    } catch (error) {
+      showMessageModal('Monitoring action failed', (primaryDone ? 'First leg canceled; the other leg could not be canceled: ' : '') + errText(error));
+    } finally {
+      monitorActionPending = false;
+      button.disabled = false;
+      refreshMonitoredRequests();
+    }
+  });
+
   function refreshMonitoredRequests() {
     MuscatFetch.fetchJson('/api/lco/monitored-requests').then(function (d) {
       var body = el('monitor-body');
       if (!body || !d.ok) return;
       var rows = d.requests || [];
+      monitoredRows = {};
+      rows.forEach(function (row) { monitoredRows[row.request_id] = row; });
       el('rescue-usage').textContent = (d.rescue_usage || []).map(function (r) {
         return r.proposal + ': ' + r.submitted + ' automatic submissions, ' + r.attempts + ' reserved attempts, ' + Number(r.reserved_minutes).toFixed(2) + ' min reserved';
       }).join(' · ');
@@ -3255,7 +3324,7 @@
           '<td>' + frames + '</td>' +
           '<td>' + escapeHtml(monitorDate(row.updated_at)) + '</td>' +
           '<td>' + (rescueDetail ? rescueDetail + '<br>' : '') + detail + '</td>' +
-          '<td><button class="btn" type="button" data-clone-id="' + escapeHtml(row.request_id) + '">Clone</button></td></tr>';
+          '<td class="monitor-actions">' + monitorActions(row) + '</td></tr>';
       }).join('');
     }).catch(function () {});
   }
@@ -4001,6 +4070,7 @@
   }).catch(function () {});
   loadProposals();
   restoreOptions();
+  syncMidtimesBlock();
   updateGenWindowsButtonState();
   ensureDefaultRange();
   applyKind();

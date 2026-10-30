@@ -2753,3 +2753,15 @@ def submit_requestgroup(
         url, method="POST", data=request_group,
         user_name=user_name, token=token, require_own_token=require_own_token,
     )
+
+
+def cancel_requestgroup(requestgroup_id: int, user_name: str | None) -> dict:
+    """Cancel on the observing network using the acting user's own token."""
+    if os.environ.get("MUSCAT_LCO_ALLOW_SUBMIT") != "1":
+        raise LcoError("Live cancellation is disabled on the server", status=403)
+    if not user_name:
+        raise LcoError("Sign in and save your own LCO API token to cancel", status=403)
+    return _lco_api_request(
+        f"https://observe.lco.global/api/requestgroups/{int(requestgroup_id)}/cancel/",
+        method="POST", user_name=user_name, require_own_token=True,
+    )

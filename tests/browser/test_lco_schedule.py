@@ -198,7 +198,7 @@ def test_unconfigured_sheet_sources_remain_visible_with_settings_link(page, shar
 # HIP 67522 from coj, April 2027, 3 h transit: one full, one partial and one
 # unobservable transit (see tests/test_lco_windows_upload.py).
 UPLOAD_COORDS = "199.3, -40.6"
-UPLOADED = "tc,tc_err_min\n2027-04-10T14:00:00Z,2.5\n2027-04-10T19:00:00Z,\n2027-04-10T02:00:00Z,\n"
+UPLOADED = "tc,tc_err\n2027-04-10T14:00:00Z,0.001\n2027-04-10T19:00:00Z,\n2027-04-10T02:00:00Z,\n"
 
 
 def _upload_and_generate(page, tmp_path) -> None:
@@ -234,7 +234,7 @@ def test_uploaded_midtimes_are_rated_and_filtered(page, tmp_path):
     expect(page.locator("#msg-windows")).to_contain_text("uploaded: 3 times (3 as UTC)")
     expect(page.locator("#win-counts")).to_have_text("3 transits: 1 full, 1 partial, 0 split, 1 none")
     # the uploaded uncertainty fills Mid unc; the rows without one show '-'
-    expect(page.locator("#windows-body")).to_contain_text("± 2.50 min")
+    expect(page.locator("#windows-body")).to_contain_text("± 1.44 min")
 
     expected = {"all": ["none", "full", "partial"], "obs": ["full", "partial"],
                 "full": ["full"], "none": ["none"], "split": []}
@@ -350,6 +350,36 @@ def test_airmass_ranked_plans_can_be_selected_and_restored(page):
         expect(select).to_have_value(relay_id)
     page.reload()
     expect(page.locator(".plan-select")).to_have_value(relay_ids[-1])
+
+
+@pytest.mark.parametrize(('today', 'end'), [('2026-10-30', '2026-11-30'), ('2027-01-31', '2027-02-28'), ('2028-01-31', '2028-02-29')])
+def test_default_range_is_one_calendar_month(page, today, end):
+    page.problems.allowed.extend(NO_TOKEN)
+    page.clock.set_fixed_time(datetime.datetime.fromisoformat(today + 'T12:00:00+00:00'))
+    page.goto('/lco/schedule')
+    expect(page.locator('#sch-range-start')).to_have_value(today)
+    expect(page.locator('#sch-range-end')).to_have_value(end)
+
+
+def test_upload_disables_ignored_controls_and_skips_their_validation(page):
+    page.problems.allowed.extend(NO_TOKEN)
+    page.goto('/lco/schedule')
+    page.fill('#sch-t0', 'invalid')
+    page.fill('#sch-period', 'invalid')
+    page.select_option('#sch-source', 'upload')
+    for field in ('sch-t0', 'sch-period', 'sch-rank'):
+        expect(page.locator('#' + field)).to_be_disabled()
+    page.fill('#sch-coords', UPLOAD_COORDS)
+    page.fill('#sch-duration', '3')
+    page.fill('#sch-range-start', '2027-04-01')
+    page.fill('#sch-range-end', '2027-04-30')
+    page.fill('#sch-midtimes', UPLOADED)
+    with page.expect_response('**/api/lco/windows', timeout=60_000) as response:
+        page.click('#btn-gen-windows')
+    assert response.value.json()['ok']
+    page.select_option('#sch-source', '')
+    expect(page.locator('#sch-t0')).to_be_enabled()
+    expect(page.locator('#sch-period')).to_be_enabled()
 
 
 @pytest.mark.parametrize('strategy', ['overlapping', 'chunked'])
