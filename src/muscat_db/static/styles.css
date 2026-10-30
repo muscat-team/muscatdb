@@ -1901,3 +1901,53 @@ body.chat-popout #minimize-chat {
 /* Chat room selector also appears in the pop-out window. */
 #chat-room { margin: 0.35rem 0.6rem; max-width: calc(100% - 1.2rem); }
 #chat-messages .message[hidden] { display: none; }
+
+#monitor-table th:last-child, #monitor-table .monitor-actions { width: 1%; white-space: nowrap; }
+
+/* Target inventories share the global table appearance and fit their content. */
+.target-page table:not(#toi-table):not(#nx-table) {
+  width: max-content;
+  table-layout: auto;
+}
+.target-page th, .target-page td {
+  max-width: none;
+  overflow: visible;
+  text-overflow: clip;
+}
+.target-lco-intro { margin: 1rem 0; }
+.target-lco-intro p { margin: 0.4rem 0; }
+.target-lco-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 0.75rem 1rem;
+  margin: 1rem 0;
+}
+.target-lco-filters label { display: grid; gap: 0.4rem; font-size: 0.85rem; }
+.target-lco-feedback {
+  margin: 1.25rem 0;
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface2);
+  line-height: 1.6;
+}
+.target-lco-feedback p { margin: 0 0 0.5rem; font-weight: 600; }
+.target-lco-feedback a { font-size: 0.85rem; }
+#target-lco-status[data-state="searching"],
+#target-lco-status[data-state="queued"] { color: var(--accent); }
+#target-lco-status[data-state="error"] { color: var(--red); }
+.target-lco-report-help { line-height: 1.6; }
+.target-lco-actions > * + * { margin-left: 0.65rem; }
+
+/* Filter inputs fill the data-sized columns without setting their minimum width. */
+.target-page tr.filter-row th input { width: 0; min-width: 100%; }
+.target-lco-filters input {
+  background: var(--input-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.4rem 0.5rem;
+  font: inherit;
+}
+#target-lco-details .hint { color: var(--text-dim); font-size: 0.85rem; }

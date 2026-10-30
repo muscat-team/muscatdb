@@ -18,23 +18,21 @@ def test_bare_bjd_column_without_header():
     parsed = parse_midtimes("2461000.5\n2461002.55\n")
 
     assert [r.bjd for r in parsed.rows] == [2461000.5, 2461002.55]
-    assert all(r.utc_jd is None and r.unc_min is None and r.epoch is None for r in parsed.rows)
+    assert all(r.utc_jd is None and r.unc_min is None for r in parsed.rows)
     assert parsed.time_systems == {"bjd_tdb": 2, "utc": 0}
 
 
-def test_positional_columns_are_tc_tc_err_epoch():
-    parsed = parse_midtimes("2461000.5, 0.001, 100\n2461002.55, 0.002, 101\n")
-
-    assert [r.epoch for r in parsed.rows] == [100, 101]
-    # tc_err is in days without a header: 0.001 d = 1.44 min
+@pytest.mark.parametrize("separator", [",", " ", "\t", "  "])
+def test_columns_use_days(separator):
+    parsed = parse_midtimes(separator.join(["tc_err", "tc"]) + "\n" + separator.join(["0.001", "2461000.5"]))
     assert parsed.rows[0].unc_min == pytest.approx(1.44)
+    assert parsed.rows[0].bjd == 2461000.5
 
 
-def test_header_names_the_columns_in_any_order():
-    parsed = parse_midtimes("epoch\ttc_err_min\ttc\n7\t2.5\t2461000.5\n")
-
-    row = parsed.rows[0]
-    assert (row.epoch, row.unc_min, row.bjd) == (7, 2.5, 2461000.5)
+@pytest.mark.parametrize("column", ["epoch", "tc_err_min"])
+def test_removed_columns_are_rejected(column):
+    with pytest.raises(MidtimeError, match="unknown column"):
+        parse_midtimes(f"tc,{column}\n2461000.5,1")
 
 
 def test_iso_utc_times_are_kept_as_utc():
@@ -77,7 +75,7 @@ def test_unknown_header_column_is_refused():
 
 def test_header_without_tc_is_refused():
     with pytest.raises(MidtimeError, match="no 'tc' column"):
-        parse_midtimes("epoch,tc_err\n1,0.001\n")
+        parse_midtimes("tc_err\n0.001\n")
 
 
 def test_epochs_must_be_all_or_none():
@@ -96,8 +94,8 @@ def test_duplicate_times_are_dropped_and_counted():
     assert parsed.duplicates_dropped == 1
 
 
-def test_one_epoch_at_two_times_is_refused():
-    with pytest.raises(MidtimeError, match="epoch 5"):
+def test_third_positional_column_is_refused():
+    with pytest.raises(MidtimeError, match="expected at most 2"):
         parse_midtimes("2461000.5,0,5\n2461002.5,0,5\n")
 
 
