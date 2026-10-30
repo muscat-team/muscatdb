@@ -261,7 +261,8 @@ def test_ledger_is_not_picked_up_as_an_instrument_or_date(obslog, fake_files):
 # -- muscat-db scan-failures ---------------------------------------------------
 
 
-def test_scan_failures_cli_lists_pending_entries(obslog, fake_files):
+def test_scan_failures_cli_lists_pending_entries(obslog, fake_files, monkeypatch):
+    from rich.console import Console
     from typer.testing import CliRunner
 
     from muscat_db.cli import app
@@ -270,7 +271,11 @@ def test_scan_failures_cli_lists_pending_entries(obslog, fake_files):
     broken.add("qhy600")
     with pytest.raises(OSError):
         scanner.scan_date("qhy600", "260301", max_workers=1)
-    r = CliRunner().invoke(app, ["scan-failures"], env={"NO_COLOR": "1", "COLUMNS": "200"})
+    # The CLI's console is built at import, so COLUMNS in the runner's env does
+    # not reach it; at the 80 columns a non-terminal gets, the seven-column
+    # table wraps "stale NFS" onto two lines. Render wide so cells stay whole.
+    monkeypatch.setattr(cli, "console", Console(width=200, no_color=True))
+    r = CliRunner().invoke(app, ["scan-failures"], env={"NO_COLOR": "1"})
 
     assert r.exit_code == 0, r.output
     assert "qhy600" in r.output and "260301" in r.output and "stale NFS" in r.output
