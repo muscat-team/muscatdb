@@ -5420,6 +5420,12 @@ def api_lco_windows(request: Request, payload: dict = Body(...)):
                     {"ok": False, "error": f"no ephemeris found for {target} {planet}".strip()},
                     status_code=404,
                 )
+            if ephem.get("error"):
+                # The sheet fit explains its own refusal (time scale, too few
+                # epochs); pass that on rather than a generic "not found".
+                return JSONResponse(
+                    {"ok": False, "error": f"{target} {key}: {ephem['error']}"}, status_code=400
+                )
             t0 = ephem.get("t0")
             period = ephem.get("period")
             if duration in (None, "") and ephem.get("duration") is not None:
@@ -6830,11 +6836,40 @@ def _sheet_ephemeris(target: str, cfg: dict) -> dict:
         return {}
 
 
+def _sheet_time_scale_problem(time_system: dict | None) -> str | None:
+    """Why the transit-centers tab cannot feed a fit, or None when its times are
+    confirmed BJD_TDB.
+
+    ``parse_transit_csv`` only labels the time scale; the upload path then asks
+    the user to confirm before import. The sheet path has no such prompt, so an
+    unspecified or unsupported scale is refused here with the same reasoning:
+    scheduling from transit centers that are secretly BJD_UTC, or whose scale
+    nobody stated, moves predicted windows by about a minute today and silently
+    more as TDB and UTC drift apart."""
+    if not time_system or not time_system.get("confirmed"):
+        return (
+            "transit-centers tab does not identify its time scale as BJD_TDB; "
+            "label the tc column, e.g. 'tc (BJD_TDB)'"
+        )
+    if not time_system.get("supported"):
+        return (
+            f"transit-centers tab is in {time_system.get('value')}, which cannot be used "
+            "as BJD_TDB without an explicit time-scale conversion"
+        )
+    return None
+
+
 def _sheet_fit_ephemeris(target: str, cfg: dict, seed_by_planet: dict) -> dict:
     """Linear-fit ``{planet: {t0, period, *_unc}}`` from the sheet transit-centers
     tab. ``seed_by_planet`` supplies a per-planet ``{t0, period}`` used only to
     assign integer epochs when the tab has no explicit epoch column; the fit
-    re-derives t0/period from the transit centers."""
+    re-derives t0/period from the transit centers.
+
+    A planet whose rows cannot yield a real fit (unconfirmed or unsupported time
+    scale, missing epochs, fewer than two distinct epochs) maps to
+    ``{"error": reason}`` with no ``t0``/``period``, so callers can tell the user
+    why instead of scheduling from a reference ephemeris or the regression's
+    placeholder period dressed up as a fit."""
     try:
         parsed = gsheet_ephemeris.query_target_transit_centers(
             target, cfg["url"], cfg["tc_tab"], cfg.get("tc_cols")
@@ -6844,6 +6879,12 @@ def _sheet_fit_ephemeris(target: str, cfg: dict, seed_by_planet: dict) -> dict:
     by_planet: dict[str, list[dict]] = {}
     for row in parsed.get("rows") or []:
         by_planet.setdefault(row["planet"], []).append(row)
+    if not by_planet:
+        return {}
+
+    time_scale_problem = _sheet_time_scale_problem(parsed.get("time_system"))
+    if time_scale_problem:
+        return {planet: {"error": time_scale_problem} for planet in by_planet}
 
     results: dict = {}
     for planet, points in by_planet.items():
@@ -6852,13 +6893,15 @@ def _sheet_fit_ephemeris(target: str, cfg: dict, seed_by_planet: dict) -> dict:
         p_seed = seed.get("period")
         have_seed = t0_seed is not None and p_seed
         if not have_seed and any(pt.get("source_epoch") is None for pt in points):
-            # No seed to assign epochs and the tab did not supply them: cannot fit.
+            results[planet] = {
+                "error": "transit-centers tab has no epoch column and no seed ephemeris "
+                         "to assign epochs from"
+            }
             continue
-        if not have_seed and len(points) < 2:
-            # Without a seed period a single point cannot yield a real fit; skip
-            # rather than echo a fabricated reference period.
-            continue
-        # Reference echoed back only if the fit itself can't run (<2 points).
+        # The reference ephemeris only anchors epoch assignment and the
+        # regression's design matrix. Without a seed every epoch is explicit,
+        # so the 1.0 d placeholder never influences a successful fit and is
+        # never returned.
         t0_ref = float(t0_seed) if have_seed else float(points[0]["tc"])
         p_ref = float(p_seed) if have_seed else 1.0
         epochs, tcs, uncs = [], [], []
@@ -6872,6 +6915,12 @@ def _sheet_fit_ephemeris(target: str, cfg: dict, seed_by_planet: dict) -> dict:
         fit_result = ephemeris_math.fit_linear_ephemeris(
             epochs, tcs, uncs, t0_ref, p_ref, fit_method="unweighted"
         )
+        if not fit_result["was_fit"]:
+            results[planet] = {
+                "error": "linear fit needs at least 2 transit centers at distinct epochs "
+                         f"({len(points)} row(s), {len(set(epochs))} distinct epoch(s))"
+            }
+            continue
         entry: dict = {"t0": fit_result["t0_fit"], "period": fit_result["period_fit"]}
         if fit_result.get("t0_fit_unc"):
             entry["t0_unc"] = fit_result["t0_fit_unc"]
