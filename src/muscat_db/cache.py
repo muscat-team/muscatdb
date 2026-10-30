@@ -76,7 +76,11 @@ class TTLCache:
     before ``clear()`` can finish after it. Each ``clear()`` bumps an
     invalidation generation; a result computed against an older generation
     is returned to its caller but not stored, otherwise a slow lookup would
-    repopulate the cache with the pre-invalidation value.
+    repopulate the cache with the pre-invalidation value. Because every
+    database write fires ``clear_all_caches()``, a slow lookup that overlaps
+    a write is never stored; under write-heavy load the hit rate of an
+    expensive cached function drops, which is the price of never serving a
+    value computed against superseded state.
     """
 
     def __init__(

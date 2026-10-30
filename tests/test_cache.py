@@ -210,7 +210,7 @@ class TestTTLCacheInvalidationGeneration:
         # A later caller must see the new value, not the stale repopulation.
         assert read() == "new"
 
-    def test_clear_during_lookup_still_caches_later_result(self):
+    def test_clear_before_lookup_still_caches_result(self):
         calls = []
 
         @TTLCache(ttl=1000.0, maxsize=8)
@@ -223,14 +223,26 @@ class TestTTLCacheInvalidationGeneration:
         assert f(1) == 1
         assert calls == [1]  # a clear before the lookup does not poison it
 
-    def test_cache_if_still_skips_rejected_results(self):
+    def test_cache_if_rejected_result_is_not_stored_across_clear(self):
         results = iter([{"ok": False}, {"ok": True}])
+        computing = threading.Event()
+        resume = threading.Event()
+        cache = TTLCache(ttl=1000.0, maxsize=8, cache_if=lambda r: r["ok"])
 
-        @TTLCache(ttl=1000.0, maxsize=8, cache_if=lambda r: r["ok"])
+        @cache
         def evaluate():
-            return next(results)
+            value = next(results)
+            computing.set()
+            resume.wait(timeout=5)
+            return value
 
-        assert evaluate() == {"ok": False}
+        worker = threading.Thread(target=evaluate)
+        worker.start()
+        assert computing.wait(timeout=5)
+        # The clear lands while a lookup that will be rejected is paused.
         evaluate.cache_clear()
+        resume.set()
+        worker.join(timeout=5)
+        assert len(cache.cache) == 0  # the rejected value was not stored
         assert evaluate() == {"ok": True}
-        assert evaluate() == {"ok": True}
+        assert evaluate() == {"ok": True}  # the accepted value is cached
