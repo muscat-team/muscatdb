@@ -5889,6 +5889,11 @@ def api_lco_split_submit(request: Request, payload: dict = Body(...)):
         )
 
     monitoring_b = _record_lco_submission(result_b, rg_b, leg_b_params, user)
+    if monitoring_a.get("ok") and monitoring_b.get("ok"):
+        try:
+            lco_monitor.link_relay(result_a["id"], result_b["id"])
+        except Exception:
+            logger.exception("Could not link the submitted relay request groups")
     return JSONResponse({
         "ok": True,
         "leg_a": {"result": result_a, "monitoring": monitoring_a},
@@ -5897,13 +5902,63 @@ def api_lco_split_submit(request: Request, payload: dict = Body(...)):
 
 
 @lco_router.get("/monitored-requests", response_class=JSONResponse)
-def api_lco_monitored_requests():
+def api_lco_monitored_requests(request: Request):
     """Return locally persisted scheduler requests and pipeline progress."""
     denied = _viewer_denied()
     rows = [
         r for r in lco_monitor.list_requests() if not _is_denied(r.get("proposal"), denied)
     ]
+    user = _request_user(request)
+    admin = bool(user) and _jobs_user_is_admin(user)
+    for row in rows:
+        row["can_modify"] = bool(user) and (admin or row["user_name"] == user)
+        row["datasets"] = [d for d in row["datasets"] if not _is_denied(
+            row["proposal"], denied, instrument=d["instrument"],
+            obsdate=d["obsdate"], obj=d["target"],
+        )]
+    for row in rows:
+        row["relay_request_id"] = next((r["request_id"] for r in rows
+            if r["requestgroup_id"] == row["relay_requestgroup_id"] and r["can_modify"]
+            and r["request_state"] not in lco_monitor.TERMINAL_REQUEST_STATES), None)
     return JSONResponse({"ok": True, "requests": rows})
+
+
+def _modifiable_lco_request(request: Request, request_id: int, payload: dict) -> dict:
+    if payload.get("confirm") is not True:
+        raise HTTPException(400, "Action requires explicit confirmation")
+    row = lco_monitor.get_request(request_id)
+    if not row or _is_denied(row["proposal"], _viewer_denied()):
+        raise HTTPException(404, "Monitored request not found")
+    user = _request_user(request)
+    if not user or not (_jobs_user_is_admin(user) or row["user_name"] == user):
+        raise HTTPException(403, "Only the submitter or an admin may modify this request")
+    return row
+
+
+@lco_router.delete("/monitored-requests/{request_id}", response_class=JSONResponse)
+def api_lco_delete_monitored_request(request: Request, request_id: int, payload: dict = Body(...)):
+    _modifiable_lco_request(request, request_id, payload)
+    lco_monitor.delete_request(request_id)
+    return JSONResponse({"ok": True})
+
+
+@lco_router.post("/monitored-requests/{request_id}/cancel", response_class=JSONResponse)
+def api_lco_cancel_monitored_request(request: Request, request_id: int, payload: dict = Body(...)):
+    row = _modifiable_lco_request(request, request_id, payload)
+    if row["request_state"] in lco_monitor.TERMINAL_REQUEST_STATES:
+        return JSONResponse({"ok": False, "error": "Request is already terminal"}, status_code=409)
+    # The portal cancels a whole group, so authorize every tracked child.
+    with get_conn(_db_path()) as conn:
+        children = conn.execute("SELECT request_id FROM lco_observation_requests WHERE requestgroup_id=?",
+                                (row["requestgroup_id"],)).fetchall()
+    for child in children:
+        _modifiable_lco_request(request, child[0], payload)
+    try:
+        lco.cancel_requestgroup(row["requestgroup_id"], _request_user(request))
+    except lco.LcoError as exc:
+        return _lco_error_response(exc)
+    lco_monitor.mark_group_canceled(row["requestgroup_id"])
+    return JSONResponse({"ok": True})
 
 
 def _require_own_archive_token(request: Request) -> None:
