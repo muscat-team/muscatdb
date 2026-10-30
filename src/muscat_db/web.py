@@ -6205,12 +6205,16 @@ def api_lco_archive_exofop(
         target, tic=(tic or "").strip() or None, denied=_viewer_denied()
     )
     if not report.get("ok"):
+        # An outage is a 503 so the page offers a retry instead of a TIC prompt.
+        unavailable = bool(report.get("unavailable"))
         return JSONResponse(
             {
                 "ok": False,
                 "error": report.get("error", "not a TOI"),
                 "needs_tic": bool(report.get("needs_tic")),
-            }
+                "unavailable": unavailable,
+            },
+            status_code=503 if unavailable else 200,
         )
     return JSONResponse(
         {

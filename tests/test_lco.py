@@ -2026,9 +2026,11 @@ class ExofopTimeSeriesTest(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         exofop._exofop_cache.clear()
 
-    def test_fetch_time_series_empty_on_error(self):
+    def test_fetch_time_series_raises_on_error(self):
+        exofop._exofop_cache.clear()
         with patch("muscat_db.exofop.catalog._sync_get", side_effect=RuntimeError("boom")):
-            self.assertEqual(exofop.fetch_time_series("6715"), [])
+            with self.assertRaises(exofop.ExofopUnavailable):
+                exofop.fetch_time_series("6715")
         exofop._exofop_cache.clear()
 
     def test_camera_names_parse_to_instrument(self):

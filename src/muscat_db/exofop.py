@@ -27,20 +27,56 @@ pathway (``archive_search_by_target_date``) queries the LCO archive.
 from __future__ import annotations
 
 import datetime
+import logging
 import re
 import threading
 from urllib.parse import quote
 
+import httpx
+
 from muscat_db import catalog, lco
+
+logger = logging.getLogger(__name__)
 
 # How recently a fetched ExoFOP response is considered fresh enough to reuse
 # (seconds). ExoFOP time series change slowly, so a short TTL lets an operator
 # re-run a search in the same session without hammering the external service.
 _EXOFOP_CACHE_TTL_S = 3600
+# A failed request is remembered only briefly: repeated clicks during an outage
+# then do not each wait out the timeout, and recovery is not held back for an
+# hour. A valid but empty time-series list gets a middle TTL. ExoFOP has been
+# seen answering 200 with an empty list for a target it lists dozens of entries
+# for, and the hour-long cache turned that blip into a stale target page.
 _EXOFOP_FAILURE_CACHE_TTL_S = 30
+_EXOFOP_EMPTY_CACHE_TTL_S = 300
 
 _exofop_cache: dict = {}
 _exofop_cache_lock = threading.Lock()
+
+# Cache marker for a request that failed. It is distinct from None, which
+# records a reply that parsed but did not describe a TESS target.
+_UNAVAILABLE = object()
+
+_UNAVAILABLE_MESSAGE = "ExoFOP is unavailable (no usable reply). Retry in a moment."
+
+
+class ExofopUnavailable(RuntimeError):
+    """ExoFOP did not answer usably: timeout, transport error, 5xx, or no JSON.
+
+    This is distinct from an empty result. Callers show "ExoFOP unavailable,
+    retry" instead of "no entries reported".
+    """
+
+
+def _is_outage(exc: BaseException) -> bool:
+    """True for every request failure except an HTTP 4xx.
+
+    A 4xx is ExoFOP answering about the id (unknown target, bad request), so
+    it is treated as a reply rather than as an outage.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code >= 500
+    return True
 
 
 # --------------------------------------------------------------------------- #
@@ -176,10 +212,13 @@ def _load_catalog():
 # ExoFOP time_series fetch (with response-level caching)
 # --------------------------------------------------------------------------- #
 
-def _exofop_url(toi: str = "", tic: str = "") -> str:
+def _exofop_ident(toi: str = "", tic: str = "") -> str:
     # ExoFOP accepts either ``id=TOI-<n>`` or a bare TIC id.
-    ident = f"TOI-{toi}" if toi else str(tic)
-    return f"https://exofop.ipac.caltech.edu/tess/target.php?id={ident}&json"
+    return f"TOI-{toi}" if toi else str(tic)
+
+
+def _exofop_url(toi: str = "", tic: str = "") -> str:
+    return f"https://exofop.ipac.caltech.edu/tess/target.php?id={_exofop_ident(toi, tic)}&json"
 
 
 def fetch_time_series(
@@ -189,6 +228,12 @@ def fetch_time_series(
 
     Keyed by the TOI host number; *tic* is the fallback id for a target that
     is not a known TOI.
+
+    Raises :class:`ExofopUnavailable` when ExoFOP does not answer with JSON
+    within the timeout. The failure is cached for
+    ``_EXOFOP_FAILURE_CACHE_TTL_S`` and logged once per request actually made,
+    so a page that keeps retrying neither hammers ExoFOP nor floods the log.
+    An HTTP 4xx is ExoFOP's answer about the id and yields an empty list.
     """
     toi = str(toi or "").strip()
     tic = str(tic or "").strip()
@@ -198,9 +243,19 @@ def fetch_time_series(
     now = _now if _now is not None else datetime.datetime.now(datetime.timezone.utc).timestamp()
     with _exofop_cache_lock:
         hit = _exofop_cache.get(cache_key)
-        if hit is not None and now - hit[0] < _EXOFOP_CACHE_TTL_S:
-            return [dict(r) for r in hit[1]]
+        if hit is not None:
+            if hit[1] is _UNAVAILABLE:
+                ttl = _EXOFOP_FAILURE_CACHE_TTL_S
+            elif not hit[1]:
+                ttl = _EXOFOP_EMPTY_CACHE_TTL_S
+            else:
+                ttl = _EXOFOP_CACHE_TTL_S
+            if now - hit[0] < ttl:
+                if hit[1] is _UNAVAILABLE:
+                    raise ExofopUnavailable(_UNAVAILABLE_MESSAGE)
+                return [dict(r) for r in hit[1]]
 
+    ident = _exofop_ident(toi, tic)
     try:
         resp = catalog._sync_get(
             _exofop_url(toi, tic),
@@ -208,8 +263,16 @@ def fetch_time_series(
             timeout=20,
         )
         data = resp.json()
-    except Exception:
-        return []
+        if not isinstance(data, dict):
+            raise ValueError(f"unexpected payload type {type(data).__name__}")
+    except Exception as exc:
+        if not _is_outage(exc):
+            data = {}
+        else:
+            with _exofop_cache_lock:
+                _exofop_cache[cache_key] = (now, _UNAVAILABLE)
+            logger.warning("ExoFOP time series fetch failed for %s: %s", ident, exc)
+            raise ExofopUnavailable(_UNAVAILABLE_MESSAGE) from exc
 
     entries = data.get("time_series") or []
     entries = [dict(e) for e in entries]
@@ -218,12 +281,18 @@ def fetch_time_series(
     return entries
 
 
-def fetch_target_by_name(name: str, *, _now: float | None = None) -> dict | None:
-    """Resolve a TESS target through ExoFOP, retaining coordinates and TIC ID.
+def _fetch_target_payload(name: str, *, _now: float | None = None):
+    """Return ExoFOP's reply for a target name, cached by name.
 
-    Share the response with time-series callers. Cache failed lookups too so
-    repeated clicks during an outage do not keep hitting ExoFOP. Failures expire
-    after 30 seconds so transient errors do not suppress recovery for an hour.
+    Three outcomes share the cache: the reply dict for a TESS target, None for
+    a name ExoFOP does not know, and ``_UNAVAILABLE`` when the request itself
+    failed (timeout, transport error, 5xx). Both non-dict outcomes expire
+    after ``_EXOFOP_FAILURE_CACHE_TTL_S`` so repeated clicks during an outage
+    do not keep hitting ExoFOP, while recovery is not held back for an hour.
+
+    A reply that is not JSON or names no TIC counts as "not a TESS target"
+    rather than as an outage: the shape of ExoFOP's reply for an unknown name
+    is not pinned down, and a reply of some kind did arrive.
     """
     from copy import deepcopy
 
@@ -235,9 +304,9 @@ def fetch_target_by_name(name: str, *, _now: float | None = None) -> dict | None
     with _exofop_cache_lock:
         hit = _exofop_cache.get(cache_key)
         if hit is not None:
-            ttl = _EXOFOP_FAILURE_CACHE_TTL_S if hit[1] is None else _EXOFOP_CACHE_TTL_S
+            ttl = _EXOFOP_CACHE_TTL_S if isinstance(hit[1], dict) else _EXOFOP_FAILURE_CACHE_TTL_S
             if now - hit[0] < ttl:
-                return deepcopy(hit[1])
+                return _UNAVAILABLE if hit[1] is _UNAVAILABLE else deepcopy(hit[1])
     data = None
     try:
         resp = catalog._sync_get(
@@ -245,23 +314,48 @@ def fetch_target_by_name(name: str, *, _now: float | None = None) -> dict | None
             headers={"User-Agent": "MuSCAT-db/0.1.0"},
             timeout=5,
         )
-        candidate = resp.json()
+    except Exception as exc:
+        if _is_outage(exc):
+            logger.warning("ExoFOP target lookup failed for %s: %s", ident, exc)
+            data = _UNAVAILABLE
+    else:
+        try:
+            candidate = resp.json()
+        except Exception:
+            candidate = None
         info = candidate.get("basic_info") if isinstance(candidate, dict) else None
         if isinstance(info, dict) and normalize_tic_input(info.get("tic_id")) is not None:
             data = candidate
-    except Exception:
-        pass
     with _exofop_cache_lock:
         # Bound cache memory even for arbitrary user-supplied target names.
         if len(_exofop_cache) >= 256:
             _exofop_cache.pop(next(iter(_exofop_cache)))
-        _exofop_cache[cache_key] = (now, deepcopy(data))
+        _exofop_cache[cache_key] = (now, _UNAVAILABLE if data is _UNAVAILABLE else deepcopy(data))
     return data
 
 
+def fetch_target_by_name(name: str, *, _now: float | None = None) -> dict | None:
+    """Resolve a TESS target through ExoFOP, retaining coordinates and TIC ID.
+
+    Returns None both for a name ExoFOP does not know and while ExoFOP is
+    unavailable, so the coordinate fallbacks in ``catalog`` and ``exposure``
+    simply move on to their next source. :func:`fetch_by_name` tells the two
+    cases apart for the target page.
+    """
+    data = _fetch_target_payload(name, _now=_now)
+    return None if data is _UNAVAILABLE else data
+
+
 def fetch_by_name(name: str, *, _now: float | None = None) -> tuple[str, list[dict]] | None:
-    """Return the resolved TIC ID and reported time series, cached by name."""
-    data = fetch_target_by_name(name, _now=_now)
+    """Return the resolved TIC ID and reported time series, cached by name.
+
+    None when ExoFOP does not know the name; raises :class:`ExofopUnavailable`
+    when ExoFOP could not be asked, so the caller does not mistake an outage
+    for an unknown target.
+    """
+    data = _fetch_target_payload(name, _now=_now)
+    if data is _UNAVAILABLE:
+        raise ExofopUnavailable(_UNAVAILABLE_MESSAGE)
     if data is None:
         return None
     tic = normalize_tic_input(data["basic_info"]["tic_id"])
@@ -579,36 +673,42 @@ def build_time_series_report(
     Returns ``{"ok": True, "toi": <num>, "time_series": [...], "total": N}``
     (``total`` counts only rows with a resolvable observation, mirroring the
     archive page's convention of reporting dataset count alongside frames).
+    When ExoFOP cannot be reached the result is
+    ``{"ok": False, "unavailable": True, "error": ...}`` so the page can say
+    so instead of reporting no entries or asking for a TIC id.
     """
     toi = None
     entries: list[dict] | None = None
     if tic and normalize_tic_input(tic) is None:
         return {"ok": False, "error": f"Invalid TIC id: {tic!r}", "needs_tic": True}
     tic = normalize_tic_input(tic)
-    if tic is None:
-        # Name -> TOI, then TIC designation, then SIMBAD aliases (HIP, HD, ...).
-        toi = resolve_toi_number(target)
-        if toi is None:
-            tic = resolve_tic_number(target)
-        if toi is None and tic is None:
-            # Not a TOI/TIC name: let ExoFOP resolve the name itself (HIP, HD,
-            # Gaia, ...), then fall back to SIMBAD's TIC alias.
-            by_name = fetch_by_name(target, _now=_now)
-            if by_name is not None:
-                tic, entries = by_name
-            else:
-                tic = resolve_tic_via_simbad(target)
-            if tic is None:
-                return {
-                    "ok": False,
-                    "needs_tic": True,
-                    "error": (
-                        "Target does not resolve to a known TOI or TIC id. "
-                        "Enter its TIC id to check ExoFOP."
-                    ),
-                }
-    if entries is None:
-        entries = fetch_time_series(toi or "", tic=tic or "", _now=_now)
+    try:
+        if tic is None:
+            # Name -> TOI, then TIC designation, then SIMBAD aliases (HIP, HD, ...).
+            toi = resolve_toi_number(target)
+            if toi is None:
+                tic = resolve_tic_number(target)
+            if toi is None and tic is None:
+                # Not a TOI/TIC name: let ExoFOP resolve the name itself (HIP, HD,
+                # Gaia, ...), then fall back to SIMBAD's TIC alias.
+                by_name = fetch_by_name(target, _now=_now)
+                if by_name is not None:
+                    tic, entries = by_name
+                else:
+                    tic = resolve_tic_via_simbad(target)
+                if tic is None:
+                    return {
+                        "ok": False,
+                        "needs_tic": True,
+                        "error": (
+                            "Target does not resolve to a known TOI or TIC id. "
+                            "Enter its TIC id to check ExoFOP."
+                        ),
+                    }
+        if entries is None:
+            entries = fetch_time_series(toi or "", tic=tic or "", _now=_now)
+    except ExofopUnavailable as exc:
+        return {"ok": False, "unavailable": True, "error": str(exc)}
     rows = [check_time_series_exists(e, target=target, denied=denied) for e in entries]
     return {
         "ok": True,

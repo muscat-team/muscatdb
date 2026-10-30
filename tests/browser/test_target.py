@@ -96,14 +96,14 @@ def test_archive_section_settles_offline_with_a_reason(page, section):
     assert message in _open_section(page, section)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="exofop.fetch_time_series swallows network errors and returns [], so an "
-    "unreachable ExoFOP reads as 'no entries reported'",
-)
 def test_exofop_section_reports_an_unreachable_exofop(page):
+    # The server answers 503 while ExoFOP is unreachable; that is the point.
+    page.problems.allowed += ["HTTP 503", "status of 503"]
     text = _open_section(page, "exofop-obslog-details")
     assert "No ExoFOP time-series entries reported" not in text
+    assert "ExoFOP is unavailable" in text
+    expect(page.locator("#exofop-obslog-retry")).to_be_visible()
+    expect(page.locator("#exofop-tic-form")).to_be_hidden()
 
 
 def test_exofop_obslog_names_the_planet_of_each_row(page):

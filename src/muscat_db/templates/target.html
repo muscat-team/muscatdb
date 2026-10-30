@@ -255,6 +255,7 @@
           <input id="exofop-tic-input" type="text" inputmode="numeric" placeholder="e.g. 166527623" autocomplete="off" style="width: 11rem;">
           <button type="submit" class="btn sm">Check ExoFOP</button>
         </form>
+        <button type="button" class="btn sm" id="exofop-obslog-retry" style="display: none;">Retry</button>
         <a id="exofop-obslog-jobs" href="/jobs" style="display: none; font-size: 0.85rem;">To Jobs</a>
       </div>
       <div class="csv-wrap" id="exofop-obslog-wrap" style="display: none;">
@@ -437,6 +438,7 @@
 
       const ticForm = document.getElementById('exofop-tic-form');
       const ticInput = document.getElementById('exofop-tic-input');
+      const retryBtn = document.getElementById('exofop-obslog-retry');
       let ticOverride = '';
 
       function load() {
@@ -444,6 +446,7 @@
         loading = true;
         statusEl.textContent = 'Checking ExoFOP for ' + targetName + '…';
         ticForm.style.display = 'none';
+        retryBtn.style.display = 'none';
         fetch('/api/lco/archive/exofop?OBJECT=' + encodeURIComponent(targetName) +
               (ticOverride ? '&tic=' + encodeURIComponent(ticOverride) : ''))
           .then(function (r) { return r.json(); })
@@ -453,13 +456,25 @@
               wrap.style.display = 'none';
               statusEl.textContent = d.error || 'No ExoFOP time-series cross-check for this target.';
               if (d.needs_tic) { ticForm.style.display = ''; ticInput.focus(); }
+              if (d.unavailable) {
+                // An outage is not an answer: offer a retry, and let reopening
+                // the section ask again instead of keeping the failed state.
+                loaded = false;
+                retryBtn.style.display = '';
+              }
               return;
             }
             render(d);
           })
-          .catch(function (e) { statusEl.textContent = 'ExoFOP check failed: ' + e; })
+          .catch(function (e) {
+            loaded = false;
+            retryBtn.style.display = '';
+            statusEl.textContent = 'ExoFOP check failed: ' + e;
+          })
           .finally(function () { loading = false; });
       }
+
+      retryBtn.addEventListener('click', function () { load(); });
 
       ticForm.addEventListener('submit', function (e) {
         e.preventDefault();
