@@ -178,3 +178,59 @@ def test_cache_without_predicate_still_caches_arbitrary_results():
 
     assert evaluate() == evaluate() == {"ok": False}
     assert calls == [1]
+
+
+class TestTTLCacheInvalidationGeneration:
+    """A lookup started before ``cache_clear()`` must not repopulate the
+    cache with its stale result once the clear has run (audit #325 item 11)."""
+
+    def test_in_flight_lookup_does_not_repopulate_after_clear(self):
+        source = {"value": "old"}
+        computing = threading.Event()
+        resume = threading.Event()
+        results = []
+
+        @TTLCache(ttl=1000.0, maxsize=8)
+        def read():
+            snapshot = source["value"]
+            computing.set()
+            resume.wait(timeout=5)
+            return snapshot
+
+        worker = threading.Thread(target=lambda: results.append(read()))
+        worker.start()
+        assert computing.wait(timeout=5)
+        # The underlying value changes and the cache is invalidated while the
+        # older lookup is still paused inside the wrapped function.
+        source["value"] = "new"
+        read.cache_clear()
+        resume.set()
+        worker.join(timeout=5)
+        assert results == ["old"]  # the paused caller keeps what it read
+        # A later caller must see the new value, not the stale repopulation.
+        assert read() == "new"
+
+    def test_clear_during_lookup_still_caches_later_result(self):
+        calls = []
+
+        @TTLCache(ttl=1000.0, maxsize=8)
+        def f(x):
+            calls.append(x)
+            return x
+
+        f.cache_clear()
+        assert f(1) == 1
+        assert f(1) == 1
+        assert calls == [1]  # a clear before the lookup does not poison it
+
+    def test_cache_if_still_skips_rejected_results(self):
+        results = iter([{"ok": False}, {"ok": True}])
+
+        @TTLCache(ttl=1000.0, maxsize=8, cache_if=lambda r: r["ok"])
+        def evaluate():
+            return next(results)
+
+        assert evaluate() == {"ok": False}
+        evaluate.cache_clear()
+        assert evaluate() == {"ok": True}
+        assert evaluate() == {"ok": True}

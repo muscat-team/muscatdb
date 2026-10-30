@@ -71,6 +71,12 @@ class TTLCache:
     distinct (inst, date, target) ever queried before any of them expire.
     Optional ``cache_if`` selects which results to store, allowing callers to
     retry transient failures immediately while retaining successful results.
+
+    The wrapped function runs outside the lock, so a lookup that started
+    before ``clear()`` can finish after it. Each ``clear()`` bumps an
+    invalidation generation; a result computed against an older generation
+    is returned to its caller but not stored, otherwise a slow lookup would
+    repopulate the cache with the pre-invalidation value.
     """
 
     def __init__(
@@ -84,6 +90,7 @@ class TTLCache:
         self.maxsize = maxsize
         self.cache: OrderedDict = OrderedDict()
         self.lock = threading.Lock()
+        self._generation = 0
 
     def __call__(self, func):
         @wraps(func)
@@ -97,10 +104,13 @@ class TTLCache:
                         self.cache.move_to_end(key)
                         return val
                     del self.cache[key]
+                generation = self._generation
             val = func(*args, **kwargs)
             if self.cache_if is not None and not self.cache_if(val):
                 return val
             with self.lock:
+                if generation != self._generation:
+                    return val
                 self.cache[key] = (val, now + self.ttl)
                 self.cache.move_to_end(key)
                 while len(self.cache) > self.maxsize:
@@ -113,6 +123,7 @@ class TTLCache:
     def clear(self):
         with self.lock:
             self.cache.clear()
+            self._generation += 1
 
 _registered_caches: list[TTLCache] = []
 
