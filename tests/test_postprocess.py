@@ -193,6 +193,32 @@ class TestRunContext:
         assert cmd[cmd.index("--sigma") + 1] == "none"
 
 
+class TestRunSyncReport:
+    @staticmethod
+    def _run(monkeypatch, stdout):
+        import subprocess
+
+        monkeypatch.setattr(
+            pp.subprocess,
+            "run",
+            lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=stdout, stderr=""),
+        )
+        return pp._run_sync(["prose"])
+
+    def test_single_line_report(self, monkeypatch):
+        assert self._run(monkeypatch, 'log line\n{"ok": true, "n": 1}\n') == {"ok": True, "n": 1}
+
+    def test_pretty_printed_report(self, monkeypatch):
+        import json
+
+        report = {"ok": True, "files": [{"name": "a.csv", "rows": 3}], "nested": {"k": [1, 2]}}
+        out = "progress {not json}\n" + json.dumps(report, indent=2) + "\n"
+        assert self._run(monkeypatch, out) == report
+
+    def test_no_json_falls_through(self, monkeypatch):
+        assert self._run(monkeypatch, "just text\n")["ok"] is False
+
+
 class TestPostprocess:
     def test_test_preview_mode(self, prose_dir, monkeypatch):
         _make_run_dir(prose_dir)

@@ -113,6 +113,29 @@ def _command(
     return args
 
 
+def _parse_report(out: str) -> dict | None:
+    """Return the last JSON object in *out*, single-line or pretty-printed."""
+    lines = out.splitlines()
+    for line in reversed(lines):
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                return json.loads(line)
+            except json.JSONDecodeError:
+                continue
+    # Pretty-printed object: its opening brace sits at column 0, so try the
+    # tail starting at each such line, last first.
+    for i in range(len(lines) - 1, -1, -1):
+        if lines[i].startswith("{"):
+            try:
+                obj = json.loads("\n".join(lines[i:]))
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict):
+                return obj
+    return None
+
+
 def _run_sync(args: list[str], timeout: int = _POSTPROCESS_TIMEOUT_S) -> dict:
     env = _job_env()
     env["MPLBACKEND"] = "Agg"  # headless matplotlib: savefig only, never a window
@@ -132,13 +155,9 @@ def _run_sync(args: list[str], timeout: int = _POSTPROCESS_TIMEOUT_S) -> dict:
         logger.error("could not launch prose postprocess (%s): %s", exc, args)
         return {"ok": False, "error": f"could not launch prose: {exc}"}
     out = (proc.stdout or "").strip()
-    for line in reversed(out.splitlines()):
-        line = line.strip()
-        if line.startswith("{"):
-            try:
-                return json.loads(line)
-            except json.JSONDecodeError:
-                continue
+    report = _parse_report(out)
+    if report is not None:
+        return report
     stderr = (proc.stderr or "").strip().splitlines()
     detail = stderr[-1] if stderr else out or "no output"
     logger.error("postprocess failed (rc=%s): %s", proc.returncode, detail)
