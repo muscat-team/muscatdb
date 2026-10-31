@@ -193,6 +193,54 @@ class TestRunContext:
         assert cmd[cmd.index("--sigma") + 1] == "none"
 
 
+class TestRunSyncReport:
+    @staticmethod
+    def _run(monkeypatch, stdout):
+        import subprocess
+
+        monkeypatch.setattr(
+            pp.subprocess,
+            "run",
+            lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=stdout, stderr=""),
+        )
+        return pp._run_sync(["prose"])
+
+    def test_single_line_report(self, monkeypatch):
+        assert self._run(monkeypatch, 'log line\n{"ok": true, "n": 1}\n') == {"ok": True, "n": 1}
+
+    def test_pretty_printed_report(self, monkeypatch):
+        import json
+
+        report = {"ok": True, "files": [{"name": "a.csv", "rows": 3}], "nested": {"k": [1, 2]}}
+        out = "progress {not json}\n" + json.dumps(report, indent=2) + "\n"
+        assert self._run(monkeypatch, out) == report
+
+    def test_pretty_report_after_early_json_log_line(self, monkeypatch):
+        import json
+
+        report = {"ok": True, "files": [{"name": "a.csv", "rows": 3}]}
+        out = '{"event": "start"}\nworking...\n' + json.dumps(report, indent=2) + "\n"
+        assert self._run(monkeypatch, out) == report
+
+    def test_pretty_report_with_compact_inner_objects(self, monkeypatch):
+        report = {"ok": True, "files": [{"name": "a.csv", "rows": 3}]}
+        out = (
+            '{\n  "ok": true,\n  "files": [\n'
+            '    {"name": "a.csv", "rows": 3}\n  ]\n}\n'
+        )
+        assert self._run(monkeypatch, out) == report
+
+    def test_single_line_report_followed_by_log_text(self, monkeypatch):
+        out = 'early log\n{"ok": true, "n": 1}\nshutting down\n'
+        assert self._run(monkeypatch, out) == {"ok": True, "n": 1}
+
+    def test_indented_single_line_report(self, monkeypatch):
+        assert self._run(monkeypatch, 'log\n   {"ok": true, "n": 2}\n') == {"ok": True, "n": 2}
+
+    def test_no_json_falls_through(self, monkeypatch):
+        assert self._run(monkeypatch, "just text\n")["ok"] is False
+
+
 class TestPostprocess:
     def test_test_preview_mode(self, prose_dir, monkeypatch):
         _make_run_dir(prose_dir)

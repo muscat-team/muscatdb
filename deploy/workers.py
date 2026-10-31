@@ -495,6 +495,17 @@ def _down_refusal(cfg: Config, host: HostSpec, hostname: str, units: list[str], 
     states = [installed_state(host.key, _pipeline_of(u)) for u in units]
     others = sorted({s.profile for s in states if s and s.profile and s.profile != cfg.profile})
     if others:
+        by_profile: dict[str, list[str]] = {}
+        for unit, state in zip(units, states):
+            if state and state.profile:
+                by_profile.setdefault(state.profile, []).append(_pipeline_of(unit))
+        if len(by_profile) > 1:
+            layout = "; ".join(f"{', '.join(pipes)} on {prof}" for prof, pipes in sorted(by_profile.items()))
+            return (
+                f"mixed profiles ({layout}), so no single --profile checks every worker's database. "
+                f"An `up` that held a busy pipeline leaves this state. "
+                f"Re-run with --force to stop anyway, or finish `up` once the held pipeline is idle."
+            )
         return (
             f"installed under profile {', '.join(others)} but {cfg.profile or '(no profile)'} is selected, "
             f"so the wrong database would be checked for jobs. "

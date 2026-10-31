@@ -1056,3 +1056,48 @@ def _copy_figures(
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(resp.content)
         stats.figures += 1
+
+
+def build_tiny_db(db_path: str, note: str = "SECRETNOTE12345") -> None:
+    """Create a minimal but valid DB with two instruments and a noted target.
+
+    Used by the tests and by the Pages workflow, which builds the UI snapshot
+    from this mock DB so the 3 GB production database is never needed.
+    """
+    import sqlite3
+
+    from muscat_db.coord import CoordRepr
+    from muscat_db.database import (
+        SCHEMA,
+        _insert_summary_rows,
+        _populate_targets,
+        _summary_rows,
+        set_note,
+    )
+
+    conn = sqlite3.connect(db_path)
+    conn.create_aggregate("coord_repr", 2, CoordRepr)
+    conn.executescript(SCHEMA)
+    frame_rows = [
+        ("muscat", "260101", 0, "MSCT0_2601010001", "M67", 1.0),
+        ("muscat", "260101", 0, "MSCT0_2601010002", "M67", 2.0),
+        ("muscat3", "260102", 0, "MSCT3_2601020001", "TOI-837", 3.0),
+        ("muscat3", "260102", 0, "MSCT3_2601020002", "TOI-837", 4.0),
+    ]
+    conn.executemany(
+        """INSERT INTO frames
+           (instrument, obsdate, ccd, filename, object, jd_start, ut_start,
+            exptime, read_mode, filter, ra, declination, airmass, focus, pa)
+           VALUES (?, ?, ?, ?, ?, ?, '00:00:00', 10, 'fast', 'gp', '', '', 1, 0, 0)""",
+        frame_rows,
+    )
+    rows = _summary_rows(conn)
+    _insert_summary_rows(conn, rows)
+    _populate_targets(conn)
+    conn.execute(
+        "INSERT OR REPLACE INTO db_meta (key, value) VALUES ('last_build_at', '1700000000')"
+    )
+    conn.commit()
+    conn.close()
+    # A user-authored note that must be scrubbed unless --keep-notes is set.
+    set_note(db_path, "M67", note)
