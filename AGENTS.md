@@ -54,6 +54,7 @@
 * all one-off scripts should live in $HOME/temp, but useful scripts should be kept in the repo
 * the server lives inside tmux session `muscatdbgui`. If you (the agent) restart muscat-db yourself, do it inside that same session.
 * `--reload` only watches Python files, not Jinja2 templates -- remind the user a restart is needed to see HTML/JavaScript changes
+* to test a feature branch in the GUI, run it from its own worktree with `deploy/dev-server.sh start <worktree>` (off test: `git worktree add -b <branch> ~/temp/wt-<name> origin/test`). it serves on :8888 by default (`--port N` for another worktree alongside; 8000-8003 are refused), always inside tmux session `muscatdb-dev`, one window per port named `port-<N>` against staging's data (`~/deploy/test/muscat_test.db`, obslog, prose/timer/harmonic outputs), never production's `muscat.db`. never start a dev server from the dev checkout root: its `.env` has no `MUSCAT_DB_PATH`, so `serve` falls back to `./muscat.db`, the production DB. the staging DB is shared with :8003 and re-seeded nightly, so dev writes are visible on staging and do not persist. `stop`/`status` manage it; rerun `start` after template/JS edits
 
 ## Optimization
 * consider CPU parallelization with a JIT compiler such as Numba, porting the inner loop into Cython, or implementing a CUDA GPU function with Numba or CuPy
