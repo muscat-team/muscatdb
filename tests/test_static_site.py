@@ -34,7 +34,7 @@ pytestmark = pytest.mark.usefixtures("mock_target_coord_resolution")
 @pytest.fixture
 def tiny_db(tmp_path):
     db = tmp_path / "muscat.db"
-    _build_tiny_db(str(db))
+    _build_tiny_db(str(db), note=_SECRET_NOTE)
     return str(db)
 
 

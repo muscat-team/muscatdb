@@ -116,19 +116,24 @@ def _command(
 def _parse_report(out: str) -> dict | None:
     """Return the last JSON object in *out*, single-line or pretty-printed."""
     lines = out.splitlines()
-    for line in reversed(lines):
-        line = line.strip()
-        if line.startswith("{"):
-            try:
-                return json.loads(line)
-            except json.JSONDecodeError:
-                continue
-    # Pretty-printed object: its opening brace sits at column 0, so try the
-    # tail starting at each such line, last first.
+    # A report's opening brace sits at column 0, so try the tail starting at
+    # each such line, last first, and parse it as one whole object. This takes
+    # a pretty-printed report whole, even when its inner objects are compact
+    # lines that parse on their own, and rejects a tail with trailing log text.
     for i in range(len(lines) - 1, -1, -1):
         if lines[i].startswith("{"):
             try:
                 obj = json.loads("\n".join(lines[i:]))
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict):
+                return obj
+    # Fallback for a one-line report that is indented or followed by log text.
+    for line in reversed(lines):
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                obj = json.loads(line)
             except json.JSONDecodeError:
                 continue
             if isinstance(obj, dict):
