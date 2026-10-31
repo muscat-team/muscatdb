@@ -2030,6 +2030,92 @@ def has_fit_outputs(inst: str, date: str, target: str) -> bool:
     return bool(list_fit_runs(inst, date, target))
 
 
+def empty_fit_outputs() -> dict:
+    """The outputs record of a run with nothing on disk.
+
+    :func:`get_fit_outputs` fills this in; the ``/api/transit-fit/outputs``
+    route returns it unchanged for a run the viewer may not see, so a hidden
+    run reads exactly like a missing one.
+    """
+    return {
+        "has_any": False,
+        "plots": [],
+        "systematics_plots": [],
+        "summary": None,
+        "detection_snr": None,
+        "has_log": False,
+        "has_fit_yaml": False,
+        "has_sys_yaml": False,
+        "has_meta_yaml": False,
+        "extra_files": [],
+    }
+
+
+# ``ror[0]`` for an achromatic fit, ``ror_<band>[0]`` per band for a chromatic
+# one. Only planet index 0 is read; the band may itself contain underscores.
+_ROR_ROW_RE = re.compile(r"^ror(?:_(?P<band>.+))?\[0\]$")
+
+
+def _finite_float(value) -> float | None:
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
+
+
+def _format_with_uncertainty(value: float, unc: float, max_decimals: int = 6) -> tuple[str, str]:
+    """Format ``value`` and ``unc`` for display: the uncertainty to two
+    significant figures and the value to the same decimal place, never more
+    than ``max_decimals`` decimals."""
+    decimals = min(max_decimals, max(0, 1 - math.floor(math.log10(unc))))
+    return f"{value:.{decimals}f}", f"{unc:.{decimals}f}"
+
+
+def detection_snr(summary_rows: list[dict]) -> dict | None:
+    """Transit detection SNR from the parsed ``summary.csv`` rows (#154).
+
+    ``summary.csv`` carries no detection significance, so judging whether a
+    fit found a transit or noise meant comparing ``ror``'s mean with its sd by
+    eye. Per band the SNR is ``ror / (2 * sd)``: the depth is ``ror**2`` and
+    first-order propagation gives it the fractional uncertainty ``2 * sd / ror``.
+    The combined value adds the bands in quadrature because MuSCAT's bands are
+    exposed simultaneously (same in-transit coverage, independent noise); for
+    a single-band instrument it equals the band value.
+
+    A band whose sd is missing, zero or not a number cannot give an SNR and is
+    dropped. Returns None when no usable row exists, so a fit that never
+    constrained the planet (e.g. an active star whose systematics model
+    absorbed the transit) reads as unavailable rather than 0. Each band
+    carries display strings (``*_text``) formatted to the precision of its
+    uncertainty, since Jinja has no significant-figure filter.
+    """
+    bands = []
+    for row in summary_rows:
+        m = _ROR_ROW_RE.match(row.get("parameter", "") or "")
+        if not m:
+            continue
+        ror = _finite_float(row.get("mean"))
+        sd = _finite_float(row.get("sd", row.get("std")))
+        if ror is None or sd is None or sd <= 0:
+            continue
+        snr = ror / (2.0 * sd)
+        ror_text, sd_text = _format_with_uncertainty(ror, sd)
+        bands.append({
+            "band": m.group("band"),
+            "ror": ror,
+            "ror_sd": sd,
+            "ror_text": ror_text,
+            "ror_sd_text": sd_text,
+            "snr": snr,
+            "snr_text": f"{snr:.1f}",
+        })
+    if not bands:
+        return None
+    combined = math.sqrt(sum(b["snr"] ** 2 for b in bands))
+    return {"bands": bands, "combined": combined, "combined_text": f"{combined:.1f}"}
+
+
 def get_fit_outputs(inst: str, date: str, target: str, run_id: str | None = None) -> dict:
     """Check and retrieve output files, plots, and summary values from a completed run.
 
@@ -2062,17 +2148,7 @@ def _get_fit_outputs_mtime(
 ) -> dict:
     """Inner cached worker. ``_cache_mtime`` participates only in the cache key
     (see :func:`get_fit_outputs`) and is otherwise unused."""
-    outputs = {
-        "has_any": False,
-        "plots": [],
-        "systematics_plots": [],
-        "summary": None,
-        "has_log": False,
-        "has_fit_yaml": False,
-        "has_sys_yaml": False,
-        "has_meta_yaml": False,
-        "extra_files": []
-    }
+    outputs = empty_fit_outputs()
 
     try:
         rdir = fit_output_dir(inst, date, target, run_id or None)
@@ -2152,6 +2228,7 @@ def _get_fit_outputs_mtime(
                     "headers": headers,
                     "rows": summary_rows
                 }
+                outputs["detection_snr"] = detection_snr(summary_rows)
                 outputs["has_any"] = True
         except Exception:
             logger.debug("failed to read timer summary preview from %s", out_dir / "summary.csv", exc_info=True)

@@ -162,6 +162,11 @@ table:not(#toi-table):not(#nx-table) {
 }
 table.resizable-init { table-layout: fixed; }
 .csv-wrap { overflow-x: auto; margin-top: 0.5rem; }
+/* Transit detection SNR on the transit-fit results page: a short table
+   that keeps its intrinsic width above the full-width parameter table. */
+.snr-block { margin: 0.5rem 0 1rem; }
+.snr-table { width: auto; margin-top: 0.4rem; }
+.snr-unavailable { color: var(--text-dim); margin-left: 0.5rem; }
 th {
   background: var(--surface2);
   color: var(--text-dim);

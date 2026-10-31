@@ -3718,6 +3718,17 @@ def transit_fit_status(inst: str, date: str, target: str, run: str = ""):
     return JSONResponse(fit.job_status(inst, date, target, run_id=(run or "").strip()))
 
 
+@transit_fit_router.get("/outputs")
+def transit_fit_outputs(inst: str, date: str, target: str, run: str = ""):
+    """The data behind the results page as JSON (plots, summary rows,
+    detection SNR), so scripts get it without scraping the page. A hidden run
+    reads as empty, as it does for ``/status``."""
+    run_id = (run or "").strip()
+    if _run_hidden("transit_fit", inst, date, target, run_id):
+        return JSONResponse({"ok": True, "outputs": fit.empty_fit_outputs()})
+    return JSONResponse({"ok": True, "outputs": fit.get_fit_outputs(inst, date, target, run_id=run_id or None)})
+
+
 @transit_fit_router.get("/log-stream")
 async def transit_fit_log_stream(request: Request, inst: str, date: str, target: str, run: str = ""):
     """SSE counterpart to ``/status`` (architecture issue #51, step 4)."""

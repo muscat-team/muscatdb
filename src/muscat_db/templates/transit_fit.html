@@ -319,6 +319,36 @@
     {% if outputs.summary %}
     <div class="phot-section">
       <h3>Fitted Parameters Summary</h3>
+      {% set snr = outputs.detection_snr %}
+      <div class="snr-block">
+        <strong>Transit detection SNR</strong>
+        <span class="help-tooltip" title="Per band: ror / (2 sigma_ror), the depth ror^2 over its first-order uncertainty. Combined: the per-band values added in quadrature, since the bands are exposed simultaneously with independent noise. Unavailable when summary.csv has no ror[0] row.">?</span>
+        {% if snr %}
+        <table class="snr-table">
+          <thead>
+            <tr><th>band</th><th>ror</th><th>SNR</th></tr>
+          </thead>
+          <tbody>
+            {% for b in snr.bands %}
+            <tr>
+              <td>{{ b.band if b.band else 'all' }}</td>
+              <td class="mono">{{ b.ror_text }} &plusmn; {{ b.ror_sd_text }}</td>
+              <td class="mono" data-snr-band="{{ b.band or '' }}">{{ b.snr_text }}</td>
+            </tr>
+            {% endfor %}
+            {% if snr.bands | length > 1 %}
+            <tr>
+              <td><strong>combined</strong></td>
+              <td></td>
+              <td class="mono" data-snr-combined>{{ snr.combined_text }}</td>
+            </tr>
+            {% endif %}
+          </tbody>
+        </table>
+        {% else %}
+        <span class="snr-unavailable">unavailable: summary.csv has no ror[0] row</span>
+        {% endif %}
+      </div>
       <div class="csv-wrap">
         <table>
           <thead>

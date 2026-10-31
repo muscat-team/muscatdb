@@ -8,6 +8,7 @@ run-scoped outputs, the run-aware file route, and the DB run_id column.
 
 from __future__ import annotations
 
+import math
 import os
 import time
 from pathlib import Path
@@ -396,3 +397,85 @@ class TestTransitFitJobStatus:
         status = fit.job_status(inst, date, target, run_id)
         assert status["state"] == "cancelled"
         assert "prior run completed" in status["log"]
+
+
+# ── transit detection SNR (#154) ───────────────────────────────────────────
+
+_SUMMARY_HEADER = "parameter,mean,sd,eti89_lb,eti89_ub\n"
+
+
+def _summary_rows(text: str) -> list[dict]:
+    """Parse summary.csv text the way ``get_fit_outputs`` does."""
+    import csv
+    import io
+
+    reader = csv.reader(io.StringIO(text))
+    headers = next(reader)
+    headers[0] = "parameter"
+    return [dict(zip(headers, row)) for row in reader if row]
+
+
+class TestDetectionSnr:
+    def test_achromatic_single_ror_row(self):
+        snr = fit.detection_snr(_summary_rows(
+            _SUMMARY_HEADER + "t0[0],0.5,0.001,0.49,0.51\nror[0],0.1,0.002,0.096,0.104\n"
+        ))
+        assert [b["band"] for b in snr["bands"]] == [None]
+        band = snr["bands"][0]
+        assert (band["ror"], band["ror_sd"]) == (0.1, 0.002)
+        assert band["snr"] == pytest.approx(25.0)
+        # A single band combines to itself (sinistro / qhy600 case).
+        assert snr["combined"] == pytest.approx(25.0)
+
+    def test_chromatic_combines_bands_in_quadrature(self):
+        text = _SUMMARY_HEADER + (
+            "ror_g[0],0.1,0.004,0,0\n"
+            "ror_r[0],0.1,0.002,0,0\n"
+            "ror_z_s[0],0.1,0.005,0,0\n"
+            "ror_g[1],0.05,0.01,0,0\n"   # another planet: not index 0
+            "error[0],1,1,0,0\n"         # not a ror row
+        )
+        snr = fit.detection_snr(_summary_rows(text))
+        assert [b["band"] for b in snr["bands"]] == ["g", "r", "z_s"]
+        assert [b["snr"] for b in snr["bands"]] == pytest.approx([12.5, 25.0, 10.0])
+        assert snr["combined"] == pytest.approx(math.sqrt(12.5**2 + 25.0**2 + 10.0**2))
+
+    def test_unavailable_without_ror_row(self):
+        assert fit.detection_snr(_summary_rows(_SUMMARY_HEADER + "t0[0],0.5,0.001,0,0\n")) is None
+        assert fit.detection_snr([]) is None
+
+    def test_unusable_sd_drops_the_band(self):
+        assert fit.detection_snr(_summary_rows(_SUMMARY_HEADER + "ror[0],0.1,0,0,0\n")) is None
+        assert fit.detection_snr(_summary_rows(_SUMMARY_HEADER + "ror[0],0.1,nan,0,0\n")) is None
+        assert fit.detection_snr(_summary_rows(_SUMMARY_HEADER + "ror[0],0.1,,0,0\n")) is None
+        snr = fit.detection_snr(_summary_rows(
+            _SUMMARY_HEADER + "ror_g[0],0.1,0,0,0\nror_r[0],0.1,0.002,0,0\n"
+        ))
+        assert [b["band"] for b in snr["bands"]] == ["r"]
+        assert snr["combined"] == pytest.approx(25.0)
+
+    def test_display_strings_follow_the_uncertainty(self):
+        snr = fit.detection_snr(_summary_rows(_SUMMARY_HEADER + "ror[0],0.1234567,0.0021,0,0\n"))
+        band = snr["bands"][0]
+        # sd to two significant figures, ror to the same decimal place.
+        assert (band["ror_text"], band["ror_sd_text"]) == ("0.1235", "0.0021")
+        assert (band["snr_text"], snr["combined_text"]) == ("29.4", "29.4")
+        # Never more than six decimals, however small the uncertainty.
+        snr = fit.detection_snr(_summary_rows(_SUMMARY_HEADER + "ror[0],0.1,0.000000123,0,0\n"))
+        assert snr["bands"][0]["ror_text"] == "0.100000"
+
+    def test_get_fit_outputs_reports_detection_snr(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("MUSCAT_TIMER_DIR", str(tmp_path))
+        tdir = tmp_path / "sinistro" / "250710" / "HIP67522"
+        _make_run(tdir, "lsc-g", "lsc", "central_2k_2x2", "g", 1_000_100)
+        summary = tdir / "lsc-g" / "out" / "summary.csv"
+        summary.write_text(_SUMMARY_HEADER + "ror[0],0.1,0.002,0,0\n")
+        fit._fit_outputs_cache.clear()
+        out = fit.get_fit_outputs("sinistro", "250710", "HIP67522", run_id="lsc-g")
+        assert out["detection_snr"]["combined"] == pytest.approx(25.0)
+        # A fit that never constrained the planet reads as unavailable, not 0.
+        summary.write_text(_SUMMARY_HEADER + "t0[0],0.5,0.001,0,0\n")
+        fit._fit_outputs_cache.clear()
+        out = fit.get_fit_outputs("sinistro", "250710", "HIP67522", run_id="lsc-g")
+        assert out["summary"] is not None and out["detection_snr"] is None
+        assert fit.empty_fit_outputs()["detection_snr"] is None
