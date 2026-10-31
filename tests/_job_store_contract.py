@@ -427,6 +427,45 @@ class JobStoreContractTests:
 
         assert store.cancel_requested("photometry", "h:1:a") == []
 
+    # --- conditional cancel of a queued row (issue #325, item 5) ---------
+    #
+    # cancel_pending() is the pending-side twin of claim_slot(pending_key=):
+    # both guard on state = 'pending' inside the one write, so exactly one of
+    # a racing cancel and a racing claim wins. The loser sees False and the
+    # row keeps whatever the winner wrote.
+
+    def test_cancel_pending_cancels_only_a_pending_row(self, store):
+        save(store, target="PEND", state="pending", started_at=100.0)
+        save(store, target="RUN", state="running", started_at=101.0, instance_id="h:1:a")
+        save(store, target="DONE", state="done", started_at=102.0)
+
+        assert store.cancel_pending("photometry:muscat4/260101/PEND") is True
+        assert store.cancel_pending("photometry:muscat4/260101/RUN") is False
+        assert store.cancel_pending("photometry:muscat4/260101/DONE") is False
+        assert store.cancel_pending("photometry:muscat4/260101/NOPE") is False
+
+        by_target = {r["target"]: r for r in store.all()}
+        assert by_target["PEND"]["state"] == "cancelled"
+        assert by_target["PEND"]["returncode"] == -1
+        assert by_target["PEND"]["error_desc"] == "Cancelled by user"
+        assert by_target["RUN"]["state"] == "running"
+        assert by_target["RUN"]["instance_id"] == "h:1:a"
+        assert by_target["DONE"]["state"] == "done"
+
+    def test_cancel_pending_loses_to_a_claim_that_already_happened(self, store):
+        save(store, target="PEND", state="pending", started_at=100.0)
+        key = "photometry:muscat4/260101/PEND"
+        assert store.claim_slot("photometry", "muscat4/260101/PEND", 1, pending_key=key) is True
+
+        assert store.cancel_pending(key) is False
+
+        row = store.get(key)
+        assert row["state"] == "running"
+        assert row["instance_id"] == job_store.current_instance_id()
+        # the claim's slot is still accounted for, so reconcile has nothing to drop
+        assert store.reconcile_slots("photometry") == 0
+        assert store.request_cancel(key) is True
+
     # --- instance_id tagging + heartbeat (architecture issue #51 step 3) --
     #
     # instance_id records which *process* (job_store.current_instance_id())
