@@ -3388,6 +3388,44 @@ def test_photometry_page_no_jd_slider_without_frame_data(mock_db, monkeypatch, t
     assert 'id="opt-exclude_after_jd"' in r.text
 
 
+def test_photometry_page_no_jd_slider_for_single_jd_span(mock_db, monkeypatch, tmp_path):
+    """Frames exist but all share one jd_start, so min == max. The slider
+    would have zero width and both cutoffs would pin to the same instant, so
+    the page falls back to the plain text inputs exactly as it does with no
+    frames at all. This is the has-rows half of the degenerate-span guard."""
+    from muscat_db import web
+
+    conn = sqlite3.connect(mock_db)
+    for i in range(3):
+        conn.execute(
+            "INSERT INTO frames (instrument, obsdate, ccd, filename, object, jd_start, ut_start, "
+            "exptime, read_mode, filter, ra, declination, airmass, focus, pa) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("muscat3", "260101", 0, f"frame{i}", "TOI-1", 781.400000, "00:00:00",
+             30.0, "high", "gp", "", "", 1.0, 0.0, 0.0),
+        )
+    conn.commit()
+    conn.close()
+
+    empty_outputs = {
+        "has_any": False, "summary": {}, "summary_items": [], "bands": {},
+        "sites": [], "modes": [], "masters": [], "npz": None, "log": None,
+        "ref_header": None, "ref_selection": None, "site": "", "mode": "",
+    }
+    monkeypatch.setattr(web.phot, "list_photometry_runs", lambda inst, date, target: ([], {}))
+    monkeypatch.setattr(web.phot, "list_outputs", lambda *args, **kwargs: empty_outputs)
+    monkeypatch.setattr(web.phot, "command_str", lambda inst, date, target, test_run=False: "run photometry")
+    monkeypatch.setattr(web.phot, "raw_data_dir", lambda inst, date: tmp_path)
+
+    r = TestClient(app).get("/photometry?inst=muscat3&date=260101&target=TOI-1")
+
+    assert r.status_code == 200
+    assert "jdslider-exclude_after_jd" not in r.text
+    assert "jdslider-exclude_before_jd" not in r.text
+    assert "; data spans " not in r.text
+    assert 'id="opt-exclude_after_jd"' in r.text
+
+
 def _outputs_with_band_csvs(files: dict[str, str]) -> dict:
     return {
         "has_any": True, "summary": {}, "summary_items": [],

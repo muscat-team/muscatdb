@@ -2405,6 +2405,15 @@
   function saveJob() { MuscatStorage.setJSON(JOB_KEY, { inst: inst, date: date, target: target, run_id: runId }); }
   function clearJob() { MuscatStorage.remove(JOB_KEY); }
 
+  // The terminal branches below append a footer to the rendered log, so the
+  // saved snapshot has to be rebuilt from the raw text: logEl.textContent has
+  // the ANSI escapes stripped and a reload would restore a colorless log.
+  // The last stored snapshot stands in for s.log when the final poll omits it.
+  function persistTerminalLog(s, footer) {
+    var text = s.log || MuscatStorage.get(logKey(), '') || '';
+    MuscatStorage.set(logKey(), text + footer);
+  }
+
   function handleFitStatus(s) {
     if (s.log) {
       logEl.innerHTML = MuscatDom.ansiToHtml(s.log);
@@ -2417,8 +2426,9 @@
     }
     if (s.state === 'done') {
       stopPolling(); clearJob();
-      logEl.innerHTML += MuscatDom.ansiToHtml('\n\n✓ done — reloading…');
-      MuscatStorage.set(logKey(), logEl.textContent);
+      var doneFooter = '\n\n✓ done — reloading…';
+      logEl.innerHTML += MuscatDom.ansiToHtml(doneFooter);
+      persistTerminalLog(s, doneFooter);
       if (typeof window.showLoading === 'function') {
         window.showLoading('Reloading…');
       }
@@ -2432,12 +2442,14 @@
       setTimeout(function () { window.location.href = reloadUrl.toString(); }, reloadDelay);
     } else if (s.state === 'error') {
       stopPolling(); setRunning(false); clearJob();
-      logEl.innerHTML += MuscatDom.ansiToHtml('\n\n✗ fit run exited with code ' + s.returncode);
-      MuscatStorage.set(logKey(), logEl.textContent);
+      var errorFooter = '\n\n✗ fit run exited with code ' + s.returncode;
+      logEl.innerHTML += MuscatDom.ansiToHtml(errorFooter);
+      persistTerminalLog(s, errorFooter);
     } else if (s.state === 'cancelled') {
       stopPolling(); setRunning(false); clearJob();
-      logEl.innerHTML += MuscatDom.ansiToHtml('\n\n■ cancelled');
-      MuscatStorage.set(logKey(), logEl.textContent);
+      var cancelFooter = '\n\n■ cancelled';
+      logEl.innerHTML += MuscatDom.ansiToHtml(cancelFooter);
+      persistTerminalLog(s, cancelFooter);
     } else if (s.state === 'pending') {
       // Queued behind the running full job; keep the Cancel button and poll
       // until the slot frees and the run is promoted to 'running'.
