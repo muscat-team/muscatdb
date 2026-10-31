@@ -379,7 +379,7 @@ class DatabaseJobStore(JobRepository, JobQueue, JobConcurrency):
         return database.get_active_persisted_jobs()
 
     def get(self, key: str) -> dict | None:
-        return next((j for j in database.get_persisted_jobs() if j.get("key") == key), None)
+        return database.get_persisted_job(key)
 
     def save(
         self,
