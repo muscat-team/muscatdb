@@ -388,7 +388,7 @@
     <p class="lco-note" id="requests-empty">Tick transits in the windows table to list their requests here.</p>
     <div class="lco-table-wrap">
       <table class="lco-table" id="requests-table" data-no-resize style="display: none; width: auto;">
-        <thead><tr><th>Transit</th><th>Plan</th><th>Site</th><th>Instrument</th><th>Request name</th><th>Window (UTC)</th><th>Status</th><th></th></tr></thead>
+        <thead><tr><th>Transit</th><th>Plan</th><th>Site</th><th>Instrument</th><th>Request name</th><th>Window (UTC)</th><th>Observing duration (hr) <span class="help-tooltip" title="How long the request's REPEAT_EXPOSE block repeats (LCO's repeat_duration). It starts as the longest value the window fits: the window span less the 180 s setup overhead and a visibility margin for each edge bounded by the target's rise or set, sized to the listed site seeing the least for an either-site request. It follows the window until you type a value; a shorter value is allowed, a longer one is refused. Reset returns it to following the window. Distinct from the transit duration above.">?</span></th><th>Status</th><th></th></tr></thead>
         <tbody id="requests-body"></tbody>
       </table>
     </div>
@@ -3369,12 +3369,15 @@
     return reqState[key];
   }
 
-  // Drop drafts/checks the change made stale; a booked request keeps its record.
+  // Drop a request's draft/check; a booked request keeps its record.
+  function dropDraft(st) {
+    if (st.status === 'submitted') return;
+    st.payload = null; st.hash = null; st.status = ''; st.message = ''; st.adjusted = null;
+  }
+  // Drop drafts/checks the change made stale.
   function invalidateRequests(match) {
     Object.keys(reqState).forEach(function (key) {
-      var st = reqState[key];
-      if (st.status === 'submitted' || !match(key)) return;
-      st.payload = null; st.hash = null; st.status = ''; st.message = ''; st.adjusted = null;
+      if (match(key)) dropDraft(reqState[key]);
     });
     renderRequests();
   }
@@ -3400,7 +3403,129 @@
     var times = [num('sch-exp-g'), num('sch-exp-r'), num('sch-exp-i'), num('sch-exp-z')];
     var count = computeExposureCount(req.kind, windowDurationSec(req.start, req.end), val('sch-type'), times, num('sch-effective-exptime'));
     if (count !== null) p.exposure_count = count;
+    var st = reqState[req.key];
+    if (st && st.obsManual && !st.obsInvalid && st.obsSeconds > 0 && requestUsesRepeat(req)) p.repeat_duration = st.obsSeconds;
     return p;
+  }
+
+  // ---- Observing duration (repeat_duration) per request ---------------------
+  // The server derives repeat_duration from a request's window (lco.py's
+  // window_repeat_duration: the span less the setup overhead and any
+  // visibility edge margin). The field shows that number and may be set
+  // shorter, never longer. The derived fit comes from
+  // /api/lco/observing-duration and is cached on the request's state under the
+  // window and constraints it was computed for (obsFit.sig), so moving the
+  // window or changing a constraint fetches it again. A typed value is kept
+  // (obsManual) until Reset, and is cut to a fit that later shrinks below it.
+  var obsFitTimers = {};
+  var obsFitPending = {};
+  var OBS_FIT_DEBOUNCE_MS = 200;
+
+  function requestUsesRepeat(req) {
+    var type = val('sch-type');
+    return type ? type === 'REPEAT_EXPOSE' : isMuscatKind(req.kind);
+  }
+  function fmtHours(seconds) { return (seconds / 3600).toFixed(2); }
+
+  function observingFitSig(req) {
+    var p = buildParams(req.kind);
+    return JSON.stringify([req.kind, req.site, req.sites, req.start, req.end, p.ra, p.dec,
+      p.max_airmass, p.min_lunar_distance, p.max_lunar_phase, p.twilight, p.type]);
+  }
+  // The cached window fit for the request as it stands now, else null.
+  function observingFit(req) {
+    var st = reqStateFor(req.key);
+    return st.obsFit && st.obsFit.sig === observingFitSig(req) ? st.obsFit : null;
+  }
+  // Fetch the window fit when none is cached for the request's current
+  // window; a drag re-renders on every move, so the fetch waits for a pause.
+  function ensureObservingFit(req) {
+    if (!requestUsesRepeat(req) || observingFit(req)) return;
+    var sig = observingFitSig(req);
+    if (obsFitPending[req.key] === sig) return;
+    obsFitPending[req.key] = sig;
+    clearTimeout(obsFitTimers[req.key]);
+    obsFitTimers[req.key] = setTimeout(function () {
+      var body = paramsFor(req);
+      delete body.repeat_duration;
+      MuscatFetch.fetchJson('/api/lco/observing-duration', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+        .then(function (d) { return d.ok ? { seconds: d.repeat_duration } : { error: d.error || 'window fit unavailable' }; })
+        .catch(function (e) { return { error: errText(e) }; })
+        .then(function (fit) {
+          if (obsFitPending[req.key] === sig) delete obsFitPending[req.key];
+          // A response for a window or constraint the request has since left
+          // is dropped whole: writing it would replace the cached fit and cut
+          // a duration the observer set against the newer window.
+          var current = deriveRequests().filter(function (r) { return r.key === req.key; })[0];
+          if (!current || observingFitSig(current) !== sig) return;
+          var st = reqStateFor(req.key);
+          fit.sig = sig;
+          st.obsFit = fit;
+          if (st.obsManual && fit.seconds != null && st.obsSeconds > fit.seconds) {
+            // The window no longer fits the typed value: cut it and say so.
+            st.obsSeconds = fit.seconds;
+            st.obsInvalid = false;
+            st.obsNote = 'cut to the ' + fmtHours(fit.seconds) + ' h the window now fits';
+            dropDraft(st);
+          }
+          renderRequests();
+          saveScheduleState();
+        });
+    }, OBS_FIT_DEBOUNCE_MS);
+  }
+
+  // A typed value, in hours. Longer than the fit is kept on screen but marked
+  // invalid, so Create drafts refuses it with the note instead of clamping.
+  function setObservingDuration(req, raw) {
+    var st = reqStateFor(req.key);
+    var fit = observingFit(req);
+    var hours = Number(raw);
+    dropDraft(st);
+    st.obsManual = true;
+    st.obsNote = '';
+    st.obsInvalid = false;
+    if (!isFinite(hours) || !(hours > 0)) {
+      st.obsSeconds = null; st.obsInvalid = true; st.obsNote = 'enter the observing duration in hours';
+      return;
+    }
+    var seconds = Math.round(hours * 3600);
+    if (fit && fit.seconds != null) {
+      // The displayed fit is rounded to 0.01 h: typing it back means the fit itself.
+      if (seconds > fit.seconds && hours <= Number(fmtHours(fit.seconds))) seconds = fit.seconds;
+      if (seconds > fit.seconds) {
+        st.obsInvalid = true;
+        st.obsNote = 'longer than the ' + fmtHours(fit.seconds) + ' h the window fits; shorten it or widen the window';
+      }
+    }
+    st.obsSeconds = seconds;
+  }
+
+  function observingNote(req, st) {
+    var fit = observingFit(req);
+    if (fit && fit.error) return { text: fit.error, bad: true };
+    if (!fit) return { text: 'computing the window fit…', bad: false };
+    if (fit.seconds == null) return { text: 'no repeat block', bad: false };
+    if (st.obsInvalid) return { text: st.obsNote, bad: true };
+    var seconds = st.obsManual ? st.obsSeconds : fit.seconds;
+    return {
+      text: seconds + ' s · ' + (st.obsManual ? 'set by hand' + (st.obsNote ? ' · ' + st.obsNote : '') : 'follows the window'),
+      bad: false
+    };
+  }
+
+  function observingCellHtml(req, st, locked) {
+    if (!requestUsesRepeat(req)) return '<span class="lco-note" style="margin: 0;">none (EXPOSE)</span>';
+    var fit = observingFit(req);
+    var k = escapeHtml(req.key);
+    var seconds = st.obsManual ? st.obsSeconds : (fit && fit.seconds != null ? fit.seconds : null);
+    var note = observingNote(req, st);
+    var disabled = locked || !fit || fit.seconds == null;
+    return '<input class="req-obs-duration lco-control" data-key="' + k + '" type="number" min="0.01" step="0.01"' +
+      (fit && fit.seconds != null ? ' max="' + fmtHours(fit.seconds) + '"' : '') +
+      ' style="width: 5em;" value="' + (seconds != null ? fmtHours(seconds) : '') + '"' +
+      ' aria-label="Observing duration (hr)"' + (disabled ? ' disabled' : '') + '>' +
+      (st.obsManual && !locked ? ' <button class="btn sm req-obs-reset" type="button" data-key="' + k + '" title="Back to the duration the window fits">Reset</button>' : '') +
+      '<div class="lco-note req-obs-note" style="margin: 0.15rem 0 0; white-space: normal; max-width: 220px;' + (note.bad ? ' color: var(--red);' : '') + '">' + escapeHtml(note.text) + '</div>';
   }
 
   var STATUS_TEXT = { '': 'not drafted', draft: 'draft', edited: 'edited — check again', ok: 'checked', error: 'error', submitted: 'submitted' };
@@ -3439,13 +3564,15 @@
         '<td><select class="req-kind lco-control" data-key="' + k + '"' + (locked ? ' disabled' : '') + '>' + kindOpts + '</select></td>' +
         '<td><input class="req-name lco-control" data-key="' + k + '" type="text" size="28" value="' + escapeHtml(requestName(req)) + '"' + (locked ? ' disabled' : '') + '></td>' +
         '<td>' + escapeHtml(hhmm(utcMs(req.start)) + '–' + hhmm(utcMs(req.end))) + ' <span class="lco-note" style="margin: 0;">(' + fmtSpan(utcMs(req.end) - utcMs(req.start)) + ')</span></td>' +
+        '<td>' + observingCellHtml(req, st, locked) + '</td>' +
         '<td>' + statusCellHtml(st) + '</td>' +
         '<td style="white-space: nowrap;">' +
           '<button class="btn req-json" type="button" data-key="' + k + '"' + (st.payload ? '' : ' disabled') + '>JSON</button> ' +
           '<button class="btn danger req-submit" type="button" data-key="' + k + '"' + (st.status === 'ok' ? '' : ' disabled') + '>Submit</button>' +
         '</td></tr>';
+      ensureObservingFit(req);
       if (openJson[req.key] && st.payload) {
-        row += '<tr class="req-json-row"><td colspan="8"><textarea class="lco-pre req-payload" data-key="' + k + '" spellcheck="false"' +
+        row += '<tr class="req-json-row"><td colspan="9"><textarea class="lco-pre req-payload" data-key="' + k + '" spellcheck="false"' +
           (locked ? ' readonly' : '') + ' aria-label="LCO request payload">' + escapeHtml(JSON.stringify(st.payload, null, 2)) + '</textarea></td></tr>';
       }
       return row;
@@ -3508,6 +3635,13 @@
     msg('msg-ipp', 'Building ' + reqs.length + ' draft(s)…');
     runSequential(reqs, function (req) {
       var st = reqStateFor(req.key);
+      if (st.obsManual && st.obsInvalid) {
+        st.payload = null; st.hash = null; st.status = 'error';
+        st.message = 'Observing duration: ' + st.obsNote;
+        failed++;
+        renderRequests();
+        return Promise.resolve();
+      }
       return MuscatFetch.fetchJson('/api/lco/build', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(paramsFor(req)) })
         .then(function (d) {
           // A redrafted row describes a new request, so the old booking's IDs go.
@@ -3607,6 +3741,13 @@
     var key = btn.getAttribute('data-key');
     if (btn.classList.contains('req-json')) { openJson[key] = !openJson[key]; renderRequests(); }
     else if (btn.classList.contains('req-submit')) submitRequests([key]);
+    else if (btn.classList.contains('req-obs-reset')) {
+      var st = reqStateFor(key);
+      st.obsManual = false; st.obsSeconds = null; st.obsInvalid = false; st.obsNote = '';
+      dropDraft(st);
+      renderRequests();
+      saveScheduleState();
+    }
   });
 
   el('requests-body').addEventListener('change', function (e) {
@@ -3628,6 +3769,20 @@
       st.nameEdited = true;
       // The name is part of a built draft: update it there and require a re-check.
       if (st.payload) { st.payload.name = st.name; st.hash = null; st.status = 'edited'; st.message = ''; }
+    } else if (e.target.classList.contains('req-obs-duration')) {
+      var req = deriveRequests().filter(function (r) { return r.key === key; })[0];
+      if (!req) return;
+      setObservingDuration(req, e.target.value);
+      // Refresh the note and Reset in place: re-rendering the cell would take
+      // the caret out of the input mid-edit.
+      var cell = e.target.parentNode;
+      var note = observingNote(req, st);
+      var noteEl = cell.querySelector('.req-obs-note');
+      noteEl.textContent = note.text;
+      noteEl.style.color = note.bad ? 'var(--red)' : '';
+      if (!cell.querySelector('.req-obs-reset')) {
+        e.target.insertAdjacentHTML('afterend', ' <button class="btn sm req-obs-reset" type="button" data-key="' + escapeHtml(key) + '" title="Back to the duration the window fits">Reset</button>');
+      }
     } else if (e.target.classList.contains('req-payload')) {
       try {
         var parsed = JSON.parse(e.target.value);
@@ -3640,7 +3795,7 @@
       return;
     }
     var row = document.querySelector('#requests-body tr[data-key="' + CSS.escape(key) + '"]');
-    if (row) row.children[6].innerHTML = statusCellHtml(st);
+    if (row) row.children[7].innerHTML = statusCellHtml(st);
     updateRequestButtons();
     saveScheduleState();
   });
