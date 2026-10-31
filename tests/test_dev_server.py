@@ -8,6 +8,7 @@ guard that refuses everything cannot pass.
 """
 
 import os
+import shlex
 import socket
 import stat
 import subprocess
@@ -180,7 +181,10 @@ def test_uv_is_found_on_path_not_a_hardcoded_home(host):
     """With UV_BIN unset the stub `uv` on PATH is what the tmux launch uses."""
     host.run(UV_BIN=None)
     launched = host.tmux_log.read_text()
-    assert f"{host.bin}/uv run muscat-db serve" in launched
+    assert any(
+        f"{host.bin}/uv run muscat-db serve" in arg
+        for arg in shlex.split(launched)
+    )
     assert "/ut2/jerome" not in launched
 
 
@@ -189,3 +193,34 @@ def test_unusable_uv_bin_is_refused_before_any_write(host):
     assert result.returncode != 0
     assert "uv not found" in result.stderr
     host.assert_untouched()
+
+
+def test_tmux_environment_cannot_override_staging_settings(host):
+    """Execute the launch command with production settings inherited from tmux."""
+    import json
+    import sys
+
+    capture = host.home / "effective.json"
+    (host.bin / "tmux").write_text(
+        '#!/usr/bin/env bash\n'
+        '[[ "$1" = has-session ]] && exit 1\n'
+        'export MUSCAT_OBSLOG_DIR=/production/obslog\n'
+        'export MUSCAT_PROSE_DIR=/production/prose\n'
+        'export MUSCAT_LCO_ALLOW_SUBMIT=1\n'
+        'export MUSCAT_POSTGRES_DSN=production-sentinel\n'
+        'bash -c "${@: -1}"\n'
+    )
+    (host.bin / "uv").write_text(
+        f'#!{sys.executable}\n'
+        'import json, os\n'
+        'from pathlib import Path\n'
+        'from dotenv import load_dotenv\n'
+        'load_dotenv(Path.cwd() / ".env")\n'
+        f'Path({str(capture)!r}).write_text(json.dumps(dict(os.environ)))\n'
+    )
+    host.run()
+    effective = json.loads(capture.read_text())
+    assert effective["MUSCAT_OBSLOG_DIR"] == str(host.staging / "obslog")
+    assert effective["MUSCAT_PROSE_DIR"] == str(host.staging / "prose")
+    assert effective["MUSCAT_LCO_ALLOW_SUBMIT"] == "0"
+    assert "MUSCAT_POSTGRES_DSN" not in effective

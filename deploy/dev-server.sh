@@ -311,6 +311,12 @@ start() {
 
   launch="cd $(printf %q "$wt") && $(printf %q "$uv") run muscat-db serve"
   launch+=" --db $(printf %q "$db") --host $(printf %q "$HOST") --port $PORT --reload"
+  # python-dotenv preserves exported variables. Clear application settings in
+  # the pane itself: an existing tmux server can carry production settings that
+  # are absent from the caller's environment. Keep PATH/HOME and other tooling
+  # settings, then let the generated staging .env supply all MUSCAT_* values.
+  launch='for name in ${!MUSCAT_@}; do unset "$name"; done; '"$launch"
+  launch="bash -c $(printf %q "$launch")"
   launch+="; echo; echo '[dev server exited -- press enter]'; read -r _"
   launch_in_tmux "$wt" "$launch"
 
