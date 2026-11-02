@@ -38,8 +38,9 @@ def test_secondary_eclipse_written_to_fit_yaml(tmp_path):
 
 @pytest.mark.slow
 def test_model_build_applies_secondary_eclipse_offset():
-    # Arrange: get the python interpreter for the timer conda env
-    timer_py = fit._conda_env_python("timer")
+    # Arrange: resolve the timer conda env's interpreter through the same
+    # helper the fit launcher uses, so MUSCAT_TIMER_CONDA_ENV is honored here.
+    timer_py = fit._conda_env_python(fit.timer_conda_env())
     if not timer_py:
         pytest.skip("timer conda environment not found")
         

@@ -33,7 +33,8 @@ class LcoTest(unittest.TestCase):
             "kind": "muscat3",
             "exposure_times": {"g": 30, "r": 30, "i": 30, "z": 30},
             "exposure_count": 2,
-            "windows": [{"start": "2026-07-01T00:00:00Z", "end": "2026-07-01T01:00:00Z"}],
+            # 6 h: an explicit repeat_duration has to fit the window.
+            "windows": [{"start": "2026-07-01T00:00:00Z", "end": "2026-07-01T06:00:00Z"}],
             "readout_mode": "MUSCAT_FAST",
             "narrowband": {"g": "in"},
             "repeat_duration": 18179,
