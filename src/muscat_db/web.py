@@ -2914,8 +2914,12 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
                 mtime, created_at = 0.0, "Unknown"
             csite, ctelescope, cmode = fit.csv_site_mode(c.name, inst) if inst in phot.MULTISITE_INSTRUMENTS else (None, None, None)
             crun = _photometry_run_of_csv(c)
+            # The flare table defaults a new peak time to the middle of the
+            # selected data, so each card carries its curve's time span.
+            trange = fit.lightcurve_time_range([c])
             rows.append({"path": str(c), "name": c.name, "created_at": created_at,
-                         "_mtime": mtime, "_site": csite, "_telescope": ctelescope, "_mode": cmode, "run_id": crun})
+                         "_mtime": mtime, "_site": csite, "_telescope": ctelescope, "_mode": cmode, "run_id": crun,
+                         "t_min": trange[0] if trange else None, "t_max": trange[1] if trange else None})
 
         if inst in phot.MULTISITE_INSTRUMENTS:
             # A multi-site instrument's date+target can hold multiple sites /
@@ -2942,7 +2946,8 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
                     and (not sel_telescope or r["_telescope"] == sel_telescope)
                     and (not sel_mode or r["_mode"] == sel_mode)]
 
-        csvs = [{"path": r["path"], "name": r["name"], "created_at": r["created_at"], "run_id": r["run_id"]} for r in rows]
+        csvs = [{"path": r["path"], "name": r["name"], "created_at": r["created_at"], "run_id": r["run_id"],
+                 "t_min": r["t_min"], "t_max": r["t_max"]} for r in rows]
 
         # Existing runs (each isolated in its own dir); show one run's results at
         # a time, defaulting to the newest, selectable via the results-run chips.
@@ -3716,6 +3721,17 @@ def transit_fit_status(inst: str, date: str, target: str, run: str = ""):
     if _run_hidden("transit_fit", inst, date, target, (run or "").strip()):
         return JSONResponse(dict(_NO_JOB_STATUS))
     return JSONResponse(fit.job_status(inst, date, target, run_id=(run or "").strip()))
+
+
+@transit_fit_router.get("/outputs")
+def transit_fit_outputs(inst: str, date: str, target: str, run: str = ""):
+    """The data behind the results page as JSON (plots, summary rows,
+    detection SNR), so scripts get it without scraping the page. A hidden run
+    reads as empty, as it does for ``/status``."""
+    run_id = (run or "").strip()
+    if _run_hidden("transit_fit", inst, date, target, run_id):
+        return JSONResponse({"ok": True, "outputs": fit.empty_fit_outputs()})
+    return JSONResponse({"ok": True, "outputs": fit.get_fit_outputs(inst, date, target, run_id=run_id or None)})
 
 
 @transit_fit_router.get("/log-stream")
@@ -5537,6 +5553,22 @@ def api_lco_build(payload: dict = Body(...)):
     try:
         rg = lco.build_requestgroup(payload.get("kind"), payload)
         return JSONResponse({"ok": True, "payload": rg, "payload_hash": lco.payload_hash(rg)})
+    except lco.LcoError as e:
+        return _lco_error_response(e)
+
+
+@lco_router.post("/observing-duration", response_class=JSONResponse)
+def api_lco_observing_duration(payload: dict = Body(...)):
+    """The ``repeat_duration`` a request built from these params would submit.
+
+    Backs the schedule page's Observing duration field: its default, and the
+    longest value it accepts, are the number ``build_requestgroup`` derives from
+    the request's window, so the rule is not repeated in JavaScript. ``null``
+    when the request is not a REPEAT_EXPOSE block. No external call is made.
+    """
+    try:
+        seconds = lco.window_repeat_duration(payload.get("kind"), payload)
+        return JSONResponse({"ok": True, "repeat_duration": seconds})
     except lco.LcoError as e:
         return _lco_error_response(e)
 

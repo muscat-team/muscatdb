@@ -789,7 +789,16 @@ def cancel_ttv_fit(target: str, run_name: str = "") -> dict:
                 # process: marking the row cancelled here would report a still
                 # running fit as stopped. It acts on this request itself.
                 return {"ok": True, "key": found[0]["key"], "requested": True}
-            if found and found[0]["state"] in ("running", "pending"):
+            if found and found[0]["state"] == "pending":
+                if store.cancel_pending(found[0]["key"]):
+                    return {"ok": True, "key": found[0]["key"]}
+                # A worker claimed it between the read above and the write:
+                # the row is running now, so leave the request its holder
+                # acts on instead of overwriting the claim.
+                if store.request_cancel(found[0]["key"]):
+                    return {"ok": True, "key": found[0]["key"], "requested": True}
+                return {"ok": False, "error": "no job to cancel"}
+            if found and found[0]["state"] == "running":
                 store.save(
                     type_="ttv_fit",
                     inst=found[0].get("inst") or "_",

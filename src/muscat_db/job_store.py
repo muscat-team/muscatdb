@@ -136,6 +136,20 @@ class JobRepository(Protocol):
         ``running`` until the owner records the terminal state itself."""
         ...
 
+    def cancel_pending(self, key: str) -> bool:
+        """Mark the row at *key* ``cancelled`` iff it is still ``pending``;
+        return whether a row changed.
+
+        The state check and the write are one statement, so a worker's
+        :meth:`JobConcurrency.claim_slot` (``pending_key``) that moved the
+        row to ``running`` in between leaves it running and this returns
+        False. A caller that reads ``pending`` and then saves ``cancelled``
+        unconditionally would overwrite that claim: the row reads cancelled,
+        reconciliation drops the worker's slot, and the worker keeps running
+        with no request on record (issue #325, item 5). On False the caller
+        falls back to :meth:`request_cancel`, which the holder honors."""
+        ...
+
     def cancel_requested(self, type_: str, instance_id: str) -> list[dict]:
         """Running *type_* rows held by *instance_id* that have a cancel
         request newer than their own ``started_at``.
@@ -298,11 +312,28 @@ def _requested_cancels(active_rows: list[dict], type_: str, instance_id: str) ->
     return out
 
 
+@runtime_checkable
+class JobStore(JobRepository, JobQueue, JobConcurrency, Protocol):
+    """What ``get_job_store()`` hands out: one object implementing all three
+    Protocols. Callers use repository, queue and concurrency methods on the
+    same store, so none of the three alone describes it, and naming a concrete
+    backend here would tie every caller to SQLite."""
+
+
 # claim_slot's pending_key step, shared by both backends; {p} is the driver's
 # placeholder. The state = 'pending' guard is the whole point: 0 rows means
 # the row was already taken, so the caller rolls the slot back.
 _START_PENDING_SQL = (
     "UPDATE jobs SET state = 'running', owner = {p}, instance_id = {p}, heartbeat_at = {p} "
+    "WHERE key = {p} AND state = 'pending'"
+)
+
+# cancel_pending, shared by both backends. The same state = 'pending' guard as
+# _START_PENDING_SQL, from the other side: a row the claim already moved to
+# running is left alone (0 rows) and the caller requests the cancel instead.
+_CANCEL_PENDING_SQL = (
+    "UPDATE jobs SET state = 'cancelled', returncode = {rc}, elapsed = 0, "
+    "error_desc = 'Cancelled by user', heartbeat_at = {p} "
     "WHERE key = {p} AND state = 'pending'"
 )
 
@@ -348,7 +379,7 @@ class DatabaseJobStore(JobRepository, JobQueue, JobConcurrency):
         return database.get_active_persisted_jobs()
 
     def get(self, key: str) -> dict | None:
-        return next((j for j in database.get_persisted_jobs() if j.get("key") == key), None)
+        return database.get_persisted_job(key)
 
     def save(
         self,
@@ -411,6 +442,17 @@ class DatabaseJobStore(JobRepository, JobQueue, JobConcurrency):
             )
             conn.commit()
             return cur.rowcount > 0
+
+    def cancel_pending(self, key: str) -> bool:
+        with database.get_conn() as conn:
+            cur = conn.execute(
+                _CANCEL_PENDING_SQL.format(p="?", rc=_CANCELLED_RC),
+                (time.time(), key),
+            )
+            conn.commit()
+        if cur.rowcount:
+            database.clear_all_caches()
+        return cur.rowcount > 0
 
     def cancel_requested(self, type_: str, instance_id: str) -> list[dict]:
         return _requested_cancels(self.active(), type_, instance_id)
@@ -913,6 +955,14 @@ class PostgresJobStore(JobRepository, JobQueue, JobConcurrency):
             )
             return cur.rowcount > 0
 
+    def cancel_pending(self, key: str) -> bool:
+        with self._pool.connection() as conn:
+            cur = conn.execute(
+                _CANCEL_PENDING_SQL.format(p="%s", rc=_CANCELLED_RC),
+                (time.time(), key),
+            )
+            return cur.rowcount > 0
+
     def cancel_requested(self, type_: str, instance_id: str) -> list[dict]:
         return _requested_cancels(self.active(), type_, instance_id)
 
@@ -1202,10 +1252,10 @@ class PostgresJobStore(JobRepository, JobQueue, JobConcurrency):
 # this module never requires psycopg or a reachable Postgres) from
 # MUSCAT_CONTROL_PLANE on first get_job_store() call, then cached -- swap it
 # explicitly with set_job_store() for tests or a future backend.
-_STORE: JobRepository | JobQueue | JobConcurrency | None = None
+_STORE: JobStore | None = None
 
 
-def _make_default_store() -> JobRepository:
+def _make_default_store() -> JobStore:
     backend = os.environ.get("MUSCAT_CONTROL_PLANE", "sqlite").strip().lower()
     if backend == "sqlite":
         return DatabaseJobStore()
@@ -1216,12 +1266,12 @@ def _make_default_store() -> JobRepository:
     )
 
 
-def get_job_store() -> DatabaseJobStore:
+def get_job_store() -> JobStore:
     """Return the process-wide job store (the C2 seam)."""
     global _STORE
     if _STORE is None:
         _STORE = _make_default_store()
-    return _STORE  # type: ignore[return-value]
+    return _STORE
 
 
 def uses_shared_control_plane() -> bool:

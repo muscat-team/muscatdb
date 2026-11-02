@@ -293,3 +293,30 @@ def test_chat_room_selection_filters_messages_and_routes_posts(page):
     page.reload()
     page.evaluate("window.__chatTransport.receive('chat_rooms', {rooms: ['chat:public', 'group:unc']})")
     expect(page.locator('#chat-room')).to_have_value('group:unc')
+
+
+def test_chat_room_restored_when_rooms_arrive_before_whoami(page):
+    # /targets is served from a shared cached page with no embedded identity, so
+    # the saved room's per-user key is only known once /whoami answers. The room
+    # list can arrive first; the saved room must still win once the user resolves.
+    page.goto('/targets')
+    assert page.evaluate("() => window.MuscatWhoami")
+    page.click('#minimize-chat')
+    page.evaluate("window.__chatTransport.receive('chat_rooms', {rooms: ['chat:public', 'group:unc']})")
+    page.select_option('#chat-room', 'group:unc')
+
+    held = []
+    page.route('**/whoami', lambda route: held.append(route))
+    page.reload()
+    page.evaluate("""() => window.__chatTransport.receive('history', {messages: [
+        {id: 920, kind: 'user', user: 'alice', text: 'Public only', ts: 10},
+        {id: 921, kind: 'user', user: 'bob', text: 'UNC conversation', room: 'group:unc', ts: 11}
+    ]})""")
+    page.evaluate("window.__chatTransport.receive('chat_rooms', {rooms: ['chat:public', 'group:unc']})")
+    expect(page.locator('#chat-room')).to_have_value('chat:public')
+    assert held, '/whoami should still be pending when the room list arrives'
+
+    held.pop().continue_()
+    expect(page.locator('#chat-room')).to_have_value('group:unc')
+    expect(page.get_by_text('UNC conversation', exact=True)).to_be_attached()
+    expect(page.get_by_text('Public only', exact=True)).to_be_hidden()

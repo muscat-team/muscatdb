@@ -2598,14 +2598,14 @@ def cancel_run(inst: str, date: str, target: str, run_id: str = "") -> dict:
             db_key = f"photometry:{key}"
             found = [j for j in store.all() if j["key"] == db_key]
             if found and found[0]["state"] == "pending":
-                store.save(
-                    type_="photometry", inst=inst, date=date, target=target,
-                    state="cancelled", returncode=-1, elapsed=0,
-                    started_at=found[0]["started_at"],
-                    error_desc="Cancelled by user",
-                    run_id=run_id,
-                )
-                return {"ok": True, "key": key}
+                if store.cancel_pending(db_key):
+                    return {"ok": True, "key": key}
+                # A worker claimed it between the read above and the write:
+                # the row is running now, so leave the request its holder
+                # acts on instead of overwriting the claim.
+                if store.request_cancel(db_key):
+                    return {"ok": True, "key": key, "requested": True}
+                return {"ok": False, "error": "no job to cancel"}
             if (
                 found and found[0]["state"] == "running"
                 and jobs.held_by_other_instance(found[0], current_instance_id())

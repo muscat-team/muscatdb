@@ -318,8 +318,9 @@ class TestAttemptsSurviveRelaunch:
         monkeypatch.setenv("MUSCAT_DB_PATH", str(tmp_path / "muscat.db"))
         monkeypatch.setenv("MUSCAT_TTV_DIR", str(tmp_path / "ttv_out"))
         monkeypatch.setattr(ttv.subprocess, "Popen", lambda *a, **k: _FakeProc())
-        with ttv._TTV_LOCK:
-            ttv._TTV_JOBS.clear()
+        # Swap the registry (undone at teardown) so the relaunched job does not
+        # leak into later tests in the same process.
+        monkeypatch.setattr(ttv, "_TTV_JOBS", {})
         store = job_store.get_job_store()
         store.save(
             type_="ttv_fit", inst="_", date="_", target="HIP67522",
