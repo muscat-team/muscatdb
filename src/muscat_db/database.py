@@ -486,7 +486,7 @@ CREATE TABLE IF NOT EXISTS group_grants_revoked (
 );
 """
 
-# Published indexes alternate names because SQLite cannot rename an index.
+# Published indexes use _next_ prefixes because SQLite cannot rename an index.
 # Schema initialization must recognize the equivalent index on the active table,
 # rather than rebuilding a duplicate over millions of rows after publication.
 _CATALOG_INDEX_TABLES = {
@@ -500,10 +500,13 @@ _CATALOG_INDEX_TABLES = {
 def _catalog_index_needed(conn: sqlite3.Connection, sql: str) -> bool:
     for name, table in _CATALOG_INDEX_TABLES.items():
         if re.search(r"\b" + name + r"\b", sql):
-            return not conn.execute(
-                "SELECT 1 FROM sqlite_schema WHERE type='index' AND tbl_name=? "
-                "AND name IN (?, ?)", (table, name, "_next_" + name),
-            ).fetchone()
+            return not any(
+                re.fullmatch(r"(?:_next_)*" + re.escape(name), index)
+                for (index,) in conn.execute(
+                    "SELECT name FROM main.sqlite_schema WHERE type='index' AND tbl_name=?",
+                    (table,),
+                )
+            )
     return True
 
 
@@ -1081,9 +1084,13 @@ def _copy_catalog_table(conn: sqlite3.Connection, table: str) -> None:
         "SELECT name, sql FROM rebuilt.sqlite_schema "
         "WHERE type='index' AND tbl_name=? AND sql IS NOT NULL", (table,)
     ).fetchall():
-        index = "_next_" + name if conn.execute(
-            "SELECT 1 FROM main.sqlite_schema WHERE name=?", (name,)
-        ).fetchone() else name
+        # Legacy databases can contain both the canonical and _next_ index
+        # on the active table. Keep both intact until the old table retires.
+        index = name
+        while conn.execute(
+            "SELECT 1 FROM main.sqlite_schema WHERE name=? COLLATE NOCASE", (index,)
+        ).fetchone():
+            index = "_next_" + index
         sql = re.sub(r'CREATE INDEX\s+(?:IF NOT EXISTS\s+)?(?:"[^"]+"|\w+)\s+ON\s+(?:"[^"]+"|\w+)',
                      f'CREATE INDEX "{index}" ON "{shadow}"', sql, count=1, flags=re.IGNORECASE)
         conn.execute(sql)

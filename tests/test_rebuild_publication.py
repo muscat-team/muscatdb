@@ -285,8 +285,21 @@ def test_publication_allows_app_commits_between_copy_and_cleanup_batches(catalog
         assert conn.execute("SELECT COUNT(*) FROM target_notes WHERE note='committed between batches'").fetchone()[0] == len(phases)
 
 
-def test_publication_retries_abandoned_shadows_without_duplicate_indexes(catalogs, monkeypatch):
+@pytest.mark.parametrize("occupied_generations", [1, 2, 3])
+def test_publication_retries_abandoned_shadows_without_duplicate_indexes(
+    catalogs, monkeypatch, occupied_generations,
+):
     live, staged = catalogs
+    # Older schema initialization could recreate canonical indexes after a
+    # publish retained the _next_ names. Reproduce that live production state.
+    with database.get_conn(live) as conn:
+        for name in database._CATALOG_INDEX_TABLES:
+            sql = conn.execute(
+                "SELECT sql FROM sqlite_schema WHERE name=?", (name,),
+            ).fetchone()[0]
+            for generation in range(1, occupied_generations):
+                conn.execute(sql.replace(name, "_next_" * generation + name, 1))
+        conn.commit()
     original = database._copy_catalog_table
 
     def fail_after_copy(conn, table):
@@ -309,6 +322,16 @@ def test_publication_retries_abandoned_shadows_without_duplicate_indexes(catalog
             conn.commit()
             assert _catalog_values(conn) == ['TOI-1234'] * 4
             assert len(conn.execute('PRAGMA index_list(frames)').fetchall()) == 3
+            assert len(conn.execute('PRAGMA index_list(summaries)').fetchall()) == 1
+            for table, columns in (
+                ('frames', [('instrument', 'obsdate'), ('object',), ('proposal_id',)]),
+                ('summaries', [('instrument', 'obsdate')]),
+            ):
+                actual = [
+                    tuple(row[2] for row in conn.execute(f'PRAGMA index_info("{index[1]}")'))
+                    for index in conn.execute(f'PRAGMA index_list({table})').fetchall()
+                ]
+                assert sorted(actual) == sorted(columns)
             assert not conn.execute("SELECT name FROM sqlite_schema WHERE name GLOB '_catalog_*'").fetchall()
             assert conn.execute("SELECT note FROM target_notes WHERE object='DURING'").fetchone() == ('survives retry',)
             assert conn.execute('PRAGMA integrity_check').fetchone() == ('ok',)
