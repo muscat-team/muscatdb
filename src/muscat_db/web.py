@@ -98,6 +98,7 @@ from muscat_db.auth import (
     PROXY_SECRET_HEADER,
     UNKNOWN_EMAIL,
     admin_email_message,
+    is_email_identity,
     authentication_required as _authentication_required,
     resolve_forwarded_identity,
     unauthenticated_message,
@@ -595,6 +596,9 @@ async def _nginx_auth_middleware(request: Request, call_next):
             forwarded, client_host,
         )
     request.state.user = user
+    request.state.auth_method = (
+        None if not user else ("cloudflare" if is_email_identity(forwarded) else "basic")
+    )
     token = _CURRENT_USER.set(user)
     try:
         if identity in (UNKNOWN_EMAIL, ADMIN_EMAIL):
@@ -2091,6 +2095,43 @@ def whoami(request: Request):
     doesn't trip the global fetch/loading-bar tracker on every navigation.
     """
     return JSONResponse({"user": getattr(request.state, "user", None)})
+
+
+CF_ACCESS_LOGOUT_PATH = "/cdn-cgi/access/logout"
+_LOGGED_OUT_HTML = (
+    "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\">"
+    "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"
+    "<title>Logged out</title></head><body style=\"font-family:sans-serif;margin:2rem\">"
+    "<h1>Logged out</h1><p>{detail}</p><p><a href=\"/\">Back to MuSCAT-db</a></p></body></html>"
+)
+
+
+@app.get("/logout", response_class=HTMLResponse)
+def logout(request: Request):
+    """End the session, per sign-in path.
+
+    * Cloudflare Access (identity is an email): redirect to Access's own
+      ``/cdn-cgi/access/logout`` on the same hostname, which clears the
+      ``CF_Authorization`` cookie.
+    * htpasswd / HTTP Basic: a link cannot clear cached Basic credentials, so
+      answer 401 with a Basic challenge for the nginx realm. Browsers drop the
+      cached credentials on a 401 challenge and show this page if the prompt
+      is cancelled; it carries no username.
+    * Not signed in: just the logged-out page.
+    """
+    method = getattr(request.state, "auth_method", None)
+    if method == "cloudflare":
+        return RedirectResponse(CF_ACCESS_LOGOUT_PATH, status_code=302)
+    if method == "basic":
+        return HTMLResponse(
+            _LOGGED_OUT_HTML.format(detail=(
+                "Your browser will ask for a password again. Cancel the prompt to stay "
+                "logged out; if it does not, close the browser to end the session."
+            )),
+            status_code=401,
+            headers={"WWW-Authenticate": 'Basic realm="MuSCAT-db"', "Cache-Control": "no-store"},
+        )
+    return HTMLResponse(_LOGGED_OUT_HTML.format(detail="You are not logged in."))
 
 
 @app.get("/chat/users", response_class=JSONResponse)
