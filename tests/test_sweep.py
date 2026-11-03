@@ -29,11 +29,13 @@ class Env:
         monkeypatch.setattr(sweep, "_active_jobs", lambda: [])
         self.missing: dict[str, list[str]] = {}
         self.rescans: list[tuple[str, str, int | None]] = []
+        self.roots: list[str | None] = []
         monkeypatch.setattr(sweep, "missing_dates", lambda inst, year, force=False: list(self.missing.get(inst, [])))
         monkeypatch.setattr(sweep, "scan_date", self._scan_date)
 
     def _scan_date(self, inst, obsdate, max_workers=None, progress=None, data_root=None):
         self.rescans.append((inst, obsdate, max_workers))
+        self.roots.append(data_root)
         scan_failures.clear(str(self.obslog), inst, obsdate)
         return {"total": 1, "per_ccd": {0: 1}}
 
@@ -196,6 +198,27 @@ def test_retries_open_scan_failures_and_clears_them(env):
     assert env.rescanned() == [("muscat2", "250310")]
     assert result.retried == [("muscat2", "250310")]
     assert scan_failures.pending(str(env.obslog)) == []
+
+
+def test_retry_uses_the_root_the_failure_was_recorded_under(env, tmp_path):
+    """lco.py and lco_monitor.py scan with the LCO download root. A retry on
+    the default root finds no files and the entry stays open forever, so the
+    retry must scan the root the ledger recorded, and the shrink guard must
+    count raw matches there too."""
+    lco_root = tmp_path / "lco"
+    d = lco_root / INSTRUMENTS["sinistro"].data_subdir / "250310"
+    d.mkdir(parents=True)
+    for i in range(3):
+        (d / f"cpt1m010-fa16-20250310-{i:04d}-e91.fits").write_bytes(b"")
+    env.csv("sinistro", "250310", 0, rows=2)  # the default root has no raw files at all
+    scan_failures.record(str(env.obslog), "sinistro", "250310", "OSError: boom", data_root=str(lco_root))
+
+    result = sweep.run_sweep()
+
+    assert result.held == []
+    assert env.rescanned() == [("sinistro", "250310")]
+    assert env.roots == [str(lco_root)]
+    assert result.retried == [("sinistro", "250310")]
 
 
 def test_a_failing_retry_does_not_stop_the_others(env, monkeypatch):

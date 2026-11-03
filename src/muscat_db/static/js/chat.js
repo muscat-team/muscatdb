@@ -71,7 +71,7 @@ document.addEventListener("DOMContentLoaded", () => {
         currentUser = u;
         refreshOwnership();
         restoreBotLog();
-        restoreStoredRoom();
+        restoreSavedRoom();
     };
     if (window.MuscatWhoami && typeof window.MuscatWhoami.then === "function") {
         window.MuscatWhoami.then(onUserResolved);
@@ -613,24 +613,30 @@ document.addEventListener("DOMContentLoaded", () => {
             .then(r => r.ok ? r.json() : null)
             .then(d => { if (d && roomSelect.value === requestedRoom) knownUsers = d.users || []; })
             .catch(() => {});
-        try { localStorage.setItem("muscat-chat-room:" + getCurrentUser(), activeRoom); } catch (e) {}
     };
-    roomSelect.addEventListener("change", updateRoom);
-    const storedRoom = () => {
-        try { return localStorage.getItem("muscat-chat-room:" + getCurrentUser()); } catch (e) { return null; }
+    // Only an explicit pick is saved: a room list missing a room (an access
+    // change, or one that arrives before /whoami names the user) must not
+    // overwrite the saved choice.
+    const roomKey = () => "muscat-chat-room:" + getCurrentUser();
+    let roomPicked = false;
+    const saveRoom = () => {
+        try { localStorage.setItem(roomKey(), roomSelect.value); } catch (e) {}
     };
-    // Cached pages resolve identity via /whoami, which can land after
-    // chat_rooms; the room saved under the real user is only readable then.
-    const restoreStoredRoom = () => {
-        const preferred = storedRoom();
-        const offered = Array.from(roomSelect.options).some(o => o.value === preferred);
-        if (!offered || preferred === roomSelect.value) return;
-        roomSelect.value = preferred;
+    roomSelect.addEventListener("change", () => { roomPicked = true; saveRoom(); updateRoom(); });
+    // Called once /whoami resolves the user the saved room is keyed by.
+    const restoreSavedRoom = () => {
+        if (roomPicked) { saveRoom(); return; }
+        let saved = null;
+        try { saved = localStorage.getItem(roomKey()); } catch (e) {}
+        const available = Array.from(roomSelect.options).some(o => o.value === saved);
+        if (!available || saved === roomSelect.value) return;
+        roomSelect.value = saved;
         updateRoom();
     };
     socket.on("chat_rooms", (d) => {
         const rooms = d.rooms || [];
-        const preferred = storedRoom() || activeRoom;
+        let preferred = activeRoom;
+        try { preferred = localStorage.getItem(roomKey()) || preferred; } catch (e) {}
         roomSelect.replaceChildren();
         rooms.forEach(room => {
             const option = document.createElement("option");

@@ -919,6 +919,9 @@ def test_run_without_record_on_open_night_is_hidden_from_pages_and_status(client
         assert name not in _get(client, page, **params).text
         assert name in _get(client, page, user="root", **params).text
     assert _get(client, "/api/transit-fit/status", **params, run="orphanfit").json() == _NONE
+    outputs = _get(client, "/api/transit-fit/outputs", **params, run="orphanfit").json()["outputs"]
+    assert outputs == fit.empty_fit_outputs()
+    assert _get(client, "/api/transit-fit/outputs", user="root", **params, run="orphanfit").json()["outputs"]["has_any"]
 
 
 # The call sites that take a light curve or a fit as input, each checked on an

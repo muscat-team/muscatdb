@@ -3388,6 +3388,44 @@ def test_photometry_page_no_jd_slider_without_frame_data(mock_db, monkeypatch, t
     assert 'id="opt-exclude_after_jd"' in r.text
 
 
+def test_photometry_page_no_jd_slider_for_single_jd_span(mock_db, monkeypatch, tmp_path):
+    """Frames exist but all share one jd_start, so min == max. The slider
+    would have zero width and both cutoffs would pin to the same instant, so
+    the page falls back to the plain text inputs exactly as it does with no
+    frames at all. This is the has-rows half of the degenerate-span guard."""
+    from muscat_db import web
+
+    conn = sqlite3.connect(mock_db)
+    for i in range(3):
+        conn.execute(
+            "INSERT INTO frames (instrument, obsdate, ccd, filename, object, jd_start, ut_start, "
+            "exptime, read_mode, filter, ra, declination, airmass, focus, pa) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("muscat3", "260101", 0, f"frame{i}", "TOI-1", 781.400000, "00:00:00",
+             30.0, "high", "gp", "", "", 1.0, 0.0, 0.0),
+        )
+    conn.commit()
+    conn.close()
+
+    empty_outputs = {
+        "has_any": False, "summary": {}, "summary_items": [], "bands": {},
+        "sites": [], "modes": [], "masters": [], "npz": None, "log": None,
+        "ref_header": None, "ref_selection": None, "site": "", "mode": "",
+    }
+    monkeypatch.setattr(web.phot, "list_photometry_runs", lambda inst, date, target: ([], {}))
+    monkeypatch.setattr(web.phot, "list_outputs", lambda *args, **kwargs: empty_outputs)
+    monkeypatch.setattr(web.phot, "command_str", lambda inst, date, target, test_run=False: "run photometry")
+    monkeypatch.setattr(web.phot, "raw_data_dir", lambda inst, date: tmp_path)
+
+    r = TestClient(app).get("/photometry?inst=muscat3&date=260101&target=TOI-1")
+
+    assert r.status_code == 200
+    assert "jdslider-exclude_after_jd" not in r.text
+    assert "jdslider-exclude_before_jd" not in r.text
+    assert "; data spans " not in r.text
+    assert 'id="opt-exclude_after_jd"' in r.text
+
+
 def _outputs_with_band_csvs(files: dict[str, str]) -> dict:
     return {
         "has_any": True, "summary": {}, "summary_items": [],
@@ -4386,3 +4424,44 @@ def test_lco_split_ipp_fits_a_leg_and_submit_rebuilds_it(mock_db, monkeypatch):
     assert body["leg_b"].get("repeat_duration_override") is None
     rebuilt = _lco.build_requestgroup("sinistro", {**leg_a, "repeat_duration": override})
     assert _lco.payload_hash(rebuilt) == body["leg_a"]["payload_hash"]
+
+
+def test_transit_fit_outputs_endpoint_and_page_show_detection_snr(mock_db, monkeypatch, tmp_path):
+    """The results page and ``/api/transit-fit/outputs`` both carry the detection SNR (#154)."""
+    import math
+    from muscat_db import transit_fit as fit
+
+    monkeypatch.setenv("MUSCAT_TIMER_DIR", str(tmp_path / "timer"))
+    monkeypatch.setenv("MUSCAT_PROSE_DIR", str(tmp_path / "prose"))
+    # The results section only renders for a night that has a light curve.
+    lc_dir = tmp_path / "prose" / "muscat3" / "260101"
+    lc_dir.mkdir(parents=True)
+    (lc_dir / "WASP12_muscat3_gp_260101.csv").write_text("BJD_TDB,Flux\n1,1\n")
+    out_dir = tmp_path / "timer" / "muscat3" / "260101" / "WASP12" / "run-abc" / "out"
+    out_dir.mkdir(parents=True)
+    (out_dir / "summary.csv").write_text(
+        "parameter,mean,sd\nt0[0],0.5,0.001\nror_g[0],0.1,0.004\nror_r[0],0.1,0.002\n"
+    )
+    fit._fit_outputs_cache.clear()
+    client = TestClient(app)
+    params = {"inst": "muscat3", "date": "260101", "target": "WASP12", "run": "run-abc"}
+
+    r = client.get("/api/transit-fit/outputs", params=params)
+    assert r.status_code == 200
+    snr = r.json()["outputs"]["detection_snr"]
+    assert [b["band"] for b in snr["bands"]] == ["g", "r"]
+    assert snr["combined"] == pytest.approx(math.sqrt(12.5**2 + 25.0**2))
+
+    page = client.get("/transit-fit", params=params)
+    assert page.status_code == 200
+    assert "Transit detection SNR" in page.text
+    assert 'data-snr-band="r">25.0<' in page.text
+    assert 'data-snr-combined>28.0<' in page.text
+
+    # No ror row: shown as unavailable, never as 0.
+    (out_dir / "summary.csv").write_text("parameter,mean,sd\nt0[0],0.5,0.001\n")
+    fit._fit_outputs_cache.clear()
+    assert client.get("/api/transit-fit/outputs", params=params).json()["outputs"]["detection_snr"] is None
+    page = client.get("/transit-fit", params=params)
+    assert "Transit detection SNR" in page.text and "unavailable" in page.text
+    assert "data-snr-combined" not in page.text

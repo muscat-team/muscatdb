@@ -182,6 +182,10 @@ def _exofop_url(toi: str = "", tic: str = "") -> str:
     return f"https://exofop.ipac.caltech.edu/tess/target.php?id={ident}&json"
 
 
+class ExofopLookupError(RuntimeError):
+    """The report is unavailable, rather than a successful empty result."""
+
+
 def fetch_time_series(
     toi: str, *, tic: str = "", _now: float | None = None
 ) -> list[dict]:
@@ -208,11 +212,13 @@ def fetch_time_series(
             timeout=20,
         )
         data = resp.json()
-    except Exception:
-        return []
+        entries = data.get("time_series") or []
+        if not isinstance(entries, list) or any(not isinstance(e, dict) for e in entries):
+            raise ValueError("Invalid ExoFOP time_series response")
+        entries = [dict(e) for e in entries]
+    except Exception as exc:
+        raise ExofopLookupError("ExoFOP lookup failed. Please try again.") from exc
 
-    entries = data.get("time_series") or []
-    entries = [dict(e) for e in entries]
     with _exofop_cache_lock:
         _exofop_cache[cache_key] = (now, [dict(e) for e in entries])
     return entries
@@ -608,7 +614,10 @@ def build_time_series_report(
                     ),
                 }
     if entries is None:
-        entries = fetch_time_series(toi or "", tic=tic or "", _now=_now)
+        try:
+            entries = fetch_time_series(toi or "", tic=tic or "", _now=_now)
+        except ExofopLookupError as exc:
+            return {"ok": False, "error": str(exc)}
     rows = [check_time_series_exists(e, target=target, denied=denied) for e in entries]
     return {
         "ok": True,

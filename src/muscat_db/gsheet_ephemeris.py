@@ -352,7 +352,9 @@ def _canonicalize_tc(text: str, target_norm: str, col_map: dict | None) -> str:
     else, which removes header ambiguity), so an explicitly mapped column with a
     non-standard name is still understood. The ``tc`` column keeps its original
     header when that name already aliases to ``tc`` (so a BJD_TDB annotation
-    survives for time-scale detection); otherwise it is renamed to ``tc``.
+    survives for time-scale detection); otherwise it is renamed to ``tc`` with
+    any time-scale label from the original header carried along, because the
+    fit refuses a tab whose scale it cannot confirm.
     """
     try:
         reader = csv.DictReader(io.StringIO(text))
@@ -369,11 +371,13 @@ def _canonicalize_tc(text: str, target_norm: str, col_map: dict | None) -> str:
         # there is no way to tell the planets apart.
         if not planet_col and not target_col:
             return ""
-        tc_out = (
-            resolved["tc"]
-            if ephemeris_import._header_key(resolved["tc"]) in _TC_ALIASES["tc"]
-            else "tc"
-        )
+        if ephemeris_import._header_key(resolved["tc"]) in _TC_ALIASES["tc"]:
+            tc_out = resolved["tc"]
+        else:
+            tc_out = "tc"
+            time_system = ephemeris_import._time_system(resolved["tc"], [])
+            if time_system["confirmed"]:
+                tc_out = f"tc ({time_system['value']})"
         header = ["planet"]
         if "epoch" in resolved:
             header.append("epoch")

@@ -640,12 +640,18 @@ the importer requires a published or link-readable sheet.
 
 Open **LCO archive** on a target page to find reduced science observations
 covering its coordinates, including nights never reported to ExoFOP. The panel
-loads only when opened. Each row groups a night, instrument and LCO request,
+starts searching automatically when opened; wait for the progress message to finish.
+Leave both optional dates blank to search all nights. Each row groups a night, instrument and LCO request,
 with filters, exposure times, proposal, frame count and proprietary status.
+The **Object** column lists distinct FITS `OBJECT` values reported by the archive
+for that group, preserving header names rather than substituting the searched
+target name. Missing values display as **—**.
+Exposure times are rounded to the nearest second and deduplicated for display
+(for example, 69.937–70.081 seconds appears as 70); raw metadata is unchanged.
 Local presence uses the individual frame filenames in the database; a partial
 request remains downloadable. **Download** queues the existing whole-request
 download and ingest workflow. Follow progress in **Jobs**, then search again
-or reopen the panel to see the **Photometry** link.
+or reopen the panel to see the **🔭** photometry link.
 
 Archive metadata is cached for one hour per coordinates, user, token and date
 range; local presence and proposal access are checked on each load. A viewer
@@ -664,7 +670,15 @@ Optional UT date filters (inclusive end date) narrow the search, and persist per
 target in the browser. ExoFOP-reported nights are included: a report does not
 account for every request, filter or telescope observed that night. ExoFOP indicators match instrument,
 site and night within one day, not individual request IDs. “No matching report”
-reflects the existing ExoFOP lookup, which may also return no rows during an outage.
+means a successful ExoFOP lookup found no matching report; an unavailable lookup
+shows **Unknown**. The ExoFOP obslog panel reports lookup errors and can retry
+when closed and reopened.
+
+ExoFOP row progress and cancellation follow only the exact job launched from
+that row, retained across reloads in the same browser tab. Other downloads are
+available on **Jobs**; rows never infer job ownership from instrument and night.
+Saving or deleting a dataset note immediately updates the Notes filter and the
+metadata used for sorting.
 
 
 ### Complete searches on the LCO archive page

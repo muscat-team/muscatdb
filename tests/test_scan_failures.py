@@ -109,6 +109,26 @@ def test_scan_date_records_failure_from_any_caller_and_reraises(obslog, fake_fil
     assert _keys(obslog) == {("muscat3", "260101")}
 
 
+def test_failure_under_a_non_default_root_records_that_root(obslog, fake_files, tmp_path):
+    """The LCO download path scans with data_root pointing at the download
+    tree, and a retry on the default root would look in the wrong place and
+    find nothing. The entry carries the root so the retry can use it; a
+    default-root failure carries no root."""
+    _, broken = fake_files
+    broken.add("sinistro")
+    lco_root = tmp_path / "lco"
+
+    with pytest.raises(OSError):
+        scanner.scan_date("sinistro", "260101", max_workers=1, data_root=lco_root)
+    (entry,) = scan_failures.pending(str(obslog))
+    assert entry["data_root"] == str(lco_root)
+
+    with pytest.raises(OSError):
+        scanner.scan_date("sinistro", "260101", max_workers=1)
+    (entry,) = scan_failures.pending(str(obslog))
+    assert "data_root" not in entry
+
+
 def test_clean_rescan_clears_the_failure(obslog, fake_files):
     files, broken = fake_files
     broken.add("muscat")
@@ -241,16 +261,27 @@ def test_ledger_is_not_picked_up_as_an_instrument_or_date(obslog, fake_files):
 # -- muscat-db scan-failures ---------------------------------------------------
 
 
-def test_scan_failures_cli_lists_pending_entries(obslog, fake_files):
+def test_scan_failures_cli_lists_pending_entries(obslog, fake_files, monkeypatch):
+    from rich.console import Console
     from typer.testing import CliRunner
 
     from muscat_db.cli import app
+
+    # cli.console fixes its width at import (COLUMNS is read once), so the env
+    # override below cannot widen it; the seven-column table wraps at 80 and
+    # splits the cell text. Swap in a wide console, which writes to the
+    # runner's captured stdout at print time.
+    monkeypatch.setattr(cli, "console", Console(highlight=False, width=200))
 
     _, broken = fake_files
     broken.add("qhy600")
     with pytest.raises(OSError):
         scanner.scan_date("qhy600", "260301", max_workers=1)
-    r = CliRunner().invoke(app, ["scan-failures"], env={"NO_COLOR": "1", "COLUMNS": "200"})
+    # The CLI's console is built at import, so COLUMNS in the runner's env does
+    # not reach it; at the 80 columns a non-terminal gets, the seven-column
+    # table wraps "stale NFS" onto two lines. Render wide so cells stay whole.
+    monkeypatch.setattr(cli, "console", Console(width=200, no_color=True))
+    r = CliRunner().invoke(app, ["scan-failures"], env={"NO_COLOR": "1"})
 
     assert r.exit_code == 0, r.output
     assert "qhy600" in r.output and "260301" in r.output and "stale NFS" in r.output

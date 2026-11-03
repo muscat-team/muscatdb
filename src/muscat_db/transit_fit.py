@@ -612,12 +612,137 @@ def _uniform_bounds(options: dict, param: str, planet: str, first_planet: str) -
     return [lo if lo is not None else lo_default, hi if hi is not None else hi_default]
 
 
-def validate_fit_options(options: dict | None) -> str | None:
+# The flare model's per-flare parameters, in the order the page shows them.
+_FLARE_PARAMS = ("tpeak", "fwhm", "ampl")
+
+
+def _parse_flare_rows(raw, param: str) -> tuple[list[tuple[float, float]] | None, str | None]:
+    """Parse one flare field, ``value,unc`` pairs joined by ``;``, into rows.
+
+    Returns ``(rows, None)`` or ``(None, error)``. The error names the row, so a
+    typo in a table of several flares points at the right line instead of
+    silently changing the number of flares.
+    """
+    pairs = [p.strip() for p in str(raw or "").split(";")]
+    while pairs and pairs[-1] == "":
+        pairs.pop()
+    rows: list[tuple[float, float]] = []
+    for i, pair in enumerate(pairs, start=1):
+        parts = [x.strip() for x in pair.split(",")]
+        if len(parts) != 2 or not parts[0] or not parts[1]:
+            return None, f"flare {param} row {i} must be two numbers (value,unc or low,high)"
+        a, b = _to_float(parts[0]), _to_float(parts[1])
+        if a is None or b is None or not math.isfinite(a) or not math.isfinite(b):
+            return None, f"flare {param} row {i} must be two numbers (value,unc or low,high)"
+        rows.append((a, b))
+    return rows, None
+
+
+def _validate_flares(o: dict, time_range: tuple[float, float] | None) -> str | None:
+    """Check the flare rows: complete, numeric, consistent counts, and ``tpeak``
+    inside the light curves when *time_range* is known.
+
+    timer sizes the model from ``tpeak`` and accepts ``fwhm``/``ampl`` either
+    one per flare or as a single value shared by every flare, so the count rule
+    here is the same one. A Uniform ``tpeak`` row holds ``low,high`` bounds and
+    only has to overlap the data; a Gaussian mean has to lie inside it.
+    """
+    if o.get("include_flare") != "true":
+        return None
+    rows_by_param: dict[str, list[tuple[float, float]]] = {}
+    priors: dict[str, str] = {}
+    for param in _FLARE_PARAMS:
+        prior = str(o.get(f"flare_{param}_prior") or "gaussian").strip().lower()
+        if prior not in _PRIOR_CHOICES:
+            return f"flare {param} prior must be gaussian or uniform"
+        priors[param] = prior
+        rows, err = _parse_flare_rows(o.get(f"flare_{param}"), param)
+        if err:
+            return err
+        if not rows:
+            return f"flare {param} is required when Use Flare is on (one value,unc pair per flare)"
+        for i, (a, b) in enumerate(rows, start=1):
+            if prior == "uniform":
+                if not a < b:
+                    return f"flare {param} uniform bounds (row {i}) must have low < high"
+            elif b <= 0:
+                return f"flare {param} uncertainty (row {i}) must be greater than 0"
+            if param == "fwhm" and (b if prior == "uniform" else a) <= 0:
+                return f"flare fwhm (row {i}) must be greater than 0"
+        rows_by_param[param] = rows
+
+    n_flares = len(rows_by_param["tpeak"])
+    for param in ("fwhm", "ampl"):
+        n = len(rows_by_param[param])
+        if n not in (1, n_flares):
+            return (
+                f"flare {param} has {n} rows but tpeak has {n_flares}: give one {param} "
+                "per flare, or a single value shared by every flare"
+            )
+
+    if time_range is not None:
+        lo, hi = time_range
+        for i, (a, b) in enumerate(rows_by_param["tpeak"], start=1):
+            inside = (a < hi and b > lo) if priors["tpeak"] == "uniform" else (lo <= a <= hi)
+            if not inside:
+                return (
+                    f"flare tpeak (row {i}) lies outside the selected light curves "
+                    f"({lo:.5f} to {hi:.5f} BJD_TDB)"
+                )
+    return None
+
+
+def lightcurve_time_range(csvs) -> tuple[float, float] | None:
+    """Return the earliest and latest ``BJD_TDB`` across the light-curve CSVs.
+
+    ``None`` when no file has a readable ``BJD_TDB`` column, so callers treat
+    the range as unknown rather than refusing input they cannot check.
+    """
+    lo = hi = None
+    for path in csvs:
+        try:
+            with open(path, newline="") as fh:
+                reader = csv.reader(fh)
+                header = next(reader, None)
+                if not header or "BJD_TDB" not in header:
+                    continue
+                col = header.index("BJD_TDB")
+                for row in reader:
+                    if len(row) <= col:
+                        continue
+                    t = _to_float(row[col])
+                    if t is None or not math.isfinite(t):
+                        continue
+                    lo = t if lo is None or t < lo else lo
+                    hi = t if hi is None or t > hi else hi
+        except (OSError, csv.Error):
+            continue
+    return None if lo is None else (lo, hi)
+
+
+def validate_flare_times(options: dict | None, csvs) -> str | None:
+    """Refuse a flare ``tpeak`` that lies outside the selected light curves.
+
+    Runs once the launch knows which CSVs are in the fit. No-op when flares are
+    off or the files carry no ``BJD_TDB`` column.
+    """
+    o = options or {}
+    if o.get("include_flare") != "true":
+        return None
+    time_range = lightcurve_time_range(csvs)
+    if time_range is None:
+        return None
+    return _validate_flares(o, time_range)
+
+
+def validate_fit_options(options: dict | None, time_range: tuple[float, float] | None = None) -> str | None:
     """Return a user-facing error string for invalid fitting options, else ``None``.
 
     Validates every field in the "Fitting Configurations & Parameters" form so
     bad input is rejected with a clear message instead of crashing the pipeline
     or writing a malformed sys.yaml. An empty field keeps the pipeline default.
+    *time_range* is the light curves' ``(earliest, latest)`` BJD_TDB when known;
+    it lets the flare ``tpeak`` check run here as well as at launch.
     """
     o = options or {}
 
@@ -768,6 +893,10 @@ def validate_fit_options(options: dict | None) -> str | None:
                 return f"GP {param} uniform bounds must have low < high"
             if prior == "gaussian" and second <= 0:
                 return f"GP {param} uncertainty must be greater than 0"
+
+    err = _validate_flares(o, time_range)
+    if err:
+        return err
 
     return None
 
@@ -1427,6 +1556,10 @@ def compute_logp(inst: str, date: str, target: str, options: dict, selected_csvs
     if err:
         return {"ok": False, "error": err}
 
+    err = validate_flare_times(options, csvs)
+    if err:
+        return {"ok": False, "error": err}
+
     timer_py = _conda_env_python(timer_conda_env())
     if not timer_py:
         return {"ok": False, "error": "timer conda environment not found"}
@@ -1554,6 +1687,12 @@ def start_fit(
             return {"ok": False, "error": "No lightcurves selected for fitting."}
 
     err = validate_no_duplicate_datasets(inst, date, csvs, fixed_params=set(_resolved_fixed_params(options)))
+    if err:
+        return {"ok": False, "error": err}
+
+    # A flare peak outside the data can only be checked once the light curves
+    # are known, so it runs here, still before the run directory is touched.
+    err = validate_flare_times(options, csvs)
     if err:
         return {"ok": False, "error": err}
 
@@ -1968,14 +2107,14 @@ def cancel_fit(inst: str, date: str, target: str, run_id: str = "") -> dict:
             db_key = f"transit_fit:{key}"
             found = [j for j in store.all() if j["key"] == db_key]
             if found and found[0]["state"] == "pending":
-                store.save(
-                    type_="transit_fit", inst=inst, date=date, target=target, run_id=run_id,
-                    state="cancelled", returncode=-1, elapsed=0,
-                    started_at=found[0]["started_at"],
-                    error_desc="Cancelled by user",
-                    run_name=found[0].get("run_name", ""),
-                )
-                return {"ok": True, "key": key}
+                if store.cancel_pending(db_key):
+                    return {"ok": True, "key": key}
+                # A worker claimed it between the read above and the write:
+                # the row is running now, so leave the request its holder
+                # acts on instead of overwriting the claim.
+                if store.request_cancel(db_key):
+                    return {"ok": True, "key": key, "requested": True}
+                return {"ok": False, "error": "no job to cancel"}
             if (
                 found and found[0]["state"] == "running"
                 and jobs.held_by_other_instance(found[0], current_instance_id())
@@ -2030,6 +2169,92 @@ def has_fit_outputs(inst: str, date: str, target: str) -> bool:
     return bool(list_fit_runs(inst, date, target))
 
 
+def empty_fit_outputs() -> dict:
+    """The outputs record of a run with nothing on disk.
+
+    :func:`get_fit_outputs` fills this in; the ``/api/transit-fit/outputs``
+    route returns it unchanged for a run the viewer may not see, so a hidden
+    run reads exactly like a missing one.
+    """
+    return {
+        "has_any": False,
+        "plots": [],
+        "systematics_plots": [],
+        "summary": None,
+        "detection_snr": None,
+        "has_log": False,
+        "has_fit_yaml": False,
+        "has_sys_yaml": False,
+        "has_meta_yaml": False,
+        "extra_files": [],
+    }
+
+
+# ``ror[0]`` for an achromatic fit, ``ror_<band>[0]`` per band for a chromatic
+# one. Only planet index 0 is read; the band may itself contain underscores.
+_ROR_ROW_RE = re.compile(r"^ror(?:_(?P<band>.+))?\[0\]$")
+
+
+def _finite_float(value) -> float | None:
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
+
+
+def _format_with_uncertainty(value: float, unc: float, max_decimals: int = 6) -> tuple[str, str]:
+    """Format ``value`` and ``unc`` for display: the uncertainty to two
+    significant figures and the value to the same decimal place, never more
+    than ``max_decimals`` decimals."""
+    decimals = min(max_decimals, max(0, 1 - math.floor(math.log10(unc))))
+    return f"{value:.{decimals}f}", f"{unc:.{decimals}f}"
+
+
+def detection_snr(summary_rows: list[dict]) -> dict | None:
+    """Transit detection SNR from the parsed ``summary.csv`` rows (#154).
+
+    ``summary.csv`` carries no detection significance, so judging whether a
+    fit found a transit or noise meant comparing ``ror``'s mean with its sd by
+    eye. Per band the SNR is ``ror / (2 * sd)``: the depth is ``ror**2`` and
+    first-order propagation gives it the fractional uncertainty ``2 * sd / ror``.
+    The combined value adds the bands in quadrature because MuSCAT's bands are
+    exposed simultaneously (same in-transit coverage, independent noise); for
+    a single-band instrument it equals the band value.
+
+    A band whose sd is missing, zero or not a number cannot give an SNR and is
+    dropped. Returns None when no usable row exists, so a fit that never
+    constrained the planet (e.g. an active star whose systematics model
+    absorbed the transit) reads as unavailable rather than 0. Each band
+    carries display strings (``*_text``) formatted to the precision of its
+    uncertainty, since Jinja has no significant-figure filter.
+    """
+    bands = []
+    for row in summary_rows:
+        m = _ROR_ROW_RE.match(row.get("parameter", "") or "")
+        if not m:
+            continue
+        ror = _finite_float(row.get("mean"))
+        sd = _finite_float(row.get("sd", row.get("std")))
+        if ror is None or sd is None or sd <= 0:
+            continue
+        snr = ror / (2.0 * sd)
+        ror_text, sd_text = _format_with_uncertainty(ror, sd)
+        bands.append({
+            "band": m.group("band"),
+            "ror": ror,
+            "ror_sd": sd,
+            "ror_text": ror_text,
+            "ror_sd_text": sd_text,
+            "snr": snr,
+            "snr_text": f"{snr:.1f}",
+        })
+    if not bands:
+        return None
+    combined = math.sqrt(sum(b["snr"] ** 2 for b in bands))
+    return {"bands": bands, "combined": combined, "combined_text": f"{combined:.1f}"}
+
+
 def get_fit_outputs(inst: str, date: str, target: str, run_id: str | None = None) -> dict:
     """Check and retrieve output files, plots, and summary values from a completed run.
 
@@ -2062,17 +2287,7 @@ def _get_fit_outputs_mtime(
 ) -> dict:
     """Inner cached worker. ``_cache_mtime`` participates only in the cache key
     (see :func:`get_fit_outputs`) and is otherwise unused."""
-    outputs = {
-        "has_any": False,
-        "plots": [],
-        "systematics_plots": [],
-        "summary": None,
-        "has_log": False,
-        "has_fit_yaml": False,
-        "has_sys_yaml": False,
-        "has_meta_yaml": False,
-        "extra_files": []
-    }
+    outputs = empty_fit_outputs()
 
     try:
         rdir = fit_output_dir(inst, date, target, run_id or None)
@@ -2152,6 +2367,7 @@ def _get_fit_outputs_mtime(
                     "headers": headers,
                     "rows": summary_rows
                 }
+                outputs["detection_snr"] = detection_snr(summary_rows)
                 outputs["has_any"] = True
         except Exception:
             logger.debug("failed to read timer summary preview from %s", out_dir / "summary.csv", exc_info=True)

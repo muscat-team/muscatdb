@@ -96,14 +96,10 @@ def test_archive_section_settles_offline_with_a_reason(page, section):
     assert message in _open_section(page, section)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="exofop.fetch_time_series swallows network errors and returns [], so an "
-    "unreachable ExoFOP reads as 'no entries reported'",
-)
 def test_exofop_section_reports_an_unreachable_exofop(page):
     text = _open_section(page, "exofop-obslog-details")
     assert "No ExoFOP time-series entries reported" not in text
+    assert "ExoFOP lookup failed" in text
 
 
 def test_exofop_obslog_names_the_planet_of_each_row(page):

@@ -300,3 +300,14 @@ def test_cursor_budget_boundaries(monkeypatch, rows, next_url, truncated):
     assert result['truncated'] is truncated
     assert len(result['results']) == min(2, len(rows))
     assert len(calls) == 1
+
+
+def test_inventory_objects_preserve_header_names_and_missing_values(setup):
+    _, rows, _ = setup
+    rows[:] = [dict(frame(1), OBJECT='Header alias', target_name='Wrong alias'),
+               dict(frame(2), OBJECT='Other header alias'),
+               dict(frame(3), OBJECT='Header alias'),
+               dict(frame(4, 102), OBJECT=None)]
+    result = {r['request_id']: r for r in inventory.inventory('TOI-1000', 'alice')['rows']}
+    assert result['101']['objects'] == ['Header alias', 'Other header alias']
+    assert result['102']['objects'] == []
