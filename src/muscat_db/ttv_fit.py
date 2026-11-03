@@ -21,7 +21,7 @@ from typing import IO
 import yaml
 
 from muscat_db import jobs, database
-from muscat_db.job_store import current_instance_id, current_owner, get_job_store
+from muscat_db.job_store import abandon_claimed_launch, current_instance_id, current_owner, get_job_store
 from muscat_db.job_limits import JobLimitExceeded, claim_caps, claim_caps_for_row, enqueue_caps, full_job_cap, limit_refusal, params_with_running_cap
 from muscat_db import __meta__, __muscatdb_version__, __version__
 from muscat_db.photometry import (
@@ -250,6 +250,18 @@ def _count_running_full() -> int:
 
 def ttv_job_key(target: str, run_name: str = "") -> str:
     return f"{_target_dir_name(target)}/{slugify_run_name(run_name)}"
+
+
+def ttv_slot_key(job_key: str) -> str:
+    """The concurrency-slot holder key for *job_key*.
+
+    ``reconcile_slots`` matches a slot to its job row as ``ttv_fit:<holder>``,
+    and a TTV row's key carries the placeholder instrument and date
+    (``ttv_fit:_/_/<target>/<run>``). Holding the slot under the bare job key
+    made every TTV slot look stale, so any reconcile pass freed the slot of a
+    running fit and the cap could be exceeded (#325).
+    """
+    return f"_/_/{job_key}"
 
 
 def _harmonic_prefix() -> list[str]:
@@ -517,7 +529,15 @@ def start_ttv_fit(
 
         # Every ttv_fit job is "full" (no test-run concept here), so always
         # claim a cross-process concurrency slot before launching.
-        claimed_slot = get_job_store().claim_slot("ttv_fit", key, _MAX_FULL_JOBS, **claim_caps(user_name))
+        # The claim registers the running row in the same transaction, so a
+        # concurrent reconcile_slots never sees the slot without it (#325).
+        launch_row = {
+            "type_": "ttv_fit", "inst": "_", "date": "_", "target": target,
+            "run_id": run_seg, "run_type": "full",
+            "params": json.dumps({"options": options}, separators=(",", ":")),
+            "run_name": run_name, "user_name": user_name, "started_at": time.time(),
+        }
+        claimed_slot = get_job_store().claim_slot("ttv_fit", ttv_slot_key(key), _MAX_FULL_JOBS, running_row=launch_row, **claim_caps(user_name))
         at_capacity = not claimed_slot
         if at_capacity:
             try:
@@ -604,7 +624,7 @@ def start_ttv_fit(
         except Exception:
             logger.debug("failed to write harmonic.pid in %s", rdir, exc_info=True)
     except (FileNotFoundError, OSError) as exc:
-        get_job_store().release_slot("ttv_fit", key)
+        abandon_claimed_launch(get_job_store(), "ttv_fit", ttv_slot_key(key), launch_row, f"Failed to launch: {exc}")
         logf.write(f"\nfailed to launch harmonic: {exc}\n")
         logf.close()
         return {"ok": False, "error": jobs.server_fault("The server could not start the TTV fit (harmonic)", exc)}
@@ -1493,7 +1513,7 @@ def sync_jobs() -> None:
                 # transaction, so two workers draining the same pending row can
                 # never both launch it, even if a reconcile_slots pass elsewhere
                 # frees the slot before the save(state="running") below.
-                if not store.claim_slot("ttv_fit", key, _MAX_FULL_JOBS, **claim_caps_for_row(entry), pending_key=entry["key"]):
+                if not store.claim_slot("ttv_fit", ttv_slot_key(key), _MAX_FULL_JOBS, **claim_caps_for_row(entry), pending_key=entry["key"]):
                     continue
                 try:
                     rdir.mkdir(parents=True, exist_ok=True)
@@ -1506,7 +1526,7 @@ def sync_jobs() -> None:
                     # terminal, not for orphan reconcile, which could trust a
                     # previous run's log in this reused directory.
                     logger.warning("failed to prepare queued TTV fit %s", key, exc_info=True)
-                    store.release_slot("ttv_fit", key)
+                    store.release_slot("ttv_fit", ttv_slot_key(key))
                     store.save(type_="ttv_fit", inst="_", date="_", target=target, state="error", returncode=-1, elapsed=0, started_at=entry["started_at"], error_desc=f"Failed to prepare run: {exc}", run_id=run_seg, run_name=run_name)
                     continue
                 cmd = [
@@ -1561,7 +1581,7 @@ def sync_jobs() -> None:
                         logf.close()
                     except OSError:
                         pass
-                    store.release_slot("ttv_fit", key)
+                    store.release_slot("ttv_fit", ttv_slot_key(key))
                     store.save(type_="ttv_fit", inst="_", date="_", target=target, state="error", returncode=-1, elapsed=0, started_at=entry["started_at"], error_desc=f"Failed to launch: {exc}", run_id=run_seg, run_name=run_name)
                     continue
                 _TTV_JOBS[key] = TTVFitJob(key=key, inst="_", date="_", target=target, cmd=cmd, proc=proc, logf=logf, log_path=log_path, run_type="full", run_id=run_seg, run_name=run_name)
@@ -1578,5 +1598,5 @@ def sync_jobs() -> None:
                     except OSError:
                         pass
                     _TTV_JOBS.pop(key, None)
-                    store.release_slot("ttv_fit", key)
+                    store.release_slot("ttv_fit", ttv_slot_key(key))
                     store.save(type_="ttv_fit", inst="_", date="_", target=target, state="error", returncode=-1, elapsed=0, started_at=entry["started_at"], error_desc="Database error", run_id=run_seg, run_name=run_name)

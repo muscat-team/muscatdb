@@ -25,7 +25,7 @@ import yaml
 
 from muscat_db import jobs, database
 from muscat_db._optimize_helper import DONE_MARKER as _OPTIMIZE_DONE_MARKER
-from muscat_db.job_store import current_instance_id, current_owner, get_job_store
+from muscat_db.job_store import abandon_claimed_launch, current_instance_id, current_owner, get_job_store
 from muscat_db.job_limits import JobLimitExceeded, claim_caps, claim_caps_for_row, enqueue_caps, full_job_cap, limit_refusal, params_with_running_cap
 from muscat_db import __meta__, __muscatdb_version__, __version__
 from muscat_db.instruments import INSTRUMENTS
@@ -1767,9 +1767,16 @@ def start_fit(
 
         # Claim a cross-process concurrency slot for full jobs (test jobs are
         # capped above instead). Not yet claimed here just means queue below.
+        # The claim registers the running row in the same transaction, so a
+        # concurrent reconcile_slots never sees the slot without it (#325).
         claimed_slot = False
+        launch_row = {
+            "type_": "transit_fit", "inst": inst, "date": date, "target": target,
+            "run_id": run_id, "run_type": run_type, "params": params_json,
+            "run_name": run_name, "user_name": user_name, "started_at": time.time(),
+        }
         if run_type == "full":
-            claimed_slot = get_job_store().claim_slot("transit_fit", key, _MAX_FULL_JOBS, **claim_caps(user_name))
+            claimed_slot = get_job_store().claim_slot("transit_fit", key, _MAX_FULL_JOBS, running_row=launch_row, **claim_caps(user_name))
         at_capacity = run_type == "full" and not claimed_slot
 
         # Queue full jobs when at capacity
@@ -1836,7 +1843,7 @@ def start_fit(
             logger.debug("failed to write timer-fit.pid in %s", rdir, exc_info=True)
     except (FileNotFoundError, OSError) as exc:
         if claimed_slot:
-            get_job_store().release_slot("transit_fit", key)
+            abandon_claimed_launch(get_job_store(), "transit_fit", key, launch_row, f"Failed to launch: {exc}")
         logf.write(f"\nfailed to launch fitting: {exc}\n")
         logf.close()
         return {"ok": False, "error": jobs.server_fault("The server could not start the transit fit", exc)}

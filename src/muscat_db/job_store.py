@@ -244,6 +244,7 @@ class JobConcurrency(Protocol):
         user_name: str | None = None,
         max_user_slots: int | None = None,
         pending_key: str | None = None,
+        running_row: dict | None = None,
     ) -> bool:
         """Atomically claim one of *max_slots* concurrency slots for
         *pipeline* under *holder_key* (the pipeline's own job key, unprefixed).
@@ -263,6 +264,16 @@ class JobConcurrency(Protocol):
         freed by any process's :meth:`reconcile_slots`, and a second drainer
         can then win the same row. The key is passed, never derived from
         *holder_key*: ttv_fit's slot key and row key differ in shape.
+
+        *running_row* is for a direct launch, which has no pending row to
+        move: the keyword arguments of the launch's :meth:`save` (``type_``,
+        ``inst``, ``date``, ``target``, ``run_id``, ``run_type``, ``params``,
+        ``run_name``, ``user_name``, ``started_at``). In the same transaction
+        as the slot insert the row is upserted as ``running``, stamped with
+        this process's owner, instance and a fresh heartbeat, so no
+        :meth:`reconcile_slots` pass can see the slot without its running row
+        (#325). Nothing is written when the claim fails. Mutually exclusive
+        with *pending_key*.
 
         When ``MUSCAT_WORKER_MAX_SLOTS`` is set, also enforces a second,
         orthogonal cap: total slots held by :func:`current_host` across every
@@ -318,6 +329,36 @@ class JobStore(JobRepository, JobQueue, JobConcurrency, Protocol):
     Protocols. Callers use repository, queue and concurrency methods on the
     same store, so none of the three alone describes it, and naming a concrete
     backend here would tie every caller to SQLite."""
+
+
+def _running_row_fields(row: dict) -> dict:
+    """``upsert_job_row`` keyword arguments for a claim_slot *running_row*:
+    the row as a launch records it, plus this process's owner and instance."""
+    allowed = {"type_", "inst", "date", "target", "run_id", "run_type", "params",
+               "run_name", "user_name", "started_at"}
+    unknown = set(row) - allowed
+    if unknown:
+        raise TypeError(f"running_row has unexpected field(s): {sorted(unknown)}")
+    return {
+        "state": "running", "returncode": None, "elapsed": 0,
+        "owner": current_owner(), "instance_id": current_instance_id(),
+        "user_name": row.get("user_name") or "",
+        **{k: v for k, v in row.items() if k != "user_name"},
+    }
+
+
+def abandon_claimed_launch(store, pipeline: str, holder_key: str, row: dict | None, error: str) -> None:
+    """Undo a direct launch that claimed a slot (with a *running_row*) but
+    never started its process: mark the row ``error`` so it is not left
+    ``running`` with nothing behind it, then release the slot. *row* is the
+    same dict the claim registered; ``None`` (a test job holds no slot and
+    registered no row) only releases. Best-effort, like :meth:`release_slot`."""
+    if row is not None:
+        try:
+            store.save(**{**row, "state": "error", "returncode": -1, "elapsed": 0, "error_desc": error})
+        except Exception:
+            logger.debug("failed to mark abandoned launch %s/%s as error", pipeline, holder_key, exc_info=True)
+    store.release_slot(pipeline, holder_key)
 
 
 # claim_slot's pending_key step, shared by both backends; {p} is the driver's
@@ -538,6 +579,7 @@ class DatabaseJobStore(JobRepository, JobQueue, JobConcurrency):
         user_name: str | None = None,
         max_user_slots: int | None = None,
         pending_key: str | None = None,
+        running_row: dict | None = None,
     ) -> bool:
         # A single INSERT ... SELECT ... WHERE statement is one atomic write:
         # SQLite serializes writers even in WAL mode, so the capacity checks
@@ -576,6 +618,8 @@ class DatabaseJobStore(JobRepository, JobQueue, JobConcurrency):
                 (*values, *predicate_values),
             )
             claimed = cur.rowcount > 0
+            if claimed and running_row is not None:
+                database.upsert_job_row(conn, **_running_row_fields(running_row))
             if claimed and pending_key is not None:
                 # Same write transaction as the INSERT above (the implicit
                 # BEGIN it opened holds the write lock), so no other writer
@@ -588,7 +632,7 @@ class DatabaseJobStore(JobRepository, JobQueue, JobConcurrency):
                     conn.rollback()
                     return False
             conn.commit()
-        if claimed and pending_key is not None:
+        if claimed and (pending_key is not None or running_row is not None):
             database.clear_all_caches()
         return claimed
 
@@ -760,6 +804,41 @@ def _pg_rows_to_dicts(columns: list[str], rows: list[tuple]) -> list[dict]:
     return result
 
 
+def _pg_upsert_job_row(conn, *, type_, inst, date, target, state, returncode, elapsed,
+                       started_at, error_desc="", run_type="", params="", run_id="",
+                       run_name="", user_name="", owner="", instance_id="", attempts=0) -> None:
+    """PostgreSQL counterpart of ``database.upsert_job_row``: one upsert on
+    *conn*, not committed, so claim_slot can make it part of its transaction."""
+    key = database.job_row_key(type_, inst, date, target, run_id)
+    conn.execute(
+        """
+        INSERT INTO jobs(key, type, instrument, obsdate, target, state, returncode,
+                          elapsed, started_at, error_desc, run_type, params, run_id,
+                          run_name, user_name, owner, instance_id, heartbeat_at, attempts)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (key) DO UPDATE SET
+            state        = EXCLUDED.state,
+            returncode   = EXCLUDED.returncode,
+            elapsed      = EXCLUDED.elapsed,
+            started_at   = EXCLUDED.started_at,
+            error_desc   = EXCLUDED.error_desc,
+            run_type     = CASE WHEN EXCLUDED.run_type    != '' THEN EXCLUDED.run_type    ELSE jobs.run_type    END,
+            params       = CASE WHEN EXCLUDED.params      != '' THEN EXCLUDED.params      ELSE jobs.params      END,
+            run_id       = EXCLUDED.run_id,
+            run_name     = CASE WHEN EXCLUDED.run_name    != '' THEN EXCLUDED.run_name    ELSE jobs.run_name    END,
+            user_name    = CASE WHEN EXCLUDED.user_name   != '' THEN EXCLUDED.user_name   ELSE jobs.user_name   END,
+            owner        = CASE WHEN EXCLUDED.owner       != '' THEN EXCLUDED.owner       ELSE jobs.owner       END,
+            instance_id  = CASE WHEN EXCLUDED.instance_id != '' THEN EXCLUDED.instance_id ELSE jobs.instance_id END,
+            heartbeat_at = EXCLUDED.heartbeat_at,
+            attempts     = EXCLUDED.attempts
+        """,
+        (key, type_, inst, date, target, state, returncode, elapsed, started_at,
+         error_desc, run_type, params, run_id, run_name, user_name, owner,
+         instance_id, time.time(), attempts),
+    )
+
+
+
 class PostgresJobStore(JobRepository, JobQueue, JobConcurrency):
     """PostgreSQL-backed control-plane adapter (``MUSCATDB-LITE.md`` §12),
     selected via ``MUSCAT_CONTROL_PLANE=postgres``. Implements the same
@@ -909,31 +988,12 @@ class PostgresJobStore(JobRepository, JobQueue, JobConcurrency):
                 ).fetchone()[0]
                 if queued >= max_queued:
                     raise JobLimitExceeded(queued_limit_message(user_name, max_queued))
-            conn.execute(
-                """
-                INSERT INTO jobs(key, type, instrument, obsdate, target, state, returncode,
-                                  elapsed, started_at, error_desc, run_type, params, run_id,
-                                  run_name, user_name, owner, instance_id, heartbeat_at, attempts)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (key) DO UPDATE SET
-                    state        = EXCLUDED.state,
-                    returncode   = EXCLUDED.returncode,
-                    elapsed      = EXCLUDED.elapsed,
-                    started_at   = EXCLUDED.started_at,
-                    error_desc   = EXCLUDED.error_desc,
-                    run_type     = CASE WHEN EXCLUDED.run_type    != '' THEN EXCLUDED.run_type    ELSE jobs.run_type    END,
-                    params       = CASE WHEN EXCLUDED.params      != '' THEN EXCLUDED.params      ELSE jobs.params      END,
-                    run_id       = EXCLUDED.run_id,
-                    run_name     = CASE WHEN EXCLUDED.run_name    != '' THEN EXCLUDED.run_name    ELSE jobs.run_name    END,
-                    user_name    = CASE WHEN EXCLUDED.user_name   != '' THEN EXCLUDED.user_name   ELSE jobs.user_name   END,
-                    owner        = CASE WHEN EXCLUDED.owner       != '' THEN EXCLUDED.owner       ELSE jobs.owner       END,
-                    instance_id  = CASE WHEN EXCLUDED.instance_id != '' THEN EXCLUDED.instance_id ELSE jobs.instance_id END,
-                    heartbeat_at = EXCLUDED.heartbeat_at,
-                    attempts     = EXCLUDED.attempts
-                """,
-                (key, type_, inst, date, target, state, returncode, elapsed, started_at,
-                 error_desc, run_type, params, run_id, run_name, user_name, owner,
-                 instance_id, time.time(), attempts),
+            _pg_upsert_job_row(
+                conn, type_=type_, inst=inst, date=date, target=target, state=state,
+                returncode=returncode, elapsed=elapsed, started_at=started_at,
+                error_desc=error_desc, run_type=run_type, params=params, run_id=run_id,
+                run_name=run_name, user_name=user_name, owner=owner,
+                instance_id=instance_id, attempts=attempts,
             )
 
     def heartbeat(self, key: str, instance_id: str) -> None:
@@ -1124,6 +1184,7 @@ class PostgresJobStore(JobRepository, JobQueue, JobConcurrency):
         user_name: str | None = None,
         max_user_slots: int | None = None,
         pending_key: str | None = None,
+        running_row: dict | None = None,
     ) -> bool:
         with self._pool.connection() as conn:
             # Unlike SQLite (whole-database writer serialization even in WAL
@@ -1187,6 +1248,8 @@ class PostgresJobStore(JobRepository, JobQueue, JobConcurrency):
                 (*values, *predicate_values),
             )
             claimed = cur.rowcount > 0
+            if claimed and running_row is not None:
+                _pg_upsert_job_row(conn, **_running_row_fields(running_row))
             if claimed and pending_key is not None:
                 # Same transaction as the INSERT. Under READ COMMITTED a
                 # concurrent UPDATE of this row blocks here and then re-checks

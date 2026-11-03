@@ -2849,6 +2849,49 @@ def _ensure_jobs_migrated(conn: sqlite3.Connection, path: str) -> None:
         _migrated_paths.add(path)
 
 
+def job_row_key(type_: str, inst: str, date: str, target: str, run_id: str = "") -> str:
+    """The ``jobs`` primary key: run-scoped, so distinct runs of one target are
+    separate rows; an empty *run_id* reproduces the legacy key."""
+    key = f"{type_}:{inst}/{date}/{target.replace(' ', '')}"
+    return f"{key}/{run_id}" if run_id else key
+
+
+def upsert_job_row(conn, *, type_, inst, date, target, state, returncode, elapsed, started_at,
+                   error_desc="", run_type="", params="", run_id="", run_name="",
+                   user_name="", owner="", instance_id="", attempts=0) -> None:
+    """Upsert one ``jobs`` row on *conn*, without committing, so a caller can
+    make it part of a larger transaction (see ``claim_slot``'s running_row)."""
+    key = job_row_key(type_, inst, date, target, run_id)
+    conn.execute(
+        """INSERT INTO jobs(key, type, instrument, obsdate, target, state, returncode, elapsed, started_at, error_desc, run_type, params, run_id, run_name, user_name, owner, instance_id, heartbeat_at, attempts)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(key) DO UPDATE SET
+             state        = excluded.state,
+             returncode   = excluded.returncode,
+             elapsed      = excluded.elapsed,
+             started_at   = excluded.started_at,
+             error_desc   = excluded.error_desc,
+             run_type     = CASE WHEN excluded.run_type != '' THEN excluded.run_type ELSE run_type END,
+             params       = CASE WHEN excluded.params != '' THEN excluded.params ELSE params END,
+             run_id       = excluded.run_id,
+             run_name     = CASE WHEN excluded.run_name != '' THEN excluded.run_name ELSE run_name END,
+             user_name    = CASE WHEN excluded.user_name != '' THEN excluded.user_name ELSE user_name END,
+             owner        = CASE WHEN excluded.owner != '' THEN excluded.owner ELSE owner END,
+             instance_id  = CASE WHEN excluded.instance_id != '' THEN excluded.instance_id ELSE instance_id END,
+             heartbeat_at = excluded.heartbeat_at,
+             attempts     = excluded.attempts""",
+        # attempts is unconditionally overwritten (like state/returncode/
+        # elapsed), never preserved-on-omit like params/run_name/owner: a
+        # caller that omits it means "this is not a reconcile-retry
+        # bookkeeping write" and the counter should read 0, exactly the
+        # reset a fresh launch needs. Only the two call sites that read a
+        # row's current attempts back (jobs.py's reconcile-retry decision,
+        # and the pending-drain relaunch that carries it forward) ever
+        # pass a nonzero value.
+        (key, type_, inst, date, target, state, returncode, elapsed, started_at, error_desc, run_type, params, run_id, run_name, user_name, owner, instance_id, time.time(), attempts)
+    )
+
+
 def save_job(
     type_: str,
     inst: str,
@@ -2905,33 +2948,12 @@ def save_job(
             if queued >= max_pending:
                 conn.rollback()
                 raise JobLimitExceeded(queued_limit_message(user_name, max_pending))
-        conn.execute(
-            """INSERT INTO jobs(key, type, instrument, obsdate, target, state, returncode, elapsed, started_at, error_desc, run_type, params, run_id, run_name, user_name, owner, instance_id, heartbeat_at, attempts)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(key) DO UPDATE SET
-                 state        = excluded.state,
-                 returncode   = excluded.returncode,
-                 elapsed      = excluded.elapsed,
-                 started_at   = excluded.started_at,
-                 error_desc   = excluded.error_desc,
-                 run_type     = CASE WHEN excluded.run_type != '' THEN excluded.run_type ELSE run_type END,
-                 params       = CASE WHEN excluded.params != '' THEN excluded.params ELSE params END,
-                 run_id       = excluded.run_id,
-                 run_name     = CASE WHEN excluded.run_name != '' THEN excluded.run_name ELSE run_name END,
-                 user_name    = CASE WHEN excluded.user_name != '' THEN excluded.user_name ELSE user_name END,
-                 owner        = CASE WHEN excluded.owner != '' THEN excluded.owner ELSE owner END,
-                 instance_id  = CASE WHEN excluded.instance_id != '' THEN excluded.instance_id ELSE instance_id END,
-                 heartbeat_at = excluded.heartbeat_at,
-                 attempts     = excluded.attempts""",
-            # attempts is unconditionally overwritten (like state/returncode/
-            # elapsed), never preserved-on-omit like params/run_name/owner: a
-            # caller that omits it means "this is not a reconcile-retry
-            # bookkeeping write" and the counter should read 0, exactly the
-            # reset a fresh launch needs. Only the two call sites that read a
-            # row's current attempts back (jobs.py's reconcile-retry decision,
-            # and the pending-drain relaunch that carries it forward) ever
-            # pass a nonzero value.
-            (key, type_, inst, date, target, state, returncode, elapsed, started_at, error_desc, run_type, params, run_id, run_name, user_name, owner, instance_id, time.time(), attempts)
+        upsert_job_row(
+            conn, type_=type_, inst=inst, date=date, target=target, state=state,
+            returncode=returncode, elapsed=elapsed, started_at=started_at,
+            error_desc=error_desc, run_type=run_type, params=params, run_id=run_id,
+            run_name=run_name, user_name=user_name, owner=owner,
+            instance_id=instance_id, attempts=attempts,
         )
         conn.commit()
     clear_all_caches()

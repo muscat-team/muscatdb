@@ -317,6 +317,47 @@ class JobStoreContractTests:
         assert store.claim_slot("ttv_fit", "HIP1/default", 1, pending_key=row_key) is True
         assert store.get(row_key)["state"] == "running"
 
+    # --- claim that registers the running row (issue #325 item 3) -----------
+    #
+    # A direct launch has no pending row to move. It passes running_row, and the
+    # slot insert and the row's upsert to running are one transaction, so no
+    # reconcile_slots pass can see a slot without its running row.
+
+    _ROW = {
+        "type_": "photometry", "inst": "muscat4", "date": "260101", "target": "HIP1",
+        "run_id": "r1", "run_type": "full", "params": "{}", "run_name": "n",
+        "user_name": "alice", "started_at": 100.0,
+    }
+    _ROW_KEY = "photometry:muscat4/260101/HIP1/r1"
+
+    def test_claim_with_running_row_registers_the_row_running(self, store):
+        assert store.claim_slot("photometry", "muscat4/260101/HIP1/r1", 1, running_row=self._ROW) is True
+        row = store.get(self._ROW_KEY)
+        assert row["state"] == "running"
+        assert row["owner"] == job_store.current_owner()
+        assert row["instance_id"] == job_store.current_instance_id()
+        assert row["user_name"] == "alice"
+        assert time.time() - row["heartbeat_at"] < 60
+
+    def test_claim_with_running_row_survives_a_concurrent_reconcile(self, store):
+        """The launch window: another process's sync pass runs reconcile_slots
+        after the claim and before the launcher's own save(state="running")."""
+        assert store.claim_slot("photometry", "muscat4/260101/HIP1/r1", 1, running_row=self._ROW) is True
+        assert store.reconcile_slots("photometry") == 0
+        assert store.count_claimed("photometry") == 1
+        assert store.claim_slot("photometry", "other", 1) is False
+
+    def test_claim_with_running_row_at_capacity_writes_no_row(self, store):
+        assert store.claim_slot("photometry", "other", 1) is True
+        assert store.claim_slot("photometry", "muscat4/260101/HIP1/r1", 1, running_row=self._ROW) is False
+        assert store.get(self._ROW_KEY) is None
+
+    def test_claim_with_running_row_for_a_held_key_leaves_the_row_alone(self, store):
+        save(store, target="HIP1", state="done", started_at=50.0)
+        assert store.claim_slot("photometry", "k", 1) is True
+        assert store.claim_slot("photometry", "k", 1, running_row=self._ROW) is False
+        assert store.get(self._ROW_KEY) is None
+
     # --- per-host concurrency cap (architecture issue #51's rejected
     # os.getloadavg() replacement) --------------------------------------
     #

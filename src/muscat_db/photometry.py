@@ -44,7 +44,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from muscat_db import jobs, database, exposure as exp_calc, catalog as catalog_lookup
-from muscat_db.job_store import current_instance_id, current_owner, get_job_store
+from muscat_db.job_store import abandon_claimed_launch, current_instance_id, current_owner, get_job_store
 from muscat_db.job_limits import JobLimitExceeded, claim_caps, claim_caps_for_row, enqueue_caps, full_job_cap, limit_refusal, params_with_running_cap
 from muscat_db.ref_time import is_valid_ref_time
 from muscat_db.instruments import INSTRUMENTS
@@ -2203,9 +2203,16 @@ def start_run(
 
         # Claim a cross-process concurrency slot for full jobs (test jobs are
         # capped above instead). Not yet claimed here just means queue below.
+        # The claim registers the running row in the same transaction, so a
+        # concurrent reconcile_slots never sees the slot without it (#325).
         claimed_slot = False
+        launch_row = {
+            "type_": "photometry", "inst": inst, "date": date, "target": target,
+            "run_id": run_id, "run_type": run_type, "params": run_params_json,
+            "run_name": run_name, "user_name": user_name, "started_at": time.time(),
+        }
         if run_type == "full":
-            claimed_slot = get_job_store().claim_slot("photometry", key, _MAX_FULL_JOBS, **claim_caps(user_name))
+            claimed_slot = get_job_store().claim_slot("photometry", key, _MAX_FULL_JOBS, running_row=launch_row, **claim_caps(user_name))
         at_capacity = run_type == "full" and not claimed_slot
 
         # Queue full jobs when at capacity
@@ -2232,13 +2239,13 @@ def start_run(
             rdir = run_output_dir(inst, date, target, run_id)
         except ValueError as exc:
             if claimed_slot:
-                get_job_store().release_slot("photometry", key)
+                abandon_claimed_launch(get_job_store(), "photometry", key, launch_row, str(exc))
             return {"ok": False, "error": str(exc)}
         if overwrite:
             ok, removed, delete_error = _delete_reduction_files(inst, date, target, run_id, keep_record=True)
             if not ok:
                 if claimed_slot:
-                    get_job_store().release_slot("photometry", key)
+                    abandon_claimed_launch(get_job_store(), "photometry", key, launch_row, f"Previous products could not be deleted: {delete_error}")
                 return {"ok": False, "error": jobs.server_fault("The previous reduction products could not be deleted before the re-run", delete_error)}
             if removed:
                 logger.info(f"start_run: deleted {removed} previous product(s) for {key} before overwrite run")
@@ -2270,7 +2277,7 @@ def start_run(
                 logger.debug("failed to write %s in %s", _PID_FILE_NAME, rdir, exc_info=True)
         except (FileNotFoundError, OSError) as exc:
             if claimed_slot:
-                get_job_store().release_slot("photometry", key)
+                abandon_claimed_launch(get_job_store(), "photometry", key, launch_row, f"Failed to launch: {exc}")
             logf.write(f"\nfailed to launch pipeline: {exc}\n")
             logf.close()
             return {"ok": False, "error": jobs.server_fault("The server could not start the photometry pipeline", exc)}
@@ -2302,7 +2309,7 @@ def start_run(
             # DB write failed (e.g. read-only database). Roll back the launched
             # process and job so we don't leak a running pipeline we can't track.
             if claimed_slot:
-                get_job_store().release_slot("photometry", key)
+                abandon_claimed_launch(get_job_store(), "photometry", key, launch_row, f"Database not writable: {exc}")
             try:
                 proc.terminate()
             except OSError:
