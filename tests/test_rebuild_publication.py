@@ -337,6 +337,34 @@ def test_publication_retries_abandoned_shadows_without_duplicate_indexes(
             assert conn.execute('PRAGMA integrity_check').fetchone() == ('ok',)
 
 
+def test_publication_reuses_canonical_indexes_named_in_other_case(catalogs):
+    # SQLite compares index names case-insensitively: a live IDX_FRAMES_INST_DATE
+    # already occupies the name idx_frames_inst_date, so publication must not
+    # try to create that name again.
+    live, staged = catalogs
+    with database.get_conn(live) as conn:
+        for name in database._CATALOG_INDEX_TABLES:
+            sql = conn.execute(
+                "SELECT sql FROM sqlite_schema WHERE name=?", (name,),
+            ).fetchone()[0]
+            conn.execute(f'DROP INDEX "{name}"')
+            conn.execute(sql.replace(name, name.upper(), 1))
+        conn.commit()
+
+    database._publish_catalog(staged, live)
+
+    with database.get_conn(live) as conn:
+        database._apply_schema(conn)
+        conn.commit()
+        assert _catalog_values(conn) == ['TOI-1234'] * 4
+        actual = [
+            tuple(row[2] for row in conn.execute(f'PRAGMA index_info("{index[1]}")'))
+            for index in conn.execute('PRAGMA index_list(frames)').fetchall()
+        ]
+        assert sorted(actual) == sorted([('instrument', 'obsdate'), ('object',), ('proposal_id',)])
+        assert conn.execute('PRAGMA integrity_check').fetchone() == ('ok',)
+
+
 def test_second_builder_waits_for_the_catalog_build_lock(live_db, monkeypatch):
     """Rebuilds serialize: a second build_db must not start while one holds the lock."""
     built = []
