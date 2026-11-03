@@ -223,6 +223,8 @@ guard_staging_paths() {
   refuse_prod_path MUSCAT_PROSE_DIR "$SP_PROSE_DIR"
   refuse_prod_path MUSCAT_TIMER_DIR "$SP_TIMER_DIR"
   refuse_prod_path MUSCAT_TTV_DIR "$SP_TTV_DIR"
+  # Copied into the worktree .env, so its keys (e.g. the Postgres DSN) come along.
+  refuse_prod_path STAGING_ENV "$STAGING_ENV"
 }
 
 write_env() {

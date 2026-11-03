@@ -166,6 +166,31 @@ def test_staging_root_inside_production_checkout_is_refused(host):
     host.assert_untouched()
 
 
+def test_staging_env_inside_production_is_refused(host):
+    """STAGING_ENV is copied into the worktree's .env, so a production env file
+    would bring its keys (the Postgres DSN included) along."""
+    prod_env = host.prod_root / "app" / ".env"
+    prod_env.parent.mkdir(parents=True)
+    prod_env.write_text("MUSCAT_POSTGRES_DSN=postgresql://prod\n")
+    result = host.run(STAGING_ENV=str(prod_env))
+    assert result.returncode != 0
+    assert "STAGING_ENV" in result.stderr
+    assert "inside production" in result.stderr
+    host.assert_untouched()
+
+
+def test_staging_env_symlinked_to_production_is_refused(host):
+    prod_env = host.prod_root / ".env"
+    prod_env.write_text("MUSCAT_POSTGRES_DSN=postgresql://prod\n")
+    link = host.staging / "app" / ".env"
+    link.unlink()
+    link.symlink_to(prod_env)
+    result = host.run()
+    assert result.returncode != 0
+    assert "STAGING_ENV" in result.stderr
+    host.assert_untouched()
+
+
 def test_sibling_with_shared_prefix_is_not_mistaken_for_production(host):
     """`/x/obslog2` is not inside `/x/obslog`: the check is path-component
     aware, not a string prefix."""
