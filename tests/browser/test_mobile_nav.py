@@ -58,7 +58,12 @@ def test_escape_closes_menu_and_returns_focus(phone):
 def test_outside_tap_closes_menu(phone):
     phone.goto("/")
     phone.click(BUTTON)
-    phone.mouse.click(5, 695)  # below the open menu
+    # The open menu can fill the viewport down to its bottom edge (font-dependent),
+    # so tap the empty header bar between the brand and the buttons instead.
+    brand = phone.locator("nav .brand").bounding_box()
+    button = phone.locator(BUTTON).bounding_box()
+    x = (brand["x"] + brand["width"] + button["x"]) / 2
+    phone.mouse.click(x, brand["y"] + brand["height"] / 2)
     expect(phone.locator(MENU)).to_be_hidden()
 
 
