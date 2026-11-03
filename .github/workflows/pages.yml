@@ -48,7 +48,7 @@ jobs:
       - name: Build MkDocs then nest the UI snapshot at site/home
         run: |
           uv run mkdocs build --site-dir site
-          uv run python -c "from tests.test_static_site import _build_tiny_db; _build_tiny_db('mock_muscat.db')"
+          uv run python -c "from muscat_db.static_site import build_tiny_db; build_tiny_db('mock_muscat.db')"
           uv run muscat-db build-static-site --out site/home --db mock_muscat.db --no-figures
 
       - name: Configure Pages
