@@ -246,3 +246,167 @@ class TestTTLCacheInvalidationGeneration:
         assert len(cache.cache) == 0  # the rejected value was not stored
         assert evaluate() == {"ok": True}
         assert evaluate() == {"ok": True}  # the accepted value is cached
+
+
+# --- concurrent misses share one lookup (#325) --------------------------------
+
+
+def _run_threads(target, n):
+    results, errors = [None] * n, [None] * n
+
+    def work(i):
+        try:
+            results[i] = target(i)
+        except BaseException as exc:  # noqa: BLE001 - reported to the test
+            errors[i] = exc
+
+    threads = [threading.Thread(target=work, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    return threads, results, errors
+
+
+def test_concurrent_misses_for_one_key_run_the_lookup_once():
+    calls = []
+    release = threading.Event()
+    started = threading.Event()
+
+    @TTLCache(ttl=60)
+    def lookup(x):
+        calls.append(x)
+        started.set()
+        release.wait(5)
+        return x * 2
+
+    threads, results, errors = _run_threads(lambda i: lookup(21), 8)
+    assert started.wait(5)
+    time.sleep(0.1)  # let the other callers reach the wait
+    release.set()
+    for t in threads:
+        t.join(5)
+    assert errors == [None] * 8
+    assert results == [42] * 8
+    assert calls == [21]
+
+
+def test_misses_for_different_keys_do_not_wait_for_each_other():
+    both_in = threading.Barrier(2, timeout=5)
+
+    @TTLCache(ttl=60)
+    def lookup(x):
+        both_in.wait()  # only passes if both lookups run at the same time
+        return x
+
+    threads, results, errors = _run_threads(lambda i: lookup(i), 2)
+    for t in threads:
+        t.join(10)
+    assert errors == [None, None]
+    assert sorted(results) == [0, 1]
+
+
+def test_a_failed_lookup_is_not_shared_with_waiting_callers():
+    calls = []
+    release = threading.Event()
+
+    @TTLCache(ttl=60)
+    def lookup():
+        calls.append(len(calls))
+        if len(calls) == 1:
+            release.wait(5)
+            raise RuntimeError("upstream down")
+        return "ok"
+
+    threads, results, errors = _run_threads(lambda i: lookup(), 4)
+    time.sleep(0.2)
+    release.set()
+    for t in threads:
+        t.join(5)
+    assert sum(isinstance(e, RuntimeError) for e in errors) == 1  # only the leader saw it
+    assert [r for r in results if r is not None] == ["ok"] * 3
+
+
+def test_a_result_the_predicate_rejects_is_not_shared():
+    calls = []
+    release = threading.Event()
+
+    @TTLCache(ttl=60, cache_if=lambda v: v is not None)
+    def lookup():
+        calls.append(len(calls))
+        if len(calls) == 1:
+            release.wait(5)
+            return None  # transient failure
+        return "ok"
+
+    threads, results, _ = _run_threads(lambda i: lookup(), 4)
+    time.sleep(0.2)
+    release.set()
+    for t in threads:
+        t.join(5)
+    assert sorted(r for r in results if r is not None) == ["ok"] * 3
+    assert lookup() == "ok"  # the good value was cached
+
+
+def test_a_clear_during_the_lookup_is_not_shared_with_waiting_callers():
+    """#366 still holds: callers waiting on a lookup that started before a
+    clear() get a fresh value, not the one computed against the old state."""
+    state = {"v": "old"}
+    release = threading.Event()
+    started = threading.Event()
+    seen = []
+
+    cache = TTLCache(ttl=60)
+
+    @cache
+    def lookup():
+        value = state["v"]
+        seen.append(value)
+        if value == "old":
+            started.set()
+            release.wait(5)
+        return value
+
+    threads, results, _ = _run_threads(lambda i: lookup(), 4)
+    assert started.wait(5)
+    time.sleep(0.1)
+    state["v"] = "new"
+    cache.clear()
+    release.set()
+    for t in threads:
+        t.join(5)
+    assert results.count("old") == 1  # the leader returns its own result
+    assert results.count("new") == 3
+    assert lookup() == "new"
+
+
+def test_a_lookup_that_calls_itself_does_not_wait_on_itself():
+    @TTLCache(ttl=60)
+    def fib(n):
+        return n if n < 2 else fib(n - 1) + fib(n - 2)
+
+    done = []
+    t = threading.Thread(target=lambda: done.append(fib(10)))
+    t.start()
+    t.join(5)
+    assert done == [55]
+
+
+def test_a_hung_lookup_does_not_stall_other_callers(monkeypatch):
+    from muscat_db import cache as cache_module
+
+    monkeypatch.setattr(cache_module, "_FLIGHT_WAIT_S", 0.2)
+    hang = threading.Event()
+    calls = []
+
+    @TTLCache(ttl=60)
+    def lookup():
+        calls.append(1)
+        if len(calls) == 1:
+            hang.wait(5)  # the leader never finishes in time
+        return "ok"
+
+    leader = threading.Thread(target=lookup)
+    leader.start()
+    time.sleep(0.1)
+    assert lookup() == "ok"  # waits ~0.2 s, then runs its own lookup
+    hang.set()
+    leader.join(5)
