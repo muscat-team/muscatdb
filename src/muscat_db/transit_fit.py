@@ -1629,9 +1629,13 @@ def _write_fit_product(
         runs_root = output_base() / inst / date / "_runs" / _target_dir_name(target)
     except ValueError:
         runs_root = None
-    inputs = [
+    from muscat_db.product_visibility import pin_product_inputs
+
+    # Pinned, so the fit stays tied to the photometry it consumed even if a
+    # run of that name is replaced later (#325).
+    inputs = pin_product_inputs([
         product_record.lightcurve_input(inst, date, target, c, runs_root) for c in csvs
-    ]
+    ])
     product_record.write_rerun_record(rdir, product_record.build_record(
         "transit_fit",
         author=user_name,
