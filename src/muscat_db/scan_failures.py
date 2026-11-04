@@ -8,7 +8,11 @@ lands here, one JSON object per line, keyed by ``(instrument, obsdate)``:
     {"instrument": "muscat2", "obsdate": "250310", "reason": "OSError: ...",
      "first_failed": "...", "last_failed": "...", "attempts": 2}
 
-and the entry is removed once a later scan of that date writes cleanly. The
+and the entry is removed once a later scan of that date writes cleanly. A
+scan under a non-default ``data_root`` (the LCO download tree) also records
+``"data_root"``, so the sweep retries it where the files are instead of on
+the default root, where nothing would be found and the entry would stay open
+forever. The
 file is the set of *open* failures, not a history; the scan logs keep that.
 
 It lives at the obslog root (``$OBSLOG_BASE/.scan-failures.jsonl``), beside the
@@ -92,8 +96,15 @@ def _rewrite(base: str, entries: list[dict]) -> None:
     os.replace(tmp, path)
 
 
-def record(base: str, instrument: str, obsdate: str, reason: str) -> None:
-    """Add or refresh the open failure for ``(instrument, obsdate)``."""
+def record(
+    base: str, instrument: str, obsdate: str, reason: str, data_root: str | None = None,
+) -> None:
+    """Add or refresh the open failure for ``(instrument, obsdate)``.
+
+    *data_root* is the non-default root the failing scan looked under, or None
+    for the default one. The latest failure decides what the entry carries,
+    since the retry should look where the most recent scan did.
+    """
     now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
     reason = reason[:_MAX_REASON_CHARS]
     try:
@@ -107,10 +118,15 @@ def record(base: str, instrument: str, obsdate: str, reason: str) -> None:
                     )
                     break
             else:
-                entries.append({
+                entry = {
                     "instrument": instrument, "obsdate": obsdate, "reason": reason,
                     "first_failed": now, "last_failed": now, "attempts": 1,
-                })
+                }
+                entries.append(entry)
+            if data_root is None:
+                entry.pop("data_root", None)
+            else:
+                entry["data_root"] = data_root
             _rewrite(base, entries)
     except OSError as exc:
         logger.warning(

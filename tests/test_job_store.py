@@ -7,6 +7,7 @@ tests/test_job_store_postgres.py); this file adds the seam's swap point
 (set_job_store/get_job_store) checks, which are backend-agnostic.
 """
 
+import contextlib
 import re
 import threading
 import time
@@ -293,3 +294,52 @@ class TestJobConcurrencySlotsColumnMigrations:
         assert [col for col, _ in database._JOB_CONCURRENCY_SLOTS_COLUMN_MIGRATIONS] == [
             col for col, _ in job_store._PG_JOB_CONCURRENCY_SLOTS_COLUMN_MIGRATIONS
         ]
+
+
+class TestGetIsIndexed:
+    """``get`` must not read the whole jobs history (#325)."""
+
+    def test_get_fetches_one_row_not_the_history(self, store, monkeypatch):
+        for i in range(2000):
+            store.save(
+                type_="photometry", inst="muscat2", date="20250101", target=f"T{i}",
+                state="done", returncode=0, elapsed=1, started_at=float(i),
+            )
+        keys = [j["key"] for j in store.all()]
+        expected = next(j for j in store.all() if j["key"] == keys[1234])
+
+        fetched = []
+        real_get_conn = database.get_conn
+
+        class _Cur:
+            def __init__(self, cur):
+                self._cur = cur
+                self.description = cur.description
+
+            def fetchall(self):
+                rows = self._cur.fetchall()
+                fetched.append(len(rows))
+                return rows
+
+            def fetchone(self):
+                row = self._cur.fetchone()
+                fetched.append(0 if row is None else 1)
+                return row
+
+        class _Conn:
+            def __init__(self, conn):
+                self._conn = conn
+
+            def execute(self, *args, **kwargs):
+                return _Cur(self._conn.execute(*args, **kwargs))
+
+        @contextlib.contextmanager
+        def wrapped(*a, **k):
+            with real_get_conn(*a, **k) as conn:
+                yield _Conn(conn)
+
+        monkeypatch.setattr(database, "get_conn", wrapped)
+
+        assert store.get(keys[1234]) == expected
+        assert store.get("no-such-key") is None
+        assert sum(fetched) <= 1

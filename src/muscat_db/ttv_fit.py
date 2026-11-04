@@ -383,6 +383,12 @@ def _write_ttv_product(rdir: pathlib.Path, options: dict, user_name: str | None)
             inputs, note = None, "inputs were empty but the fit has transit times"
     else:
         note = "client did not submit inputs"
+    if inputs:
+        # Pinned, so the fit stays tied to the transit fits it consumed even if
+        # a run of that name is replaced later (#325).
+        from muscat_db.product_visibility import pin_product_inputs
+
+        inputs = pin_product_inputs(inputs)
     # csv_content / ini_content are the staged data inputs, already in meta.yaml.
     settings = {k: v for k, v in options.items() if k not in ("csv_content", "ini_content", "inputs")}
     product_record.write_rerun_record(rdir, product_record.build_record(
@@ -789,7 +795,16 @@ def cancel_ttv_fit(target: str, run_name: str = "") -> dict:
                 # process: marking the row cancelled here would report a still
                 # running fit as stopped. It acts on this request itself.
                 return {"ok": True, "key": found[0]["key"], "requested": True}
-            if found and found[0]["state"] in ("running", "pending"):
+            if found and found[0]["state"] == "pending":
+                if store.cancel_pending(found[0]["key"]):
+                    return {"ok": True, "key": found[0]["key"]}
+                # A worker claimed it between the read above and the write:
+                # the row is running now, so leave the request its holder
+                # acts on instead of overwriting the claim.
+                if store.request_cancel(found[0]["key"]):
+                    return {"ok": True, "key": found[0]["key"], "requested": True}
+                return {"ok": False, "error": "no job to cancel"}
+            if found and found[0]["state"] == "running":
                 store.save(
                     type_="ttv_fit",
                     inst=found[0].get("inst") or "_",

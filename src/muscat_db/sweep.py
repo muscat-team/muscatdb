@@ -116,24 +116,30 @@ def _csv_rows(inst_name: str, obsdate: str, ccd: int) -> int:
         return 0
 
 
-def _shrink_reason(inst_name: str, obsdate: str) -> str | None:
-    """Why rescanning would lose rows, or None if it would not."""
+def _shrink_reason(inst_name: str, obsdate: str, data_root: str | None = None) -> str | None:
+    """Why rescanning would lose rows, or None if it would not.
+
+    *data_root* is the root the rescan will look under; counting raw matches
+    anywhere else would hold a date whose files live only in the LCO tree.
+    """
     inst = INSTRUMENTS[inst_name]
     for ccd in range(inst.nccd):
         rows = _csv_rows(inst_name, obsdate, ccd)
         if not rows:
             continue
-        raw = len(_find_fits_files(inst, obsdate, ccd))
+        raw = len(_find_fits_files(inst, obsdate, ccd, data_root=data_root))
         if raw < rows:
             return f"rescan would shrink ccd{ccd} from {rows} CSV rows to {raw} raw matches"
     return None
 
 
-def _hold_reason(inst_name: str, obsdate: str, known: dict[tuple[str, str], str]) -> str | None:
+def _hold_reason(
+    inst_name: str, obsdate: str, known: dict[tuple[str, str], str], data_root: str | None = None,
+) -> str | None:
     ref = known.get((inst_name, obsdate))
     if ref:
         return ref
-    return _shrink_reason(inst_name, obsdate)
+    return _shrink_reason(inst_name, obsdate, data_root)
 
 
 def _raw_signature(inst_name: str, obsdate: str) -> int | None:
@@ -212,12 +218,16 @@ def _retry_failures(result: SweepResult, known, max_workers: int) -> None:
             continue
         if key[1] in result.scanned.get(key[0], []):
             continue  # step 1 rescanned it; still listed means it failed again
-        why = _hold_reason(*key, known)
+        # A failure recorded under the LCO download root is retried there:
+        # on the default root the files are absent, so nothing is found and
+        # the entry never closes.
+        data_root = entry.get("data_root")
+        why = _hold_reason(*key, known, data_root)
         if why:
             result.held.append((*key, why))
             continue
         try:
-            ok = scan_date(*key, max_workers=max_workers)
+            ok = scan_date(*key, max_workers=max_workers, data_root=data_root)
         except Exception:
             logger.warning("sweep retry of %s %s failed again", *key, exc_info=True)
             result.failed.append(key)

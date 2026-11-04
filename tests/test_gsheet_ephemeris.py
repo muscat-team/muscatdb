@@ -344,3 +344,35 @@ def test_suggest_tc_columns_maps_standard_headers():
     assert suggested["tc"] == "tc"
     assert suggested["tc_unc"] == "tc_unc"
     assert suggested["planet"] == "planet"
+
+
+def test_query_target_transit_centers_keeps_time_scale_of_mapped_column(monkeypatch):
+    # An explicitly mapped tc column with a non-standard name is renamed to
+    # "tc" for the parser; its BJD_TDB label must survive the rename, or the
+    # fit refuses the tab for an unspecified time scale.
+    csv_text = (
+        "Star,pl,E,Mid-transit (BJD_TDB),Mid-transit err\n"
+        "WASP-12,b,0,2456305.4555,0.001\n"
+        "WASP-12,b,1,2456306.5469,0.001\n"
+    )
+    monkeypatch.setattr(gs, "_fetch_tab_csv", lambda sid, tab: csv_text)
+    col_map = {
+        "target": "Star", "planet": "pl", "epoch": "E",
+        "tc": "Mid-transit (BJD_TDB)", "tc_unc": "Mid-transit err",
+    }
+    out = gs.query_target_transit_centers("WASP-12", SHEET_URL, "tc", col_map)
+    assert len(out["rows"]) == 2
+    assert out["time_system"]["value"] == "BJD_TDB"
+    assert out["time_system"]["confirmed"] is True
+
+
+def test_query_target_transit_centers_flags_bjd_utc_column(monkeypatch):
+    csv_text = (
+        "target,planet,epoch,tc_BJD_UTC,tc_unc\n"
+        "WASP-12,b,0,2456305.4555,0.001\n"
+        "WASP-12,b,1,2456306.5469,0.001\n"
+    )
+    monkeypatch.setattr(gs, "_fetch_tab_csv", lambda sid, tab: csv_text)
+    out = gs.query_target_transit_centers("WASP-12", SHEET_URL, "tc")
+    assert len(out["rows"]) == 2
+    assert out["time_system"] == {"value": "BJD_UTC", "confirmed": True, "supported": False}

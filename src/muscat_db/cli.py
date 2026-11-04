@@ -360,12 +360,13 @@ def scan_failures_cmd():
         console.print("[green]No open scan failures[/]")
         return
     table = Table(title=f"Open scan failures ({scan_failures.ledger_path(scanner.OBSLOG_BASE)})")
-    for col in ("instrument", "obsdate", "attempts", "first failed", "last failed", "reason"):
+    for col in ("instrument", "obsdate", "attempts", "first failed", "last failed", "data root", "reason"):
         table.add_column(col)
     for e in sorted(entries, key=lambda e: (e["instrument"], e["obsdate"])):
         table.add_row(
             e["instrument"], e["obsdate"], str(e.get("attempts", 1)),
-            e.get("first_failed", ""), e.get("last_failed", ""), e.get("reason", ""),
+            e.get("first_failed", ""), e.get("last_failed", ""), e.get("data_root", ""),
+            e.get("reason", ""),
         )
     console.print(table)
 

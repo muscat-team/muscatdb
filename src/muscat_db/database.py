@@ -261,6 +261,8 @@ CREATE TABLE IF NOT EXISTS lco_observation_requests (
     target              TEXT NOT NULL DEFAULT '',
     instrument          TEXT NOT NULL DEFAULT '',
     user_name           TEXT NOT NULL DEFAULT '',
+    supersedes_request_id INTEGER,
+    rescue_reason       TEXT NOT NULL DEFAULT '',
     request_state       TEXT NOT NULL DEFAULT 'PENDING',
     monitor_state       TEXT NOT NULL DEFAULT 'monitoring',
     window_start        TEXT NOT NULL DEFAULT '',
@@ -300,6 +302,30 @@ CREATE TABLE IF NOT EXISTS lco_observation_frames (
     PRIMARY KEY (request_id, frame_id),
     FOREIGN KEY (request_id) REFERENCES lco_observation_requests(request_id)
         ON DELETE CASCADE
+);
+
+-- A committed reservation precedes any external cancellation/submission.
+-- Uncertain outcomes retain their reservation and are never automatically retried.
+CREATE TABLE IF NOT EXISTS lco_rescue_attempts (
+    original_id INTEGER PRIMARY KEY,
+    proposal TEXT NOT NULL,
+    reserved_seconds REAL NOT NULL,
+    state TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    params_json TEXT NOT NULL,
+    result_json TEXT NOT NULL DEFAULT '{}',
+    reason TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    next_retry_at REAL NOT NULL DEFAULT 0,
+    retry_count INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS lco_rescue_notices (
+    original_id INTEGER NOT NULL,
+    event TEXT NOT NULL,
+    message_id INTEGER NOT NULL,
+    PRIMARY KEY(original_id, event)
 );
 
 CREATE TABLE IF NOT EXISTS lco_monitor_leases (
@@ -486,7 +512,7 @@ CREATE TABLE IF NOT EXISTS group_grants_revoked (
 );
 """
 
-# Published indexes alternate names because SQLite cannot rename an index.
+# Published indexes use _next_ prefixes because SQLite cannot rename an index.
 # Schema initialization must recognize the equivalent index on the active table,
 # rather than rebuilding a duplicate over millions of rows after publication.
 _CATALOG_INDEX_TABLES = {
@@ -500,10 +526,13 @@ _CATALOG_INDEX_TABLES = {
 def _catalog_index_needed(conn: sqlite3.Connection, sql: str) -> bool:
     for name, table in _CATALOG_INDEX_TABLES.items():
         if re.search(r"\b" + name + r"\b", sql):
-            return not conn.execute(
-                "SELECT 1 FROM sqlite_schema WHERE type='index' AND tbl_name=? "
-                "AND name IN (?, ?)", (table, name, "_next_" + name),
-            ).fetchone()
+            return not any(
+                re.fullmatch(r"(?:_next_)*" + re.escape(name), index)
+                for (index,) in conn.execute(
+                    "SELECT name FROM main.sqlite_schema WHERE type='index' AND tbl_name=?",
+                    (table,),
+                )
+            )
     return True
 
 
@@ -511,6 +540,10 @@ def _catalog_index_needed(conn: sqlite3.Connection, sql: str) -> bool:
 # Each migration is attempted unconditionally; "duplicate column" errors are
 # silently swallowed so the function is safe to call multiple times.
 _MIGRATIONS = [
+    "ALTER TABLE lco_observation_requests ADD COLUMN supersedes_request_id INTEGER",
+    "ALTER TABLE lco_observation_requests ADD COLUMN rescue_reason TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE lco_rescue_attempts ADD COLUMN next_retry_at REAL NOT NULL DEFAULT 0",
+    "ALTER TABLE lco_rescue_attempts ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0",
     # 2026-07-12: group simultaneous multi-telescope sinistro nights separately
     "ALTER TABLE summaries ADD COLUMN telescope TEXT",
     # 2026-07-24: user override for normalized target names
@@ -1011,6 +1044,8 @@ _APP_OWNED_TABLES = (
     "test_observations",
     "lco_observation_requests",
     "lco_observation_frames",
+    "lco_rescue_attempts",
+    "lco_rescue_notices",
     "chat_messages",
     "chat_reactions",
     "target_tags",
@@ -1081,9 +1116,13 @@ def _copy_catalog_table(conn: sqlite3.Connection, table: str) -> None:
         "SELECT name, sql FROM rebuilt.sqlite_schema "
         "WHERE type='index' AND tbl_name=? AND sql IS NOT NULL", (table,)
     ).fetchall():
-        index = "_next_" + name if conn.execute(
-            "SELECT 1 FROM main.sqlite_schema WHERE name=?", (name,)
-        ).fetchone() else name
+        # Legacy databases can contain both the canonical and _next_ index
+        # on the active table. Keep both intact until the old table retires.
+        index = name
+        while conn.execute(
+            "SELECT 1 FROM main.sqlite_schema WHERE name=? COLLATE NOCASE", (index,)
+        ).fetchone():
+            index = "_next_" + index
         sql = re.sub(r'CREATE INDEX\s+(?:IF NOT EXISTS\s+)?(?:"[^"]+"|\w+)\s+ON\s+(?:"[^"]+"|\w+)',
                      f'CREATE INDEX "{index}" ON "{shadow}"', sql, count=1, flags=re.IGNORECASE)
         conn.execute(sql)
@@ -2945,6 +2984,28 @@ def get_persisted_jobs() -> list[dict]:
                 d["run_name"] = str(d.get("run_id") or "").strip()
             result.append(d)
         return result
+
+
+def get_persisted_job(key: str) -> dict | None:
+    """Return the row for *key*, or ``None``, via the primary-key index.
+
+    ``key`` is the table's primary key, so at most one row matches. Unlike
+    scanning :func:`get_persisted_jobs`, the work does not grow with history.
+    """
+    path = db_path()
+    with get_conn(path) as conn:
+        _ensure_jobs_migrated(conn, path)
+        cur = conn.execute("SELECT * FROM jobs WHERE key = ?", (key,))
+        columns = [d[0] for d in cur.description]
+        row = cur.fetchone()
+        if row is None:
+            return None
+        item = dict(zip(columns, row))
+        item["inst"] = item["instrument"]
+        item["date"] = item["obsdate"]
+        if not str(item.get("run_name") or "").strip():
+            item["run_name"] = str(item.get("run_id") or "").strip()
+        return item
 
 
 def get_active_persisted_jobs() -> list[dict]:

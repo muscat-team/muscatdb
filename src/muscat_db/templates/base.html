@@ -63,6 +63,7 @@
 <div id="loading-bar" role="progressbar" aria-label="Loading"></div>
 <nav>
   <a class="brand" href="/" data-nav-section="home">MuSCAT-db</a>
+  <div id="nav-menu" class="nav-links">
   <a href="/targets" data-nav-section="targets">Targets</a>
   <a href="/obs" data-nav-section="obslog">Obs</a>
   <a href="/projects" data-nav-section="projects">Projects</a>
@@ -79,6 +80,14 @@
   <a href="/nexsci" data-nav-section="nexsci">NExScI</a>
   <a href="/guide" data-nav-section="guide" style="margin-right: 0.5rem;">Guide</a>
   <a href="/settings" data-nav-section="settings">Settings <span class="badge" id="current-user-badge"{% if not current_user %} hidden{% endif %}>{{ current_user or '' }}</span></a>
+  <div class="nav-user" id="nav-user"{% if not current_user %} hidden{% endif %}>
+    <span class="nav-user-name" id="nav-user-name">{{ current_user or '' }}</span>
+    <button class="nav-logout btn" id="nav-logout" type="button">Log out</button>
+  </div>
+  </div>
+  <button id="nav-menu-btn" class="nav-menu-btn" type="button" aria-expanded="false" aria-controls="nav-menu" aria-label="Menu">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/></svg>
+  </button>
   <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Toggle light/dark theme" title="Toggle theme">
     <svg class="icon-sun" viewBox="0 0 24 24" aria-hidden="true">
       <circle cx="12" cy="12" r="4"/>
@@ -135,6 +144,34 @@
     });
   })();
 
+  // Narrow-screen menu: the links collapse behind #nav-menu-btn.
+  (function () {
+    var logout = document.getElementById('nav-logout');
+    if (logout) logout.addEventListener('click', function () { window.location.assign('/logout'); });
+    var btn = document.getElementById('nav-menu-btn');
+    var menu = document.getElementById('nav-menu');
+    if (!btn || !menu) return;
+    function setOpen(open) {
+      btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+      menu.classList.toggle('open', open);
+    }
+    btn.addEventListener('click', function () {
+      setOpen(btn.getAttribute('aria-expanded') !== 'true');
+    });
+    menu.addEventListener('click', function (e) {
+      if (e.target.closest('a')) setOpen(false);
+    });
+    document.addEventListener('click', function (e) {
+      if (!e.target.closest('#nav-menu') && !e.target.closest('#nav-menu-btn')) setOpen(false);
+    });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && btn.getAttribute('aria-expanded') === 'true') {
+        setOpen(false);
+        btn.focus();
+      }
+    });
+  })();
+
   // Resolve the current nginx-authenticated user once, per request and uncached
   // (see /whoami in web.py). The result is shared via a promise so the navbar
   // badge and the chat widget reuse a single request instead of each firing
@@ -155,6 +192,9 @@
         badge.textContent = user;
         badge.hidden = false;
       }
+      var box = document.getElementById('nav-user');
+      var name = document.getElementById('nav-user-name');
+      if (box && name) { name.textContent = user; box.hidden = false; }
     });
   })();
 </script>

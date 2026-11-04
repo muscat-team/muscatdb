@@ -32,7 +32,11 @@ the re-runner chose its inputs.
 there but the inputs could not be established, so the product must be treated
 as admin-only until someone can supply them. An empty list is a real answer
 ("no inputs") only for a product that has none, such as a TTV fit with no
-times; it is never a stand-in for unknown. A frames input keeps blank PROPIDs
+times; it is never a stand-in for unknown. A ``product`` input also carries a
+``pinned`` manifest, ``{"maker": ..., "inputs": ...}``, copied from the upstream
+record when this one was written (:func:`muscat_db.product_visibility.pin_product_inputs`),
+so visibility follows the upstream that was actually consumed. Only the server
+writes it; points submitted by a client are rebuilt from known fields. A frames input keeps blank PROPIDs
 as ``""`` so a rule that treats blank as denied can see them.
 """
 

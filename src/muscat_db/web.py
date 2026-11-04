@@ -68,6 +68,7 @@ from fastapi.responses import (
     FileResponse,
     HTMLResponse,
     JSONResponse,
+    PlainTextResponse,
     RedirectResponse,
     Response,
     StreamingResponse,
@@ -97,6 +98,7 @@ from muscat_db.auth import (
     PROXY_SECRET_HEADER,
     UNKNOWN_EMAIL,
     admin_email_message,
+    is_email_identity,
     authentication_required as _authentication_required,
     resolve_forwarded_identity,
     unauthenticated_message,
@@ -427,7 +429,6 @@ _SSE_ACTIVE_STATES = frozenset({"running", "cancelling", "finalizing", "pending"
 async def _sse_job_stream(
     request: Request,
     status_fn: Callable[[], dict],
-    sync_fn: Callable[[], None] | None = None,
 ) -> AsyncIterator[bytes]:
     """Yield one SSE ``data:`` event per status change until the job is terminal.
 
@@ -438,15 +439,25 @@ async def _sse_job_stream(
     stream is not itself a signal to stop reconnecting (a browser's
     ``EventSource`` retries by default), so the frontend must close its side on
     the first terminal event rather than rely on the server not restarting it.
+
+    ``status_fn`` reads the job store and the log file, both blocking, so it
+    runs on a worker thread: a slow read then delays only this stream, not
+    every other request sharing the event loop (issue #325, item 7). The
+    stream never reconciles jobs itself; ``_job_reconciliation_loop`` owns
+    that on its own cadence, so an open tab no longer adds a reconciliation
+    pass per second. A failure inside ``status_fn`` is logged and ends the
+    stream; the browser's ``EventSource`` reconnects and gets a fresh read.
     """
     last_payload: str | None = None
     last_sent = time.monotonic()
     while True:
         if await request.is_disconnected():
             return
-        if sync_fn is not None:
-            sync_fn()
-        status = status_fn()
+        try:
+            status = await asyncio.to_thread(status_fn)
+        except Exception:
+            logger.exception("SSE job stream: status read failed, closing the stream")
+            return
         payload = json.dumps(status, separators=(",", ":"))
         now = time.monotonic()
         if payload != last_payload:
@@ -585,6 +596,9 @@ async def _nginx_auth_middleware(request: Request, call_next):
             forwarded, client_host,
         )
     request.state.user = user
+    request.state.auth_method = (
+        None if not user else ("cloudflare" if is_email_identity(forwarded) else "basic")
+    )
     token = _CURRENT_USER.set(user)
     try:
         if identity in (UNKNOWN_EMAIL, ADMIN_EMAIL):
@@ -628,31 +642,69 @@ app.include_router(cf_access_router)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
+class _StaticFilesWhenPresent:
+    """ASGI app that serves *directory* with *static* once it exists.
+
+    ``StaticFiles(check_dir=False)`` only defers its directory check to the
+    first request and then answers 500 while the directory is missing, so
+    this wrapper answers 404 instead and hands over as soon as the tree is
+    there. One ``stat`` per request, the same cost as the page link check.
+    """
+
+    def __init__(self, directory: pathlib.Path, static: StaticFiles) -> None:
+        self.directory = directory
+        self.static = static
+
+    async def __call__(self, scope, receive, send) -> None:
+        if not self.directory.is_dir():
+            await PlainTextResponse("Not Found", status_code=404)(scope, receive, send)
+            return
+        await self.static(scope, receive, send)
+
+
 def _mount_muscat2_quicklook(target_app: FastAPI, html_dir: pathlib.Path) -> bool:
-    """Mount the externally-synced MuSCAT2 live-observation dashboard, if present.
+    """Mount the externally-synced MuSCAT2 live-observation dashboard.
 
     ``html_dir`` is generated on the MuSCAT2 observing host (obslog, quicklook,
-    airmass plot) and synced here by a job outside muscat-db, so it is absent on
-    hosts without that mount (e.g. a dev machine or CI) -- in that case this is a
-    no-op and returns False so callers can hide the dead link.
+    airmass plot) and synced here by a job outside muscat-db, so it may be
+    absent on hosts without that mount (e.g. a dev machine or CI) and may
+    appear after this server started. The mounts are therefore registered
+    unconditionally: a request under them answers 404 until the tree exists
+    and serves it from then on, without a restart. Returns whether the tree
+    exists right now, for the startup log only; the pages ask
+    :func:`_lc_monitor_available` per request.
     """
-    if not html_dir.is_dir():
-        return False
     # obslog/ and quicklook/archive/ have no index.html; their original host
     # serves them with a plain directory autoindex that Starlette's StaticFiles
     # does not, so use the listing-capable subclass for the dashboard itself.
     target_app.mount(
         "/lc-monitor",
-        ListingStaticFiles(directory=str(html_dir), html=True),
+        _StaticFilesWhenPresent(
+            html_dir, ListingStaticFiles(directory=str(html_dir), html=True, check_dir=False),
+        ),
         name="lc_monitor",
     )
     # airmass_plot/index.html is regenerated by the remote observing host and
     # hardcodes an absolute image src of /airmass_plot/png/<date>/...png, so it
     # needs its own root-level mount alongside the prefixed one above.
     airmass_dir = html_dir / "airmass_plot"
-    if airmass_dir.is_dir():
-        target_app.mount("/airmass_plot", StaticFiles(directory=str(airmass_dir)), name="lc_monitor_airmass_plot")
-    return True
+    target_app.mount(
+        "/airmass_plot",
+        _StaticFilesWhenPresent(
+            airmass_dir, StaticFiles(directory=str(airmass_dir), check_dir=False),
+        ),
+        name="lc_monitor_airmass_plot",
+    )
+    return html_dir.is_dir()
+
+
+def _lc_monitor_available() -> bool:
+    """Whether the synced dashboard tree exists at this moment.
+
+    One ``stat`` per page render, so the link shows up as soon as the sync
+    job delivers the tree instead of waiting for the next restart.
+    """
+    return MUSCAT2_HTML_DIR.is_dir()
 
 
 @app.get("/lc-monitor/lc_monitor", include_in_schema=False)
@@ -664,9 +716,10 @@ def _lc_monitor_redirect() -> RedirectResponse:
     return RedirectResponse(url="/lc-monitor/quicklook/")
 
 
-LC_MONITOR_AVAILABLE = _mount_muscat2_quicklook(app, MUSCAT2_HTML_DIR)
-if not LC_MONITOR_AVAILABLE:
-    logger.info("MUSCAT2_HTML_DIR %s not found; LC monitor link disabled", MUSCAT2_HTML_DIR)
+if not _mount_muscat2_quicklook(app, MUSCAT2_HTML_DIR):
+    logger.info(
+        "MUSCAT2_HTML_DIR %s not found; LC monitor link hidden until it appears", MUSCAT2_HTML_DIR,
+    )
 
 
 @app.get("/healthz", include_in_schema=False)
@@ -2044,6 +2097,43 @@ def whoami(request: Request):
     return JSONResponse({"user": getattr(request.state, "user", None)})
 
 
+CF_ACCESS_LOGOUT_PATH = "/cdn-cgi/access/logout"
+_LOGGED_OUT_HTML = (
+    "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\">"
+    "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"
+    "<title>Logged out</title></head><body style=\"font-family:sans-serif;margin:2rem\">"
+    "<h1>Logged out</h1><p>{detail}</p><p><a href=\"/\">Back to MuSCAT-db</a></p></body></html>"
+)
+
+
+@app.get("/logout", response_class=HTMLResponse)
+def logout(request: Request):
+    """End the session, per sign-in path.
+
+    * Cloudflare Access (identity is an email): redirect to Access's own
+      ``/cdn-cgi/access/logout`` on the same hostname, which clears the
+      ``CF_Authorization`` cookie.
+    * htpasswd / HTTP Basic: a link cannot clear cached Basic credentials, so
+      answer 401 with a Basic challenge for the nginx realm. Browsers drop the
+      cached credentials on a 401 challenge and show this page if the prompt
+      is cancelled; it carries no username.
+    * Not signed in: just the logged-out page.
+    """
+    method = getattr(request.state, "auth_method", None)
+    if method == "cloudflare":
+        return RedirectResponse(CF_ACCESS_LOGOUT_PATH, status_code=302)
+    if method == "basic":
+        return HTMLResponse(
+            _LOGGED_OUT_HTML.format(detail=(
+                "Your browser will ask for a password again. Cancel the prompt to stay "
+                "logged out; if it does not, close the browser to end the session."
+            )),
+            status_code=401,
+            headers={"WWW-Authenticate": 'Basic realm="MuSCAT-db"', "Cache-Control": "no-store"},
+        )
+    return HTMLResponse(_LOGGED_OUT_HTML.format(detail="You are not logged in."))
+
+
 @app.get("/chat/users", response_class=JSONResponse)
 def chat_users(request: Request, room: str = "chat:public"):
     """Known usernames for chat @-mention autocomplete. Requires an
@@ -2865,8 +2955,12 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
                 mtime, created_at = 0.0, "Unknown"
             csite, ctelescope, cmode = fit.csv_site_mode(c.name, inst) if inst in phot.MULTISITE_INSTRUMENTS else (None, None, None)
             crun = _photometry_run_of_csv(c)
+            # The flare table defaults a new peak time to the middle of the
+            # selected data, so each card carries its curve's time span.
+            trange = fit.lightcurve_time_range([c])
             rows.append({"path": str(c), "name": c.name, "created_at": created_at,
-                         "_mtime": mtime, "_site": csite, "_telescope": ctelescope, "_mode": cmode, "run_id": crun})
+                         "_mtime": mtime, "_site": csite, "_telescope": ctelescope, "_mode": cmode, "run_id": crun,
+                         "t_min": trange[0] if trange else None, "t_max": trange[1] if trange else None})
 
         if inst in phot.MULTISITE_INSTRUMENTS:
             # A multi-site instrument's date+target can hold multiple sites /
@@ -2893,7 +2987,8 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
                     and (not sel_telescope or r["_telescope"] == sel_telescope)
                     and (not sel_mode or r["_mode"] == sel_mode)]
 
-        csvs = [{"path": r["path"], "name": r["name"], "created_at": r["created_at"], "run_id": r["run_id"]} for r in rows]
+        csvs = [{"path": r["path"], "name": r["name"], "created_at": r["created_at"], "run_id": r["run_id"],
+                 "t_min": r["t_min"], "t_max": r["t_max"]} for r in rows]
 
         # Existing runs (each isolated in its own dir); show one run's results at
         # a time, defaulting to the newest, selectable via the results-run chips.
@@ -3669,15 +3764,25 @@ def transit_fit_status(inst: str, date: str, target: str, run: str = ""):
     return JSONResponse(fit.job_status(inst, date, target, run_id=(run or "").strip()))
 
 
+@transit_fit_router.get("/outputs")
+def transit_fit_outputs(inst: str, date: str, target: str, run: str = ""):
+    """The data behind the results page as JSON (plots, summary rows,
+    detection SNR), so scripts get it without scraping the page. A hidden run
+    reads as empty, as it does for ``/status``."""
+    run_id = (run or "").strip()
+    if _run_hidden("transit_fit", inst, date, target, run_id):
+        return JSONResponse({"ok": True, "outputs": fit.empty_fit_outputs()})
+    return JSONResponse({"ok": True, "outputs": fit.get_fit_outputs(inst, date, target, run_id=run_id or None)})
+
+
 @transit_fit_router.get("/log-stream")
 async def transit_fit_log_stream(request: Request, inst: str, date: str, target: str, run: str = ""):
     """SSE counterpart to ``/status`` (architecture issue #51, step 4)."""
     run_id = (run or "").strip()
-    hidden = _run_hidden("transit_fit", inst, date, target, run_id)
+    hidden = await asyncio.to_thread(_run_hidden, "transit_fit", inst, date, target, run_id)
     return _sse_response(_sse_job_stream(
         request,
         lambda: dict(_NO_JOB_STATUS) if hidden else fit.job_status(inst, date, target, run_id=run_id),
-        sync_fn=fit.sync_jobs,
     ))
 
 
@@ -5372,6 +5477,12 @@ def api_lco_windows(request: Request, payload: dict = Body(...)):
                     {"ok": False, "error": f"no ephemeris found for {target} {planet}".strip()},
                     status_code=404,
                 )
+            if ephem.get("error"):
+                # The sheet fit explains its own refusal (time scale, too few
+                # epochs); pass that on rather than a generic "not found".
+                return JSONResponse(
+                    {"ok": False, "error": f"{target} {key}: {ephem['error']}"}, status_code=400
+                )
             t0 = ephem.get("t0")
             period = ephem.get("period")
             if duration in (None, "") and ephem.get("duration") is not None:
@@ -5482,7 +5593,45 @@ def api_lco_build(payload: dict = Body(...)):
     """
     try:
         rg = lco.build_requestgroup(payload.get("kind"), payload)
+        _validate_lco_rescue(payload, rg)
         return JSONResponse({"ok": True, "payload": rg, "payload_hash": lco.payload_hash(rg)})
+    except lco.LcoError as e:
+        return _lco_error_response(e)
+
+
+def _validate_lco_rescue(payload: dict, requestgroup: dict, user: str | None = None) -> bool:
+    from muscat_db.lco_autoschedule import rescue_policy
+
+    try:
+        policy = rescue_policy(payload.get("auto_resubmit"), requestgroup.get("proposal", ""))
+        if policy is None:
+            return False
+        children = requestgroup.get("requests") or []
+        if len(children) != 1 or len(children[0].get("configurations") or []) != 1 or children[0]["configurations"][0].get("type") != "REPEAT_EXPOSE":
+            raise ValueError("Auto-resubmit requires one request with one REPEAT_EXPOSE configuration")
+        if not str((children[0].get("location") or {}).get("site") or "").strip():
+            raise ValueError("Auto-resubmit requires an explicitly pinned site")
+        if int(children[0].get("configuration_repeats", 1)) != 1:
+            raise ValueError("Auto-resubmit requires configuration_repeats of 1")
+        if user is not None:
+            lco._get_lco_api_token(user, require_own_token=True)
+        return True
+    except (ValueError, TypeError) as exc:
+        raise lco.LcoError(str(exc), status=400) from exc
+
+
+@lco_router.post("/observing-duration", response_class=JSONResponse)
+def api_lco_observing_duration(payload: dict = Body(...)):
+    """The ``repeat_duration`` a request built from these params would submit.
+
+    Backs the schedule page's Observing duration field: its default, and the
+    longest value it accepts, are the number ``build_requestgroup`` derives from
+    the request's window, so the rule is not repeated in JavaScript. ``null``
+    when the request is not a REPEAT_EXPOSE block. No external call is made.
+    """
+    try:
+        seconds = lco.window_repeat_duration(payload.get("kind"), payload)
+        return JSONResponse({"ok": True, "repeat_duration": seconds})
     except lco.LcoError as e:
         return _lco_error_response(e)
 
@@ -5507,6 +5656,7 @@ def api_lco_ipp(request: Request, payload: dict = Body(...)):
     try:
         user = _request_user(request)
         rg = _requestgroup_from_payload(payload)
+        _validate_lco_rescue(payload, rg, user)
         ipp = lco.max_allowable_ipp(rg, user)
         body = {"ok": True}
         # LCO saw less visible time than the request lasts: cut repeat_duration
@@ -5530,7 +5680,7 @@ def _record_lco_submission(result: dict, requestgroup: dict, params: dict, user:
     while the enclosing submission response remains successful so a user does
     not retry and accidentally create a duplicate booking.
     """
-    monitor_payload = {**params, "requests": requestgroup.get("requests") or []}
+    monitor_payload = {**params, "requests": requestgroup.get("requests") or [], "_requestgroup": requestgroup}
     try:
         rows = lco_monitor.record_submission(result, monitor_payload, user)
         return {"ok": True, "request_ids": [row["request_id"] for row in rows]}
@@ -5767,6 +5917,9 @@ def api_lco_submit(request: Request, payload: dict = Body(...)):
                 status_code=409,
             )
         user = _request_user(request)
+        rescue_enabled = _validate_lco_rescue(payload, rg, user)
+        if rescue_enabled and not user:
+            raise lco.LcoError("Auto-resubmit requires a logged-in submitter with a saved personal token", status=403)
         result = lco.submit_requestgroup(rg, user)
         monitoring = _record_lco_submission(result, rg, payload, user)
         return JSONResponse({"ok": True, "result": result, "monitoring": monitoring})
@@ -5920,7 +6073,10 @@ def api_lco_monitored_requests(request: Request):
         row["relay_request_id"] = next((r["request_id"] for r in rows
             if r["requestgroup_id"] == row["relay_requestgroup_id"] and r["can_modify"]
             and r["request_state"] not in lco_monitor.TERMINAL_REQUEST_STATES), None)
-    return JSONResponse({"ok": True, "requests": rows})
+    from muscat_db.lco_rescue import proposal_usage
+
+    usage = [r for r in proposal_usage(_db_path()) if not _is_denied(r.get("proposal"), denied)]
+    return JSONResponse({"ok": True, "requests": rows, "rescue_usage": usage})
 
 
 def _modifiable_lco_request(request: Request, request_id: int, payload: dict) -> dict:
@@ -5938,7 +6094,10 @@ def _modifiable_lco_request(request: Request, request_id: int, payload: dict) ->
 @lco_router.delete("/monitored-requests/{request_id}", response_class=JSONResponse)
 def api_lco_delete_monitored_request(request: Request, request_id: int, payload: dict = Body(...)):
     _modifiable_lco_request(request, request_id, payload)
-    lco_monitor.delete_request(request_id)
+    try:
+        lco_monitor.delete_request(request_id)
+    except lco.LcoError as exc:
+        return _lco_error_response(exc)
     return JSONResponse({"ok": True})
 
 
@@ -6782,11 +6941,40 @@ def _sheet_ephemeris(target: str, cfg: dict) -> dict:
         return {}
 
 
+def _sheet_time_scale_problem(time_system: dict | None) -> str | None:
+    """Why the transit-centers tab cannot feed a fit, or None when its times are
+    confirmed BJD_TDB.
+
+    ``parse_transit_csv`` only labels the time scale; the upload path then asks
+    the user to confirm before import. The sheet path has no such prompt, so an
+    unspecified or unsupported scale is refused here with the same reasoning:
+    scheduling from transit centers that are secretly BJD_UTC, or whose scale
+    nobody stated, moves predicted windows by about a minute today and silently
+    more as TDB and UTC drift apart."""
+    if not time_system or not time_system.get("confirmed"):
+        return (
+            "transit-centers tab does not identify its time scale as BJD_TDB; "
+            "label the tc column, e.g. 'tc (BJD_TDB)'"
+        )
+    if not time_system.get("supported"):
+        return (
+            f"transit-centers tab is in {time_system.get('value')}, which cannot be used "
+            "as BJD_TDB without an explicit time-scale conversion"
+        )
+    return None
+
+
 def _sheet_fit_ephemeris(target: str, cfg: dict, seed_by_planet: dict) -> dict:
     """Linear-fit ``{planet: {t0, period, *_unc}}`` from the sheet transit-centers
     tab. ``seed_by_planet`` supplies a per-planet ``{t0, period}`` used only to
     assign integer epochs when the tab has no explicit epoch column; the fit
-    re-derives t0/period from the transit centers."""
+    re-derives t0/period from the transit centers.
+
+    A planet whose rows cannot yield a real fit (unconfirmed or unsupported time
+    scale, missing epochs, fewer than two distinct epochs) maps to
+    ``{"error": reason}`` with no ``t0``/``period``, so callers can tell the user
+    why instead of scheduling from a reference ephemeris or the regression's
+    placeholder period dressed up as a fit."""
     try:
         parsed = gsheet_ephemeris.query_target_transit_centers(
             target, cfg["url"], cfg["tc_tab"], cfg.get("tc_cols")
@@ -6796,6 +6984,12 @@ def _sheet_fit_ephemeris(target: str, cfg: dict, seed_by_planet: dict) -> dict:
     by_planet: dict[str, list[dict]] = {}
     for row in parsed.get("rows") or []:
         by_planet.setdefault(row["planet"], []).append(row)
+    if not by_planet:
+        return {}
+
+    time_scale_problem = _sheet_time_scale_problem(parsed.get("time_system"))
+    if time_scale_problem:
+        return {planet: {"error": time_scale_problem} for planet in by_planet}
 
     results: dict = {}
     for planet, points in by_planet.items():
@@ -6804,13 +6998,15 @@ def _sheet_fit_ephemeris(target: str, cfg: dict, seed_by_planet: dict) -> dict:
         p_seed = seed.get("period")
         have_seed = t0_seed is not None and p_seed
         if not have_seed and any(pt.get("source_epoch") is None for pt in points):
-            # No seed to assign epochs and the tab did not supply them: cannot fit.
+            results[planet] = {
+                "error": "transit-centers tab has no epoch column and no seed ephemeris "
+                         "to assign epochs from"
+            }
             continue
-        if not have_seed and len(points) < 2:
-            # Without a seed period a single point cannot yield a real fit; skip
-            # rather than echo a fabricated reference period.
-            continue
-        # Reference echoed back only if the fit itself can't run (<2 points).
+        # The reference ephemeris only anchors epoch assignment and the
+        # regression's design matrix. Without a seed every epoch is explicit,
+        # so the 1.0 d placeholder never influences a successful fit and is
+        # never returned.
         t0_ref = float(t0_seed) if have_seed else float(points[0]["tc"])
         p_ref = float(p_seed) if have_seed else 1.0
         epochs, tcs, uncs = [], [], []
@@ -6824,6 +7020,12 @@ def _sheet_fit_ephemeris(target: str, cfg: dict, seed_by_planet: dict) -> dict:
         fit_result = ephemeris_math.fit_linear_ephemeris(
             epochs, tcs, uncs, t0_ref, p_ref, fit_method="unweighted"
         )
+        if not fit_result["was_fit"]:
+            results[planet] = {
+                "error": "linear fit needs at least 2 transit centers at distinct epochs "
+                         f"({len(points)} row(s), {len(set(epochs))} distinct epoch(s))"
+            }
+            continue
         entry: dict = {"t0": fit_result["t0_fit"], "period": fit_result["period_fit"]}
         if fit_result.get("t0_fit_unc"):
             entry["t0_unc"] = fit_result["t0_fit_unc"]
@@ -8206,11 +8408,10 @@ async def photometry_log_stream(request: Request, inst: str, date: str, target: 
     change instead of waiting for the client's next poll (architecture issue
     #51, step 4)."""
     run_id = (run or "").strip()
-    hidden = _run_hidden("photometry", inst, date, target, run_id)
+    hidden = await asyncio.to_thread(_run_hidden, "photometry", inst, date, target, run_id)
     return _sse_response(_sse_job_stream(
         request,
         lambda: dict(_NO_JOB_STATUS) if hidden else phot.job_status(inst, date, target, run_id=run_id),
-        sync_fn=phot.sync_jobs,
     ))
 
 
@@ -8705,7 +8906,7 @@ async def ttv_fit_log_stream(request: Request, target: str = "", run_name: str =
     if not target:
         raise HTTPException(status_code=400, detail="target is required")
     target = target.strip()
-    hidden = _ttv_run_hidden(target, run_name)
+    hidden = await asyncio.to_thread(_ttv_run_hidden, target, run_name)
     return _sse_response(_sse_job_stream(
         request, lambda: dict(_NO_JOB_STATUS) if hidden else ttv.job_status(target, run_name)
     ))
@@ -8817,7 +9018,7 @@ def instrument_page(instrument: str):
         "instrument.html",
         instrument=instrument,
         dates=dates,
-        lc_monitor_available=LC_MONITOR_AVAILABLE,
+        lc_monitor_available=_lc_monitor_available(),
     )
 
 

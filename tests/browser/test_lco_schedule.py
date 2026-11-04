@@ -109,6 +109,18 @@ def lco_account(monkeypatch):
             return {"1M0-SCICAM-SINISTRO": {}, "0M4-SCICAM-QHY600": {}, "2M0-SCICAM-MUSCAT": {}}
         if url == "https://observe.lco.global/api/requestgroups/max_allowable_ipp/":
             return {PROPOSAL: {"1M0": {"semester": "2026B", "max_allowable_ipp_value": 1.5}}}
+        if url == "https://observe.lco.global/api/requestgroups/" and method == "POST":
+            # A booking: one child request per submitted request, IDs from 101.
+            return {
+                "id": 10,
+                "name": data.get("name"),
+                "proposal": PROPOSAL,
+                "state": "PENDING",
+                "requests": [
+                    {"id": 101 + i, "state": "PENDING", "windows": child.get("windows") or []}
+                    for i, child in enumerate(data.get("requests") or [])
+                ],
+            }
         raise AssertionError(f"unexpected LCO call: {method} {url}")
 
     monkeypatch.setattr(lco, "_lco_api_request", lco_api_request)
@@ -380,3 +392,312 @@ def test_upload_disables_ignored_controls_and_skips_their_validation(page):
     page.select_option('#sch-source', '')
     expect(page.locator('#sch-t0')).to_be_enabled()
     expect(page.locator('#sch-period')).to_be_enabled()
+
+
+@pytest.mark.parametrize('strategy', ['overlapping', 'chunked'])
+def test_strategy_preview_and_rescue_settings_persist(page, lco_account, strategy):
+    page.goto('/lco/schedule')
+    _generate_windows(page)
+    page.locator('#windows-body tr', has_text='Full @ ELP').locator('input[type=checkbox]').check()
+    expect(page.locator('#requests-body tr')).to_have_count(1)
+    expect(page.locator('#sch-auto-resubmit')).not_to_be_checked()
+    page.select_option('#sch-strategy', strategy)
+    page.fill('#sch-strategy-count', '3')
+    page.locator('#sch-strategy-count').blur()
+    expect(page.locator('#requests-body tr')).to_have_count(3)
+    expect(page.locator('#strategy-summary')).to_contain_text('3 requests')
+    page.check('#sch-auto-resubmit')
+    page.fill('#sch-rescue-min-minutes', '25')
+    page.locator('#sch-rescue-min-minutes').blur()
+    page.reload()
+    expect(page.locator('#sch-strategy')).to_have_value(strategy)
+    expect(page.locator('#sch-strategy-count')).to_have_value('3')
+    expect(page.locator('#sch-rescue-min-minutes')).to_have_value('25')
+    expect(page.locator('#sch-auto-resubmit')).to_be_checked()
+    expect(page.locator('#requests-body tr')).to_have_count(3)
+
+    # Capture form params, not the preview labels, so the test verifies the
+    # actual windows and opt-in thresholds sent to the draft endpoint.
+    sent = []
+    def build(route):
+        sent.append(route.request.post_data_json)
+        route.fulfill(json={'ok': True, 'payload': {'requests': []}})
+    page.route('**/api/lco/build', build)
+    page.click('#btn-create-draft')
+    expect(page.locator('#msg-ipp')).to_contain_text('3 draft(s) created')
+    assert len(sent) == 3
+    windows = [p['windows'][0] for p in sent]
+    start = [datetime.datetime.fromisoformat(w['start'].replace('Z', '+00:00')) for w in windows]
+    end = [datetime.datetime.fromisoformat(w['end'].replace('Z', '+00:00')) for w in windows]
+    assert len({p['name'] for p in sent}) == 3
+    assert all(p['auto_resubmit']['min_minutes'] == 25 for p in sent)
+    if strategy == 'overlapping':
+        assert (start[1] - start[0]).total_seconds() == 300
+        assert (end[2] - end[1]).total_seconds() == 300
+        assert end[0] - start[0] == end[2] - start[2]
+    else:
+        # Ten minutes of padding on both sides means 20 minutes of overlap.
+        assert (end[0] - start[1]).total_seconds() == pytest.approx(1200, abs=0.002)
+        assert (end[1] - start[2]).total_seconds() == pytest.approx(1200, abs=0.002)
+
+
+def test_rescue_monitor_shows_links_reasons_and_proposal_count(page):
+    page.problems.allowed.extend(NO_TOKEN)
+    page.route('**/api/lco/monitored-requests', lambda route: route.fulfill(json={
+        'ok': True,
+        'requests': [
+            {'request_id': 101, 'target': 'TOI-123', 'rescue_reason': 'auto-resubmitted as #202'},
+            {'request_id': 202, 'target': 'TOI-123', 'supersedes_request_id': 101},
+            {'request_id': 303, 'target': 'TOI-456', 'rescue_reason': 'not resubmitted: proposal rescue budget exhausted'},
+        ],
+        'rescue_usage': [{'proposal': 'P1', 'submitted': 1, 'attempts': 1, 'reserved_minutes': 90}],
+    }))
+    page.goto('/lco/schedule')
+    expect(page.locator('#monitor-body')).to_contain_text('auto-resubmitted from #101')
+    expect(page.locator('#monitor-body a', has_text='#202')).to_have_attribute('href', 'https://observe.lco.global/requests/202')
+    expect(page.locator('#monitor-body')).to_contain_text('not resubmitted: proposal rescue budget exhausted')
+    expect(page.locator('#rescue-usage')).to_contain_text('P1: 1 automatic submissions, 1 reserved attempts, 90.00 min reserved')
+
+
+def test_create_drafts_needs_a_ticked_window_and_a_valid_strategy(page, lco_account):
+    page.goto('/lco/schedule')
+    _generate_windows(page)
+    expect(page.locator('#windows-body tr').first).to_be_attached()
+    draft = page.locator('#btn-create-draft')
+    expect(draft).to_be_disabled()
+    page.select_option('#sch-strategy', 'overlapping')
+    expect(draft).to_be_disabled()
+    box = page.locator('#windows-body tr', has_text='Full @ ELP').locator('input[type=checkbox]')
+    box.check()
+    expect(draft).to_be_enabled()
+    page.fill('#sch-strategy-count', '1')
+    page.locator('#sch-strategy-count').blur()
+    expect(draft).to_be_disabled()
+    page.fill('#sch-strategy-count', '3')
+    page.locator('#sch-strategy-count').blur()
+    expect(draft).to_be_enabled()
+    box.uncheck()
+    expect(draft).to_be_disabled()
+    expect(draft).to_have_attribute('title', 'Generate windows and tick a row in the windows table first')
+
+
+def test_rescue_note_describes_submit_first_cleanup(page):
+    page.problems.allowed.extend(NO_TOKEN)
+    page.goto('/lco/schedule')
+    note = page.locator('p.lco-note', has_text='At most one replacement')
+    expect(note).to_contain_text('The replacement is submitted first')
+    expect(note).to_contain_text('a scheduled or running original is kept')
+    expect(note).not_to_contain_text('canceled before replacement')
+
+
+def _observing_field(page):
+    return page.locator("#requests-body .req-obs-duration")
+
+
+def _plot_end_input(page):
+    return page.locator('#vis-prop-legs input[data-edge="end"]')
+
+
+def _check_full_elp_window(page):
+    """Generate windows for TOI-1000 and check the Full @ ELP row, which adds a
+    request whose first observing-duration fit is fetched. Returns the row."""
+    page.goto("/lco/schedule")
+    expect(page.locator("#msg-proposals")).to_have_text("Loaded 1 proposals")
+    page.select_option("#sch-proposal", PROPOSAL)
+    page.fill("#sch-target", "TOI-1000")
+    page.locator("#sch-target").blur()
+    expect(page.locator("#sch-period")).not_to_have_value("")
+    page.fill("#sch-coords", f"{RA}, {DEC}")  # by hand, so the plot link needs no lookup
+    page.fill("#sch-duration", "3")  # the plot link refuses to open without a transit duration
+    page.fill("#sch-range-start", RANGE[0])
+    page.fill("#sch-range-end", RANGE[1])
+    with page.expect_response("**/api/lco/windows", timeout=60_000):
+        page.click("#btn-gen-windows")
+
+    row = page.locator("#windows-body tr", has_text="Full @ ELP")
+    with page.expect_response("**/api/lco/observing-duration", timeout=60_000):
+        row.locator("input[type=checkbox]").check()
+    return row
+
+
+def test_observing_duration_follows_the_window_until_set_by_hand(page, lco_account):
+    """The field shows the window fit, tracks a resize, sends a shorter value as
+    repeat_duration, refuses a longer one, and Reset returns it to the fit."""
+    row = _check_full_elp_window(page)
+    field = _observing_field(page)
+    expect(field).to_be_enabled()
+    note = page.locator("#requests-body .req-obs-note")
+    expect(note).to_contain_text("follows the window")
+    default_h = float(field.input_value())
+    fit_s = int(note.inner_text().split(" s")[0])
+    assert abs(fit_s / 3600 - default_h) < 0.006
+    request = page.locator("#requests-body tr").first
+    span_text = request.locator("td").nth(5).inner_text()
+    hours, minutes = span_text.split("(")[1].rstrip(")").replace("m", "").split("h ")
+    span_s = int(hours) * 3600 + int(minutes) * 60
+    assert fit_s < span_s  # the fit is shy of the window span (setup overhead, edge margin)
+
+    # Shorten the window by an hour from the plot's typed end time: the default follows.
+    with page.expect_response("**/api/lco/visibility?*"):
+        row.locator(".vis-link").click()
+    end_input = _plot_end_input(page)
+    expect(end_input).to_be_enabled()
+    end = datetime.datetime.strptime(end_input.input_value(), "%Y-%m-%d %H:%M")
+    new_end = (end - datetime.timedelta(hours=1)).strftime("%Y-%m-%d %H:%M")
+    with page.expect_response("**/api/lco/observing-duration", timeout=60_000):
+        end_input.fill(new_end)
+        end_input.press("Tab")
+    expect(field).not_to_have_value(f"{default_h:.2f}")
+    shorter_h = float(field.input_value())
+    # The fit is clipped to what the target can be observed, so an hour off the
+    # window may cost the fit less than an hour, never more.
+    assert 0 < default_h - shorter_h <= 1.0 + 0.02
+    expect(note).to_contain_text("follows the window")
+
+    # A shorter manual value is what Create drafts sends as repeat_duration.
+    field.fill("1")
+    field.press("Tab")
+    expect(note).to_contain_text("3600 s")
+    expect(note).to_contain_text("set by hand")
+    with page.expect_request("**/api/lco/build") as built:
+        page.click("#btn-create-draft")
+    assert built.value.post_data_json["repeat_duration"] == 3600
+    expect(request).to_contain_text("draft")
+    request.locator(".req-json").click()
+    expect(page.locator("#requests-body .req-payload")).to_contain_text('"repeat_duration": 3600')
+
+    # Longer than the window fits is refused on the row, not sent.
+    field.fill(f"{shorter_h + 0.5:.2f}")
+    field.press("Tab")
+    expect(note).to_contain_text("longer than the")
+    page.click("#btn-create-draft")
+    expect(request).to_contain_text("Observing duration: longer than")
+    expect(page.locator("#msg-ipp")).to_contain_text("1 of 1 draft(s) failed")
+
+    # Reset restores the fit and the value survives a reload.
+    page.locator("#requests-body .req-obs-reset").click()
+    expect(field).to_have_value(f"{shorter_h:.2f}")
+    expect(note).to_contain_text("follows the window")
+    field.fill("1.5")
+    field.press("Tab")
+    page.reload()
+    expect(_observing_field(page)).to_have_value("1.50")
+    expect(page.locator("#requests-body .req-obs-note")).to_contain_text("set by hand")
+
+
+def test_stale_observing_fit_response_leaves_a_manual_duration_alone(page, lco_account):
+    """A delayed fit for an old, shorter window must not replace the cached fit
+    or cut a duration the observer set after widening the window."""
+    row = _check_full_elp_window(page)
+    field = _observing_field(page)
+    expect(field).to_be_enabled()
+    with page.expect_response("**/api/lco/visibility?*"):
+        row.locator(".vis-link").click()
+    end_input = _plot_end_input(page)
+    expect(end_input).to_be_enabled()
+    end = datetime.datetime.strptime(end_input.input_value(), "%Y-%m-%d %H:%M")
+
+    # Hold the fit for a window shortened by an hour.
+    held = []
+
+    def hold_first(route):
+        if held:
+            route.continue_()
+        else:
+            held.append(route)
+
+    page.route("**/api/lco/observing-duration", hold_first)
+    short_end = (end - datetime.timedelta(hours=1)).strftime("%Y-%m-%d %H:%M")
+    end_input.fill(short_end)
+    end_input.press("Tab")
+    for _ in range(100):
+        if held:
+            break
+        page.wait_for_timeout(50)
+    assert held, "the shortened window never requested its fit"
+
+    # Widen the window again (past the held one) and let its fit arrive.
+    wide_end = (end - datetime.timedelta(minutes=30)).strftime("%Y-%m-%d %H:%M")
+    with page.expect_response("**/api/lco/observing-duration", timeout=60_000):
+        end_input.fill(wide_end)
+        end_input.press("Tab")
+    note = page.locator("#requests-body .req-obs-note")
+    expect(note).to_contain_text("follows the window")
+    wide_fit_s = int(note.inner_text().split(" s")[0])
+    assert wide_fit_s > 7200  # the manual value below must fit the wide window
+
+    field.fill("2")
+    field.press("Tab")
+    expect(note).to_contain_text("7200 s")
+    expect(note).to_contain_text("set by hand")
+
+    # The old, shorter fit arrives last. The client takes a response from the
+    # network only after this fulfill, so give it a moment to run its handler.
+    with page.expect_response("**/api/lco/observing-duration", timeout=60_000):
+        held[0].fulfill(json={"ok": True, "repeat_duration": 3600})
+    page.wait_for_timeout(500)
+    # Redraw the rows from the cache: they must still show the wide window's
+    # fit and the manual value, not the stale response's.
+    page.dispatch_event("#sch-effective-filter", "change")
+    expect(field).to_be_enabled()
+    expect(field).to_have_value("2.00")
+    expect(field).to_have_attribute("max", f"{wide_fit_s / 3600:.2f}")
+    expect(note).to_contain_text("7200 s")
+    page.reload()
+    expect(_observing_field(page)).to_have_value("2.00")
+
+
+def test_create_drafts_redrafts_a_submitted_request_after_confirmation(
+    page, lco_account, monkeypatch
+):
+    """A settings change after a submit yields a second request from the same
+    row: Create drafts asks once, naming the booked request IDs, then builds
+    from the new settings while the earlier booking stays in monitoring."""
+    monkeypatch.setenv("MUSCAT_LCO_ALLOW_SUBMIT", "1")
+    page.goto("/lco/schedule")
+    expect(page.locator("#msg-proposals")).to_have_text("Loaded 1 proposals")
+    page.select_option("#sch-proposal", PROPOSAL)
+    _generate_windows(page)
+    page.locator("#windows-body tr", has_text="Full @ ELP").locator("input[type=checkbox]").check()
+    request = page.locator("#requests-body tr").first
+    expect(request).to_contain_text("not drafted")
+
+    page.fill("#sch-effective-exptime", "60")
+    page.locator("#sch-effective-exptime").blur()
+    with page.expect_request("**/api/lco/build") as build:
+        page.click("#btn-create-draft")
+    assert build.value.post_data_json["exposure_time"] == 60
+    with page.expect_response("**/api/lco/ipp"):
+        page.click("#btn-dry-run")
+    expect(request).to_contain_text("checked")
+    page.click("#btn-submit")
+    expect(page.locator("#message-modal-ok")).to_have_text("Submit")
+    with page.expect_response("**/api/lco/submit") as resp:
+        page.click("#message-modal-ok")
+    assert resp.value.status == 200
+    expect(request).to_contain_text("submitted")
+    expect(request.locator("a", has_text="101")).to_have_count(1)
+    expect(page.locator("#monitor-body tr", has_text="101")).to_have_count(1)
+    assert ("POST", "https://observe.lco.global/api/requestgroups/") in lco_account
+
+    # The change leaves the booked row alone; drafting again is what redoes it.
+    page.fill("#sch-effective-exptime", "90")
+    page.locator("#sch-effective-exptime").blur()
+    expect(request).to_contain_text("submitted")
+
+    # Declining the confirmation keeps the booked row as it was.
+    page.click("#btn-create-draft")
+    expect(page.locator("#message-modal-text")).to_contain_text("already submitted")
+    expect(page.locator("#message-modal-text")).to_contain_text("101")
+    page.click("#message-modal-cancel")
+    expect(request).to_contain_text("submitted")
+
+    page.click("#btn-create-draft")
+    expect(page.locator("#message-modal-ok")).to_have_text("Create drafts")
+    with page.expect_request("**/api/lco/build") as build:
+        page.click("#message-modal-ok")
+    assert build.value.post_data_json["exposure_time"] == 90
+    expect(request).to_contain_text("draft")
+    expect(request).not_to_contain_text("submitted")
+    expect(page.locator("#msg-ipp")).to_contain_text("1 draft(s) created")
+    expect(page.locator("#monitor-body tr", has_text="101")).to_have_count(1)

@@ -234,3 +234,123 @@ def test_job_owner_lookup_follows_the_job_store_key(tmp_path, monkeypatch):
                   run_id="my_run", run_name="My Run", user_name="alice")
     assert default_job_owner("ttv_fit", "", "", "TOI 1", "My Run") == "alice"
     assert default_job_owner("ttv_fit", "", "", "TOI 1", "other") is None
+
+
+# --- pinned inputs (#325 item 2) ---------------------------------------------
+#
+# A product input used to be followed by name to whatever run holds that name
+# today, so replacing an upstream run changed who could see its downstream.
+# The writers now pin each consumed product's manifest into the input.
+
+
+def _fit_ref(rid, date=DATE):
+    return {"kind": "product", "level": "transit_fit", "instrument": INST,
+            "obsdate": date, "target": TARGET, "run_id": rid}
+
+
+def _phot_ref(rid):
+    return {"kind": "product", "level": "photometry", "instrument": INST,
+            "obsdate": DATE, "target": TARGET, "run_id": rid}
+
+
+def _resolver(tmp_path):
+    return lambda level, inst, date, target, run_id: tmp_path / level / inst / date / target / run_id
+
+
+def _pinned(tmp_path, refs):
+    from muscat_db.product_visibility import pin_product_inputs
+
+    return pin_product_inputs(refs, run_dir=_resolver(tmp_path))
+
+
+def test_pin_copies_the_upstream_makers_and_inputs(tmp_path):
+    _put(tmp_path, "photometry", [_frames(OPEN)], run_id="p1", author="Alice")
+    [entry] = _pinned(tmp_path, [_phot_ref("p1")])
+    assert entry["pinned"] == {"maker": "Alice", "inputs": [_frames(OPEN)]}
+    assert {k: v for k, v in entry.items() if k != "pinned"} == _phot_ref("p1")
+
+
+def test_pin_leaves_the_callers_list_alone(tmp_path):
+    _put(tmp_path, "photometry", [_frames(OPEN)], run_id="p1")
+    refs = [_phot_ref("p1")]
+    _pinned(tmp_path, refs)
+    assert "pinned" not in refs[0]
+
+
+def test_pin_skips_manual_frames_and_unreadable_upstreams(tmp_path):
+    manual = {"kind": "manual", "note": "typed"}
+    out = _pinned(tmp_path, [manual, _frames(OPEN), _phot_ref("missing")])
+    assert out == [manual, _frames(OPEN), _phot_ref("missing")]
+
+
+def test_pin_ignores_an_upstream_record_of_another_level(tmp_path):
+    _put(tmp_path, "transit_fit", [_frames(OPEN)], run_id="p1")
+    rdir = tmp_path / "photometry" / INST / DATE / TARGET / "p1"
+    rdir.parent.mkdir(parents=True)
+    (tmp_path / "transit_fit" / INST / DATE / TARGET / "p1").rename(rdir)
+    assert "pinned" not in _pinned(tmp_path, [_fit_ref("p1")])[0]
+
+
+def test_pin_keeps_an_existing_pin(tmp_path):
+    _put(tmp_path, "photometry", [_frames(OPEN)], run_id="p1")
+    first = _pinned(tmp_path, [_phot_ref("p1")])
+    _put(tmp_path, "photometry", [_frames(RESTRICTED)], run_id="p1")
+    assert _pinned(tmp_path, first) == first
+
+
+def test_downstream_stays_hidden_when_its_upstream_is_replaced_by_a_public_one(tmp_path):
+    """The audit's reproduction: a TTV fit made from private inputs became
+    visible once its transit fit was re-run on public inputs."""
+    _put(tmp_path, "photometry", [_frames(RESTRICTED)], run_id="p1")
+    _put(tmp_path, "transit_fit", _pinned(tmp_path, [_phot_ref("p1")]), run_id="f1")
+    _put(tmp_path, "ttv_fit", _pinned(tmp_path, [_fit_ref("f1")]), run_id="t1")
+    assert _viewer(tmp_path).hidden("ttv_fit", INST, DATE, TARGET, "t1")
+
+    _put(tmp_path, "photometry", [_frames(OPEN)], run_id="p1")  # same name, public frames
+    _put(tmp_path, "transit_fit", _pinned(tmp_path, [_phot_ref("p1")]), run_id="f1")
+    assert not _viewer(tmp_path).hidden("transit_fit", INST, DATE, TARGET, "f1")
+    assert _viewer(tmp_path).hidden("ttv_fit", INST, DATE, TARGET, "t1")
+
+
+def test_an_unpinned_input_still_follows_the_current_upstream(tmp_path):
+    """Records written before pinning keep the live lookup."""
+    _put(tmp_path, "photometry", [_frames(RESTRICTED)], run_id="p1")
+    _put(tmp_path, "transit_fit", [_phot_ref("p1")], run_id="f1")
+    _put(tmp_path, "photometry", [_frames(OPEN)], run_id="p1")
+    assert not _viewer(tmp_path).hidden("transit_fit", INST, DATE, TARGET, "f1")
+
+
+def test_a_pinned_input_does_not_need_the_upstream_to_still_exist(tmp_path):
+    _put(tmp_path, "photometry", [_frames(OPEN)], run_id="p1")
+    _put(tmp_path, "transit_fit", _pinned(tmp_path, [_phot_ref("p1")]), run_id="f1")
+    import shutil
+    shutil.rmtree(tmp_path / "photometry" / INST / DATE / TARGET / "p1")
+    assert not _viewer(tmp_path).hidden("transit_fit", INST, DATE, TARGET, "f1")
+
+
+def test_the_maker_of_a_pinned_upstream_sees_what_was_built_on_it(tmp_path):
+    _put(tmp_path, "photometry", [_frames(RESTRICTED)], run_id="p1", author="Alice")
+    _put(tmp_path, "transit_fit", _pinned(tmp_path, [_phot_ref("p1")]), run_id="f1", author="Bob")
+    assert not _viewer(tmp_path, user="alice").hidden("transit_fit", INST, DATE, TARGET, "f1")
+    assert _viewer(tmp_path, user="carol").hidden("transit_fit", INST, DATE, TARGET, "f1")
+
+
+def test_a_pinned_undetermined_upstream_is_admin_only(tmp_path):
+    _put(tmp_path, "photometry", None, run_id="p1")
+    _put(tmp_path, "transit_fit", _pinned(tmp_path, [_phot_ref("p1")]), run_id="f1")
+    assert _viewer(tmp_path).hidden("transit_fit", INST, DATE, TARGET, "f1")
+
+
+def test_a_malformed_pin_fails_closed(tmp_path):
+    bad = dict(_phot_ref("p1"), pinned="oops")
+    _put(tmp_path, "transit_fit", [bad], run_id="f1")
+    assert _viewer(tmp_path).hidden("transit_fit", INST, DATE, TARGET, "f1")
+
+
+def test_a_pinned_chain_is_followed_through_every_hop(tmp_path):
+    _put(tmp_path, "photometry", [_frames(RESTRICTED)], run_id="p1")
+    _put(tmp_path, "transit_fit", _pinned(tmp_path, [_phot_ref("p1")]), run_id="f1")
+    _put(tmp_path, "ttv_fit", _pinned(tmp_path, [_fit_ref("f1")]), run_id="t1")
+    import json
+    record = json.loads((tmp_path / "ttv_fit" / INST / DATE / TARGET / "t1" / pr.RECORD_NAME).read_text())
+    assert record["inputs"][0]["pinned"]["inputs"][0]["pinned"]["inputs"] == [_frames(RESTRICTED)]

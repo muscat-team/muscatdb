@@ -81,7 +81,7 @@
 <p class="fov-note" style="margin-bottom: 1.1rem;">
   Choose a pointing and field orientation that keep the target inside the
   instrument footprint while capturing the richest set of <em>useful</em>
-  comparison stars &mdash; similar brightness (a brighter comp would cap the
+  comparison stars: similar brightness (a brighter comp would cap the
   exposure to avoid saturation), similar color, and well isolated.
 </p>
 
@@ -221,7 +221,7 @@
     <h4>2. Query Gaia DR3 around the target</h4>
     <p>
       All catalog stars within a circle around the target are pulled from
-      Gaia DR3 &mdash; wide enough to cover the instrument's footprint even
+      Gaia DR3, wide enough to cover the instrument's footprint even
       when the optimizer ends up pointing off-target. The official ESA
       archive is tried first; if it's unavailable, a VizieR mirror
       (<code>I/355/gaiadr3</code>) is used instead. Because Gaia photometry
@@ -235,7 +235,7 @@
 
     <div style="background:var(--surface-alt); border-radius:6px; padding:0.8rem 1rem; margin-bottom:1rem; font-size:0.83rem; line-height:1.7;">
 
-      <div style="margin-bottom:0.5rem;"><strong>Magnitude term</strong> &mdash;
+      <div style="margin-bottom:0.5rem;"><strong>Magnitude term</strong>:
         a Gaussian centred on the ideal offset, with a hard floor for stars bright
         enough to limit the exposure:</div>
 
@@ -248,7 +248,7 @@
         if &Delta;G &lt; &minus;1.0 &rarr; <em>w</em><sub>mag</sub> &times;= 0.3
       </div>
 
-      <div style="margin-bottom:0.5rem;"><strong>Color term</strong> &mdash;
+      <div style="margin-bottom:0.5rem;"><strong>Color term</strong>:
         a second Gaussian rewarding stars whose Gaia BP&minus;RP colour is close to
         the target's:</div>
 
@@ -263,7 +263,7 @@
         <em>w</em> = <em>w</em><sub>mag</sub> &times; <em>w</em><sub>color</sub>
       </div>
 
-      <div style="margin-bottom:0.5rem;"><strong>Crowding penalty</strong> &mdash;
+      <div style="margin-bottom:0.5rem;"><strong>Crowding penalty</strong>:
         a star with a comparably bright neighbour within 12″ is downweighted:</div>
 
       <div style="font-family: 'Times New Roman', serif; text-align:center; margin:0.2rem 0 0.4rem; font-size:0.95rem;">
@@ -298,7 +298,7 @@
       The field center doesn't have to sit exactly on the target. The
       optimizer grid-searches candidate field-center offsets together with a
       position angle (skipped if "allow field rotation" is unchecked, which
-      fixes the field at PA=0&deg;) &mdash; a square footprint repeats every
+      fixes the field at PA=0&deg;). A square footprint repeats every
       90&deg;, so only that range needs to be searched. For every candidate
       pointing that still keeps the target inside the footprint (respecting
       your target margin) and avoids any "too bright" star, the comparison
@@ -307,8 +307,8 @@
       total score wins.
     </p>
     <p>
-      If no candidate pointing can satisfy every constraint &mdash; usually
-      because a bright star can't be dodged anywhere in reach &mdash; the
+      If no candidate pointing can satisfy every constraint, usually
+      because a bright star can't be dodged anywhere in reach, the
       optimizer reports that explicitly rather than silently returning a
       compromised field.
     </p>
@@ -322,14 +322,14 @@
     </p>
     <p>
       Footprint size is read from <code>data/FOV_*.vot.xml</code>; the polygon shown
-      reflects the optimized pointing and position angle. Pan/zoom freely &mdash;
+      reflects the optimized pointing and position angle. Pan/zoom freely;
       “Recenter view” returns to the optimized field.
     </p>
     <p>
       <strong>Proper motion arrows</strong> (when enabled) point in each
       star's direction of motion, colored by category (target vs.
       comparison). Arrow length is exaggerated and scaled relative to the
-      fastest-moving star shown &mdash; only useful for comparing direction
+      fastest-moving star shown, so it is only useful for comparing direction
       and relative speed between stars, not the true angular scale. A
       comparison star with an arrow parallel to, and about as long as, the
       target's suggests a common proper-motion (co-moving) companion.
@@ -341,7 +341,7 @@
       previous observation of this target is found) lists every night this
       target was actually observed, across all instruments. Picking one draws
       its real footprint (magenta) alongside the optimized one, from the
-      pointing actually used that night &mdash; not a proposal &mdash; read
+      pointing actually used that night, not a proposal, read
       straight from the frames obslog rather than the Gaia-driven optimizer
       above. The
       footprint size reflects the read mode that night actually used; the
@@ -355,11 +355,11 @@
     <p>
       A note under the field lists the separation between the observed
       pointing and the current target position, flagged when it puts the
-      target outside that night's footprint entirely &mdash; a real telescope
+      target outside that night's footprint entirely: a real telescope
       pointing error, not a display bug. <strong>MuSCAT and MuSCAT2 frames
       carry no native WCS</strong>: their header RA/Dec is only the TCS's own
       belief about where it was pointed, never independently plate-solved, so
-      it can be unreliable &mdash; the note flags this for every muscat/muscat2
+      it can be unreliable; the note flags this for every muscat/muscat2
       overlay.
     </p>
   </div>

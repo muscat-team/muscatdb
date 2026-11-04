@@ -213,6 +213,46 @@ def test_transit_fit_records_each_selected_lightcurve(db, tmp_path):
     }]
 
 
+def test_transit_fit_pins_the_photometry_it_consumed(db, tmp_path):
+    runs = phot.output_base() / INST / DATE / "_runs" / "TOI-1234"
+    csv = runs / "coj-full" / "TOI-1234_sinistro_g.csv"
+    csv.parent.mkdir(parents=True)
+    csv.write_text("x\n")
+    frames = [{"kind": "frames", "instrument": INST, "obsdate": DATE, "target": TARGET,
+               "proposal_ids": ["KEY2026B-001"], "resolved": True}]
+    assert pr.write_record(csv.parent, pr.build_record("photometry", author="alice", inputs=frames))
+    rdir = tmp_path / "fit"
+    rdir.mkdir()
+    fit._write_fit_product(rdir, INST, DATE, TARGET, [csv], {"degree": 2}, False, "bob")
+    [entry] = pr.read_record(rdir)["inputs"]
+    assert entry["pinned"] == {"maker": "alice", "inputs": frames}
+
+
+def test_ttv_fit_pins_the_transit_fits_it_consumed(db, tmp_path):
+    fit_dir = fit.fit_output_dir(INST, DATE, TARGET, "r1")
+    fit_dir.mkdir(parents=True)
+    upstream = [{"kind": "frames", "instrument": INST, "obsdate": DATE, "target": TARGET,
+                 "proposal_ids": ["OTHER-9"], "resolved": True}]
+    assert pr.write_record(fit_dir, pr.build_record("transit_fit", author="bob", inputs=upstream))
+    rdir = tmp_path / "ttv"
+    rdir.mkdir()
+    ttv.write_ttv_inputs(rdir, "c", "i", _ttv_options(inputs=[_point()]), user_name="carol")
+    [entry] = pr.read_record(rdir)["inputs"]
+    assert entry["pinned"] == {"maker": "bob", "inputs": upstream}
+
+
+def test_a_pin_submitted_by_a_client_is_discarded(db, tmp_path):
+    """Only the server pins: a client must not be able to vouch for its own inputs."""
+    forged = dict(_point(), pinned={"maker": "carol", "inputs": []})
+    inputs, err = pr.ttv_inputs_from_points([forged])
+    assert err is None
+    assert "pinned" not in inputs[0]
+    rdir = tmp_path / "ttv"
+    rdir.mkdir()
+    ttv.write_ttv_inputs(rdir, "c", "i", _ttv_options(inputs=[forged]), user_name="carol")
+    assert "pinned" not in pr.read_record(rdir)["inputs"][0]
+
+
 def _ttv_options(**kw):
     opts = {
         "csv_content": "planet,epoch,tc,tc_unc\n0,0,2459000.1,0.001\n",
