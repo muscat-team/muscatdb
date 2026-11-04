@@ -410,3 +410,82 @@ def test_a_hung_lookup_does_not_stall_other_callers(monkeypatch):
     assert lookup() == "ok"  # waits ~0.2 s, then runs its own lookup
     hang.set()
     leader.join(5)
+
+
+@pytest.mark.parametrize("mode", ["raises", "rejected"])
+def test_unshared_lookups_run_concurrently_not_one_after_another(mode):
+    """Waiters of a flight that was not shared each run their own lookup at
+    once; they must not queue behind a new leader (6 callers x 0.3 s)."""
+    delay, n = 0.3, 6
+
+    def slow():
+        time.sleep(delay)
+        if mode == "raises":
+            raise RuntimeError("upstream down")
+        return None
+
+    lookup = TTLCache(ttl=60, cache_if=lambda v: v is not None)(slow)
+    start = time.monotonic()
+    threads, _, _ = _run_threads(lambda i: _swallow(lookup), n)
+    for t in threads:
+        t.join(10)
+    assert time.monotonic() - start < delay * 3  # serialized would be ~n * delay
+
+
+def _swallow(fn):
+    try:
+        return fn()
+    except RuntimeError:
+        return None
+
+
+def test_successive_callers_do_not_each_wait_on_a_hung_leader(monkeypatch):
+    from muscat_db import cache as cache_module
+
+    wait = 0.4
+    monkeypatch.setattr(cache_module, "_FLIGHT_WAIT_S", wait)
+    hang = threading.Event()
+    calls = []
+
+    @TTLCache(ttl=60)
+    def lookup():
+        calls.append(1)
+        if len(calls) == 1:
+            hang.wait(5)
+        return "ok"
+
+    leader = threading.Thread(target=lookup)
+    leader.start()
+    time.sleep(0.1)
+    assert lookup() == "ok"  # waits the bound once, then caches its result
+    start = time.monotonic()
+    assert lookup() == "ok"
+    assert time.monotonic() - start < wait / 2  # cached, not another full wait
+    hang.set()
+    leader.join(5)
+
+
+def test_a_caller_arriving_after_a_timeout_leads_instead_of_waiting(monkeypatch):
+    from muscat_db import cache as cache_module
+
+    wait = 0.4
+    monkeypatch.setattr(cache_module, "_FLIGHT_WAIT_S", wait)
+    hang = threading.Event()
+    calls = []
+
+    @TTLCache(ttl=60, cache_if=lambda v: False)  # nothing is cached
+    def lookup():
+        calls.append(1)
+        if len(calls) == 1:
+            hang.wait(5)
+        return "ok"
+
+    leader = threading.Thread(target=lookup)
+    leader.start()
+    time.sleep(0.1)
+    assert lookup() == "ok"  # times out once, drops the dead flight
+    start = time.monotonic()
+    assert lookup() == "ok"
+    assert time.monotonic() - start < wait / 2
+    hang.set()
+    leader.join(5)

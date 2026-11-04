@@ -104,9 +104,11 @@ class TTLCache:
     computes it and the rest wait for that result (#325), so a burst of
     identical requests costs one lookup, not one each. Only a result that was
     stored is shared. If the leader raises, or its result is rejected by
-    ``cache_if`` or predates a ``clear()``, each waiting caller looks the key
-    up again, so a transient failure is never fanned out and #366's guarantee
-    holds.
+    ``cache_if`` or predates a ``clear()``, each waiting caller runs its own
+    lookup (concurrently, not queued behind a new leader), so a transient
+    failure is never fanned out and #366's guarantee holds. A caller waits at
+    most ``_FLIGHT_WAIT_S`` for one flight; a timed-out flight is dropped so
+    later callers are not held by the same hung leader.
     """
 
     def __init__(
@@ -127,51 +129,59 @@ class TTLCache:
         @wraps(func)
         def wrapper(*args, **kwargs):
             key = (args, tuple(sorted(kwargs.items())))
-            while True:
-                now = time.time()
-                with self.lock:
-                    if key in self.cache:
-                        val, expiry = self.cache[key]
-                        if now < expiry:
-                            self.cache.move_to_end(key)
-                            return val
-                        del self.cache[key]
-                    generation = self._generation
-                    flight = self._in_flight.get(key)
-                    if flight is not None and (
-                        flight.generation != generation or flight.leader == threading.get_ident()
-                    ):
-                        flight = None  # superseded by a clear(), or this thread's own recursion
-                    if flight is None:
-                        mine = _Flight(generation)
-                        self._in_flight[key] = mine
-                if flight is not None:
-                    # Another caller is already looking this key up: wait for it
-                    # instead of repeating an expensive lookup. Its result is
-                    # shared only if it was stored; a failed, rejected or
-                    # pre-clear() result sends this caller round again.
-                    if not flight.done.wait(_FLIGHT_WAIT_S):
-                        # The leader is hung: one stuck lookup must not stall
-                        # every caller of the key. Look it up independently.
-                        return func(*args, **kwargs)
+            now = time.time()
+            with self.lock:
+                if key in self.cache:
+                    val, expiry = self.cache[key]
+                    if now < expiry:
+                        self.cache.move_to_end(key)
+                        return val
+                    del self.cache[key]
+                generation = self._generation
+                flight = self._in_flight.get(key)
+                if flight is not None and (
+                    flight.generation != generation or flight.leader == threading.get_ident()
+                ):
+                    flight = None  # superseded by a clear(), or this thread's own recursion
+                if flight is None:
+                    mine = _Flight(generation)
+                    self._in_flight[key] = mine
+            if flight is not None:
+                # Another caller is already looking this key up: wait for it
+                # instead of repeating an expensive lookup.
+                if flight.done.wait(_FLIGHT_WAIT_S):
                     if flight.shared:
                         return flight.value
-                    continue
-                return self._lead(mine, key, now, func, args, kwargs)
+                else:
+                    # The leader is hung: drop its flight so the next caller
+                    # leads instead of waiting on it too.
+                    with self.lock:
+                        if self._in_flight.get(key) is flight:
+                            del self._in_flight[key]
+                # Not shared (failed, rejected or pre-clear() result) or
+                # timed out: look the key up independently, as callers did
+                # before coalescing, rather than queueing behind a new
+                # leader. The wait is therefore bounded by one flight.
+                with self.lock:
+                    generation = self._generation
+                return self._lead(None, generation, key, time.time(), func, args, kwargs)
+            return self._lead(mine, mine.generation, key, now, func, args, kwargs)
 
         wrapper.cache_clear = self.clear
         return wrapper
 
-    def _lead(self, flight, key, now, func, args, kwargs):
-        """Run the lookup for *key* as its single leader and publish the
-        outcome to any callers waiting on *flight*."""
+    def _lead(self, flight, generation, key, now, func, args, kwargs):
+        """Run the lookup for *key* and store the result if allowed. With a
+        *flight*, publish the outcome to any callers waiting on it; without
+        one, the lookup is independent and nobody waits on it."""
         stored = False
         try:
             val = func(*args, **kwargs)
-            flight.value = val
+            if flight is not None:
+                flight.value = val
             if self.cache_if is None or self.cache_if(val):
                 with self.lock:
-                    if flight.generation == self._generation:
+                    if generation == self._generation:
                         self.cache[key] = (val, now + self.ttl)
                         self.cache.move_to_end(key)
                         while len(self.cache) > self.maxsize:
@@ -179,11 +189,12 @@ class TTLCache:
                         stored = True
             return val
         finally:
-            flight.shared = stored
-            with self.lock:
-                if self._in_flight.get(key) is flight:
-                    del self._in_flight[key]
-            flight.done.set()
+            if flight is not None:
+                flight.shared = stored
+                with self.lock:
+                    if self._in_flight.get(key) is flight:
+                        del self._in_flight[key]
+                flight.done.set()
 
     def clear(self):
         with self.lock:
