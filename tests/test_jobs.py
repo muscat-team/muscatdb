@@ -228,6 +228,32 @@ class TestResolveJobState:
         )
         assert state == "done" and terminal is True
 
+    def test_a_job_already_terminal_is_not_resolved_again(self, make_job, monkeypatch):
+        """sync_jobs visits every retained job on every pass: once a job has
+        gone terminal its outcome is kept, and its log is not read again (#325)."""
+        job, _ = make_job(rc=0)
+        job.state, job.returncode = "done", 0
+
+        def reread(*_a, **_k):
+            raise AssertionError("the log of a terminal job was read again")
+
+        monkeypatch.setattr(jobs, "log_quiescent", reread)
+        monkeypatch.setattr(jobs, "terminal_job_state", reread)
+        assert jobs.resolve_job_state(job, _cfg()) == ("done", 0, True)
+
+    def test_a_terminal_error_keeps_its_recorded_state(self, make_job):
+        """sync_jobs may rewrite a zero exit to error on a partial failure; the
+        recorded state is what later passes report."""
+        job, _ = make_job(rc=0)
+        job.state, job.returncode = "error", 0
+        assert jobs.resolve_job_state(job, _cfg()) == ("error", 0, True)
+
+    def test_a_running_job_is_still_resolved_from_its_process(self, make_job):
+        job, _ = make_job(rc=3)
+        assert job.state == "running"
+        state, rc, terminal = jobs.resolve_job_state(job, _cfg(grace_s=0))
+        assert (state, rc, terminal) == ("error", 3, True)
+
     def test_nonzero_exit_is_error(self, make_job):
         job, _ = make_job(rc=3)
         time.sleep(0)  # log already quiescent (mtime in the past)

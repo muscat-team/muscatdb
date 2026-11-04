@@ -417,6 +417,10 @@ def terminal_job_state(
     return "done"
 
 
+# States a tracked job holds once it has finished; its outcome does not change.
+_TERMINAL_STATES = frozenset({"done", "error", "cancelled"})
+
+
 def resolve_job_state(
     job: PipelineJob, cfg: FinalizeConfig, now: float | None = None
 ) -> tuple[str, int | None, bool]:
@@ -428,6 +432,10 @@ def resolve_job_state(
     emit after parent-exit. A cancelled job goes terminal immediately to keep the
     Cancel flow responsive.
     """
+    if job.state in _TERMINAL_STATES and job.returncode is not None:
+        # Already resolved: sync_jobs keeps finished jobs and visits each one
+        # on every pass, so do not read its log again (#325).
+        return job.state, job.returncode, True
     rc = job.proc.poll()
     if rc is None:
         return ("cancelling" if job.cancelled else "running"), None, False
