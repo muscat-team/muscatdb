@@ -347,17 +347,90 @@ def _running_row_fields(row: dict) -> dict:
     }
 
 
-def abandon_claimed_launch(store, pipeline: str, holder_key: str, row: dict | None, error: str) -> None:
+# Direct launches that hold a claim but have not registered their process yet.
+# The claim writes the ``running`` row before the process exists, so within this
+# process anything that reads "running row, no tracked job" as an orphan (the
+# sync_jobs reconcile pass) or as a cancellable job (cancel) must skip these.
+# Cross-process readers are covered by the row's instance id and heartbeat.
+_LAUNCHING: set[str] = set()
+_LAUNCHING_LOCK = threading.Lock()
+
+
+def mark_launching(db_key: str) -> None:
+    """Record that this process is between a slot claim and process registration."""
+    with _LAUNCHING_LOCK:
+        _LAUNCHING.add(db_key)
+
+
+def clear_launching(db_key: str) -> None:
+    with _LAUNCHING_LOCK:
+        _LAUNCHING.discard(db_key)
+
+
+def is_launching(db_key: str) -> bool:
+    with _LAUNCHING_LOCK:
+        return db_key in _LAUNCHING
+
+
+def launch_row_key(row: dict) -> str:
+    """The ``jobs`` primary key of a claim_slot *running_row*."""
+    return database.job_row_key(row["type_"], row["inst"], row["date"], row["target"], row.get("run_id") or "")
+
+
+def begin_claimed_launch(store, row: dict) -> dict | None:
+    """The row a claim is about to replace, or ``None`` if there is none.
+    Read before the claim, since the claim overwrites it. Pass the result to
+    :func:`abandon_claimed_launch` so a failed relaunch can put it back."""
+    try:
+        return store.get(launch_row_key(row))
+    except Exception:
+        logger.debug("failed to read the row a launch will replace", exc_info=True)
+        return None
+
+
+def mark_claimed_launch(row: dict) -> None:
+    mark_launching(launch_row_key(row))
+
+
+def finish_claimed_launch(row: dict | None) -> None:
+    """The launch registered its process: sync and cancel may act on it now."""
+    if row is not None:
+        clear_launching(launch_row_key(row))
+
+
+# Only a finished run is put back; a live or queued row is never resurrected.
+_RESTORABLE_STATES = ("done", "error", "cancelled")
+_RESTORE_FIELDS = ("run_type", "params", "run_id", "run_name", "user_name", "owner", "instance_id", "error_desc", "attempts")
+
+
+def abandon_claimed_launch(
+    store, pipeline: str, holder_key: str, row: dict | None, error: str, *, previous: dict | None = None,
+) -> None:
     """Undo a direct launch that claimed a slot (with a *running_row*) but
-    never started its process: mark the row ``error`` so it is not left
-    ``running`` with nothing behind it, then release the slot. *row* is the
-    same dict the claim registered; ``None`` (a test job holds no slot and
-    registered no row) only releases. Best-effort, like :meth:`release_slot`."""
+    never started its process, then release the slot. *row* is the same dict
+    the claim registered; ``None`` (a test job holds no slot and registered no
+    row) only releases.
+
+    The finished row the claim replaced is put back when *previous* is given (a failed
+    relaunch must not erase the earlier run's ``done`` row, whose products may
+    still be on disk); otherwise the row is marked ``error`` so it is not left
+    ``running`` with nothing behind it. Best-effort, like :meth:`release_slot`."""
     if row is not None:
         try:
-            store.save(**{**row, "state": "error", "returncode": -1, "elapsed": 0, "error_desc": error})
+            if previous is not None and previous.get("state") in _RESTORABLE_STATES:
+                store.save(
+                    type_=previous["type"], inst=previous["inst"], date=previous["date"],
+                    target=previous["target"], state=previous["state"],
+                    returncode=previous.get("returncode"), elapsed=int(previous.get("elapsed") or 0),
+                    started_at=previous.get("started_at") or 0,
+                    **{k: previous.get(k) or ("" if k != "attempts" else 0) for k in _RESTORE_FIELDS},
+                )
+            else:
+                store.save(**{**row, "state": "error", "returncode": -1, "elapsed": 0, "error_desc": error})
         except Exception:
-            logger.debug("failed to mark abandoned launch %s/%s as error", pipeline, holder_key, exc_info=True)
+            logger.debug("failed to settle abandoned launch %s/%s", pipeline, holder_key, exc_info=True)
+        finally:
+            clear_launching(launch_row_key(row))
     store.release_slot(pipeline, holder_key)
 
 

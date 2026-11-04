@@ -25,7 +25,16 @@ import yaml
 
 from muscat_db import jobs, database
 from muscat_db._optimize_helper import DONE_MARKER as _OPTIMIZE_DONE_MARKER
-from muscat_db.job_store import abandon_claimed_launch, current_instance_id, current_owner, get_job_store
+from muscat_db.job_store import (
+    abandon_claimed_launch,
+    begin_claimed_launch,
+    current_instance_id,
+    current_owner,
+    finish_claimed_launch,
+    get_job_store,
+    is_launching,
+    mark_claimed_launch,
+)
 from muscat_db.job_limits import JobLimitExceeded, claim_caps, claim_caps_for_row, enqueue_caps, full_job_cap, limit_refusal, params_with_running_cap
 from muscat_db import __meta__, __muscatdb_version__, __version__
 from muscat_db.instruments import INSTRUMENTS
@@ -1775,8 +1784,11 @@ def start_fit(
             "run_id": run_id, "run_type": run_type, "params": params_json,
             "run_name": run_name, "user_name": user_name, "started_at": time.time(),
         }
+        previous = begin_claimed_launch(get_job_store(), launch_row) if run_type == "full" else None
         if run_type == "full":
             claimed_slot = get_job_store().claim_slot("transit_fit", key, _MAX_FULL_JOBS, running_row=launch_row, **claim_caps(user_name))
+            if claimed_slot:
+                mark_claimed_launch(launch_row)  # under _FIT_LOCK, so sync_jobs skips it until registered
         at_capacity = run_type == "full" and not claimed_slot
 
         # Queue full jobs when at capacity
@@ -1798,80 +1810,89 @@ def start_fit(
                 return {"ok": False, "error": jobs.server_fault("The job could not be queued because the job database is not writable", exc)}
             return {"ok": True, "key": key, "queued": True, "run_id": run_id}
 
-    # Working directory
-    rdir.mkdir(parents=True, exist_ok=True)
+    try:
+        # Working directory
+        rdir.mkdir(parents=True, exist_ok=True)
 
-    # Preserve existing products so timer can reuse them when clobber is false.
-    # When overwrite is selected, fit.yaml sets clobber=true and timer owns the
-    # invalidation/replacement of its cached results.
-    # Full fits always clobber — otherwise timer reuses the cached test-run
-    # trace (20 draws) and exits immediately, misleading the user into thinking
-    # their full-fit request was silently ignored.
-    narrowband_aliases = _write_fit_inputs(
-        rdir, inst, date, target, csvs, options,
-        site=site, telescope=telescope, mode=mode, run_name=run_name, run_id=run_id,
-        run_type=run_type)
-    _write_fit_product(rdir, inst, date, target, csvs, options, test_run, user_name)
+        # Preserve existing products so timer can reuse them when clobber is false.
+        # When overwrite is selected, fit.yaml sets clobber=true and timer owns the
+        # invalidation/replacement of its cached results.
+        # Full fits always clobber — otherwise timer reuses the cached test-run
+        # trace (20 draws) and exits immediately, misleading the user into thinking
+        # their full-fit request was silently ignored.
+        narrowband_aliases = _write_fit_inputs(
+            rdir, inst, date, target, csvs, options,
+            site=site, telescope=telescope, mode=mode, run_name=run_name, run_id=run_id,
+            run_type=run_type)
+        _write_fit_product(rdir, inst, date, target, csvs, options, test_run, user_name)
 
-    # Clear cached outputs so the next page load reads fresh results from disk.
-    _fit_outputs_cache.clear()
+        # Clear cached outputs so the next page load reads fresh results from disk.
+        _fit_outputs_cache.clear()
 
-    # Launch process: timer-fit for a full run, the optimize-only helper
-    # (no MCMC) for a test run.
-    cmd = _fit_command(rdir, run_type)
-    log_path = rdir / "timer-fit.log"
-    logf = open(log_path, "w")
-    _write_log_banner(logf, cmd, options, narrowband_aliases)
-    logf.flush()
+        # Launch process: timer-fit for a full run, the optimize-only helper
+        # (no MCMC) for a test run.
+        cmd = _fit_command(rdir, run_type)
+        log_path = rdir / "timer-fit.log"
+        logf = open(log_path, "w")
+        _write_log_banner(logf, cmd, options, narrowband_aliases)
+        logf.flush()
+
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(rdir),
+                stdout=logf,
+                stderr=subprocess.STDOUT,
+                text=True,
+                start_new_session=True,
+                # Core pinning (architecture issue #51, 2.4): no-op unless
+                # MUSCAT_JOB_MAX_THREADS is configured.
+                env={**os.environ, **jobs.core_pinning_env()},
+            )
+            try:
+                with open(rdir / "timer-fit.pid", "w") as pidf:
+                    pidf.write(str(proc.pid))
+            except Exception:
+                logger.debug("failed to write timer-fit.pid in %s", rdir, exc_info=True)
+        except (FileNotFoundError, OSError) as exc:
+            if claimed_slot:
+                abandon_claimed_launch(get_job_store(), "transit_fit", key, launch_row, f"Failed to launch: {exc}", previous=previous)
+            logf.write(f"\nfailed to launch fitting: {exc}\n")
+            logf.close()
+            return {"ok": False, "error": jobs.server_fault("The server could not start the transit fit", exc)}
+    except BaseException:
+        if claimed_slot:
+            abandon_claimed_launch(get_job_store(), "transit_fit", key, launch_row, "Launch failed before the process started", previous=previous)
+        raise
 
     try:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(rdir),
-            stdout=logf,
-            stderr=subprocess.STDOUT,
-            text=True,
-            start_new_session=True,
-            # Core pinning (architecture issue #51, 2.4): no-op unless
-            # MUSCAT_JOB_MAX_THREADS is configured.
-            env={**os.environ, **jobs.core_pinning_env()},
-        )
-        try:
-            with open(rdir / "timer-fit.pid", "w") as pidf:
-                pidf.write(str(proc.pid))
-        except Exception:
-            logger.debug("failed to write timer-fit.pid in %s", rdir, exc_info=True)
-    except (FileNotFoundError, OSError) as exc:
+        with _FIT_LOCK:
+            _FIT_JOBS[key] = TransitFitJob(
+                key=key, inst=inst, date=date, target=target,
+                cmd=cmd, proc=proc, logf=logf, log_path=log_path,
+                run_type=run_type, run_id=run_id, site=site, telescope=telescope, mode=mode, run_name=run_name,
+            )
+            # Record new job in the database
+            get_job_store().save(
+                type_="transit_fit",
+                inst=inst,
+                date=date,
+                target=target,
+                run_id=run_id,
+                state="running",
+                returncode=None,
+                elapsed=0,
+                started_at=_FIT_JOBS[key].started_at,
+                run_type=run_type,
+                params=params_json,
+                run_name=run_name,
+                user_name=user_name,
+                owner=current_owner(),
+                instance_id=current_instance_id(),
+            )
+    finally:
         if claimed_slot:
-            abandon_claimed_launch(get_job_store(), "transit_fit", key, launch_row, f"Failed to launch: {exc}")
-        logf.write(f"\nfailed to launch fitting: {exc}\n")
-        logf.close()
-        return {"ok": False, "error": jobs.server_fault("The server could not start the transit fit", exc)}
-
-    with _FIT_LOCK:
-        _FIT_JOBS[key] = TransitFitJob(
-            key=key, inst=inst, date=date, target=target,
-            cmd=cmd, proc=proc, logf=logf, log_path=log_path,
-            run_type=run_type, run_id=run_id, site=site, telescope=telescope, mode=mode, run_name=run_name,
-        )
-        # Record new job in the database
-        get_job_store().save(
-            type_="transit_fit",
-            inst=inst,
-            date=date,
-            target=target,
-            run_id=run_id,
-            state="running",
-            returncode=None,
-            elapsed=0,
-            started_at=_FIT_JOBS[key].started_at,
-            run_type=run_type,
-            params=params_json,
-            run_name=run_name,
-            user_name=user_name,
-            owner=current_owner(),
-            instance_id=current_instance_id(),
-        )
+            finish_claimed_launch(launch_row)
 
     return {"ok": True, "key": key, "run_id": run_id}
 
@@ -2113,6 +2134,8 @@ def cancel_fit(inst: str, date: str, target: str, run_id: str = "") -> dict:
             # May be a pending job (in DB but not yet launched)
             db_key = f"transit_fit:{key}"
             found = [j for j in store.all() if j["key"] == db_key]
+            if is_launching(db_key):
+                return {"ok": False, "error": "the fit is still starting; try again in a moment"}
             if found and found[0]["state"] == "pending":
                 if store.cancel_pending(db_key):
                     return {"ok": True, "key": key}
@@ -2694,6 +2717,8 @@ def sync_jobs() -> None:
             row = next((j for j in db_jobs if j["key"] == db_key), None)
             if row is None:
                 continue
+            if is_launching(db_key):
+                continue  # claimed by a launch in this process that has not spawned yet
             owner = row.get("owner") or ""
             if owner and owner != current_owner():
                 # Another role's process launched this job; only its own

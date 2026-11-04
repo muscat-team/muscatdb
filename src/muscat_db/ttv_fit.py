@@ -21,7 +21,16 @@ from typing import IO
 import yaml
 
 from muscat_db import jobs, database
-from muscat_db.job_store import abandon_claimed_launch, current_instance_id, current_owner, get_job_store
+from muscat_db.job_store import (
+    abandon_claimed_launch,
+    begin_claimed_launch,
+    current_instance_id,
+    current_owner,
+    finish_claimed_launch,
+    get_job_store,
+    is_launching,
+    mark_claimed_launch,
+)
 from muscat_db.job_limits import JobLimitExceeded, claim_caps, claim_caps_for_row, enqueue_caps, full_job_cap, limit_refusal, params_with_running_cap
 from muscat_db import __meta__, __muscatdb_version__, __version__
 from muscat_db.photometry import (
@@ -537,7 +546,10 @@ def start_ttv_fit(
             "params": json.dumps({"options": options}, separators=(",", ":")),
             "run_name": run_name, "user_name": user_name, "started_at": time.time(),
         }
+        previous = begin_claimed_launch(get_job_store(), launch_row)
         claimed_slot = get_job_store().claim_slot("ttv_fit", ttv_slot_key(key), _MAX_FULL_JOBS, running_row=launch_row, **claim_caps(user_name))
+        if claimed_slot:
+            mark_claimed_launch(launch_row)  # under _TTV_LOCK, so sync_jobs skips it until registered
         at_capacity = not claimed_slot
         if at_capacity:
             try:
@@ -557,101 +569,109 @@ def start_ttv_fit(
                 return {"ok": False, "error": jobs.server_fault("The job could not be queued because the job database is not writable", exc)}
             return {"ok": True, "key": key, "queued": True}
 
-    rdir = ttv_output_dir(target, run_name)
-    rdir.mkdir(parents=True, exist_ok=True)
+    try:
+        rdir = ttv_output_dir(target, run_name)
+        rdir.mkdir(parents=True, exist_ok=True)
 
-    csv_content = options.get("csv_content", "")
-    ini_content = options.get("ini_content", "")
-    input_dir = write_ttv_inputs(rdir, csv_content, ini_content, options, user_name=user_name)
+        csv_content = options.get("csv_content", "")
+        ini_content = options.get("ini_content", "")
+        input_dir = write_ttv_inputs(rdir, csv_content, ini_content, options, user_name=user_name)
 
-    cmd = [
-        *_harmonic_prefix(),
-        "-i", str(input_dir / "data.csv"),
-        "-c", str(input_dir / "config.ini"),
-        "-o", str(rdir),
-    ]
-    letters = options.get("planet_letters", "")
-    if letters:
-        cmd.extend(["-l", letters])
-    walkers = options.get("walkers")
-    if walkers:
-        cmd.extend(["-w", str(walkers)])
-    steps = options.get("steps")
-    if steps:
-        cmd.extend(["--steps", str(steps)])
-    burn = options.get("burn")
-    if burn:
-        cmd.extend(["-b", str(burn)])
-    thin = options.get("thin")
-    if thin:
-        cmd.extend(["--thin", str(thin)])
-    nproc = options.get("nproc")
-    if nproc:
-        cmd.extend(["--nproc", str(nproc)])
-    seed = options.get("seed")
-    if seed:
-        cmd.extend(["--seed", str(seed)])
-    if options.get("non_transiting_outer"):
-        cmd.append("-n")
-    if options.get("phase_offsets"):
-        cmd.append("--phase-offsets")
-    mstar = options.get("mstar")
-    if mstar:
-        cmd.extend(["-m", str(mstar)])
-    if options.get("clobber"):
-        cmd.append("--clobber")
+        cmd = [
+            *_harmonic_prefix(),
+            "-i", str(input_dir / "data.csv"),
+            "-c", str(input_dir / "config.ini"),
+            "-o", str(rdir),
+        ]
+        letters = options.get("planet_letters", "")
+        if letters:
+            cmd.extend(["-l", letters])
+        walkers = options.get("walkers")
+        if walkers:
+            cmd.extend(["-w", str(walkers)])
+        steps = options.get("steps")
+        if steps:
+            cmd.extend(["--steps", str(steps)])
+        burn = options.get("burn")
+        if burn:
+            cmd.extend(["-b", str(burn)])
+        thin = options.get("thin")
+        if thin:
+            cmd.extend(["--thin", str(thin)])
+        nproc = options.get("nproc")
+        if nproc:
+            cmd.extend(["--nproc", str(nproc)])
+        seed = options.get("seed")
+        if seed:
+            cmd.extend(["--seed", str(seed)])
+        if options.get("non_transiting_outer"):
+            cmd.append("-n")
+        if options.get("phase_offsets"):
+            cmd.append("--phase-offsets")
+        mstar = options.get("mstar")
+        if mstar:
+            cmd.extend(["-m", str(mstar)])
+        if options.get("clobber"):
+            cmd.append("--clobber")
 
-    log_path = rdir / "harmonic.log"
-    logf = open(log_path, "w")
-    _write_log_banner(logf, cmd, options)
-    logf.flush()
+        log_path = rdir / "harmonic.log"
+        logf = open(log_path, "w")
+        _write_log_banner(logf, cmd, options)
+        logf.flush()
+
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(rdir),
+                stdout=logf,
+                stderr=subprocess.STDOUT,
+                text=True,
+                start_new_session=True,
+                # Core pinning (architecture issue #51, 2.4): no-op unless
+                # MUSCAT_JOB_MAX_THREADS is configured.
+                env={**os.environ, **jobs.core_pinning_env()},
+            )
+            try:
+                with open(rdir / "harmonic.pid", "w") as pidf:
+                    pidf.write(str(proc.pid))
+            except Exception:
+                logger.debug("failed to write harmonic.pid in %s", rdir, exc_info=True)
+        except (FileNotFoundError, OSError) as exc:
+            abandon_claimed_launch(get_job_store(), "ttv_fit", ttv_slot_key(key), launch_row, f"Failed to launch: {exc}", previous=previous)
+            logf.write(f"\nfailed to launch harmonic: {exc}\n")
+            logf.close()
+            return {"ok": False, "error": jobs.server_fault("The server could not start the TTV fit (harmonic)", exc)}
+    except BaseException:
+        if claimed_slot:
+            abandon_claimed_launch(get_job_store(), "ttv_fit", ttv_slot_key(key), launch_row, "Launch failed before the process started", previous=previous)
+        raise
 
     try:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(rdir),
-            stdout=logf,
-            stderr=subprocess.STDOUT,
-            text=True,
-            start_new_session=True,
-            # Core pinning (architecture issue #51, 2.4): no-op unless
-            # MUSCAT_JOB_MAX_THREADS is configured.
-            env={**os.environ, **jobs.core_pinning_env()},
-        )
-        try:
-            with open(rdir / "harmonic.pid", "w") as pidf:
-                pidf.write(str(proc.pid))
-        except Exception:
-            logger.debug("failed to write harmonic.pid in %s", rdir, exc_info=True)
-    except (FileNotFoundError, OSError) as exc:
-        abandon_claimed_launch(get_job_store(), "ttv_fit", ttv_slot_key(key), launch_row, f"Failed to launch: {exc}")
-        logf.write(f"\nfailed to launch harmonic: {exc}\n")
-        logf.close()
-        return {"ok": False, "error": jobs.server_fault("The server could not start the TTV fit (harmonic)", exc)}
-
-    with _TTV_LOCK:
-        _TTV_JOBS[key] = TTVFitJob(
-            key=key, inst="_", date="_", target=target,
-            cmd=cmd, proc=proc, logf=logf, log_path=log_path,
-            run_type="full", run_id=run_seg, run_name=run_name,
-        )
-        get_job_store().save(
-            type_="ttv_fit",
-            inst="_",
-            date="_",
-            target=target,
-            run_id=run_seg,
-            state="running",
-            returncode=None,
-            elapsed=0,
-            started_at=_TTV_JOBS[key].started_at,
-            run_type="full",
-            params=json.dumps({"options": options}, separators=(",", ":")),
-            run_name=run_name,
-            user_name=user_name,
-            owner=current_owner(),
-            instance_id=current_instance_id(),
-        )
+        with _TTV_LOCK:
+            _TTV_JOBS[key] = TTVFitJob(
+                key=key, inst="_", date="_", target=target,
+                cmd=cmd, proc=proc, logf=logf, log_path=log_path,
+                run_type="full", run_id=run_seg, run_name=run_name,
+            )
+            get_job_store().save(
+                type_="ttv_fit",
+                inst="_",
+                date="_",
+                target=target,
+                run_id=run_seg,
+                state="running",
+                returncode=None,
+                elapsed=0,
+                started_at=_TTV_JOBS[key].started_at,
+                run_type="full",
+                params=json.dumps({"options": options}, separators=(",", ":")),
+                run_name=run_name,
+                user_name=user_name,
+                owner=current_owner(),
+                instance_id=current_instance_id(),
+            )
+    finally:
+        finish_claimed_launch(launch_row)
 
     return {"ok": True, "key": key}
 
@@ -800,6 +820,11 @@ def cancel_ttv_fit(target: str, run_name: str = "") -> dict:
                 and j.get("target") == target
                 and (j.get("run_name") == run_name or j.get("run_id") == run_seg)
             ]
+            if found and found[0]["state"] == "running" and is_launching(found[0]["key"]):
+                # The launch has claimed the slot and written the row but not
+                # spawned yet; "cancelled" written now would be overwritten by
+                # the launch's own running save, so the fit would run anyway.
+                return {"ok": False, "error": "the fit is still starting; try again in a moment"}
             if (
                 found and found[0]["state"] == "running"
                 and jobs.held_by_other_instance(found[0], current_instance_id())
@@ -1396,6 +1421,8 @@ def sync_jobs() -> None:
             row = next((j for j in db_jobs if j["key"] == db_key), None)
             if row is None:
                 continue
+            if is_launching(db_key):
+                continue  # claimed by a launch in this process that has not spawned yet
             owner = row.get("owner") or ""
             if owner and owner != current_owner():
                 # Another role's process launched this job; only its own

@@ -44,7 +44,16 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from muscat_db import jobs, database, exposure as exp_calc, catalog as catalog_lookup
-from muscat_db.job_store import abandon_claimed_launch, current_instance_id, current_owner, get_job_store
+from muscat_db.job_store import (
+    abandon_claimed_launch,
+    begin_claimed_launch,
+    current_instance_id,
+    current_owner,
+    finish_claimed_launch,
+    get_job_store,
+    is_launching,
+    mark_claimed_launch,
+)
 from muscat_db.job_limits import JobLimitExceeded, claim_caps, claim_caps_for_row, enqueue_caps, full_job_cap, limit_refusal, params_with_running_cap
 from muscat_db.ref_time import is_valid_ref_time
 from muscat_db.instruments import INSTRUMENTS
@@ -2211,8 +2220,11 @@ def start_run(
             "run_id": run_id, "run_type": run_type, "params": run_params_json,
             "run_name": run_name, "user_name": user_name, "started_at": time.time(),
         }
+        previous = begin_claimed_launch(get_job_store(), launch_row) if run_type == "full" else None
         if run_type == "full":
             claimed_slot = get_job_store().claim_slot("photometry", key, _MAX_FULL_JOBS, running_row=launch_row, **claim_caps(user_name))
+            if claimed_slot:
+                mark_claimed_launch(launch_row)
         at_capacity = run_type == "full" and not claimed_slot
 
         # Queue full jobs when at capacity
@@ -2236,90 +2248,101 @@ def start_run(
             return {"ok": True, "key": key, "queued": True, "run_id": run_id}
 
         try:
-            rdir = run_output_dir(inst, date, target, run_id)
-        except ValueError as exc:
-            if claimed_slot:
-                abandon_claimed_launch(get_job_store(), "photometry", key, launch_row, str(exc))
-            return {"ok": False, "error": str(exc)}
-        if overwrite:
-            ok, removed, delete_error = _delete_reduction_files(inst, date, target, run_id, keep_record=True)
-            if not ok:
+            try:
+                rdir = run_output_dir(inst, date, target, run_id)
+            except ValueError as exc:
                 if claimed_slot:
-                    abandon_claimed_launch(get_job_store(), "photometry", key, launch_row, f"Previous products could not be deleted: {delete_error}")
-                return {"ok": False, "error": jobs.server_fault("The previous reduction products could not be deleted before the re-run", delete_error)}
-            if removed:
-                logger.info(f"start_run: deleted {removed} previous product(s) for {key} before overwrite run")
-        rdir.mkdir(parents=True, exist_ok=True)
+                    abandon_claimed_launch(get_job_store(), "photometry", key, launch_row, str(exc), previous=previous)
+                return {"ok": False, "error": str(exc)}
+            if overwrite:
+                ok, removed, delete_error = _delete_reduction_files(inst, date, target, run_id, keep_record=True)
+                if not ok:
+                    if claimed_slot:
+                        abandon_claimed_launch(get_job_store(), "photometry", key, launch_row, f"Previous products could not be deleted: {delete_error}", previous=previous)
+                    return {"ok": False, "error": jobs.server_fault("The previous reduction products could not be deleted before the re-run", delete_error)}
+                if removed:
+                    logger.info(f"start_run: deleted {removed} previous product(s) for {key} before overwrite run")
+            rdir.mkdir(parents=True, exist_ok=True)
 
-        _write_run_meta(rdir, inst=inst, date=date, target=target, run_id=run_id, site=site, telescope=telescope, mode=mode, run_name=run_name, run_type=run_type)
-        _write_run_product(rdir, inst=inst, date=date, target=target, opts=opts, test_run=test_run, user_name=user_name, site=site, telescope=telescope, mode=mode, run_name=run_name, frames=frames)
-        cmd = build_command(inst, date, target, opts, test_run=test_run, run_id=run_id)
-        log_path = _run_log_path(rdir, inst, date, target, run_id)
-        logf = open(log_path, "w")
-        _write_log_header(logf, cmd, target_coord_note(target, opts, command=cmd))
-        try:
-            env = _job_env()
-            proc = subprocess.Popen(
-                cmd,
-                cwd=str(rdir),
-                stdout=logf,
-                stderr=subprocess.STDOUT,
-                text=True,
-                # Own session/process group so Cancel can kill the whole tree
-                # (prose spawns multiprocessing workers via SequenceParallel).
-                start_new_session=True,
-                env=env,
-            )
+            _write_run_meta(rdir, inst=inst, date=date, target=target, run_id=run_id, site=site, telescope=telescope, mode=mode, run_name=run_name, run_type=run_type)
+            _write_run_product(rdir, inst=inst, date=date, target=target, opts=opts, test_run=test_run, user_name=user_name, site=site, telescope=telescope, mode=mode, run_name=run_name, frames=frames)
+            cmd = build_command(inst, date, target, opts, test_run=test_run, run_id=run_id)
+            log_path = _run_log_path(rdir, inst, date, target, run_id)
+            logf = open(log_path, "w")
+            _write_log_header(logf, cmd, target_coord_note(target, opts, command=cmd))
             try:
-                with open(rdir / _PID_FILE_NAME, "w") as pidf:
-                    pidf.write(str(proc.pid))
-            except OSError:
-                logger.debug("failed to write %s in %s", _PID_FILE_NAME, rdir, exc_info=True)
-        except (FileNotFoundError, OSError) as exc:
-            if claimed_slot:
-                abandon_claimed_launch(get_job_store(), "photometry", key, launch_row, f"Failed to launch: {exc}")
-            logf.write(f"\nfailed to launch pipeline: {exc}\n")
-            logf.close()
-            return {"ok": False, "error": jobs.server_fault("The server could not start the photometry pipeline", exc)}
-        _JOBS[key] = Job(
-            key=key, inst=inst, date=date, target=target,
-            cmd=cmd, proc=proc, logf=logf, log_path=log_path,
-            run_type=run_type, run_id=run_id, site=site, telescope=telescope, mode=mode, run_name=run_name,
-        )
-        # Record new job in the database
-        try:
-                get_job_store().save(
-                type_="photometry",
-                inst=inst,
-                date=date,
-                target=target,
-                state="running",
-                returncode=None,
-                elapsed=0,
-                started_at=_JOBS[key].started_at,
-                run_type=run_type,
-                params=run_params_json,
-                run_id=run_id,
-                run_name=run_name,
-                user_name=user_name,
-                owner=current_owner(),
-                instance_id=current_instance_id(),
-            )
-        except sqlite3.OperationalError as exc:
-            # DB write failed (e.g. read-only database). Roll back the launched
-            # process and job so we don't leak a running pipeline we can't track.
-            if claimed_slot:
-                abandon_claimed_launch(get_job_store(), "photometry", key, launch_row, f"Database not writable: {exc}")
-            try:
-                proc.terminate()
-            except OSError:
-                pass
-            try:
+                env = _job_env()
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=str(rdir),
+                    stdout=logf,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    # Own session/process group so Cancel can kill the whole tree
+                    # (prose spawns multiprocessing workers via SequenceParallel).
+                    start_new_session=True,
+                    env=env,
+                )
+                try:
+                    with open(rdir / _PID_FILE_NAME, "w") as pidf:
+                        pidf.write(str(proc.pid))
+                except OSError:
+                    logger.debug("failed to write %s in %s", _PID_FILE_NAME, rdir, exc_info=True)
+            except (FileNotFoundError, OSError) as exc:
+                if claimed_slot:
+                    abandon_claimed_launch(get_job_store(), "photometry", key, launch_row, f"Failed to launch: {exc}", previous=previous)
+                logf.write(f"\nfailed to launch pipeline: {exc}\n")
                 logf.close()
-            except OSError:
-                pass
-            _JOBS.pop(key, None)
-            return {"ok": False, "error": jobs.server_fault("The job could not be recorded because the job database is not writable", exc)}
+                return {"ok": False, "error": jobs.server_fault("The server could not start the photometry pipeline", exc)}
+        except BaseException:
+            if claimed_slot:
+                abandon_claimed_launch(get_job_store(), "photometry", key, launch_row, "Launch failed before the process started", previous=previous)
+            raise
+
+        try:
+            _JOBS[key] = Job(
+                key=key, inst=inst, date=date, target=target,
+                cmd=cmd, proc=proc, logf=logf, log_path=log_path,
+                run_type=run_type, run_id=run_id, site=site, telescope=telescope, mode=mode, run_name=run_name,
+            )
+            # Record new job in the database
+            try:
+                    get_job_store().save(
+                    type_="photometry",
+                    inst=inst,
+                    date=date,
+                    target=target,
+                    state="running",
+                    returncode=None,
+                    elapsed=0,
+                    started_at=_JOBS[key].started_at,
+                    run_type=run_type,
+                    params=run_params_json,
+                    run_id=run_id,
+                    run_name=run_name,
+                    user_name=user_name,
+                    owner=current_owner(),
+                    instance_id=current_instance_id(),
+                )
+            except sqlite3.OperationalError as exc:
+                # DB write failed (e.g. read-only database). Roll back the launched
+                # process and job so we don't leak a running pipeline we can't track.
+                if claimed_slot:
+                    abandon_claimed_launch(get_job_store(), "photometry", key, launch_row, f"Database not writable: {exc}", previous=previous)
+                try:
+                    proc.terminate()
+                except OSError:
+                    pass
+                try:
+                    logf.close()
+                except OSError:
+                    pass
+                _JOBS.pop(key, None)
+                return {"ok": False, "error": jobs.server_fault("The job could not be recorded because the job database is not writable", exc)}
+        finally:
+            if claimed_slot:
+                finish_claimed_launch(launch_row)
+
     return {"ok": True, "key": key, "run_id": run_id}
 
 
@@ -2831,6 +2854,8 @@ def sync_jobs() -> None:
             parts = rest.split("/")
             if len(parts) < 3:
                 continue
+            if is_launching(db_key):
+                continue  # claimed by a launch in this process that has not spawned yet
             inst, date, target = parts[:3]
             run_id = "/".join(parts[3:]) if len(parts) > 3 else ""
             started_at = time.time()
