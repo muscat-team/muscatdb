@@ -383,6 +383,12 @@ def _write_ttv_product(rdir: pathlib.Path, options: dict, user_name: str | None)
             inputs, note = None, "inputs were empty but the fit has transit times"
     else:
         note = "client did not submit inputs"
+    if inputs:
+        # Pinned, so the fit stays tied to the transit fits it consumed even if
+        # a run of that name is replaced later (#325).
+        from muscat_db.product_visibility import pin_product_inputs
+
+        inputs = pin_product_inputs(inputs)
     # csv_content / ini_content are the staged data inputs, already in meta.yaml.
     settings = {k: v for k, v in options.items() if k not in ("csv_content", "ini_content", "inputs")}
     product_record.write_rerun_record(rdir, product_record.build_record(

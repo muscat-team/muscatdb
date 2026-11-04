@@ -15,6 +15,12 @@ was made from. One rule applies at every level:
   viewer (:func:`muscat_db.access.is_denied`). A product input is visible when
   that upstream product is. A manual input has no frames behind it.
 
+A product input is pinned when it is written (:func:`pin_product_inputs`): the
+upstream's maker and its own inputs are copied into the entry, so what
+authorizes the downstream product is the manifest it actually consumed, not
+whichever run holds that name later (#325). An input with no pin, written
+before pinning or whose upstream had no record, follows the current upstream.
+
 The exception is a legacy photometry run (no run id): it writes into the
 night's directory, shared by every target of that night, so one record cannot
 describe it. It keeps the night/target rule (:class:`NightVisibility`) until it
@@ -80,6 +86,38 @@ def default_job_owner(level: str, inst: str, date: str, target: str, run_id: str
         logger.warning("job owner lookup failed for %s", key, exc_info=True)
         return None
     return None if row is None else str(row.get("user_name") or "")
+
+
+def pin_product_inputs(inputs: list[dict], run_dir: RunDirResolver | None = None) -> list[dict]:
+    """*inputs* with each ``product`` entry's consumed upstream pinned (#325).
+
+    The pin is ``{"maker": ..., "inputs": ...}`` copied from the upstream's
+    record as it is now. The upstream's own inputs carry their pins, so a
+    chain is pinned through every hop. An entry is left as it is when it is
+    not a product, already pinned, a legacy photometry run (no run id, so no
+    record, which follows the night rule), or its upstream has no readable
+    record of that level. Returns a new list; *inputs* is not changed.
+    """
+    resolve = run_dir or default_run_dir
+    return [_pin_entry(entry, resolve) for entry in inputs]
+
+
+def _pin_entry(entry: dict, resolve: RunDirResolver) -> dict:
+    if not isinstance(entry, dict) or entry.get("kind") != "product" or "pinned" in entry:
+        return entry
+    level = str(entry.get("level") or "")
+    run_id = str(entry.get("run_id") or "")
+    if level not in product_record.LEVELS or (level == "photometry" and not run_id):
+        return entry
+    try:
+        rdir = resolve(level, str(entry.get("instrument") or ""), str(entry.get("obsdate") or ""),
+                       str(entry.get("target") or ""), run_id)
+    except ValueError:
+        return entry
+    record = product_record.read_record(rdir)
+    if record is None or record.get("level") != level:
+        return entry
+    return {**entry, "pinned": {"maker": product_record.maker(record), "inputs": record.get("inputs")}}
 
 
 class ProductVisibility:
@@ -205,6 +243,8 @@ class ProductVisibility:
                 return False
             return not any(self._proposal_denied(p, entry) for p in proposals)
         if kind == "product":
+            if "pinned" in entry:
+                return self._pinned_visible(entry["pinned"], depth)
             return not self.hidden(
                 str(entry.get("level") or ""),
                 str(entry.get("instrument") or ""),
@@ -214,3 +254,16 @@ class ProductVisibility:
                 _depth=depth + 1,
             )
         return False
+
+    def _pinned_visible(self, pinned: object, depth: int) -> bool:
+        """Whether the manifest pinned into a product input is visible: its
+        maker sees it, otherwise every input it was made from must be."""
+        if not isinstance(pinned, dict) or depth + 1 > _MAX_DEPTH:
+            return False
+        maker = str(pinned.get("maker") or "").strip().casefold()
+        if maker and maker == self.username:
+            return True
+        inputs = pinned.get("inputs")
+        if not isinstance(inputs, list):
+            return False
+        return all(self._input_visible(entry, depth + 1) for entry in inputs)
