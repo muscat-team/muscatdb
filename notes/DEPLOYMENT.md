@@ -961,7 +961,7 @@ The current pins are:
 
 | Engine | Repository | Commit | Candidate environment |
 |---|---|---|---|
-| prose2 | `jpdeleon/prose2` | `dd19c2e238336f3cf25cc9f3af2581c3366ba210` (v3.5.1) | `prose-prod-dd19c2e2` |
+| prose2 | `jpdeleon/prose2` | `714b4071b8b329d113a6a3ae2d0aeb788ed5fc72` (v3.5.3) | `prose-prod-714b4071` |
 | timer | `john-livingston/timer` | `b8428258c9b62266532173af4abd7fbafee6dcef` | `timer-prod-b8428258` |
 | harmonic | `john-livingston/harmonic` | `a32fb8e32ca776e0e6e7dc92ad4232cef1f12194` | `harmonic-prod-a32fb8e3` |
 
@@ -1050,6 +1050,35 @@ the candidate's scientific settings, then update the packaged YAML and both
 recorded SHA-256 values (`muscat_db/prose_config.py` and `engines.toml`) together.
 Never regenerate the production snapshot automatically at launch or by following
 live symlinks.
+
+### Prose2 3.5.3 candidate (2026-11-06)
+
+- Owner repository: `https://github.com/jpdeleon/prose2`.
+- Release/tag commit: `714b4071b8b329d113a6a3ae2d0aeb788ed5fc72` (`v3.5.3`).
+- Candidate environment: `prose-prod-714b4071`; keep `prose-prod-dd19c2e2`
+  available for rollback.
+- Frozen configuration SHA-256:
+  `4f6701ae520755f487888c4ea95da92edddc3650b250ee4f47a88722edf796e0`.
+
+This incorporates native-unit saturation thresholds and configuration matching
+from jpdeleon/prose2#49 and per-band shared-reference screening from
+jpdeleon/prose2#51. BANZAI frames use their header `SATURATE` in electrons;
+MuSCAT/MuSCAT2 retain matched telescope limits in ADU. Shared-reference runs
+screen comparisons on each band's representative middle frame, using its own
+threshold and native pixels. This is not per-exposure saturation masking.
+
+The telescope definitions in prose2 are unchanged between v3.5.1 and v3.5.3.
+The reviewed frozen settings, aliases, and source-file hashes are preserved;
+only its engine commit/version provenance and resulting digest change.
+`deploy/conda/production/prose.json` records the candidate installation.
+
+Provision and verify the candidate with `uv run python deploy/engines.py install
+prose` (once) and `uv run python deploy/engines.py verify prose --record` before
+activation. Coordinate the web process and production workers using the engine
+procedure above; the PR does not restart services or switch running jobs.
+For rollback, restore the previous pin, snapshot, checksum, and worker profile
+together. Existing light curves remain unchanged; rerun under a new run name
+to compare saturation exclusions and photometry.
 
 ### Prose2 3.5.1 candidate (2026-10-28)
 
