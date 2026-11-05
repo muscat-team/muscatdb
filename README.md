@@ -59,6 +59,18 @@ numbers at fault.
 for non-empty malformed values. Negative integers retain the disabled (`0`)
 behavior.
 
+LCO archive downloads use the PostgreSQL worker queue when
+`MUSCAT_CONTROL_PLANE=postgres`. Run the `lco_archive_download` worker pipeline
+and configure the same absolute `MUSCAT_LCO_DIR` and
+`MUSCAT_LCO_DOWNLOAD_SPOOL` paths on the web host and workers. The fleet admits
+two datasets at once, with four frame transfers each and one dataset per host;
+these slots are independent of the science pipeline limits. Progress survives
+web restarts and remains visible on Jobs. Downloads and unpacking run on workers;
+catalog scanning/registration stays on the control plane. SQLite installations
+retain the local downloader. See the
+[archive worker deployment notes](notes/DEPLOYMENT.md#lco-archive-worker-queue-389)
+for credentials, leases, resume behavior, and rollout checks.
+
 ## Requirements
 
 - Python ≥ 3.12

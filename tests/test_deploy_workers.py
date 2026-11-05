@@ -69,6 +69,21 @@ def test_shipped_config_parses():
     assert cfg.hosts, "deploy/workers.toml must define at least one host"
 
 
+def test_archive_profiles_keep_shared_paths_separate_and_supply_all_workers():
+    prod = w.load_config(w.DEFAULT_CONFIG, profile="prod")
+    dev = w.load_config(w.DEFAULT_CONFIG, profile="dev")
+    assert prod.archive_root == "/data"
+    assert dev.archive_root != prod.archive_root
+    assert dev.archive_spool != prod.archive_spool
+    for cfg in (prod, dev):
+        for host in cfg.hosts.values():
+            assert "lco_archive_download" in host.pipelines
+            env = w.render_env(cfg, host, "muscat-" + host.key)
+            assert f"MUSCAT_LCO_DIR={cfg.archive_root}" in env
+            assert f"MUSCAT_LCO_DOWNLOAD_SPOOL={cfg.archive_spool}" in env
+        assert cfg.archive_spool in w.web_env(cfg)
+
+
 # -- profiles -----------------------------------------------------------------
 
 

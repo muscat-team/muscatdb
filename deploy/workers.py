@@ -67,7 +67,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-PIPELINES = ("photometry", "transit_fit", "ttv_fit")
+PIPELINES = ("photometry", "transit_fit", "ttv_fit", "lco_archive_download")
 UNIT_NAME = "muscatdb-worker@.service"
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "workers.toml"
@@ -107,6 +107,8 @@ class Config:
     profile: str | None = None
     engine_envs: dict[str, str] = field(default_factory=dict)
     prose_frozen_config: bool = False
+    archive_root: str = ""
+    archive_spool: str = ""
     hosts: dict[str, HostSpec] = field(default_factory=dict)
 
 
@@ -121,7 +123,7 @@ def _int(value, where: str, minimum: int = 0) -> int:
 _PROFILE_KEYS = frozenset({
     "repo", "env_file", "pg_host", "database", "control_plane", "max_slots",
     "job_threads", "notify", "stagger_s", "max_full_jobs", "queue_only", "engine_envs",
-    "prose_frozen_config",
+    "prose_frozen_config", "archive_root", "archive_spool",
 })
 
 
@@ -155,6 +157,10 @@ def _apply_profile(data: dict, profile: str | None) -> tuple[dict, dict, str | N
 
 def parse_config(data: dict, profile: str | None = None) -> Config:
     d, web, profile = _apply_profile(data, profile)
+    for name in ("archive_root", "archive_spool"):
+        value = d.get(name, "")
+        if value and (not isinstance(value, str) or not re.fullmatch(r"/[A-Za-z0-9_./-]+", value)):
+            raise ConfigError(f"{name} must be an absolute shared path without whitespace")
     frozen = d.get("prose_frozen_config", False)
     if not isinstance(frozen, bool):
         raise ConfigError("prose_frozen_config must be a boolean")
@@ -206,6 +212,8 @@ def parse_config(data: dict, profile: str | None = None) -> Config:
         profile=profile,
         engine_envs=dict(engine_envs),
         prose_frozen_config=frozen,
+        archive_root=d.get("archive_root", ""),
+        archive_spool=d.get("archive_spool", ""),
         hosts=hosts,
     )
 
@@ -260,6 +268,8 @@ def render_env(cfg: Config, host: HostSpec, hostname: str) -> str:
         "MUSCAT_WORKER_MAX_SLOTS": str(host.max_slots),
         "MUSCAT_JOB_MAX_THREADS": str(host.job_threads),
         "MUSCAT_JOB_NOTIFY": "1" if host.notify else "0",
+        "MUSCAT_LCO_DIR": cfg.archive_root,
+        "MUSCAT_LCO_DOWNLOAD_SPOOL": cfg.archive_spool,
     }
     if cfg.max_full_jobs is not None:
         lines["MUSCAT_MAX_FULL_JOBS"] = str(cfg.max_full_jobs)
@@ -274,6 +284,8 @@ def render_env(cfg: Config, host: HostSpec, hostname: str) -> str:
 
 def web_env(cfg: Config) -> str:
     out = [f"export MUSCAT_PROSE_FROZEN_CONFIG={int(cfg.prose_frozen_config)}\n"]
+    out.extend([f"export MUSCAT_LCO_DIR='{cfg.archive_root}'\n",
+                f"export MUSCAT_LCO_DOWNLOAD_SPOOL='{cfg.archive_spool}'\n"])
     for engine, name in sorted(cfg.engine_envs.items()):
         out.append(f"export MUSCAT_{engine.upper()}_CONDA_ENV={name}\n")
     if cfg.profile:
@@ -591,7 +603,7 @@ def make_db_query(cfg: Config):
             "import os,json,psycopg;"
             "c=psycopg.connect(os.environ['D'],connect_timeout=8);"
             "print(json.dumps([dict(instance_id=r[0],type=r[1]) for r in c.execute("
-            "\"select instance_id,type from jobs where state='running'\")]))"
+            "\"select instance_id,type from jobs where state IN ('running','cancelling')\")]))"
         )
         try:
             p = subprocess.run(

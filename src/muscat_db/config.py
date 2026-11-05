@@ -189,8 +189,10 @@ ENV_VARS: tuple[EnvVar, ...] = (
         "Root directory for LCO archive downloads (<root>/<instrument>/<date>/). "
         "Falls back to MUSCAT_DATA_DIR's per-instrument layout when unset.",
     ),
-    EnvVar("MUSCAT_LCO_ARCHIVE_DOWNLOAD_WORKERS", "1", "Concurrent LCO background download jobs"),
-    EnvVar("MUSCAT_LCO_ARCHIVE_DOWNLOAD_FRAME_WORKERS", "8", "Frame workers within one LCO download"),
+    EnvVar("MUSCAT_LCO_DOWNLOAD_SPOOL", None,
+           "Absolute shared credential spool for PostgreSQL archive downloads (service owner, mode 700)."),
+    EnvVar("MUSCAT_LCO_ARCHIVE_DOWNLOAD_WORKERS", "1", "Concurrent local LCO download jobs (SQLite only)"),
+    EnvVar("MUSCAT_LCO_ARCHIVE_DOWNLOAD_FRAME_WORKERS", "8", "Frame workers per local download (SQLite only)"),
     EnvVar("MUSCAT_LCO_ARCHIVE_FUNPACK_WORKERS", "2", "Concurrent LCO funpack subprocesses"),
     EnvVar("MUSCAT_LCO_ARCHIVE_MAX_FRAMES", "0", "Frames allowed per LCO archive download (0 means no limit)"),
     EnvVar("MUSCAT_LCO_ARCHIVE_MAX_PAYLOAD_BYTES", "16777216", "Serialized bytes allowed per LCO archive request"),

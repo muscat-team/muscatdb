@@ -512,7 +512,7 @@ def process_request(request: dict, *, path: str | None = None, now: float | None
                 # In-memory download jobs disappear on restart. Atomic files and
                 # persisted frame metadata make safely re-queuing them idempotent.
                 snapshot = {"state": "lost", "results": [], "funpack_results": []}
-            if snapshot.get("state") in {"pending", "running"}:
+            if snapshot.get("state") in {"pending", "running", "cancelling"}:
                 with get_conn(path) as conn:
                     conn.execute(
                         "UPDATE lco_observation_requests SET next_poll_at=?, updated_at=? WHERE request_id=? AND monitor_state!='canceled'",
@@ -520,7 +520,9 @@ def process_request(request: dict, *, path: str | None = None, now: float | None
                     )
                     conn.commit()
                 return
-            if snapshot.get("state") == "done":
+            if snapshot.get("state") == "done" or (
+                snapshot.get("durable") and snapshot.get("state") == "error"
+            ):
                 if not _finish_download(request, snapshot, path=path, now=now):
                     return
                 request = {**request, "download_job_id": ""}
@@ -639,6 +641,7 @@ def process_request(request: dict, *, path: str | None = None, now: float | None
                 overwrite=False,
                 auto_ingest=False,
                 user_name=_MONITOR_DOWNLOAD_USER,
+                credential_user=request.get("user_name") or "",
             )
             with get_conn(path) as conn:
                 conn.execute(

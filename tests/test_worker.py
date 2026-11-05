@@ -23,7 +23,7 @@ from muscat_db import cli, job_store, worker
 class TestResolvePipelines:
     def test_all_returns_every_pipeline_in_a_stable_order(self):
         names = [n for n, _ in worker.resolve_pipelines("all")]
-        assert names == ["photometry", "transit_fit", "ttv_fit"]
+        assert names == ["photometry", "transit_fit", "ttv_fit", "lco_archive_download"]
 
     def test_single_name(self):
         names = [n for n, _ in worker.resolve_pipelines("transit_fit")]

@@ -1143,7 +1143,8 @@ _DOWNLOAD_CHUNK = 1 << 20  # 1 MiB
 _FUNPACK_TIMEOUT_S = float(os.environ.get("MUSCAT_LCO_FUNPACK_TIMEOUT_S", "300"))
 
 
-def _download_to_file(url: str, dest: Path, timeout: float = _DOWNLOAD_TIMEOUT_S) -> None:
+def _download_to_file(url: str, dest: Path, timeout: float = _DOWNLOAD_TIMEOUT_S,
+                      *, check=None, temp_suffix: str = "", deadline_s: float | None = None) -> None:
     """Stream *url* to *dest* atomically, with a per-read socket timeout.
 
     Writes to a sibling ``.part`` file and atomically renames on success so an
@@ -1152,11 +1153,32 @@ def _download_to_file(url: str, dest: Path, timeout: float = _DOWNLOAD_TIMEOUT_S
     ``TimeoutError`` instead of blocking forever (the bug that wedged the server
     when a bare ``urlretrieve`` stalled mid-dataset).
     """
-    tmp = dest.with_name(dest.name + ".part")
+    tmp = dest.with_name(dest.name + ".part" + temp_suffix)
+    deadline = time.monotonic() + deadline_s if deadline_s else None
     try:
+        if check:
+            check()
         with _open_download_url(url, timeout=timeout) as response:
             with open(tmp, "wb") as fh:
-                shutil.copyfileobj(response, fh, _DOWNLOAD_CHUNK)
+                if check:
+                    received = 0
+                    headers = getattr(response, "headers", None)
+                    expected = headers.get("Content-Length") if headers is not None else None
+                    while True:
+                        check()
+                        if deadline and time.monotonic() >= deadline:
+                            raise TimeoutError("Archive frame transfer deadline exceeded")
+                        chunk = response.read(_DOWNLOAD_CHUNK)
+                        if not chunk:
+                            break
+                        received += len(chunk)
+                        fh.write(chunk)
+                    if not received or (expected is not None and received != int(expected)):
+                        raise OSError("Archive transfer was empty or incomplete")
+                else:
+                    shutil.copyfileobj(response, fh, _DOWNLOAD_CHUNK)
+        if check:
+            check()
         tmp.replace(dest)
     except (urllib.error.URLError, socket.timeout, TimeoutError, OSError):
         # Drop the partial file so a retry starts clean; re-raise for the caller
@@ -1217,7 +1239,8 @@ def _funpack_dest(path: Path) -> Path | None:
     return None
 
 
-def _funpack_file(path: Path, timeout: float = _FUNPACK_TIMEOUT_S) -> dict:
+def _funpack_file(path: Path, timeout: float = _FUNPACK_TIMEOUT_S,
+                  *, check=None, temp_suffix: str = "") -> dict:
     out = _funpack_dest(path)
     status = {
         "filename": path.name,
@@ -1241,9 +1264,11 @@ def _funpack_file(path: Path, timeout: float = _FUNPACK_TIMEOUT_S) -> dict:
     # does: `out.exists()` above is the "already unpacked" signal, so a funpack
     # killed or timed out mid-write must never leave a truncated .fits there.
     # cfitsio will not overwrite, so clear a .part left by an earlier crash.
-    tmp = out.with_name(out.name + ".part")
+    tmp = out.with_name(out.name + ".part" + temp_suffix)
     tmp.unlink(missing_ok=True)
     try:
+        if check:
+            check()
         proc = subprocess.run(
             [funpack, "-O", str(tmp), str(path)],
             check=False,
@@ -1255,6 +1280,8 @@ def _funpack_file(path: Path, timeout: float = _FUNPACK_TIMEOUT_S) -> dict:
             status["status"] = "error"
             status["error"] = (proc.stderr or proc.stdout or f"funpack exited {proc.returncode}").strip()
             return status
+        if check:
+            check()
         tmp.replace(out)
     except OSError as exc:
         status["status"] = "error"
@@ -1531,6 +1558,12 @@ def cancel_archive_download(job_id: str) -> dict:
     finish, skips funpack/ingest and then settles on ``cancelled``. Files
     already downloaded are left in place.
     """
+    from muscat_db import lco_download, lco_queue
+
+    if lco_queue.enabled():
+        job = lco_queue.ArchiveQueue().cancel(job_id)
+        if job is not None:
+            return lco_download.public(job)
     with _ARCHIVE_DOWNLOAD_LOCK:
         job = _ARCHIVE_DOWNLOAD_JOBS.get(job_id)
         if job is None:
@@ -1552,6 +1585,12 @@ def delete_archive_download(job_id: str) -> None:
     Only terminal jobs may go: a pending/running one still has a worker.
     Absent jobs are a no-op (e.g. after a restart only the DB row remains).
     """
+    from muscat_db import lco_download, lco_queue
+
+    if lco_queue.enabled() and lco_queue.ArchiveQueue().get(job_id):
+        lco_queue.ArchiveQueue().delete(job_id)
+        lco_download._path(job_id).unlink(missing_ok=True)
+        return
     with _ARCHIVE_DOWNLOAD_LOCK:
         job = _ARCHIVE_DOWNLOAD_JOBS.get(job_id)
         if job is None:
@@ -1727,6 +1766,7 @@ def start_archive_download(
     user_name: str | None = None,
     server_side: bool = False,
     request_id: str | None = None,
+    credential_user: str | None = None,
 ) -> dict:
     """Queue an LCO archive download in a dedicated worker and return its state.
 
@@ -1777,6 +1817,10 @@ def start_archive_download(
         "finished_at": None,
         "error": None,
     }
+    from muscat_db import lco_download, lco_queue
+
+    if lco_queue.enabled():
+        return lco_download.submit(job, credential_user=credential_user if credential_user is not None else user_name)
     with _ARCHIVE_DOWNLOAD_LOCK:
         _prune_archive_download_jobs(now, reserve_slots=1)
         active_jobs = [
@@ -1809,6 +1853,12 @@ def start_archive_download(
 
 def archive_download_status(job_id: str) -> dict:
     """Return the current state for a queued archive-download job."""
+    from muscat_db import lco_download, lco_queue
+
+    if lco_queue.enabled():
+        job = lco_queue.ArchiveQueue().get(job_id)
+        if job is not None:
+            return lco_download.public(job)
     with _ARCHIVE_DOWNLOAD_LOCK:
         _prune_archive_download_jobs()
         job = _ARCHIVE_DOWNLOAD_JOBS.get(job_id)
@@ -1819,9 +1869,13 @@ def archive_download_status(job_id: str) -> dict:
 
 def archive_download_jobs() -> list[dict]:
     """Return LCO archive-download jobs known to this server process."""
+    from muscat_db import lco_download, lco_queue
+
     with _ARCHIVE_DOWNLOAD_LOCK:
         _prune_archive_download_jobs()
         jobs = [_archive_download_snapshot(job) for job in _ARCHIVE_DOWNLOAD_JOBS.values()]
+    if lco_queue.enabled():
+        jobs.extend(lco_download.public(job) for job in lco_queue.ArchiveQueue().all())
     jobs.sort(key=lambda job: job.get("started_at") or 0, reverse=True)
     return jobs
 

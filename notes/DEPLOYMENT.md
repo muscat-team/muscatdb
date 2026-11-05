@@ -1270,6 +1270,96 @@ The §12 shared-path precondition is **already satisfied for ut2/ut3/ut4/ut6**: 
 
 Under §12 every worker runs the same `muscatdb worker --pipeline <name>` loop, pulling jobs from the durable queue (SKIP-LOCKED claim + lease). **No broker.** The **control plane** (PostgreSQL, `[cluster]`) lives on ut2.
 
+### LCO archive worker queue (#389)
+
+PostgreSQL deployments enqueue archive downloads as `lco_archive_download` jobs
+in the existing jobs table. The web process never launches their transfers.
+`deploy/workers.toml` includes a separate systemd pipeline unit on each of
+ut3–ut7. Applying this configuration is a separate deployment step; the change
+does not itself install/restart units or provision directories.
+
+**Decisions and bounds.** Transactional claims use a PostgreSQL advisory lock
+and per-attempt lease tokens. Capacity is a hard ceiling of two download jobs
+across the configured fleet database, one per host, with four concurrent frame
+operations per job: at most eight transfers/URL refreshes, equal to the previous
+single web job's default frame concurrency. Unpacking is serial within each
+job. Neither downloads nor registration consume `MUSCAT_MAX_FULL_JOBS` or
+`MUSCAT_WORKER_MAX_SLOTS`; the science pipelines keep their existing scheduling.
+The existing one-profile-at-a-time fleet rule still applies: independently
+running fleets against different databases would have independent caps and
+must not be used to multiply this LCO budget. The local SQLite downloader's
+worker settings do not increase these fleet ceilings.
+
+Leases last 300 seconds and renew every 15 seconds. PostgreSQL statement and
+lock waits are bounded to 10 and 5 seconds in archive transactions. A failed
+renewal stops new work; a monotonic 150-second safety deadline fences a paused
+executor before its next operation or publish. Socket reads have a 10-second
+timeout, transfers a 120-second total deadline, and funpack its existing
+300-second timeout. Files are written to attempt-specific sibling temporary
+paths and renamed only while ownership remains valid. A hard NFS stall can
+delay a thread's exit; it cannot authorize an old attempt to publish after it
+resumes. Failed transient transfers retain the existing per-frame retry budget;
+jobs have three download attempts, separate from three registration attempts,
+with 30/60-second retry delays. Expired leases are reclaimed by the next queue
+pass, including after cancellation. Permanent errors and exhausted attempts
+remain visible as errors. Terminal job history is durable until explicitly
+deleted; the old in-memory job TTL does not expire fleet history.
+
+**Paths and credentials.** `archive_root` and `archive_spool` in each fleet
+profile are rendered into both the worker environment and `web-env` output.
+Production uses `/data` and
+`/ut2/jerome/.config/muscatdb/archive-downloads-prod`. Development uses
+`/ut2/jerome/deploy/test/lco` and a separate `archive-downloads-dev` spool; the
+development data root must be provisioned before use. The root must already
+exist. Keep the common path spelling (`/data`) even though its resolved path
+differs on the storage server; result paths are converted back to that shared
+alias before persistence. Worker and web data-root settings must match.
+
+The control plane resolves the submitting user's archive token using the
+existing per-user/global fallback rules. A private per-job JSON file contains
+that token and signed frame URLs, following the existing `pg.env` service-user
+file-permission model: spool directory mode 0700, credential file mode 0600,
+matching service UID across hosts, no symlink files. Insecure permissions fail
+closed. Only a random job ID, public summaries, and sanitized progress enter
+Postgres; tokens and signed URLs never enter rows, command lines, units, or
+logs. Workers do not read user settings or `muscat.db`. A worker refreshes an
+expired URL with the same saved token using the documented
+[`basename_exact` archive filter](https://developers.lco.global/#list-frames)
+and checks the returned filename before downloading. Network/command exception
+text is replaced with safe status messages. Terminal jobs lose their private
+file; the control plane also removes abandoned submission files after one day.
+Spool backups must receive the same protections as other credentials.
+
+**Registration, resume, and monitoring.** Downloads and funpack finish before
+the job transitions to `pending` / `awaiting_ingest`. A control-plane thread
+claims registration separately, with one registration active across the queue,
+so a long scan does not block the normal reconciliation loop. Scanning and
+`ingest_date` can be replayed after a control-plane restart. Completed frame
+files are skipped on a retried attempt, including when the initial submission
+requested overwrite; partial attempt files never count as complete. Existing
+unpacked files are reused. Cancellation fences new operations/publication and
+leaves completed products in place. `lco_monitor` retains its submit/poll API
+and dedicated admission bucket while handing off the original user's token;
+it waits through pending/running/cancelling states and accounts for terminal
+frame failures in its existing bounded retry policy. Monitor registration stays
+on ut2. Completion hooks remain best-effort, claimed once in the durable row.
+
+**Read-only host verification, 2026-11-05.** `id`, `readlink`, `stat`, `test -w`,
+and `findmnt` showed UID 1003 / GID 1000 on ut2–ut7. `/data` is ut3's
+`/raid_ut3/data` locally and the same ut3 NFS export mounted at
+`/mnt_ut3/raid_ut3/data` on the other hosts. `/data/MuSCAT3` is group-writable
+and writable to this service identity on all workers. The shared configuration
+parent `/ut2/jerome/.config/muscatdb` is visible on all workers. No production
+file writes, real downloads, unit changes, or catalog mutations were performed.
+These checks do not prove write/rename/fsync behavior, permissions in every
+existing night directory, funpack availability on each host, or NFS behavior
+during a host/network failure. Verify those with a small staging download and
+worker restart/cancellation before promotion. Provision the private spool and
+development root, apply the matching web environment, and start the archive
+units through the normal deployment procedure; old workers do not claim this
+new job kind. On rollback, drain/cancel durable archive jobs before removing
+their units; keep their credential spool until jobs are terminal.
+
 ### PostgreSQL control plane → **ut2**
 - Always-on gateway co-located with the FastAPI web app (minimizes web↔DB latency).
 - Lightweight; 44 GiB is ample.
