@@ -3,7 +3,9 @@
 import concurrent.futures
 import io
 import json
+from pathlib import Path
 import threading
+from unittest.mock import Mock
 
 import pytest
 
@@ -22,6 +24,7 @@ def queue(monkeypatch, tmp_path):
     monkeypatch.setattr(job_store, "uses_shared_control_plane", lambda: True)
     monkeypatch.setattr(job_store, "get_job_store", lambda: store)
     monkeypatch.setattr(job_store, "_OWNER", "web")
+    monkeypatch.setenv("MUSCAT_LCO_FLEET_DOWNLOADS", "1")
     monkeypatch.setenv("MUSCAT_LCO_DOWNLOAD_SPOOL", str(tmp_path / "spool"))
     root = tmp_path / "data"
     root.mkdir()
@@ -273,3 +276,100 @@ def test_ingest_cannot_run_on_worker(queue, monkeypatch):
     with lco_download.Lease(queue, claimed) as lease:
         with pytest.raises(RuntimeError, match="never register"):
             lco_download._ingest(lco_download._read_manifest(submitted["job_id"]), lease)
+
+
+def finished(queue, user="alice", results=None):
+    submitted = enqueue(queue, user=user)
+    claimed = queue.claim("download", "h1")
+    queue.update(submitted["job_id"], claimed["lease_token"],
+                 {"results": results or [{"filename": "f", "status": "exists"}], "frames_done": 1})
+    queue.finish(submitted["job_id"], claimed["lease_token"])
+    return submitted["job_id"]
+
+
+def test_listing_is_bounded_and_omits_per_frame_payloads(queue):
+    first = finished(queue, "alice")
+    second = finished(queue, "bob")
+    assert [row["job_id"] for row in queue.all(limit=1)] == [second]
+    listed = {row["job_id"]: row for row in queue.all()}
+    assert set(listed) == {first, second}
+    assert "results" not in listed[first]
+    assert listed[first]["frames_done"] == 1
+    assert queue.get(first)["results"]  # Status polls still see every frame.
+
+
+def test_active_jobs_are_listed_ahead_of_newer_finished_ones(queue):
+    active = enqueue(queue, user="alice")["job_id"]
+    with queue.store._pool.connection() as conn:
+        conn.execute("UPDATE jobs SET started_at = started_at - 1000 WHERE run_id = %s", (active,))
+    newer = enqueue(queue, user="bob")["job_id"]
+    with queue.store._pool.connection() as conn:
+        conn.execute("UPDATE jobs SET state = 'done' WHERE run_id = %s", (newer,))
+    assert queue.all(limit=1)[0]["job_id"] == active
+
+
+def test_old_finished_rows_are_compacted_but_stay_in_history(queue):
+    old = finished(queue, "alice", results=[{"filename": "f" * 200, "status": "exists"}])
+    recent = finished(queue, "bob")
+    running = enqueue(queue, user="carol")["job_id"]
+    with queue.store._pool.connection() as conn:
+        conn.execute("UPDATE jobs SET heartbeat_at = 1 WHERE run_id = ANY(%s)", ([old, running],))
+    assert queue.compact(older_than_s=86400) == 1
+    assert queue.compact(older_than_s=86400) == 0
+    compacted = queue.get(old)
+    assert "results" not in compacted and "filenames" not in compacted
+    assert compacted["state"] == "done" and compacted["frames_done"] == 1
+    assert lco_download.public(compacted)["state"] == "done"
+    assert queue.get(recent)["results"]
+    assert queue.get(running)["filenames"]
+
+
+def test_notification_does_not_move_a_finished_jobs_elapsed_time(queue, monkeypatch):
+    job_id = finished(queue)
+    with queue.store._pool.connection() as conn:
+        before = conn.execute("SELECT elapsed, heartbeat_at FROM jobs WHERE run_id=%s", (job_id,)).fetchone()
+    finished_at = queue.get(job_id)["finished_at"]
+    monkeypatch.setattr(lco_queue.ArchiveQueue, "_now", staticmethod(lambda conn: finished_at + 500))
+    assert queue.take_notification(job_id)
+    with queue.store._pool.connection() as conn:
+        after = conn.execute("SELECT elapsed, heartbeat_at FROM jobs WHERE run_id=%s", (job_id,)).fetchone()
+    assert after == before
+
+
+def test_cleanup_notifies_each_finished_job_once_even_beyond_the_listing_limit(queue, monkeypatch):
+    from muscat_db import jobs
+
+    fired = Mock()
+    monkeypatch.setattr(jobs, "fire_job_finished", fired)
+    monkeypatch.setattr(lco_queue, "LIST_LIMIT", 1)
+    finished(queue, "alice")
+    finished(queue, "bob")
+    lco_download.cleanup()
+    lco_download.cleanup()
+    assert fired.call_count == 2
+
+
+def test_crashed_attempts_leave_no_partial_files(queue):
+    submitted = enqueue(queue)
+    job_id = submitted["job_id"]
+    night = Path(submitted["dest_dirs"][0])
+    night.mkdir(parents=True)
+    unrelated = night / f"other.fits.part.{'f' * 32}"
+    unrelated.write_bytes(b"another job's transfer")
+    first = queue.claim("download", "h1")
+    crashed = night / f"frame.fits.part.{first['lease_token']}"
+    crashed.write_bytes(b"partial")
+    expire(queue, first)
+    second = queue.claim("download", "h2")
+    current = night / f"frame.fits.part.{second['lease_token']}"
+    current.write_bytes(b"in progress")
+    lco_download._discard_partial_files(second)
+    assert not crashed.exists()  # A retry removes what earlier attempts left.
+    assert current.exists() and unrelated.exists()
+    expire(queue, second)
+    expire(queue, queue.claim("download", "h3"))
+    assert queue.claim("download", "h4") is None
+    assert queue.get(job_id)["state"] == "error"
+    lco_download.cleanup()  # No worker survived to clean up after the last attempt.
+    assert not current.exists() and unrelated.exists()
+    assert not lco_download._path(job_id).exists()

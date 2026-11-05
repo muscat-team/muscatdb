@@ -60,7 +60,7 @@ for non-empty malformed values. Negative integers retain the disabled (`0`)
 behavior.
 
 LCO archive downloads use the PostgreSQL worker queue when
-`MUSCAT_CONTROL_PLANE=postgres`. Run the `lco_archive_download` worker pipeline
+`MUSCAT_CONTROL_PLANE=postgres` and `MUSCAT_LCO_FLEET_DOWNLOADS=1`. Run the `lco_archive_download` worker pipeline
 and configure the same absolute `MUSCAT_LCO_DIR` and
 `MUSCAT_LCO_DOWNLOAD_SPOOL` paths on the web host and workers. The fleet admits
 two datasets at once, with four frame transfers each and one dataset per host;

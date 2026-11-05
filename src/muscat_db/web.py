@@ -269,7 +269,12 @@ def _reconcile_all_jobs() -> None:
     if uses_shared_control_plane():
         from muscat_db import lco_download
 
-        lco_download.sync_jobs()
+        # Isolated like the worker's run_pass: an archive problem must not stop
+        # target status for finished science jobs.
+        try:
+            lco_download.sync_jobs()
+        except Exception as exc:
+            logger.warning("archive download sync failed: %s", type(exc).__name__)
         refresh_worker_finished_targets(_FINISHED_JOB_WATCHER, get_job_store())
 
 
@@ -349,6 +354,10 @@ async def _lifespan(app: FastAPI):
             "muscat/muscat2 calibration with --wcs_method astrometry.net will fail; "
             "use --wcs_method twirl (no API key) or export the key."
         )
+    from muscat_db import lco_download
+
+    for warning in lco_download.config_warnings():
+        print(f"[startup] WARNING: {warning}")
 
     from muscat_db import proxy, http_client
     await proxy.startup()
@@ -7579,7 +7588,7 @@ def _lco_archive_download_row(job: dict) -> dict:
         run_name = f"{frames_done}/{frames_total} frames"
     details = "; ".join(dest_dirs) if dest_dirs else "Destination pending"
     if phase and phase not in {"done", state}:
-        details = f"{phase}: {details}"
+        details = f"{phase.replace('_', ' ')}: {details}"
     single_dataset = state == "done" and len(instruments) == 1 and len(obsdates) == 1
     obslog_url = _lco_obslog_url(instruments[0], obsdates[0]) if single_dataset else ""
     photometry_url = str(job.get("photometry_url") or "")

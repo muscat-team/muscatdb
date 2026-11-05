@@ -493,3 +493,29 @@ def test_database_lease_allows_only_one_live_owner(monitor_db):
     assert lco_monitor._acquire_lease(monitor_db, "worker-a", 100)
     assert not lco_monitor._acquire_lease(monitor_db, "worker-b", 101)
     assert lco_monitor._acquire_lease(monitor_db, "worker-b", 100 + lco_monitor._LEASE_S + 1)
+
+
+def test_frame_refused_by_the_shared_limiter_spends_no_attempt(monitor_db, tmp_path, monkeypatch):
+    monkeypatch.setenv("MUSCAT_LCO_DIR", str(tmp_path))
+    result, payload = _submission(state="COMPLETED")
+    lco_monitor.record_submission(result, payload, None, path=monitor_db, now=100)
+    reduced = _frame(91, 1)
+    with get_conn_for(monitor_db) as conn:
+        lco_monitor._upsert_reduced_frames(conn, 101, [reduced], 200)
+        conn.commit()
+    snapshot = {
+        "state": "done",
+        "results": [{"filename": reduced["filename"], "status": "error",
+                     "error": "Shared LCO request budget or cooldown active", "retry_after": 7200}],
+        "funpack_results": [],
+    }
+    lco_monitor._finish_download(_row(monitor_db), snapshot, path=monitor_db, now=300)
+    with sqlite3.connect(monitor_db) as conn:
+        state, attempts = conn.execute(
+            "SELECT state, attempts FROM lco_observation_frames WHERE request_id=101"
+        ).fetchone()
+        next_poll = conn.execute(
+            "SELECT next_poll_at FROM lco_observation_requests WHERE request_id=101"
+        ).fetchone()[0]
+    assert (state, attempts) == ("error", 0)
+    assert next_poll >= 300 + 7200

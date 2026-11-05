@@ -31,10 +31,30 @@ def clock(monkeypatch):
 
 
 @pytest.mark.parametrize("value,expected", [(None, 60), ("", 60), ("oops", 60),
-    ("-5", 60), ("inf", 60), ("0", 1), ("120", 120), ("172800", 172800),
+    ("-5", 60), ("inf", 60), ("0", 1), ("120", 120), ("86400", 86400),
     ("Thu, 01 Jan 1970 00:02:00 GMT", 20), ("Thu, 01 Jan 1970 00:00:00 GMT", 1)])
 def test_retry_after(value, expected):
     assert lco_rate.retry_after_seconds(value, 100) == expected
+
+
+@pytest.mark.parametrize("value", ["86401", "172800", "99999999999", "Fri, 01 Jan 2100 00:00:00 GMT"])
+def test_retry_after_cannot_park_the_fleet_beyond_one_day(value):
+    assert lco_rate.retry_after_seconds(value, 100) == lco_rate.MAX_RETRY_AFTER_S
+
+
+def test_strictest_policy_takes_lowest_budget_and_longest_interval():
+    lax = dict(lco_rate._POLICY, api_daily=50000, api_interval=0.5)
+    strict = dict(lco_rate._POLICY, api_daily=2000, api_interval=2.0)
+    for stored, local in ((lax, strict), (strict, lax)):
+        merged = lco_rate._strictest(stored, local)
+        assert merged["api_daily"] == 2000
+        assert merged["api_interval"] == 2.0
+
+
+@pytest.mark.parametrize("stored", [{"api_daily": "oops"}, {"api_daily": -1}, "not a mapping"])
+def test_malformed_stored_policy_is_rejected(stored):
+    with pytest.raises(ValueError):
+        lco_rate._strictest(stored, lco_rate._POLICY)
 
 
 def test_backoff_is_jittered_and_bounded(monkeypatch):
@@ -217,3 +237,8 @@ def test_scopes_separate_api_and_storage():
 def test_http_date_wait_uses_reference_clock():
     header = format_datetime(datetime.fromtimestamp(90000, timezone.utc), usegmt=True)
     assert lco_rate.retry_after_seconds(header, 80000) == 10000
+
+
+def test_policy_value_added_by_a_newer_release_is_adopted():
+    assert lco_rate._strictest({"api_daily": 4000}, {"api_daily": 4000, "storage_interval": 0.25}) == {
+        "api_daily": 4000, "storage_interval": 0.25}

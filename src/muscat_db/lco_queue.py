@@ -10,6 +10,7 @@ private shared spool (see lco_download), never in a jobs row.
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from contextlib import contextmanager
 
@@ -24,10 +25,28 @@ MAX_JOBS = 2
 FRAME_WORKERS = 4
 _LOCK = 0x6D75_7363_6C63_6F31
 TERMINAL = {"done", "error", "cancelled"}
+ACTIVE_SQL = "('pending','running','cancelling')"
+# Rows listed for pages and polls. Status polls read one full row instead.
+LIST_LIMIT = 200
+# Per-frame payloads leave history after this. A monitor that has not read them
+# by then simply re-queues, and resume finds the frames already on disk.
+RESULTS_RETENTION_S = 7 * 86400
+_PER_FRAME_FIELDS = "- 'results' - 'funpack_results' - 'filenames'"
 
 
 def enabled() -> bool:
+    """Whether durable rows can exist. Stays true after rollback so they drain."""
     return job_store.uses_shared_control_plane()
+
+
+def accepting() -> bool:
+    """Whether new downloads go to the fleet, once workers and spool are ready.
+
+    A merge deploys the web process within minutes, but it does not provision
+    the spool or install worker units. Without this switch those jobs would sit
+    pending with nothing able to claim them.
+    """
+    return enabled() and os.environ.get("MUSCAT_LCO_FLEET_DOWNLOADS", "0") == "1"
 
 
 def key(job_id: str) -> str:
@@ -69,13 +88,15 @@ class ArchiveQueue:
 
     @staticmethod
     def _write(conn, job: dict, now: float):
+        # A later write to a finished row (its notification mark) moves no clock.
+        end = (job.get("finished_at") or now) if job["state"] in TERMINAL else now
         conn.execute(
             "UPDATE jobs SET params=%s, state=%s, heartbeat_at=%s, instance_id=%s, "
             "attempts=%s, elapsed=%s, returncode=%s, error_desc=%s, run_name=%s "
             "WHERE key=%s AND owner=%s",
-            (json.dumps(job), job["state"], now,
+            (json.dumps(job), job["state"], end,
              f"{job['host']}:{job['lease_token']}" if job.get("lease_token") else "",
-             job.get("download_attempts", 0), int(now - job["started_at"]),
+             job.get("download_attempts", 0), int(end - job["started_at"]),
              (0 if job["state"] == "done" else 1) if job["state"] in TERMINAL else None,
              job.get("error") or "", f"{job['frames_done']}/{job['frames_total']} frames",
              key(job["job_id"]), OWNER),
@@ -118,12 +139,45 @@ class ArchiveQueue:
         with self._connection() as conn:
             return self._read(conn, job_id)
 
-    def all(self) -> list[dict]:
+    def all(self, limit: int | None = None) -> list[dict]:
+        """Active jobs, then newest history, without per-frame payloads."""
         with self._connection() as conn:
             rows = conn.execute(
-                "SELECT params FROM jobs WHERE owner=%s ORDER BY started_at DESC", (OWNER,),
+                f"SELECT (params::jsonb {_PER_FRAME_FIELDS})::text FROM jobs WHERE owner=%s "
+                f"ORDER BY state IN {ACTIVE_SQL} DESC, started_at DESC LIMIT %s",
+                (OWNER, LIST_LIMIT if limit is None else limit),
             ).fetchall()
             return [json.loads(r[0]) for r in rows]
+
+    def unnotified(self, limit: int = 50) -> list[dict]:
+        """Recently finished jobs whose completion hook has not fired."""
+        with self._connection() as conn:
+            cutoff = self._now(conn) - RESULTS_RETENTION_S
+            rows = conn.execute(
+                f"SELECT (params::jsonb {_PER_FRAME_FIELDS})::text FROM jobs "
+                "WHERE owner=%s AND state IN ('done','error') AND heartbeat_at >= %s "
+                "AND params::jsonb->>'notified' IS NULL ORDER BY started_at LIMIT %s",
+                (OWNER, cutoff, limit),
+            ).fetchall()
+            return [json.loads(r[0]) for r in rows]
+
+    def states(self, job_ids: list[str]) -> dict[str, str]:
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT run_id, state FROM jobs WHERE owner=%s AND run_id = ANY(%s)", (OWNER, job_ids),
+            ).fetchall()
+            return dict(rows)
+
+    def compact(self, older_than_s: float = RESULTS_RETENTION_S) -> int:
+        """Drop per-frame payloads from old finished rows, keeping their history."""
+        with self._connection() as conn:
+            cutoff = self._now(conn) - older_than_s
+            return conn.execute(
+                f"UPDATE jobs SET params = (params::jsonb {_PER_FRAME_FIELDS})::text "
+                "WHERE owner=%s AND state = ANY(%s) AND heartbeat_at < %s "
+                "AND params::jsonb ?| array['results','funpack_results','filenames']",
+                (OWNER, sorted(TERMINAL), cutoff),
+            ).rowcount
 
     def claim(self, stage: str, host: str) -> dict | None:
         with self._connection() as conn:
@@ -155,6 +209,8 @@ class ArchiveQueue:
                     continue
                 job.update(state="running", phase="downloading" if stage == "download" else "scanning",
                            lease_token=uuid.uuid4().hex, lease_until=now + LEASE_S, host=host)
+                # Remembered so a later attempt can remove what a crash left.
+                job["attempt_tokens"] = [*job.get("attempt_tokens", []), job["lease_token"]]
                 job[stage + "_attempts"] += 1
                 self._write(conn, job, now)
                 return job

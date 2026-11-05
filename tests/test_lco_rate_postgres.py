@@ -137,16 +137,46 @@ def test_daily_exhaustion_is_atomic(rate):
     assert delays.count(86400) == 7
 
 
-def test_mismatched_policy_fails_closed_and_state_contains_no_identity(rate):
+def test_laxer_release_cannot_raise_limits_or_lose_availability(rate):
     import psycopg
 
     coordinator, now = rate
-    coordinator.reserve("archive")
-    with pytest.raises(lco.LcoError, match="policy mismatched"):
-        lco_rate.Coordinator(_DSN, policy=dict(lco_rate._POLICY, api_daily=50000)).reserve("archive")
+    assert coordinator.reserve("archive") == 0
+    lax = lco_rate.Coordinator(_DSN, policy=dict(lco_rate._POLICY, api_daily=50000, api_interval=0.1))
+    now[0] += 0.5
+    assert lax.reserve("archive") == pytest.approx(0.5)  # Stored 1/s still applies.
+    now[0] += 0.5
+    assert lax.reserve("archive") == 0
     with psycopg.connect(_DSN) as conn:
         rows = conn.execute("SELECT * FROM lco_rate_state").fetchall()
         events = conn.execute("SELECT * FROM lco_api_requests").fetchall()
     assert rows == [("archive", lco_rate._POLICY, now[0] + 1, 0)]
-    assert events == [(now[0], False)]
+    assert [event[1] for event in events] == [False, False]
     assert "postgres" not in json.dumps(rows)
+
+
+def test_stricter_release_tightens_every_running_version(rate):
+    coordinator, now = rate
+    assert coordinator.reserve("archive") == 0
+    strict = lco_rate.Coordinator(_DSN, policy=dict(lco_rate._POLICY, api_daily=1))
+    now[0] += 1
+    assert strict.reserve("archive") > 0
+    # The older release never lowered its own number; it reads the shared one.
+    assert coordinator.reserve("archive") > 0
+
+
+def test_malformed_stored_policy_fails_closed(rate):
+    import psycopg
+
+    coordinator, _ = rate
+    assert coordinator.reserve("archive") == 0
+    with psycopg.connect(_DSN) as conn:
+        conn.execute("UPDATE lco_rate_state SET policy = '{\"api_daily\": \"oops\"}'")
+    with pytest.raises(lco.LcoError) as error:
+        coordinator.reserve("archive")
+    assert error.value.status == 503
+
+
+def test_absurd_retry_after_is_persisted_clamped(rate):
+    coordinator, _ = rate
+    assert coordinator.cooldown("archive", "99999999999") == lco_rate.MAX_RETRY_AFTER_S

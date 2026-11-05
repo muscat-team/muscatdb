@@ -1272,11 +1272,27 @@ Under §12 every worker runs the same `muscatdb worker --pipeline <name>` loop, 
 
 ### LCO archive worker queue (#389)
 
-PostgreSQL deployments enqueue archive downloads as `lco_archive_download` jobs
-in the existing jobs table. The web process never launches their transfers.
-`deploy/workers.toml` includes a separate systemd pipeline unit on each of
-ut3–ut7. Applying this configuration is a separate deployment step; the change
+With `MUSCAT_LCO_FLEET_DOWNLOADS=1`, PostgreSQL deployments enqueue archive
+downloads as `lco_archive_download` jobs in the existing jobs table, and the web
+process never launches their transfers. Without it, downloads stay on the local
+threads. `deploy/workers.toml` includes a separate systemd pipeline unit on each
+of ut3–ut7. Applying this configuration is a separate deployment step; the change
 does not itself install/restart units or provision directories.
+
+**Rollout order.** A merge to `test` reaches staging, and a release to `main`
+reaches production, within about 5 minutes, and neither provisions anything.
+
+1. Before merging to `test`: create the limiter database and put
+   `MUSCAT_LCO_RATE_DSN` in the staging web environment and `pg.env`. Without it,
+   every archive request returns 503 as soon as the code deploys.
+2. Before the release PR: do the same for the production web environment.
+3. Apply the worker units and provision the spool for the profile.
+4. Set `MUSCAT_LCO_FLEET_DOWNLOADS=1` for that web process and restart it. Run the
+   small staging download and worker restart/cancellation checks below first.
+
+The web process prints a `[startup] WARNING` for each setting that will block
+archive access. To roll back, unset the flag so new downloads return to the local
+threads; existing durable rows stay readable and cancellable while they drain.
 
 **Decisions and bounds.** Transactional claims use a PostgreSQL advisory lock
 and per-attempt lease tokens. Capacity is a hard ceiling of two download jobs
@@ -1308,7 +1324,7 @@ when changing the queue's profile/database. Export that same secret into each
 web service environment as well. The generated `web-env` output and systemd
 units intentionally contain no DSN. `MUSCAT_LCO_RATE_DSN` does not fall back to
 the queue DSN: absent credentials, missing dependencies, unreachable PostgreSQL
-or mixed limiter policies fail closed with a safe HTTP 503. Science workers and
+or a malformed stored policy fail closed with a safe HTTP 503. Science workers and
 Observation Portal scheduling remain usable; archive searches/downloads require
 this configuration. No production database or credentials were provisioned as
 part of this change.
@@ -1327,15 +1343,21 @@ abandoned permits still count. A transaction/advisory lock and PostgreSQL clock
 serialize admissions; no midnight reset or process restart replenishes the
 budget. Only fixed scope names, timestamps, policy numbers and an anonymous
 flag are stored, never tokens, token hashes, users, URLs or signed query strings.
-The fixed policy avoids accidentally raising limits in a single profile; any
-policy change needs a coordinated code rollout, and mixed versions fail closed.
+Staging and production run different releases between a merge and a release, so
+each process enforces the stricter of its own policy and the stored one and writes
+back any tightening. Lowering a limit in code therefore takes effect everywhere as
+soon as one release runs it. Raising one takes both the code change and a manual
+update of `policy` in `lco_rate_state`, after every process runs the new code.
 
 S3/object GETs have a separate shared four-starts-per-second pace and do not
 consume the archive API daily allowance. Existing job/frame concurrency ceilings
 still apply. API and storage scopes each propagate HTTP 429 cooldowns; storage
 503s also trigger cooldowns. `Retry-After` delta seconds and HTTP dates are
 honored using database time, with a 60-second fallback for missing/malformed
-values and a one-second minimum. Longer existing cooldowns are never shortened.
+values, a one-second minimum and a one-day maximum. Longer existing cooldowns are
+never shortened. To clear one by hand, run
+`UPDATE lco_rate_state SET cooldown_until = 0 WHERE scope = 'archive'` (or
+`'storage'`) in the limiter database.
 Peers recheck admission after the wait, so recovery is paced. Already-started
 requests cannot be recalled. Frames have at most three attempts (the existing
 retry environment setting is clamped to 1–3), with exponential jittered delay
@@ -1358,7 +1380,9 @@ Leases last 300 seconds and renew every 15 seconds. PostgreSQL statement and
 lock waits are bounded to 10 and 5 seconds in archive transactions. A failed
 renewal stops new work; a monotonic 150-second safety deadline fences a paused
 executor before its next operation or publish. Socket reads have a 10-second
-timeout, transfers a 120-second total deadline, and funpack its existing
+timeout, transfers a total deadline of `MUSCAT_LCO_ARCHIVE_TRANSFER_DEADLINE_S`
+(default 120 seconds, longer when the response declares more than 256 KiB/s can
+deliver in that time; frame metadata publishes no size), and funpack its existing
 300-second timeout. Files are written to attempt-specific sibling temporary
 paths and renamed only while ownership remains valid. A hard NFS stall can
 delay a thread's exit; it cannot authorize an old attempt to publish after it
@@ -1367,7 +1391,10 @@ jobs have three download attempts, separate from three registration attempts,
 with 30/60-second retry delays. Expired leases are reclaimed by the next queue
 pass, including after cancellation. Permanent errors and exhausted attempts
 remain visible as errors. Terminal job history is durable until explicitly
-deleted; the old in-memory job TTL does not expire fleet history.
+deleted; the old in-memory job TTL does not expire fleet history. Seven days after
+a job ends, its per-frame results leave the row and its summary stays. Page and
+poll listings read at most 200 rows without per-frame payloads, and progress is
+saved at most every 10 seconds, so cost does not grow with history or frame count.
 
 **Paths and credentials.** `archive_root` and `archive_spool` in each fleet
 profile are rendered into both the worker environment and `web-env` output.

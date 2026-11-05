@@ -1154,6 +1154,22 @@ def _open_download_url(url: str, timeout: float):
 _DOWNLOAD_TIMEOUT_S = float(os.environ.get("MUSCAT_LCO_DOWNLOAD_TIMEOUT_S", "120"))
 _DOWNLOAD_CHUNK = 1 << 20  # 1 MiB
 _FUNPACK_TIMEOUT_S = float(os.environ.get("MUSCAT_LCO_FUNPACK_TIMEOUT_S", "300"))
+# The slowest rate a declared transfer may run at before it counts as stalled.
+# Frame metadata publishes no size, so this applies to the response's own length.
+_MIN_TRANSFER_BYTES_PER_S = 256 * 1024
+
+
+def _content_length(response) -> int | None:
+    headers = getattr(response, "headers", None)
+    try:
+        return int(headers.get("Content-Length"))
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def _transfer_deadline(base_s: float, expected: int | None) -> float:
+    """Allow *base_s*, or longer when the response declares a large body."""
+    return max(base_s, (expected or 0) / _MIN_TRANSFER_BYTES_PER_S)
 
 
 def _download_to_file(url: str, dest: Path, timeout: float = _DOWNLOAD_TIMEOUT_S,
@@ -1171,13 +1187,12 @@ def _download_to_file(url: str, dest: Path, timeout: float = _DOWNLOAD_TIMEOUT_S
         if check:
             check()
         with lco_rate.request_context(check), _open_download_url(url, timeout=timeout) as response:
+            expected = _content_length(response)
             # Rate/cooldown waiting does not consume the transfer deadline.
-            deadline = time.monotonic() + deadline_s if deadline_s else None
+            deadline = time.monotonic() + _transfer_deadline(deadline_s, expected) if deadline_s else None
             with open(tmp, "wb") as fh:
                 if check:
                     received = 0
-                    headers = getattr(response, "headers", None)
-                    expected = headers.get("Content-Length") if headers is not None else None
                     while True:
                         check()
                         if deadline and time.monotonic() >= deadline:
@@ -1187,7 +1202,7 @@ def _download_to_file(url: str, dest: Path, timeout: float = _DOWNLOAD_TIMEOUT_S
                             break
                         received += len(chunk)
                         fh.write(chunk)
-                    if not received or (expected is not None and received != int(expected)):
+                    if not received or (expected is not None and received != expected):
                         raise OSError("Archive transfer was empty or incomplete")
                 else:
                     shutil.copyfileobj(response, fh, _DOWNLOAD_CHUNK)
@@ -1234,6 +1249,8 @@ def _download_frame(frame: dict, overwrite: bool = False) -> dict:
     except LcoError as e:
         status["status"] = "error"
         status["error"] = e.message
+        if e.retry_after is not None:
+            status["retry_after"] = e.retry_after
     except Exception as e:
         status["status"] = "error"
         status["error"] = str(e)
@@ -1509,25 +1526,38 @@ _TRANSIENT_DOWNLOAD_RE = re.compile(
 )
 
 
+# How long a local download thread sits out shared limiter refusals per frame.
+_ARCHIVE_ADMISSION_WAIT_S = 300.0
+
+
 def _is_transient_download_error(error: str) -> bool:
     return bool(_TRANSIENT_DOWNLOAD_RE.search(error))
 
 
 def _download_frame_with_retry(frame: dict, overwrite: bool = False) -> dict:
-    """Download a frame with retry + exponential backoff for transient errors."""
+    """Download a frame with retry + exponential backoff for transient errors.
+
+    A refusal from the shared limiter never reached LCO, so waiting it out spends
+    no attempt. A wait past the limit returns, with ``retry_after`` for the caller.
+    """
     max_attempts = min(3, max(1, _ARCHIVE_DOWNLOAD_FRAME_RETRIES))
-    last_result: dict | None = None
-    for attempt in range(max_attempts):
+    attempt = 0
+    waited = 0.0
+    while True:
         result = _download_frame(frame, overwrite=overwrite)
         if result.get("status") != "error":
             return result
-        last_result = result
-        error_msg = result.get("error", "")
-        if not _is_transient_download_error(error_msg):
+        retry_after = result.get("retry_after")
+        if retry_after:
+            if waited + retry_after > _ARCHIVE_ADMISSION_WAIT_S:
+                return result
+            time.sleep(retry_after)
+            waited += retry_after
+            continue
+        if not _is_transient_download_error(result.get("error", "")) or attempt + 1 >= max_attempts:
             return result
-        if attempt < max_attempts - 1:
-            time.sleep(lco_rate.backoff(attempt))
-    return last_result
+        time.sleep(lco_rate.backoff(attempt))
+        attempt += 1
 
 
 def _notify_archive_download_finished(job: dict) -> None:
@@ -1833,7 +1863,7 @@ def start_archive_download(
     }
     from muscat_db import lco_download, lco_queue
 
-    if lco_queue.enabled():
+    if lco_queue.accepting():
         return lco_download.submit(job, credential_user=credential_user if credential_user is not None else user_name)
     with _ARCHIVE_DOWNLOAD_LOCK:
         _prune_archive_download_jobs(now, reserve_slots=1)

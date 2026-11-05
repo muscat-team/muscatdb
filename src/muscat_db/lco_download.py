@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import concurrent.futures
+import importlib.util
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -14,6 +16,23 @@ import urllib.error
 import urllib.parse
 
 from muscat_db import database, job_store, lco, lco_queue, lco_rate
+
+logger = logging.getLogger(__name__)
+
+# The shortest allowance for one frame; large responses get longer (see
+# lco._transfer_deadline).
+_TRANSFER_DEADLINE_S = max(1.0, float(os.environ.get("MUSCAT_LCO_ARCHIVE_TRANSFER_DEADLINE_S", "120")))
+# Progress lives in one row holding every frame's result, so a write per frame
+# costs O(n^2). The heartbeat still notices cancellation between saves.
+_CHECKPOINT_INTERVAL_S = 10.0
+_CLEANUP_INTERVAL_S = 30.0
+_COMPACT_INTERVAL_S = 3600.0
+_TOKEN_RE = re.compile(r"[0-9a-f]{32}")
+
+
+def _describe(exc: BaseException) -> str:
+    """Name a failure for logs. Network and subprocess text can hold secrets."""
+    return exc.message if isinstance(exc, lco.LcoError) else type(exc).__name__
 
 
 def _spool() -> Path:
@@ -31,6 +50,21 @@ def _path(job_id: str) -> Path:
     if not re.fullmatch(r"[a-f0-9]{16}", job_id):
         raise lco.LcoError("LCO archive download job not found", status=404)
     return _spool() / (job_id + ".json")
+
+
+def config_warnings() -> list[str]:
+    """Problems that will block archive access, named without their values."""
+    warnings = []
+    if importlib.util.find_spec("psycopg") is None:
+        warnings.append("psycopg is not installed; archive requests need the cluster extra and will return 503")
+    if not os.environ.get("MUSCAT_LCO_RATE_DSN"):
+        warnings.append("MUSCAT_LCO_RATE_DSN is unset; archive search, monitoring and downloads will return 503")
+    if lco_queue.accepting():
+        try:
+            _spool()
+        except (lco.LcoError, OSError) as exc:
+            warnings.append(f"MUSCAT_LCO_DOWNLOAD_SPOOL is unusable ({_describe(exc)}); fleet downloads will fail")
+    return warnings
 
 
 def _read_manifest(job_id: str) -> dict:
@@ -124,7 +158,8 @@ class Lease:
         while not self.closed.wait(15):
             try:
                 self.checkpoint({})
-            except Exception:
+            except Exception as exc:
+                logger.info("archive job %s lease renewal stopped: %s", self.job["job_id"], _describe(exc))
                 self.stop.set()
                 return
 
@@ -136,7 +171,9 @@ class Lease:
         self.check()
         try:
             row = self.queue.update(self.job["job_id"], self.job["lease_token"], changes)
-        except Exception:
+        except Exception as exc:
+            logger.warning("archive job %s could not reach the control plane: %s",
+                           self.job["job_id"], _describe(exc))
             self.stop.set()
             raise LeaseLost("Archive execution stopped: control plane unavailable") from None
         if not row or row.get("cancel_requested"):
@@ -162,16 +199,18 @@ def _frame(frame: dict, manifest: dict, lease: Lease) -> dict:
     lease.check()
     frame = dict(frame)
     filename = str(frame.get("filename") or frame.get("basename"))
-    _, _, dest = lco.frame_destination(frame)
     # Resume skips complete files even if the initial job requested overwrite.
     overwrite = manifest["overwrite"] and lease.job["download_attempts"] == 1
-    if dest.exists() and dest.stat().st_size > 0 and not overwrite:
-        return {"filename": filename, "dest": str(dest), "status": "exists"}
-    dest.parent.mkdir(parents=True, exist_ok=True)
     max_attempts = min(3, max(1, lco._ARCHIVE_DOWNLOAD_FRAME_RETRIES))
+    dest = None
     for attempt in range(max_attempts):
         lease.check()
         try:
+            # Inside the retry: an NFS blip here must not end a whole dataset.
+            _, _, dest = lco.frame_destination(frame)
+            if dest.exists() and dest.stat().st_size > 0 and not overwrite:
+                return {"filename": filename, "dest": str(dest), "status": "exists"}
+            dest.parent.mkdir(parents=True, exist_ok=True)
             if not frame.get("url"):
                 # Refresh by exact filename only when needed. This also supports
                 # old selections with no archive frame ID, without broad searches.
@@ -183,7 +222,8 @@ def _frame(frame: dict, manifest: dict, lease: Lease) -> dict:
                     raise lco.LcoError("Archive frame URL could not be refreshed", status=404)
                 frame["url"] = matches[0]["url"]
             lco._download_to_file(frame["url"], dest, timeout=10, check=lease.check,
-                                  temp_suffix="." + lease.job["lease_token"], deadline_s=120)
+                                  temp_suffix="." + lease.job["lease_token"],
+                                  deadline_s=_TRANSFER_DEADLINE_S)
             return {"filename": filename, "dest": str(dest), "status": "downloaded"}
         except LeaseLost:
             raise
@@ -193,16 +233,48 @@ def _frame(frame: dict, manifest: dict, lease: Lease) -> dict:
             if code in {401, 403}:
                 frame.pop("url", None)
             if not transient or attempt + 1 == max_attempts:
-                return {"filename": filename, "dest": str(dest), "status": "error",
+                return {"filename": filename, "dest": str(dest) if dest else None, "status": "error",
                         "error": f"Archive HTTP {code}" if code else "Archive transfer failed",
                         "retryable": transient}
             lco_rate.wait(lco_rate.backoff(attempt), lease.check)
     raise AssertionError("frame retry budget must be positive")
 
 
+def _progress_saver(lease: Lease):
+    """Checkpoint at most once per interval, or whenever forced."""
+    last = time.monotonic()
+
+    def save(changes: dict, *, force: bool = False) -> None:
+        nonlocal last
+        now = time.monotonic()
+        if force or now - last >= _CHECKPOINT_INTERVAL_S:
+            lease.checkpoint(changes)
+            last = now
+        else:
+            lease.check()
+
+    return save
+
+
+def _discard_partial_files(job: dict) -> None:
+    """Remove temporary files earlier attempts of this job left after a crash.
+
+    An abandoned writer that wakes later only fails to publish: its rename finds
+    no file, and its lease is already gone. Only this job's tokens are matched,
+    so another job transferring into the same night directory is unaffected.
+    """
+    tokens = [token for token in job.get("attempt_tokens", [])
+              if token != job.get("lease_token") and _TOKEN_RE.fullmatch(token)]
+    for directory in job.get("dest_dirs") or []:
+        for token in tokens:
+            for path in Path(directory).glob(f"*.part.{token}"):
+                path.unlink(missing_ok=True)
+
+
 def _download(manifest: dict, lease: Lease):
     root = Path(manifest["root"])
     results, unpacked = [], []
+    save = _progress_saver(lease)
     # Submit only a bounded window. A cancellation never leaves thousands of
     # pending network calls in an executor's internal queue.
     frames = iter(manifest["frames"])
@@ -216,20 +288,22 @@ def _download(manifest: dict, lease: Lease):
             done, pending = concurrent.futures.wait(pending, return_when=concurrent.futures.FIRST_COMPLETED)
             for future in done:
                 results.append(_safe_result(future.result(), root))
-            lease.checkpoint({"results": results, "frames_done": len(results)})
+            save({"results": results, "frames_done": len(results)})
             for _ in done:
                 frame = next(frames, None)
                 if frame is not None:
                     lease.check()
                     pending.add(pool.submit(_frame, frame, manifest, lease))
+    save({"results": results, "frames_done": len(results)}, force=True)
     paths = lco._funpack_paths(results)
     lease.checkpoint({"phase": "funpacking", "funpack_total": len(paths)})
     for path in paths:
         lease.check()
         result = lco._funpack_file(path, check=lease.check, temp_suffix="." + lease.job["lease_token"])
         unpacked.append(_safe_result(result, root))
-        lease.checkpoint({"funpack_results": unpacked, "funpack_done": len(unpacked)})
-    failures = [r for r in results + unpacked if r["status"] == "error"]
+        save({"funpack_results": unpacked, "funpack_done": len(unpacked)})
+    save({"funpack_results": unpacked, "funpack_done": len(unpacked)}, force=True)
+    failures =[r for r in results + unpacked if r["status"] == "error"]
     return ("One or more archive frames failed" if failures else None,
             bool(failures) and all(r.get("retryable", False) for r in failures))
 
@@ -259,6 +333,7 @@ def _execute(queue, job) -> None:
     error, retryable, auto_ingest = None, False, False
     try:
         with Lease(queue, job) as lease:
+            _discard_partial_files(job)
             manifest = _read_manifest(job["job_id"])
             if str(lco.download_root()) != manifest["root"]:
                 raise RuntimeError("Archive data root differs between control plane and worker")
@@ -271,8 +346,11 @@ def _execute(queue, job) -> None:
         # finish is fenced too: it acknowledges a cancellation when still owned,
         # but cannot overwrite a newly claimed attempt after a lost lease.
         error, retryable = "Archive execution interrupted", True
-    except Exception:
-        error, retryable = "Archive configuration or processing failed; check shared paths and permissions", stage == "ingest"
+    except Exception as exc:
+        logger.warning("archive job %s failed during %s: %s", job["job_id"], stage, _describe(exc))
+        # Shared storage recovers; a programming or data error will not.
+        error = "Archive configuration or processing failed; check shared paths and permissions"
+        retryable = stage == "ingest" or isinstance(exc, OSError)
     completed = queue.finish(job["job_id"], job["lease_token"], error=error,
                              retryable=retryable, auto_ingest=auto_ingest)
     if completed and completed["state"] in lco_queue.TERMINAL:
@@ -282,6 +360,7 @@ def _execute(queue, job) -> None:
 _EXECUTION_THREADS: dict[str, threading.Thread] = {}
 _EXECUTION_LOCK = threading.Lock()
 _LAST_CLEANUP = 0.0
+_LAST_COMPACT = 0.0
 
 
 def sync_jobs() -> None:
@@ -299,9 +378,14 @@ def sync_jobs() -> None:
         thread = _EXECUTION_THREADS.get(stage)
         if thread is not None and thread.is_alive():
             return
-        if stage == "ingest" and time.monotonic() - _LAST_CLEANUP >= 30:
-            cleanup()
+        if stage == "ingest" and time.monotonic() - _LAST_CLEANUP >= _CLEANUP_INTERVAL_S:
+            # Advanced first: a broken spool must not retry on every 2 s pass,
+            # and housekeeping must not stop jobs from being claimed.
             _LAST_CLEANUP = time.monotonic()
+            try:
+                cleanup()
+            except Exception as exc:
+                logger.warning("archive download cleanup failed: %s", _describe(exc))
         job = queue.claim(stage, job_store.current_host())
         if job:
             thread = threading.Thread(target=_execute, args=(queue, job),
@@ -311,32 +395,45 @@ def sync_jobs() -> None:
 
 
 def cleanup() -> None:
-    """Remove credentials left by a cancelled queued job or a dead worker.
+    """Fire completion hooks, compact old rows, and clear finished jobs' files.
 
     Terminal rows are durable history, so their credentials are no longer
-    useful. Never prune active jobs by wall-clock TTL.
+    useful. Never prune active jobs by wall-clock TTL. Work scales with the spool
+    and unfinished notifications, not with the length of the job history.
     """
+    global _LAST_COMPACT
     from muscat_db import jobs
 
     queue = lco_queue.ArchiveQueue()
-    rows = queue.all()
-    for job in rows:
-        if job["state"] in lco_queue.TERMINAL:
-            _path(job["job_id"]).unlink(missing_ok=True)
-            if queue.take_notification(job["job_id"]):
-                jobs.fire_job_finished(
-                    job_key=lco_queue.key(job["job_id"]), type_="archive",
-                    target=", ".join(job["objects"]), inst=", ".join(job["instruments"]),
-                    date=", ".join(job["obsdates"]), state=job["state"],
-                    started_at=job["started_at"], owner="" if job["user_name"] == "anonymous" else job["user_name"],
-                    link=job.get("photometry_url") or "",
-                )
-    # A crash between writing a private manifest and committing the queue row
-    # can leave an orphan. Allow a full day for an in-flight submission, then
-    # prune only UUID-named manifest files that have no corresponding row.
+    for job in queue.unnotified():
+        if queue.take_notification(job["job_id"]):
+            jobs.fire_job_finished(
+                job_key=lco_queue.key(job["job_id"]), type_="archive",
+                target=", ".join(job["objects"]), inst=", ".join(job["instruments"]),
+                date=", ".join(job["obsdates"]), state=job["state"],
+                started_at=job["started_at"], owner="" if job["user_name"] == "anonymous" else job["user_name"],
+                link=job.get("photometry_url") or "",
+            )
+    if time.monotonic() - _LAST_COMPACT >= _COMPACT_INTERVAL_S:
+        _LAST_COMPACT = time.monotonic()
+        queue.compact()
     if os.environ.get("MUSCAT_LCO_DOWNLOAD_SPOOL"):
-        known = {row["job_id"] for row in rows}
-        for path in _spool().glob("*.json"):
-            if (re.fullmatch(r"[a-f0-9]{16}", path.stem) and path.stem not in known
-                    and path.lstat().st_mtime < time.time() - 86400):
+        _sweep_spool(queue)
+
+
+def _sweep_spool(queue) -> None:
+    manifests = {path.stem: path for path in _spool().glob("*.json")
+                 if re.fullmatch(r"[a-f0-9]{16}", path.stem)}
+    states = queue.states(list(manifests))
+    for job_id, path in manifests.items():
+        state = states.get(job_id)
+        if state is None:
+            # A crash between writing a private manifest and committing the queue
+            # row can leave an orphan. Allow a full day for an in-flight submission.
+            if path.lstat().st_mtime < time.time() - 86400:
                 path.unlink(missing_ok=True)
+        elif state in lco_queue.TERMINAL:
+            # A surviving manifest means no worker saw the end of this job, so
+            # nothing has yet cleaned up after its last attempt.
+            _discard_partial_files(queue.get(job_id) or {})
+            path.unlink(missing_ok=True)

@@ -137,7 +137,9 @@ def test_results_use_shared_alias_and_drop_exception_text(tmp_path):
 def test_frame_window_is_bounded_and_cancellation_starts_no_more(monkeypatch):
     lease = Mock()
     lease.job = {"lease_token": "attempt"}
-    lease.checkpoint.side_effect = lco_download.LeaseLost("cancelled")
+    # Progress saves are throttled, so cancellation arrives through the check
+    # the heartbeat trips rather than through a per-frame database write.
+    lease.check.side_effect = lco_download.LeaseLost("cancelled")
     arrived = threading.Barrier(lco_queue.FRAME_WORKERS)
     calls = []
     def frame(data, manifest, lease):
@@ -181,3 +183,183 @@ def test_refresh_cooldown_receives_lease_check(monkeypatch, tmp_path, lease):
     with pytest.raises(lco_download.LeaseLost):
         lco_download._frame({"filename": "frame.fits"}, {"overwrite": False, "token": "private-token"}, lease)
     transfer.assert_not_called()
+
+
+def test_filesystem_error_before_transfer_is_retried(monkeypatch, tmp_path, lease):
+    dest = tmp_path / "night" / "frame.fits"
+    outcomes = [OSError("stale NFS handle"), ("muscat3", "date", dest)]
+    def destination(frame):
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+    monkeypatch.setattr(lco, "frame_destination", destination)
+    monkeypatch.setattr(lco_rate, "wait", lambda delay, check: None)
+    transfer = Mock()
+    monkeypatch.setattr(lco, "_download_to_file", transfer)
+    result = lco_download._frame({"filename": "frame.fits", "url": "signed"}, {"overwrite": False}, lease)
+    assert result["status"] == "downloaded"
+    transfer.assert_called_once()
+
+
+def test_execution_failures_retry_filesystem_errors_and_log_no_exception_text(monkeypatch, caplog):
+    queue = Mock()
+    queue.update.return_value = {"cancel_requested": False}
+    queue.finish.return_value = {"state": "pending"}
+    job = {"job_id": "a" * 16, "lease_token": "attempt", "stage": "download", "download_attempts": 1}
+    def unreadable(job_id):
+        raise OSError("/private/spool?signature=secret")
+    monkeypatch.setattr(lco_download, "_read_manifest", unreadable)
+    with caplog.at_level("WARNING", logger="muscat_db.lco_download"):
+        lco_download._execute(queue, job)
+    assert queue.finish.call_args.kwargs["retryable"] is True
+    assert "OSError" in caplog.text and job["job_id"] in caplog.text
+    assert "signature" not in caplog.text
+
+
+def test_transfer_deadline_grows_with_the_declared_response_size():
+    assert lco._transfer_deadline(120, None) == 120
+    assert lco._transfer_deadline(120, 1) == 120
+    large = 360 * lco._MIN_TRANSFER_BYTES_PER_S
+    assert lco._transfer_deadline(120, large) == pytest.approx(360)
+
+
+def test_large_response_outlives_the_shortest_deadline(tmp_path, monkeypatch):
+    class Stream(io.BytesIO):
+        headers = {"Content-Length": "7"}
+    monkeypatch.setattr(lco, "_MIN_TRANSFER_BYTES_PER_S", 0.01)
+    monkeypatch.setattr(lco.time, "monotonic", Mock(side_effect=[0, 121, 121]))
+    monkeypatch.setattr(lco, "_open_download_url", lambda *a, **k: Stream(b"partial"))
+    dest = tmp_path / "frame.fits"
+    lco._download_to_file("url", dest, check=lambda: None, deadline_s=120)
+    assert dest.read_bytes() == b"partial"
+
+
+def test_malformed_content_length_does_not_fail_a_complete_transfer(tmp_path, monkeypatch):
+    class Stream(io.BytesIO):
+        headers = {"Content-Length": "oops"}
+    monkeypatch.setattr(lco, "_open_download_url", lambda *a, **k: Stream(b"complete"))
+    dest = tmp_path / "frame.fits"
+    lco._download_to_file("url", dest, check=lambda: None, deadline_s=120)
+    assert dest.read_bytes() == b"complete"
+
+
+def test_job_row_details_show_readable_phases():
+    from muscat_db import web
+
+    row = web._lco_archive_download_row({"job_id": "a" * 16, "state": "pending", "phase": "awaiting_ingest",
+                                         "dest_dirs": ["/data/night"]})
+    assert row["details"] == "awaiting ingest: /data/night"
+
+
+def test_progress_saves_are_throttled_but_the_final_save_is_complete(monkeypatch):
+    lease = Mock()
+    lease.job = {"lease_token": "attempt"}
+    monkeypatch.setattr(lco_download, "_frame", lambda data, manifest, lease: {"filename": data, "status": "exists"})
+    monkeypatch.setattr(lco, "_funpack_paths", lambda results: [])
+    lco_download._download({"frames": list(map(str, range(200))), "root": "/data"}, lease)
+    saves = [call.args[0] for call in lease.checkpoint.call_args_list if "results" in call.args[0]]
+    assert len(saves) < 10
+    assert saves[-1]["frames_done"] == 200
+    assert len(saves[-1]["results"]) == 200
+
+
+def test_archive_sync_failure_cannot_stop_target_refresh(monkeypatch):
+    from muscat_db import web
+
+    for module in (web.phot, web.fit, web.ttv):
+        monkeypatch.setattr(module, "sync_jobs", lambda: None)
+    monkeypatch.setattr(web, "_lco_archive_download_rows", lambda: [])
+    monkeypatch.setattr(web, "uses_shared_control_plane", lambda: True)
+    monkeypatch.setattr(web, "get_job_store", Mock())
+    refresh = Mock()
+    monkeypatch.setattr(web, "refresh_worker_finished_targets", refresh)
+    monkeypatch.setattr(lco_download, "sync_jobs", Mock(side_effect=lco.LcoError("spool mode", status=503)))
+    web._reconcile_all_jobs()
+    refresh.assert_called_once()
+
+
+def test_cleanup_failure_does_not_stop_claims_or_repeat_every_pass(monkeypatch):
+    queue = Mock()
+    queue.claim.return_value = None
+    monkeypatch.setattr(lco_queue, "enabled", lambda: True)
+    monkeypatch.setattr(lco_queue, "ArchiveQueue", lambda: queue)
+    monkeypatch.setattr(lco_download.job_store, "current_owner", lambda: "web")
+    monkeypatch.setattr(lco_download, "_EXECUTION_THREADS", {})
+    monkeypatch.setattr(lco_download, "_LAST_CLEANUP", -1e12)
+    cleanup = Mock(side_effect=lco.LcoError("spool mode", status=503))
+    monkeypatch.setattr(lco_download, "cleanup", cleanup)
+    lco_download.sync_jobs()
+    lco_download.sync_jobs()
+    assert queue.claim.call_count == 2
+    cleanup.assert_called_once()
+
+
+def test_queue_accepts_jobs_only_when_explicitly_enabled(monkeypatch):
+    monkeypatch.setattr(lco_queue.job_store, "uses_shared_control_plane", lambda: True)
+    monkeypatch.delenv("MUSCAT_LCO_FLEET_DOWNLOADS", raising=False)
+    assert lco_queue.enabled() is True  # Existing rows stay readable after rollback.
+    assert lco_queue.accepting() is False
+    monkeypatch.setenv("MUSCAT_LCO_FLEET_DOWNLOADS", "1")
+    assert lco_queue.accepting() is True
+    monkeypatch.setattr(lco_queue.job_store, "uses_shared_control_plane", lambda: False)
+    assert lco_queue.accepting() is False
+
+
+def test_merge_without_the_flag_keeps_the_local_download_path(monkeypatch, tmp_path):
+    monkeypatch.setattr(lco_queue.job_store, "uses_shared_control_plane", lambda: True)
+    monkeypatch.delenv("MUSCAT_LCO_FLEET_DOWNLOADS", raising=False)
+    monkeypatch.setenv("MUSCAT_LCO_DIR", str(tmp_path))
+    monkeypatch.setattr(lco, "_ARCHIVE_DOWNLOAD_JOBS", {})
+    executor = Mock()
+    monkeypatch.setattr(lco, "_ARCHIVE_DOWNLOAD_EXECUTOR", executor)
+    submit = Mock()
+    monkeypatch.setattr(lco_download, "submit", submit)
+    frame = {"filename": "coj1m003-fa19-20261101-0001-e91.fits", "INSTRUME": "fa19", "SITEID": "coj",
+             "TELID": "1m0", "OBJECT": "TOI-1", "url": "https://archive-lco-global.s3.amazonaws.com/frame"}
+    lco.start_archive_download([frame], user_name="alice")
+    submit.assert_not_called()
+    executor.submit.assert_called_once()
+
+
+def test_startup_warnings_name_missing_settings_but_never_their_values(monkeypatch):
+    monkeypatch.setattr(lco_queue.job_store, "uses_shared_control_plane", lambda: True)
+    monkeypatch.delenv("MUSCAT_LCO_RATE_DSN", raising=False)
+    monkeypatch.delenv("MUSCAT_LCO_FLEET_DOWNLOADS", raising=False)
+    assert any("MUSCAT_LCO_RATE_DSN" in line for line in lco_download.config_warnings())
+    monkeypatch.setenv("MUSCAT_LCO_RATE_DSN", "postgresql://user:secret@host/db")
+    monkeypatch.setenv("MUSCAT_LCO_FLEET_DOWNLOADS", "1")
+    monkeypatch.delenv("MUSCAT_LCO_DOWNLOAD_SPOOL", raising=False)
+    warnings = lco_download.config_warnings()
+    assert any("MUSCAT_LCO_DOWNLOAD_SPOOL" in line for line in warnings)
+    assert "secret" not in " ".join(warnings)
+
+
+def test_admission_refusal_keeps_retry_information(monkeypatch, tmp_path):
+    monkeypatch.setattr(lco, "frame_destination", lambda frame: ("muscat3", "date", tmp_path / "frame.fits"))
+    monkeypatch.setattr(lco, "_validate_download_url", lambda url: url)
+    monkeypatch.setattr(lco, "_download_to_file", Mock(side_effect=lco.LcoError(
+        "Shared LCO request budget or cooldown active", status=429, retry_after=30)))
+    result = lco._download_frame({"filename": "frame.fits", "url": "signed"})
+    assert result["status"] == "error"
+    assert result["retry_after"] == 30
+
+
+def test_admission_wait_spends_no_frame_attempt(monkeypatch):
+    refused = {"filename": "f", "status": "error", "error": "Shared LCO cooldown", "retry_after": 60}
+    download = Mock(side_effect=[refused, refused, {"filename": "f", "status": "downloaded"}])
+    monkeypatch.setattr(lco, "_download_frame", download)
+    monkeypatch.setattr(lco, "_ARCHIVE_DOWNLOAD_FRAME_RETRIES", 1)
+    sleeps = []
+    monkeypatch.setattr(lco.time, "sleep", sleeps.append)
+    assert lco._download_frame_with_retry({"filename": "f"})["status"] == "downloaded"
+    assert sleeps == [60, 60]
+
+
+def test_long_admission_wait_returns_to_the_caller(monkeypatch):
+    refused = {"filename": "f", "status": "error", "error": "Shared LCO budget", "retry_after": 3600}
+    monkeypatch.setattr(lco, "_download_frame", Mock(return_value=refused))
+    sleeps = []
+    monkeypatch.setattr(lco.time, "sleep", sleeps.append)
+    assert lco._download_frame_with_retry({"filename": "f"})["retry_after"] == 3600
+    assert sleeps == []

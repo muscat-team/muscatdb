@@ -385,6 +385,13 @@ def _prepared_downloads(snapshot: dict) -> tuple[set[str], dict[str, str]]:
 
 def _finish_download(request: dict, snapshot: dict, *, path: str, now: float) -> bool:
     ready, errors = _prepared_downloads(snapshot)
+    # The shared limiter refused these before they reached LCO: wait, but do not
+    # move a frame that may be perfectly available toward 'abandoned'.
+    deferred = {
+        str(row.get("filename") or ""): float(row["retry_after"])
+        for row in snapshot.get("results") or []
+        if row.get("retry_after")
+    }
     with get_conn(path) as conn:
         for filename in ready:
             conn.execute(
@@ -393,6 +400,13 @@ def _finish_download(request: dict, snapshot: dict, *, path: str, now: float) ->
                 (now, request["request_id"], filename),
             )
         for filename, error in errors.items():
+            if filename in deferred:
+                conn.execute(
+                    "UPDATE lco_observation_frames SET state='error', error=?, updated_at=? "
+                    "WHERE request_id=? AND filename=?",
+                    (error, now, request["request_id"], filename),
+                )
+                continue
             # Count the attempt, and stop retrying a frame that has burned
             # through its budget: 'abandoned' is excluded from _download_rows, so
             # one permanently unavailable product can no longer keep `pending`
@@ -413,7 +427,10 @@ def _finish_download(request: dict, snapshot: dict, *, path: str, now: float) ->
             "downloaded_count=?, next_poll_at=?, updated_at=?, last_error=? WHERE request_id=? AND monitor_state!='canceled'",
             (
                 downloaded,
-                now if not errors else now + _error_delay(int(request.get("error_count") or 0) + 1),
+                now if not errors else now + max(
+                    _error_delay(int(request.get("error_count") or 0) + 1),
+                    max(deferred.values(), default=0),
+                ),
                 now,
                 "; ".join(sorted(set(errors.values())))[:2000],
                 request["request_id"],

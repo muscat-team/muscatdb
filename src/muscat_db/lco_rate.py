@@ -11,6 +11,7 @@ from contextvars import ContextVar
 from email.utils import parsedate_to_datetime
 from functools import lru_cache
 import json
+import logging
 import math
 import os
 import random
@@ -18,13 +19,36 @@ import time
 import urllib.parse
 import urllib.request
 
+logger = logging.getLogger(__name__)
+
 DAY = 86400
+# One bad header must not park every profile's archive traffic indefinitely.
+MAX_RETRY_AFTER_S = DAY
 _LOCK = 389404
 _CHECK = ContextVar("lco_request_check", default=None)
-# Fixed across releases/profiles; a mixed policy fails closed. Deliberately
-# aggregate all identities, leaving headroom under LCO's per-user allowance.
+# Deliberately aggregates all identities, leaving headroom under LCO's per-user
+# allowance. Staging and production run different releases between a merge and
+# a release, so a difference tightens to the stricter value (see _strictest).
 _POLICY = {"api_interval": 1.0, "api_daily": 4000, "anonymous_daily": 500,
            "storage_interval": 0.25}
+
+
+def _strictest(stored, local):
+    """Merge policies so no release can raise a limit another one still enforces.
+
+    Budgets take the lowest value and pacing intervals the longest. A value a
+    newer release adds is adopted. Anything malformed raises, which fails closed.
+    """
+    if not isinstance(stored, dict):
+        raise ValueError("stored policy is not a mapping")
+    merged = dict(stored)
+    for name, value in local.items():
+        current = stored.get(name, value)
+        if (isinstance(current, bool) or not isinstance(current, (int, float))
+                or not math.isfinite(current) or current < 0):
+            raise ValueError(f"stored policy value {name} is invalid")
+        merged[name] = max(current, value) if name.endswith("_interval") else min(current, value)
+    return merged
 
 
 def _error(message, status=503, retry_after=60):
@@ -34,7 +58,10 @@ def _error(message, status=503, retry_after=60):
 
 
 def retry_after_seconds(value, now):
-    """Accept RFC Retry-After seconds or an HTTP date; malformed uses 60s."""
+    """Accept RFC Retry-After seconds or an HTTP date, clamped to one day.
+
+    Malformed values use 60s.
+    """
     try:
         value = str(value).strip()
         if value.isascii() and value.isdigit():
@@ -46,7 +73,9 @@ def retry_after_seconds(value, now):
             seconds = date.timestamp() - now
         if not math.isfinite(seconds):
             raise ValueError("not finite")
-        return max(1.0, seconds)
+        if seconds > MAX_RETRY_AFTER_S:
+            logger.warning("Clamped an LCO Retry-After of %.0f s to %d s", seconds, MAX_RETRY_AFTER_S)
+        return min(MAX_RETRY_AFTER_S, max(1.0, seconds))
     except (TypeError, ValueError, OverflowError):
         return 60.0
 
@@ -98,21 +127,24 @@ class Coordinator:
                     conn.execute("CREATE INDEX IF NOT EXISTS lco_api_requests_at ON lco_api_requests(at)")
                 yield conn
             self._ready = True
-        except Exception:
-            # Connection errors can include passwords/DSNs. Never propagate them.
-            raise _error("Shared LCO request coordinator unavailable or policy mismatched") from None
+        except Exception as exc:
+            # Connection errors can include passwords/DSNs. Never propagate or
+            # log their text; the type still separates an outage from a bad row.
+            logger.warning("LCO request coordinator failed: %s", type(exc).__name__)
+            raise _error("Shared LCO request coordinator unavailable") from None
 
     def _state(self, conn, scope):
         if scope not in {"archive", "storage"}:
             raise ValueError("unknown request scope")
         conn.execute("INSERT INTO lco_rate_state(scope, policy) VALUES (%s, %s) ON CONFLICT DO NOTHING",
                      (scope, json.dumps(self._policy)))
-        policy, next_at, cooldown = conn.execute(
+        stored, next_at, cooldown = conn.execute(
             "SELECT policy, next_at, cooldown_until FROM lco_rate_state WHERE scope=%s", (scope,)
         ).fetchone()
-        if policy != self._policy:
-            raise ValueError("request policy mismatch")
-        return next_at, cooldown
+        policy = _strictest(stored, self._policy)
+        if policy != stored:
+            conn.execute("UPDATE lco_rate_state SET policy=%s WHERE scope=%s", (json.dumps(policy), scope))
+        return policy, next_at, cooldown
 
     def reserve(self, scope, *, anonymous=False):
         """Atomically debit one start, or return seconds until another attempt.
@@ -121,7 +153,7 @@ class Coordinator:
         still count. No future permits are issued ahead of a shared cooldown.
         """
         with self._transaction() as conn:
-            next_at, cooldown = self._state(conn, scope)
+            policy, next_at, cooldown = self._state(conn, scope)
             now = self._now(conn)
             ready = max(next_at, cooldown)
             if scope == "archive":
@@ -130,15 +162,15 @@ class Coordinator:
                     "SELECT count(*), min(at), count(*) FILTER (WHERE anonymous), "
                     "min(at) FILTER (WHERE anonymous) FROM lco_api_requests"
                 ).fetchone()
-                if count >= self._policy["api_daily"]:
+                if count >= policy["api_daily"]:
                     ready = max(ready, oldest + DAY)
-                if anonymous and anon_count >= self._policy["anonymous_daily"]:
+                if anonymous and anon_count >= policy["anonymous_daily"]:
                     ready = max(ready, anon_oldest + DAY)
             if ready > now:
                 return ready - now
             if scope == "archive":
                 conn.execute("INSERT INTO lco_api_requests VALUES (%s, %s)", (now, anonymous))
-            interval = self._policy["api_interval" if scope == "archive" else "storage_interval"]
+            interval = policy["api_interval" if scope == "archive" else "storage_interval"]
             conn.execute("UPDATE lco_rate_state SET next_at=%s WHERE scope=%s", (now + interval, scope))
             return 0.0
 

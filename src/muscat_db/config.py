@@ -189,6 +189,10 @@ ENV_VARS: tuple[EnvVar, ...] = (
         "Root directory for LCO archive downloads (<root>/<instrument>/<date>/). "
         "Falls back to MUSCAT_DATA_DIR's per-instrument layout when unset.",
     ),
+    EnvVar("MUSCAT_LCO_FLEET_DOWNLOADS", "0",
+           "1 sends new archive downloads to the PostgreSQL worker queue. Set after the spool and worker units are ready."),
+    EnvVar("MUSCAT_LCO_ARCHIVE_TRANSFER_DEADLINE_S", "120",
+           "Shortest total transfer allowance per fleet frame; large responses get longer at 256 KiB/s."),
     EnvVar("MUSCAT_LCO_DOWNLOAD_SPOOL", None,
            "Absolute shared credential spool for PostgreSQL archive downloads (service owner, mode 700)."),
     EnvVar("MUSCAT_LCO_RATE_DSN", None,
