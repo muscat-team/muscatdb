@@ -191,6 +191,9 @@ ENV_VARS: tuple[EnvVar, ...] = (
     ),
     EnvVar("MUSCAT_LCO_DOWNLOAD_SPOOL", None,
            "Absolute shared credential spool for PostgreSQL archive downloads (service owner, mode 700)."),
+    EnvVar("MUSCAT_LCO_RATE_DSN", None,
+           "Shared PostgreSQL archive request limiter, identical for web/monitor/workers and dev/prod; required for archive HTTP requests.",
+           secret=True),
     EnvVar("MUSCAT_LCO_ARCHIVE_DOWNLOAD_WORKERS", "1", "Concurrent local LCO download jobs (SQLite only)"),
     EnvVar("MUSCAT_LCO_ARCHIVE_DOWNLOAD_FRAME_WORKERS", "8", "Frame workers per local download (SQLite only)"),
     EnvVar("MUSCAT_LCO_ARCHIVE_FUNPACK_WORKERS", "2", "Concurrent LCO funpack subprocesses"),
@@ -199,7 +202,7 @@ ENV_VARS: tuple[EnvVar, ...] = (
     EnvVar("MUSCAT_LCO_ARCHIVE_FOREGROUND_MAX_FRAMES", "10", "Frames allowed in a foreground LCO download"),
     EnvVar("MUSCAT_LCO_ARCHIVE_MAX_ACTIVE_PER_USER", "2", "Active LCO archive jobs allowed per user"),
     EnvVar("MUSCAT_LCO_ARCHIVE_DOWNLOAD_MAX_JOBS", "200", "Tracked LCO archive queue/history entries"),
-    EnvVar("MUSCAT_LCO_ARCHIVE_FRAME_RETRIES", "3", "Retry attempts per frame on transient download errors"),
+    EnvVar("MUSCAT_LCO_ARCHIVE_FRAME_RETRIES", "3", "Attempts per frame on transient download errors (clamped to 1–3)"),
     EnvVar(
         "MUSCAT_LCO_ALLOW_SUBMIT",
         "0",

@@ -13,7 +13,7 @@ import time
 import urllib.error
 import urllib.parse
 
-from muscat_db import database, job_store, lco, lco_queue
+from muscat_db import database, job_store, lco, lco_queue, lco_rate
 
 
 def _spool() -> Path:
@@ -168,7 +168,8 @@ def _frame(frame: dict, manifest: dict, lease: Lease) -> dict:
     if dest.exists() and dest.stat().st_size > 0 and not overwrite:
         return {"filename": filename, "dest": str(dest), "status": "exists"}
     dest.parent.mkdir(parents=True, exist_ok=True)
-    for attempt in range(lco._ARCHIVE_DOWNLOAD_FRAME_RETRIES):
+    max_attempts = min(3, max(1, lco._ARCHIVE_DOWNLOAD_FRAME_RETRIES))
+    for attempt in range(max_attempts):
         lease.check()
         try:
             if not frame.get("url"):
@@ -176,7 +177,7 @@ def _frame(frame: dict, manifest: dict, lease: Lease) -> dict:
                 # old selections with no archive frame ID, without broad searches.
                 basename = re.sub(r"\.(?:fits(?:\.fz)?|fz)$", "", filename, flags=re.IGNORECASE)
                 url = "https://archive-api.lco.global/frames/?" + urllib.parse.urlencode({"basename_exact": basename, "limit": 2})
-                page = lco._lco_api_request(url, token=manifest["token"])
+                page = lco._lco_api_request(url, token=manifest["token"], check=lease.check)
                 matches = [f for f in page.get("results", []) if (f.get("filename") or f.get("basename")) == filename]
                 if len(matches) != 1 or not matches[0].get("url"):
                     raise lco.LcoError("Archive frame URL could not be refreshed", status=404)
@@ -191,12 +192,11 @@ def _frame(frame: dict, manifest: dict, lease: Lease) -> dict:
             transient = code in {401, 403, 429, 500, 502, 503, 504} or isinstance(exc, (OSError, TimeoutError))
             if code in {401, 403}:
                 frame.pop("url", None)
-            if not transient or attempt + 1 == lco._ARCHIVE_DOWNLOAD_FRAME_RETRIES:
+            if not transient or attempt + 1 == max_attempts:
                 return {"filename": filename, "dest": str(dest), "status": "error",
                         "error": f"Archive HTTP {code}" if code else "Archive transfer failed",
                         "retryable": transient}
-            if lease.stop.wait(min(2 ** attempt, 30)):
-                lease.check()
+            lco_rate.wait(lco_rate.backoff(attempt), lease.check)
     raise AssertionError("frame retry budget must be positive")
 
 

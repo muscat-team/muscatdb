@@ -68,6 +68,18 @@ def _row(path, request_id=101):
         )
 
 
+def test_shared_archive_cooldown_delays_monitor_without_losing_request(monitor_db):
+    result, payload = _submission()
+    lco_monitor.record_submission(result, payload, "alice", path=monitor_db, now=100)
+    error = lco.LcoError("Shared LCO request budget or cooldown active", status=429, retry_after=86400)
+    lco_monitor._mark_error(101, error, path=monitor_db, now=200)
+    row = _row(monitor_db)
+    assert row["next_poll_at"] == 86600
+    assert row["monitor_state"] == "monitoring"
+    assert row["user_name"] == "alice"
+    assert row["error_count"] == 1
+
+
 def test_record_submission_persists_each_child_and_waits_for_window(monitor_db):
     result, payload = _submission()
     rows = lco_monitor.record_submission(

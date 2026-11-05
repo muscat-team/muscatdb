@@ -476,10 +476,11 @@ def _mark_error(request_id: int, error: Exception, *, path: str, now: float) -> 
             "SELECT error_count FROM lco_observation_requests WHERE request_id=?", (request_id,)
         ).fetchone()
         count = int(current[0] if current else 0) + 1
+        delay = max(_error_delay(count), getattr(error, "retry_after", None) or 0)
         conn.execute(
             "UPDATE lco_observation_requests SET monitor_state='monitoring', error_count=?, last_error=?, "
             "next_poll_at=?, updated_at=? WHERE request_id=? AND monitor_state!='canceled'",
-            (count, str(error)[:2000], now + _error_delay(count), now, request_id),
+            (count, str(error)[:2000], now + delay, now, request_id),
         )
         conn.commit()
 

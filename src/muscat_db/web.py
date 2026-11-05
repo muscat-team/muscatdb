@@ -4671,7 +4671,8 @@ def api_ephemeris_view_get(slug: str):
 
 
 def _lco_error_response(e: "lco.LcoError") -> JSONResponse:
-    return JSONResponse(e.to_dict(), status_code=e.status)
+    headers = {"Retry-After": str(e.retry_after)} if e.retry_after is not None else None
+    return JSONResponse(e.to_dict(), status_code=e.status, headers=headers)
 
 
 @app.get("/settings", response_class=HTMLResponse)

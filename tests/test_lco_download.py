@@ -8,7 +8,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from muscat_db import lco, lco_download, lco_queue
+from muscat_db import lco, lco_download, lco_queue, lco_rate
 
 
 @pytest.fixture
@@ -148,3 +148,36 @@ def test_frame_window_is_bounded_and_cancellation_starts_no_more(monkeypatch):
     with pytest.raises(lco_download.LeaseLost):
         lco_download._download({"frames": list(map(str, range(100))), "root": "/data"}, lease)
     assert len(calls) == lco_queue.FRAME_WORKERS
+
+
+def test_retry_count_is_clamped_and_backoff_checks_lease(monkeypatch, tmp_path, lease):
+    monkeypatch.setattr(lco, "_ARCHIVE_DOWNLOAD_FRAME_RETRIES", 999)
+    monkeypatch.setattr(lco, "frame_destination", lambda frame: ("muscat3", "date", tmp_path / "frame.fits"))
+    transfer = Mock(side_effect=lco.LcoError("temporary", status=503))
+    monkeypatch.setattr(lco, "_download_to_file", transfer)
+    waits = []
+    def wait(delay, check):
+        check()
+        waits.append(delay)
+    monkeypatch.setattr(lco_rate, "wait", wait)
+    monkeypatch.setattr(lco_rate.random, "uniform", lambda lo, hi: hi)
+    result = lco_download._frame({"filename": "frame.fits", "url": "signed-secret"}, {"overwrite": False}, lease)
+    assert transfer.call_count == 3
+    assert waits == [2, 4]
+    assert result["retryable"]
+    assert "signed-secret" not in json.dumps(result)
+
+
+def test_refresh_cooldown_receives_lease_check(monkeypatch, tmp_path, lease):
+    monkeypatch.setattr(lco, "frame_destination", lambda frame: ("muscat3", "date", tmp_path / "frame.fits"))
+    def refresh(url, **kwargs):
+        assert kwargs["token"] == "private-token"
+        assert kwargs["check"] == lease.check
+        lease.stop.set()
+        kwargs["check"]()
+    monkeypatch.setattr(lco, "_lco_api_request", refresh)
+    transfer = Mock()
+    monkeypatch.setattr(lco, "_download_to_file", transfer)
+    with pytest.raises(lco_download.LeaseLost):
+        lco_download._frame({"filename": "frame.fits"}, {"overwrite": False, "token": "private-token"}, lease)
+    transfer.assert_not_called()

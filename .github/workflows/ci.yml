@@ -85,7 +85,7 @@ jobs:
       - name: Run PostgreSQL-backed job store tests
         env:
           MUSCAT_POSTGRES_DSN: postgresql://muscatdb:muscatdb@localhost:5432/muscatdb_test
-        run: uv run pytest tests/test_job_store_postgres.py tests/test_lco_queue_postgres.py --tb=short -q
+        run: uv run pytest tests/test_job_store_postgres.py tests/test_lco_queue_postgres.py tests/test_lco_rate_postgres.py --tb=short -q
 
   coverage:
     name: coverage

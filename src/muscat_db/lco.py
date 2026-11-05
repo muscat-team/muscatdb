@@ -43,6 +43,7 @@ from muscat_db.database import (
     user_lco_token_configured,
 )
 from muscat_db.instruments import INSTRUMENTS
+from muscat_db import lco_rate
 
 logger = logging.getLogger(__name__)
 
@@ -106,14 +107,19 @@ def _validated_defocus(params: dict, limit_mm: float) -> float:
 class LcoError(Exception):
     """Structured LCO API error."""
 
-    def __init__(self, message: str, status: int = 500, detail: str | None = None):
+    def __init__(self, message: str, status: int = 500, detail: str | None = None,
+                 retry_after: int | None = None):
         self.message = message
         self.status = status
         self.detail = detail
+        self.retry_after = retry_after
         super().__init__(f"[{status}] {message}" + (f" - {detail}" if detail else ""))
 
     def to_dict(self) -> dict:
-        return {"ok": False, "error": self.message, "detail": self.detail, "status": self.status}
+        result = {"ok": False, "error": self.message, "detail": self.detail, "status": self.status}
+        if self.retry_after is not None:
+            result["retry_after"] = self.retry_after
+        return result
 
 
 class WindowNotObservable(LcoError):
@@ -244,7 +250,7 @@ class _ValidatedApiRedirectHandler(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-_API_OPENER = urllib.request.build_opener(_ValidatedApiRedirectHandler)
+_API_OPENER = urllib.request.build_opener(_ValidatedApiRedirectHandler, lco_rate.ArchiveRateHandler)
 
 
 def _friendly_lco_error_detail(raw_body: str, status: int) -> str:
@@ -289,6 +295,7 @@ def _lco_api_request(
     user_name: str | None = None,
     token: str | None = None,
     require_own_token: bool = False,
+    check=None,
 ) -> dict:
     """Make an authenticated request to the LCO API.
 
@@ -307,7 +314,7 @@ def _lco_api_request(
     req = urllib.request.Request(url, data=body, headers=headers, method=method)
 
     try:
-        with _API_OPENER.open(req, timeout=15) as response:
+        with lco_rate.request_context(check), _API_OPENER.open(req, timeout=15) as response:
             if 200 <= response.status < 300:
                 return json.loads(response.read().decode())
             raw = response.read().decode()
@@ -317,6 +324,10 @@ def _lco_api_request(
                 detail=_friendly_lco_error_detail(raw, response.status),
             )
     except urllib.error.HTTPError as e:
+        if e.code == 429:
+            retry_after = math.ceil(lco_rate.retry_after_seconds((e.headers or {}).get("Retry-After"), time.time()))
+            e.close()
+            raise LcoError("LCO API throttled requests", status=429, retry_after=retry_after) from None
         try:
             raw = e.read().decode()
         except Exception:
@@ -326,6 +337,8 @@ def _lco_api_request(
     except LcoError:
         raise
     except Exception as e:
+        if check:
+            check()
         raise LcoError("LCO API request failed", detail=str(e))
 
 
@@ -1130,7 +1143,7 @@ class _ValidatedArchiveRedirectHandler(urllib.request.HTTPRedirectHandler):
 def _open_download_url(url: str, timeout: float):
     """Open an archive URL with redirect validation enabled for every hop."""
     _validate_download_url(url)
-    opener = urllib.request.build_opener(_ValidatedArchiveRedirectHandler())
+    opener = urllib.request.build_opener(_ValidatedArchiveRedirectHandler(), lco_rate.ArchiveRateHandler())
     return opener.open(url, timeout=timeout)
 
 
@@ -1154,11 +1167,12 @@ def _download_to_file(url: str, dest: Path, timeout: float = _DOWNLOAD_TIMEOUT_S
     when a bare ``urlretrieve`` stalled mid-dataset).
     """
     tmp = dest.with_name(dest.name + ".part" + temp_suffix)
-    deadline = time.monotonic() + deadline_s if deadline_s else None
     try:
         if check:
             check()
-        with _open_download_url(url, timeout=timeout) as response:
+        with lco_rate.request_context(check), _open_download_url(url, timeout=timeout) as response:
+            # Rate/cooldown waiting does not consume the transfer deadline.
+            deadline = time.monotonic() + deadline_s if deadline_s else None
             with open(tmp, "wb") as fh:
                 if check:
                     received = 0
@@ -1327,7 +1341,7 @@ _ARCHIVE_DOWNLOAD_MAX_JOBS = max(10, int(os.environ.get("MUSCAT_LCO_ARCHIVE_DOWN
 _ARCHIVE_DOWNLOAD_MAX_FRAMES = int(os.environ.get("MUSCAT_LCO_ARCHIVE_MAX_FRAMES", "0"))
 _ARCHIVE_DOWNLOAD_MAX_PAYLOAD_BYTES = max(1024, int(os.environ.get("MUSCAT_LCO_ARCHIVE_MAX_PAYLOAD_BYTES", "16777216")))
 _ARCHIVE_DOWNLOAD_MAX_PER_USER = max(1, int(os.environ.get("MUSCAT_LCO_ARCHIVE_MAX_ACTIVE_PER_USER", "2")))
-_ARCHIVE_DOWNLOAD_FRAME_RETRIES = max(1, int(os.environ.get("MUSCAT_LCO_ARCHIVE_FRAME_RETRIES", "3")))
+_ARCHIVE_DOWNLOAD_FRAME_RETRIES = min(3, max(1, int(os.environ.get("MUSCAT_LCO_ARCHIVE_FRAME_RETRIES", "3"))))
 _ARCHIVE_DOWNLOAD_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=_ARCHIVE_DOWNLOAD_WORKERS,
     thread_name_prefix="lco-archive-download",
@@ -1501,7 +1515,7 @@ def _is_transient_download_error(error: str) -> bool:
 
 def _download_frame_with_retry(frame: dict, overwrite: bool = False) -> dict:
     """Download a frame with retry + exponential backoff for transient errors."""
-    max_attempts = _ARCHIVE_DOWNLOAD_FRAME_RETRIES
+    max_attempts = min(3, max(1, _ARCHIVE_DOWNLOAD_FRAME_RETRIES))
     last_result: dict | None = None
     for attempt in range(max_attempts):
         result = _download_frame(frame, overwrite=overwrite)
@@ -1512,7 +1526,7 @@ def _download_frame_with_retry(frame: dict, overwrite: bool = False) -> dict:
         if not _is_transient_download_error(error_msg):
             return result
         if attempt < max_attempts - 1:
-            time.sleep(min(2 ** attempt, 30))
+            time.sleep(lco_rate.backoff(attempt))
     return last_result
 
 

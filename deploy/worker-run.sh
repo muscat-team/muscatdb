@@ -15,6 +15,9 @@ env_file="${MUSCAT_WORKER_PG_ENV:?MUSCAT_WORKER_PG_ENV is not set}"
 env_file="${env_file/#\~/$HOME}"
 # shellcheck disable=SC1090
 source "$env_file"
+# Deliberately keep the same limiter database/host for dev and prod. Never
+# rewrite it with MUSCAT_WORKER_PG_DATABASE or expose it in generated units.
+export MUSCAT_LCO_RATE_DSN="${MUSCAT_LCO_RATE_DSN:-}"
 
 dsn="${MUSCAT_POSTGRES_DSN:?MUSCAT_POSTGRES_DSN missing from $env_file}"
 dsn="${dsn%/*}/${MUSCAT_WORKER_PG_DATABASE:?MUSCAT_WORKER_PG_DATABASE is not set}"

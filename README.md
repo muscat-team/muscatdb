@@ -67,7 +67,11 @@ two datasets at once, with four frame transfers each and one dataset per host;
 these slots are independent of the science pipeline limits. Progress survives
 web restarts and remains visible on Jobs. Downloads and unpacking run on workers;
 catalog scanning/registration stays on the control plane. SQLite installations
-retain the local downloader. See the
+retain the local downloader. All archive clients also require the `cluster`
+extra and `MUSCAT_LCO_RATE_DSN` pointing to one shared limiter database across
+web, monitor, workers, dev and prod. Missing coordination blocks archive HTTP
+requests. The shared policy allows one API start/second and 20,000 requests per
+rolling 24 hours; S3 downloads have separate pacing and shared cooldowns. See the
 [archive worker deployment notes](notes/DEPLOYMENT.md#lco-archive-worker-queue-389)
 for credentials, leases, resume behavior, and rollout checks.
 

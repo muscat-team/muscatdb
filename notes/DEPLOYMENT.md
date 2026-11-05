@@ -1287,8 +1287,69 @@ job. Neither downloads nor registration consume `MUSCAT_MAX_FULL_JOBS` or
 `MUSCAT_WORKER_MAX_SLOTS`; the science pipelines keep their existing scheduling.
 The existing one-profile-at-a-time fleet rule still applies: independently
 running fleets against different databases would have independent caps and
-must not be used to multiply this LCO budget. The local SQLite downloader's
+must not be used to multiply download concurrency. The local SQLite downloader's
 worker settings do not increase these fleet ceilings.
+
+**Shared request limits (required before enabling archive access).** Every
+application process that uses the archive, including SQLite/local web instances,
+must install the `cluster` extra and set `MUSCAT_LCO_RATE_DSN` to the **same
+PostgreSQL database**, independently of `MUSCAT_POSTGRES_DSN`. Provision one
+dedicated database (for example `muscatdb_lco_limits`) on the existing PostgreSQL
+server. Give its service role schema/table creation and read/write access;
+tables initialize on first use. Use the same database and schema/search path on
+ut2–ut7 and in dev/prod. A profile-specific limiter database would multiply
+allowances and is unsupported. Do not reset/restore an older ledger while
+requests are running; a lost ledger requires a 24-hour archive pause before
+resuming, since its spent allowance cannot be reconstructed.
+
+Store the DSN in the existing service-owned mode-0600 `pg.env`, using a host
+reachable from all workers (not `localhost`). `worker-run.sh` exports it unchanged
+when changing the queue's profile/database. Export that same secret into each
+web service environment as well. The generated `web-env` output and systemd
+units intentionally contain no DSN. `MUSCAT_LCO_RATE_DSN` does not fall back to
+the queue DSN: absent credentials, missing dependencies, unreachable PostgreSQL
+or mixed limiter policies fail closed with a safe HTTP 503. Science workers and
+Observation Portal scheduling remain usable; archive searches/downloads require
+this configuration. No production database or credentials were provisioned as
+part of this change.
+
+The fixed fleet policy is one archive API request start per second and 20,000
+requests in a rolling 24 hours, aggregated across every app identity/profile.
+Anonymous API requests also have a 500-request rolling allowance. These leave
+headroom below LCO's published [50,000 authenticated / 1,000 anonymous calls per
+24 hours](https://developers.lco.global/#archive). All archive metadata searches,
+pagination, monitor queries and worker URL refreshes use this ledger; every
+redirect hop is charged according to its destination. Failed HTTP requests and
+abandoned permits still count. A transaction/advisory lock and PostgreSQL clock
+serialize admissions; no midnight reset or process restart replenishes the
+budget. Only fixed scope names, timestamps, policy numbers and an anonymous
+flag are stored, never tokens, token hashes, users, URLs or signed query strings.
+The fixed policy avoids accidentally raising limits in a single profile; any
+policy change needs a coordinated code rollout, and mixed versions fail closed.
+
+S3/object GETs have a separate shared four-starts-per-second pace and do not
+consume the archive API daily allowance. Existing job/frame concurrency ceilings
+still apply. API and storage scopes each propagate HTTP 429 cooldowns; storage
+503s also trigger cooldowns. `Retry-After` delta seconds and HTTP dates are
+honored using database time, with a 60-second fallback for missing/malformed
+values and a one-second minimum. Longer existing cooldowns are never shortened.
+Peers recheck admission after the wait, so recovery is paced. Already-started
+requests cannot be recalled. Frames have at most three attempts (the existing
+retry environment setting is clamped to 1–3), with exponential jittered delay
+(first retries 1–2 and 2–4 seconds, helper capped at 30 seconds); no nested
+metadata retry loop multiplies that budget.
+
+Interactive searches/monitor calls wait at most two seconds for admission,
+then return HTTP 429 with `Retry-After` and JSON `retry_after`. The monitor
+persists at least that delay before its next poll. Durable workers wait without
+holding DB connections, check cancellation/lease ownership every 250ms, and
+continue renewing their job lease independently. The transfer deadline begins
+after admission. A daily wait remains a durable running job and occupies its
+download slot, but no science slot. Unavailable coordination permits no new
+outbound requests. External scripts, direct LCO use and Observation Portal
+requests are outside this archive allowance; the headroom cannot guarantee a
+token's upstream quota if those clients consume it. This is request pacing and
+budgeting, not a bandwidth limit.
 
 Leases last 300 seconds and renew every 15 seconds. PostgreSQL statement and
 lock waits are bounded to 10 and 5 seconds in archive transactions. A failed
