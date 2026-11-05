@@ -1313,11 +1313,14 @@ Observation Portal scheduling remain usable; archive searches/downloads require
 this configuration. No production database or credentials were provisioned as
 part of this change.
 
-The fixed fleet policy is one archive API request start per second and 20,000
+The fixed fleet policy is one archive API request start per second and 4,000
 requests in a rolling 24 hours, aggregated across every app identity/profile.
 Anonymous API requests also have a 500-request rolling allowance. These leave
-headroom below LCO's published [50,000 authenticated / 1,000 anonymous calls per
-24 hours](https://developers.lco.global/#archive). All archive metadata searches,
+headroom below both conflicting LCO publications: the [archive guide lists
+5,000 authenticated / 3,500 anonymous requests per day](https://lco.global/documentation/archive-documentation/),
+while the [developer reference lists 50,000 / 1,000 per 24 hours](https://developers.lco.global/#archive)
+(checked 2026-11-05). We use the lower limit for each identity class, rather than
+assuming which upstream quota is enforced. All archive metadata searches,
 pagination, monitor queries and worker URL refreshes use this ledger; every
 redirect hop is charged according to its destination. Failed HTTP requests and
 abandoned permits still count. A transaction/advisory lock and PostgreSQL clock

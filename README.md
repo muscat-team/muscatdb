@@ -70,7 +70,7 @@ catalog scanning/registration stays on the control plane. SQLite installations
 retain the local downloader. All archive clients also require the `cluster`
 extra and `MUSCAT_LCO_RATE_DSN` pointing to one shared limiter database across
 web, monitor, workers, dev and prod. Missing coordination blocks archive HTTP
-requests. The shared policy allows one API start/second and 20,000 requests per
+requests. The shared policy allows one API start/second and 4,000 requests per
 rolling 24 hours; S3 downloads have separate pacing and shared cooldowns. See the
 [archive worker deployment notes](notes/DEPLOYMENT.md#lco-archive-worker-queue-389)
 for credentials, leases, resume behavior, and rollout checks.

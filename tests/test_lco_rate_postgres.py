@@ -70,6 +70,21 @@ def test_rolling_daily_budget_does_not_reset_at_midnight(rate):
     assert coordinator.reserve("archive") == 86398
 
 
+def test_default_budget_leaves_headroom_below_both_lco_publications(rate):
+    import psycopg
+
+    coordinator, now = rate
+    assert lco_rate._POLICY["api_daily"] == 4000  # archive guide: 5000; developer reference: 50000
+    assert lco_rate._POLICY["anonymous_daily"] == 500  # below 1000 and 3500
+    coordinator.reserve("archive")
+    with psycopg.connect(_DSN) as conn:
+        conn.execute("INSERT INTO lco_api_requests SELECT %s, false FROM generate_series(1, 3999)", (now[0],))
+    now[0] += 1
+    assert coordinator.reserve("archive") == 86399
+    now[0] += 86399
+    assert coordinator.reserve("archive") == 0
+
+
 def test_anonymous_has_smaller_budget_and_storage_does_not_debit_api(rate):
     coordinator, now = rate
     coordinator = lco_rate.Coordinator(_DSN, policy=dict(lco_rate._POLICY, anonymous_daily=1, api_daily=2))

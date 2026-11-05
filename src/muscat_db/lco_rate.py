@@ -23,7 +23,7 @@ _LOCK = 389404
 _CHECK = ContextVar("lco_request_check", default=None)
 # Fixed across releases/profiles; a mixed policy fails closed. Deliberately
 # aggregate all identities, leaving headroom under LCO's per-user allowance.
-_POLICY = {"api_interval": 1.0, "api_daily": 20000, "anonymous_daily": 500,
+_POLICY = {"api_interval": 1.0, "api_daily": 4000, "anonymous_daily": 500,
            "storage_interval": 0.25}
 
 
