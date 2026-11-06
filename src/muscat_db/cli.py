@@ -1169,8 +1169,22 @@ def htpasswd_add(
         False, "--password-stdin",
         help="Read the password as a single line from stdin (safe for scripting).",
     ),
+    group: str | None = typer.Option(
+        None, "--group", "-g",
+        help=(
+            "Group a new account joins (e.g. muscatjp for the team). Required for a new "
+            "non-admin account, which otherwise sees nothing (#354)."
+        ),
+    ),
+    no_group: bool = typer.Option(
+        False, "--no-group",
+        help="Create the account in no group on purpose: it sees nothing until added to one.",
+    ),
 ):
     """Add or update a user in the nginx htpasswd file."""
+    if group and no_group:
+        console.print("[red]Error: --group and --no-group are mutually exclusive[/]")
+        raise typer.Exit(1)
     if "@" in username:
         console.print(
             "[red]Error: usernames cannot contain '@'; a forwarded value with '@' is "
@@ -1211,10 +1225,15 @@ def htpasswd_add(
             auth.reject_username_collision(username, entries)
             auth.reject_username_collision(
                 username, (row[0] for row in conn.execute("SELECT username FROM users")))
+            is_new = username not in entries and conn.execute(
+                "SELECT 1 FROM users WHERE username = ?", (username,)).fetchone() is None
+            _check_initial_group(conn, group, no_group, is_new=is_new, admin=admin)
             conn.execute(
                 "INSERT OR IGNORE INTO users (username, display_name, is_admin) VALUES (?, ?, ?)",
                 (username, username, 1 if admin else 0),
             )
+            if group:
+                _join_initial_group(conn, username, group)
             if admin:
                 conn.execute("UPDATE users SET is_admin = 1 WHERE username = ?", (username,))
             entries[username] = hashed
@@ -1225,6 +1244,49 @@ def htpasswd_add(
         raise typer.Exit(1) from exc
 
     console.print(f"[green]User '{username}' added to {ht_path}[/]")
+    if group:
+        console.print(f"[green]{username} is in group {group}[/]")
+    elif no_group:
+        console.print(f"[yellow]{username} is in no group and sees nothing until added to one[/]")
+
+
+class _GroupRefused(ValueError):
+    pass
+
+
+def _check_initial_group(conn, group: str | None, no_group: bool, *, is_new: bool, admin: bool) -> None:
+    """A new non-admin account must name its group (or opt out with
+    --no-group): under explicit membership (#354) an account in no group sees
+    nothing, which is too easy to do by mistake."""
+    from muscat_db import access_groups
+
+    if group is None:
+        # Before #354 a new account is implicitly on the team, so it is not
+        # left seeing nothing; the requirement starts with explicit membership.
+        if is_new and not admin and not no_group and access_groups.explicit_membership(conn):
+            raise _GroupRefused(
+                "a new account needs --group <name> (e.g. --group "
+                f"{access_groups.TEAM_GROUP} for the team), or --no-group to create it "
+                "seeing nothing"
+            )
+        return
+    if group.lower() == access_groups.TEAM_GROUP:
+        return  # joins through set_in_team, before or after #354
+    problem = access_groups.check_group_name(group)
+    if problem:
+        raise _GroupRefused(problem)
+    if not access_groups.group_exists(conn, group):
+        raise _GroupRefused(f"no group '{group}'; create it with `muscat-db access group create`")
+
+
+def _join_initial_group(conn, username: str, group: str) -> None:
+    from muscat_db import access_groups
+
+    access_groups.ensure_seeded(conn)
+    if group.lower() == access_groups.TEAM_GROUP:
+        access_groups.set_in_team(conn, username, True, by="htpasswd add")
+    else:
+        access_groups.add_member(conn, group, username, "htpasswd add")
 
 
 @htpasswd_app.command("set-email")
@@ -1671,6 +1733,57 @@ def access_list(
     console.print(table)
 
 
+@access_app.command("explicit-groups")
+def access_explicit_groups(
+    apply: bool = typer.Option(
+        False, "--apply", help="Write the migration (default: dry run, nothing written)"
+    ),
+) -> None:
+    """Make every user's access explicit group membership (#354).
+
+    Moves `everyone`'s grants to the team group `muscatjp` (every user not
+    excluded from `everyone`, htpasswd accounts included) and to the built-in
+    `public` group (the anonymous viewer of the static site), gathers the
+    KEY2026B-001 collaborators into `lcokey`, and removes `everyone`. After it,
+    a user sees only what their groups grant, and a new account sees nothing.
+
+    It runs in one transaction and compares every user's and the anonymous
+    viewer's visible summaries before and after; any difference rolls it back,
+    with or without --apply.
+    """
+    from muscat_db import access_explicit
+    from muscat_db.database import db_path
+
+    try:
+        report = access_explicit.run(db_path(), extra_users=_read_htpasswd().keys(), apply=apply)
+    except access_explicit.MigrationRefused as exc:
+        console.print(f"[red]Error: {exc}[/]")
+        raise typer.Exit(1) from exc
+    verb = "Moved" if report.applied else "Would move"
+    console.print(
+        f"{verb} {report.copied_grants} `everyone` grant(s) to "
+        f"`{access_explicit.ag.TEAM_GROUP}` and `{access_explicit.ag.PUBLIC}`"
+    )
+    console.print(f"  {access_explicit.ag.TEAM_GROUP}: {', '.join(report.team_members) or '-'}")
+    console.print(f"  {access_explicit.KEY_GROUP}: {', '.join(report.key_members) or '-'}")
+    if report.key_grants_revoked:
+        console.print(
+            f"  {access_explicit.KEY_PROPOSAL} grant moved from: {', '.join(report.key_grants_revoked)}"
+        )
+    if report.removed_exclusions:
+        console.print(f"  no longer on the team (were scoped): {', '.join(report.removed_exclusions)}")
+    console.print(f"Checked {report.viewers_checked} viewer(s), anonymous included.")
+    if report.differences:
+        for viewer, (before, after) in sorted(report.differences.items()):
+            console.print(f"[red]  {viewer or '(anonymous)'}: {before} -> {after} visible rows[/]")
+        console.print("[red]Visibility would change, so nothing was written.[/]")
+        raise typer.Exit(1)
+    if report.applied:
+        console.print("[green]Applied: membership is now explicit.[/]")
+    else:
+        console.print("[yellow]Dry run: nothing written. Re-run with --apply.[/]")
+
+
 @access_app.command("groups-seed")
 def access_groups_seed(
     dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be added, write nothing"),
@@ -1693,6 +1806,13 @@ def access_groups_seed(
     db = db_path()
     with get_conn(db) as conn:
         active = access_groups.is_active(conn)
+        explicit = access_groups.explicit_membership(conn)
+    if explicit:
+        console.print(
+            "[red]Membership is explicit (#354): there is no `everyone` to seed. "
+            "Share a proposal with `muscat-db access unrestrict <PROPOSAL>`.[/]"
+        )
+        raise typer.Exit(1)
     if active and not dry_run and not force:
         console.print(
             "[red]Groups are already seeded and decide visibility. Seeding again would "
@@ -1884,6 +2004,12 @@ def access_group_grant(
 
     if group.lower() == access_groups.ADMIN:
         _refuse_implicit_group(group, "granted data")
+    if group.lower() == access_groups.PUBLIC:
+        console.print(
+            f"[red]Error: the public site mirrors {access_groups.TEAM_GROUP}; "
+            "grant to that group instead[/]"
+        )
+        raise typer.Exit(1)
     db = db_path()
     is_user_group = group.lower().startswith(access_groups.USER_PREFIX)
     if not is_user_group and not access.group_exists(db, group):

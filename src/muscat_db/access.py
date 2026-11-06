@@ -56,18 +56,16 @@ def _is_admin(conn: sqlite3.Connection, username: str) -> bool:
 
 
 def _is_scoped(conn: sqlite3.Connection, username: str) -> bool:
-    """Whether *username* is excluded from ``everyone`` -- the group model's
-    scoped viewer (#202). ``users.scoped`` mirrors it but no longer decides."""
+    """Whether *username* is off the team -- the group model's scoped viewer
+    (#202): excluded from ``everyone``, or under explicit membership (#354)
+    not a member of the team group. ``users.scoped`` mirrors it but no longer
+    decides."""
     try:
-        row = conn.execute(
-            "SELECT 1 FROM group_exclusions WHERE groupname = ? AND username = ?",
-            (access_groups.EVERYONE, username),
-        ).fetchone()
+        return not access_groups.in_team(conn, username)
     except sqlite3.OperationalError as exc:
         if _missing_table(exc):
             return False
         raise
-    return row is not None
 
 
 def is_scoped(db_path: str, username: str | None) -> bool:
@@ -367,10 +365,11 @@ def is_admin_user(db_path: str, username: str) -> bool:
 
 
 def set_scoped(db_path: str, username: str, scoped: bool = True) -> bool:
-    """Mark *username* as a scoped viewer (or clear it): excluded from
-    ``everyone``, so only their own grants apply. Returns False when nothing
-    changed. The user row is created if missing, the same way ``htpasswd
-    promote`` does, and ``users.scoped`` is kept as a mirror."""
+    """Mark *username* as a scoped viewer (or clear it): off the team, so only
+    their own groups' grants apply (:func:`access_groups.set_in_team`).
+    Returns False when nothing changed. The user row is created if missing,
+    the same way ``htpasswd promote`` does, and ``users.scoped`` is kept as a
+    mirror."""
     with get_conn(db_path) as conn:
         _ensure_schema(conn)
         access_groups.ensure_seeded(conn)
@@ -378,23 +377,22 @@ def set_scoped(db_path: str, username: str, scoped: bool = True) -> bool:
             "INSERT OR IGNORE INTO users (username, display_name) VALUES (?, ?)",
             (username, username),
         )
-        changed = access_groups.set_excluded(conn, access_groups.EVERYONE, username, scoped)
-        conn.execute(
-            "UPDATE users SET scoped = ? WHERE username = ?", (1 if scoped else 0, username)
-        )
+        changed = access_groups.set_in_team(conn, username, not scoped, by="access scope")
         conn.commit()
     return changed
 
 
 def restrict(db_path: str, proposal_id: str, revoked_by: str = "") -> bool:
-    """Hide *proposal_id* from ``everyone`` by revoking its ``everyone``
-    grant. Grants to other groups and users are kept. Returns False if
-    ``everyone`` did not have it."""
+    """Hide *proposal_id* from the team and the public site by revoking its
+    grant to each shared group (``everyone``, or after #354 the team group and
+    ``public``). Grants to other groups and users are kept. Returns False if
+    none of them had it."""
     with get_conn(db_path) as conn:
         _ensure_schema(conn)
         access_groups.ensure_seeded(conn)
-        removed = access_groups.remove_proposal_grant(
-            conn, access_groups.EVERYONE, proposal_id, revoked_by
+        removed = sum(
+            access_groups.remove_proposal_grant(conn, group, proposal_id, revoked_by)
+            for group in access_groups.shared_groups(conn)
         )
         conn.commit()
     return removed > 0
@@ -410,15 +408,15 @@ def unrestrict(db_path: str, proposal_id: str, granted_by: str = "") -> bool:
     with get_conn(db_path) as conn:
         _ensure_schema(conn)
         access_groups.ensure_seeded(conn)
-        granted = access_groups.add_grant(
-            conn,
-            access_groups.EVERYONE,
-            proposal_id=proposal_id,
-            note="access unrestrict",
-            granted_by=granted_by,
-        )
+        granted = [
+            access_groups.add_grant(
+                conn, group, proposal_id=proposal_id, note="access unrestrict",
+                granted_by=granted_by,
+            )
+            for group in access_groups.shared_groups(conn)
+        ]
         conn.commit()
-    return granted
+    return any(granted)
 
 
 def _ensure_user_group(conn: sqlite3.Connection, username: str, by: str) -> str:
@@ -467,7 +465,7 @@ def _everyone_proposals(conn: sqlite3.Connection) -> frozenset[str]:
     rows = conn.execute(
         "SELECT proposal_id FROM group_grants WHERE groupname = ? AND proposal_id IS NOT NULL "
         "AND instrument IS NULL AND target IS NULL AND date_from IS NULL AND date_to IS NULL",
-        (access_groups.EVERYONE,),
+        (access_groups.team_group(conn),),
     ).fetchall()
     return frozenset(r[0].upper() for r in rows)
 
@@ -512,7 +510,7 @@ def list_restrictions(db_path: str) -> list[dict]:
             conn.execute(
                 "SELECT UPPER(proposal_id), MAX(revoked_at) FROM group_grants_revoked "
                 "WHERE groupname = ? AND proposal_id IS NOT NULL GROUP BY UPPER(proposal_id)",
-                (access_groups.EVERYONE,),
+                (access_groups.team_group(conn),),
             ).fetchall()
         )
         by_pid: dict[str, list[str]] = {}
@@ -650,9 +648,7 @@ def grant_group(
             username = group[len(access_groups.USER_PREFIX):]
             access_groups.ensure_group(conn, group, f"direct grants for {username}", builtin=True)
             access_groups.add_member(conn, group, username, granted_by)
-        created = access_groups.add_grant(
-            conn,
-            group,
+        fields = dict(
             proposal_id=selector.proposal_id,
             instrument=selector.instrument,
             target=selector.target,
@@ -661,7 +657,13 @@ def grant_group(
             note=note,
             granted_by=granted_by,
         )
+        # A team grant is mirrored to `public` after #354; the id reported is
+        # the team's grant, written first.
+        primary, *mirrors = access_groups.grant_groups(conn, group)
+        created = access_groups.add_grant(conn, primary, **fields)
         grant_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0] if created else None
+        for mirror in mirrors:
+            access_groups.add_grant(conn, mirror, **fields)
         conn.commit()
     return grant_id
 

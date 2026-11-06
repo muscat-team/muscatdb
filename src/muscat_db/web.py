@@ -6907,11 +6907,30 @@ def _shared_ephem_sheet_owner() -> str:
     return "" if owner.lower() == "none" else owner
 
 
+def _on_shared_sheet_team(request) -> bool:
+    """Whether the requester may read the team's shared ephemeris sheet:
+    a signed-in user on the team (admins always are). Fails closed."""
+    viewer = _request_user(request) if request else None
+    if not viewer:
+        return False
+    try:
+        from muscat_db import access
+        return not access.is_scoped(_db_path(), viewer)
+    except Exception:
+        logger.exception("team lookup failed for %s; withholding the shared sheet", viewer)
+        return False
+
+
 def _user_ephem_sheet_cfg(request, *, shared: bool = False) -> dict | None:
     """Load the personal or designated shared source, with tab defaults.
 
-    Never accept an arbitrary source owner from a request.
+    Never accept an arbitrary source owner from a request. The shared sheet
+    is the team's planning list, so only team members get it (#354): a scoped
+    viewer or an anonymous request gets None, the same answer as having no
+    sheet configured, and uses their own sheet from Settings instead.
     """
+    if shared and not _on_shared_sheet_team(request):
+        return None
     user = _shared_ephem_sheet_owner() if shared else (_request_user(request) if request else None)
     if not user:
         return None
