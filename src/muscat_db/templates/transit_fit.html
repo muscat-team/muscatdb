@@ -285,7 +285,7 @@
       <span class="site-label">Run:</span>
       {% for r in runs %}
       <a class="site-chip {% if r.run_id == sel_run %}active{% endif %}"
-         href="{{ base_qs ~ '&run=' ~ (r.run_id or '__legacy__') }}">{{ r.run_name or 'legacy' }}</a>
+         href="{{ base_qs ~ '&run=' ~ (r.run_id or '__legacy__') }}">{{ run_labels[r.run_id] }}</a>
       {% endfor %}
     </div>
   </div>

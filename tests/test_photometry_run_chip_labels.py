@@ -33,3 +33,16 @@ def test_the_legacy_run_is_labelled_legacy():
     runs = [RunDescriptor(run_id="", run_name="legacy", is_legacy=True),
             RunDescriptor(run_id="r1", run_name="")]
     assert run_chip_labels(runs) == {"": "legacy", "r1": "r1"}
+
+
+def test_transit_fit_runs_are_labelled_the_same_way():
+    from muscat_db.transit_fit import RunDescriptor as FitRun
+
+    runs = [FitRun(run_id="tel06-default", site="", telescope="1m0-06", mode="full",
+                   run_name="default", mtime=0.0, is_legacy=False),
+            FitRun(run_id="tel08-default", site="", telescope="1m0-08", mode="full",
+                   run_name="default", mtime=0.0, is_legacy=False)]
+    assert run_chip_labels(runs) == {
+        "tel06-default": "default · 1m0-06 full",
+        "tel08-default": "default · 1m0-08 full",
+    }

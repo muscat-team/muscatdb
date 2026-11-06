@@ -24,7 +24,8 @@ This module never trusts user input for filesystem access: see
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from typing import Protocol
 from concurrent.futures import Future, TimeoutError as FutureTimeoutError
 import csv as _csv
 import datetime
@@ -1214,8 +1215,20 @@ class RunDescriptor:
     run_type: str = "full"
 
 
-def run_chip_labels(runs: list[RunDescriptor]) -> dict[str, str]:
-    """A distinct Run-chip label per ``run_id``.
+class ChipRun(Protocol):
+    """What ``run_chip_labels`` reads from a run: photometry's
+    ``RunDescriptor`` and transit_fit's both provide it."""
+
+    run_id: str
+    site: str
+    telescope: str
+    mode: str
+    run_name: str
+    is_legacy: bool
+
+
+def run_chip_labels(runs: Sequence[ChipRun]) -> dict[str, str]:
+    """A distinct Run-chip label per ``run_id`` (photometry and transit-fit pages).
 
     A run keeps its plain run name unless another listed run shares it --
     e.g. one sinistro night reduced per telescope stores ``run_name="default"``
@@ -1224,10 +1237,10 @@ def run_chip_labels(runs: list[RunDescriptor]) -> dict[str, str]:
     that still collide (same name and scope) fall back to their run id, which
     is unique and is what the ``run=`` URL parameter uses.
     """
-    def name(r: RunDescriptor) -> str:
+    def name(r: ChipRun) -> str:
         return "legacy" if r.is_legacy else (r.run_name or r.run_id)
 
-    def qualified(r: RunDescriptor) -> str:
+    def qualified(r: ChipRun) -> str:
         scope = " ".join(p for p in (r.site, r.telescope, r.mode) if p)
         return f"{name(r)} · {scope}" if scope else r.run_id
 

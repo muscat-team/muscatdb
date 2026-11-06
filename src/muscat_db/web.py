@@ -3082,7 +3082,7 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
         target_norm_name=target_norm_name,
         sel_site=sel_site, sel_telescope=sel_telescope, sel_mode=sel_mode,
         csv_sites=csv_sites, csv_telescopes=csv_telescopes, csv_modes=csv_modes,
-        runs=runs, sel_run=sel_run,
+        runs=runs, run_labels=phot.run_chip_labels(runs), sel_run=sel_run,
         can_modify_run=_viewer_may_modify_run("transit_fit", inst, date, target, sel_run or ""),
         runs_json=runs_json,
         dates=dates, targets=targets,
