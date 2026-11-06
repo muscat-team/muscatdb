@@ -37,7 +37,7 @@ from muscat_db.job_store import (
 )
 from muscat_db.job_limits import JobLimitExceeded, claim_caps, claim_caps_for_row, enqueue_caps, full_job_cap, limit_refusal, params_with_running_cap
 from muscat_db import __meta__, __muscatdb_version__, __version__
-from muscat_db.instruments import INSTRUMENTS
+from muscat_db.instruments import EXTERNAL_INSTRUMENT, INSTRUMENTS
 from muscat_db.photometry import (
     output_base, valid_date, _conda_env_python, _tail, _to_float, _get_error_desc,
     SINISTRO_SITES, MULTISITE_INSTRUMENTS, MULTISITE_SITES,
@@ -393,6 +393,11 @@ def _timer_prefix() -> list[str]:
     if shutil.which("timer-fit"):
         return ["timer-fit"]
     return ["timer-fit"]
+
+
+# Instruments a transit fit can read light curves from: every LCO instrument,
+# plus uploads from other facilities (issue #382, :mod:`muscat_db.lc_upload`).
+FIT_INSTRUMENTS: tuple[str, ...] = (*INSTRUMENTS, EXTERNAL_INSTRUMENT)
 
 
 def get_csv_lightcurves(inst: str, date: str, target: str) -> list[pathlib.Path]:
@@ -1039,9 +1044,13 @@ _TIMER_COVARIATE_COLUMNS: tuple[str, ...] = (
 _MISSING_CELL = {"", "nan", "-nan", "none", "null", "na"}
 
 
-def _copy_lightcurve_for_timer(src: pathlib.Path, dst: pathlib.Path) -> None:
+def _copy_lightcurve_for_timer(
+    src: pathlib.Path, dst: pathlib.Path, extra_covariates: tuple[str, ...] = ()
+) -> None:
     """Copy one light-curve CSV, keeping only the columns timer should model.
 
+    *extra_covariates* are kept as well: an uploaded light curve's covariates
+    (issue #382) carry the uploader's column names, chosen deliberately.
     Anything outside the reserved and covariate lists is dropped, as is any
     covariate that is empty for every row: timer's ``bin_df`` ends with
     ``dropna()``, so a single all-NaN column would otherwise delete every binned
@@ -1067,7 +1076,7 @@ def _copy_lightcurve_for_timer(src: pathlib.Path, dst: pathlib.Path) -> None:
     for idx, name in enumerate(header):
         if name in _TIMER_RESERVED_COLUMNS:
             keep.append(idx)
-        elif name in _TIMER_COVARIATE_COLUMNS and any(
+        elif (name in _TIMER_COVARIATE_COLUMNS or name in extra_covariates) and any(
             (r[idx].strip().lower() if idx < len(r) else "") not in _MISSING_CELL
             for r in body
         ):
@@ -1108,8 +1117,10 @@ def _write_fit_inputs(
     recorded in meta.yaml so run discovery never has to parse the directory
     name.
     """
+    from muscat_db.lc_upload import upload_covariates
+
     for c in csvs:
-        _copy_lightcurve_for_timer(c, rdir / c.name)
+        _copy_lightcurve_for_timer(c, rdir / c.name, upload_covariates(c))
 
     # fit.yaml
     trend_val = 1 if options.get("trend", "true") == "true" else 0
@@ -1537,7 +1548,7 @@ def compute_logp(inst: str, date: str, target: str, options: dict, selected_csvs
     run products are untouched. Returns ``{"ok": True, "logp": <str>,
     "text": "logP= <value>"}`` or ``{"ok": False, "error": ...}``.
     """
-    if inst not in INSTRUMENTS:
+    if inst not in FIT_INSTRUMENTS:
         return {"ok": False, "error": f"unknown instrument {inst!r}"}
     if not valid_date(date):
         return {"ok": False, "error": "date must be 6-digit yymmdd"}
@@ -1673,7 +1684,7 @@ def start_fit(
     If *selected_csvs* is given, only CSVs whose filename appears in the list
     are included (useful when the user unchecks some lightcurves in the UI).
     """
-    if inst not in INSTRUMENTS:
+    if inst not in FIT_INSTRUMENTS:
         return {"ok": False, "error": f"unknown instrument {inst!r}"}
     if not valid_date(date):
         return {"ok": False, "error": "date must be 6-digit yymmdd"}

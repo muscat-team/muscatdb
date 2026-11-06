@@ -658,6 +658,38 @@ that must remain owner-only in that shared source. Other users' sheet
 configurations remain private within the app. Google permissions are separate:
 the importer requires a published or link-readable sheet.
 
+### External light curves (uploads)
+
+Collaborators' light curves from pipelines muscat-db does not run can be fitted
+too. Open **Upload an External Light Curve** on `/transit-fit`, name the target,
+night (yymmdd), facility and band, and pick the file. Every column gets a role
+chosen by hand (time, flux, error, covariate or ignore), so a file's column
+names are never interpreted. Covariates may come from a second file, joined on
+one key column per file (often the time column in both).
+
+Saving writes a normalized CSV (`BJD_TDB`, `Flux`, `Err`, then the covariates
+under their original names) and a `_product.json` record (input kind `upload`,
+with each file's name and SHA-256, the mapping, facility and band) to
+`$MUSCAT_PROSE_DIR/external/<yymmdd>/_runs/<target>/upload-<sha8>/`. The
+transit fit lists it under the pseudo-instrument **external** and passes the
+mapped covariates to timer unchanged.
+
+An upload is refused, with nothing written, when:
+
+* the time column is not full BJD_TDB (JD_UTC needs the observatory's location
+  to convert, and offset times such as BTJD cannot be told apart);
+* the first timestamp is more than 1.5 days from the named night;
+* the second file does not join exactly: a key repeated in either file, or a
+  row of either file with no match in the other;
+* a covariate has no numeric value in any row (timer's `bin_df` would drop
+  every row). A covariate missing in only some rows is kept with a warning;
+* the same file (same checksum) was uploaded before. The message names the
+  existing product.
+
+Uploads are visible to every viewer, like a manually entered point: they have
+no frames or proposals behind them. Saved column-mapping presets for recurring
+formats are not implemented yet.
+
 
 ### Target LCO archive inventory
 
