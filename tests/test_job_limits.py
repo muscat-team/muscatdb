@@ -116,10 +116,12 @@ class _RecordingStore:
         self._claim = claim
         self._enqueue_error = enqueue_error
         self.claims: list[dict] = []
+        self.running_rows: list[dict | None] = []
         self.enqueues: list[dict] = []
 
-    def claim_slot(self, pipeline, holder_key, max_slots, **kwargs):
+    def claim_slot(self, pipeline, holder_key, max_slots, *, running_row=None, **kwargs):
         self.claims.append(kwargs)
+        self.running_rows.append(running_row)
         return self._claim
 
     def enqueue(self, **kwargs):
@@ -182,6 +184,8 @@ def test_launch_passes_the_users_caps_to_claim_and_enqueue(launch, db, monkeypat
 
     assert result["queued"] is True
     assert store.claims == [{"user_name": "ann", "max_user_slots": 2}]
+    # A full launch registers its running row with the claim (#325).
+    assert [r["user_name"] for r in store.running_rows] == ["ann"]
     assert store.enqueues[0]["max_queued"] == 3
 
 
