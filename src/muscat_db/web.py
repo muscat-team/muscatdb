@@ -2844,6 +2844,7 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
         sel_telescope=(outputs.get("telescope") if outputs else "") or "",
         sel_mode=(outputs.get("mode") if outputs else "") or "",
         runs=runs,
+        run_labels=phot.run_chip_labels(runs),
         sel_run=sel_run or "",
         can_modify_run=_viewer_may_modify_run("photometry", inst, date, route_target, sel_run or ""),
         dates=dates, targets=targets,

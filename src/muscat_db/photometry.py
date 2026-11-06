@@ -23,6 +23,7 @@ This module never trusts user input for filesystem access: see
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import Future, TimeoutError as FutureTimeoutError
 import csv as _csv
@@ -1211,6 +1212,32 @@ class RunDescriptor:
     mtime: float = 0.0
     is_legacy: bool = False
     run_type: str = "full"
+
+
+def run_chip_labels(runs: list[RunDescriptor]) -> dict[str, str]:
+    """A distinct Run-chip label per ``run_id``.
+
+    A run keeps its plain run name unless another listed run shares it --
+    e.g. one sinistro night reduced per telescope stores ``run_name="default"``
+    for both ``tel06-default`` and ``tel08-default`` -- in which case the name
+    is qualified by the run's site/telescope/mode ("default · 1m0-06"). Runs
+    that still collide (same name and scope) fall back to their run id, which
+    is unique and is what the ``run=`` URL parameter uses.
+    """
+    def name(r: RunDescriptor) -> str:
+        return "legacy" if r.is_legacy else (r.run_name or r.run_id)
+
+    def qualified(r: RunDescriptor) -> str:
+        scope = " ".join(p for p in (r.site, r.telescope, r.mode) if p)
+        return f"{name(r)} · {scope}" if scope else r.run_id
+
+    name_counts = Counter(name(r) for r in runs)
+    labels = {r.run_id: (qualified(r) if name_counts[name(r)] > 1 else name(r)) for r in runs}
+    label_counts = Counter(labels.values())
+    return {
+        run_id: (run_id if label_counts[label] > 1 and run_id else label)
+        for run_id, label in labels.items()
+    }
 
 
 def _read_run_meta(d: Path) -> dict:
