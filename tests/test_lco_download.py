@@ -4,6 +4,7 @@ import io
 import json
 from pathlib import Path
 import threading
+import time
 from unittest.mock import Mock
 
 import pytest
@@ -150,6 +151,55 @@ def test_frame_window_is_bounded_and_cancellation_starts_no_more(monkeypatch):
     with pytest.raises(lco_download.LeaseLost):
         lco_download._download({"frames": list(map(str, range(100))), "root": "/data"}, lease)
     assert len(calls) == lco_queue.FRAME_WORKERS
+
+
+def test_unpacking_overlaps_downloads_and_runs_in_parallel(monkeypatch, tmp_path):
+    lease = Mock()
+    lease.job = {"lease_token": "attempt"}
+    unpack_started = threading.Event()
+    last = "9"
+    def frame(data, manifest, lease):
+        if data == last:
+            # The final transfer only finishes once earlier frames are unpacking.
+            assert unpack_started.wait(timeout=5), "unpacking waited for every download"
+        return {"filename": data, "dest": str(tmp_path / f"{data}.fits.fz"), "status": "downloaded"}
+    pair = threading.Barrier(2)
+    def funpack(path, *, check, temp_suffix):
+        unpack_started.set()
+        pair.wait(timeout=5)  # breaks unless two unpacks run at once
+        return {"filename": path.name, "src": str(path), "dest": str(path)[:-3], "status": "unpacked"}
+    monkeypatch.setattr(lco_download, "_frame", frame)
+    monkeypatch.setattr(lco, "_funpack_file", funpack)
+    monkeypatch.setattr(lco, "_ARCHIVE_FUNPACK_WORKERS", 2)
+    error, retryable = lco_download._download({"frames": list(map(str, range(10))), "root": str(tmp_path)}, lease)
+    assert error is None and not retryable
+    final = lease.checkpoint.call_args_list[-1].args[0]
+    assert final["funpack_done"] == 10
+    assert {r["status"] for r in final["funpack_results"]} == {"unpacked"}
+
+
+def test_lease_loss_cancels_queued_unpacks(monkeypatch, tmp_path):
+    lease = Mock()
+    lease.job = {"lease_token": "attempt"}
+    lost = threading.Event()
+    def frame(data, manifest, lease):
+        if data == "20":
+            lost.set()
+            raise lco_download.LeaseLost("cancelled")
+        return {"filename": data, "dest": str(tmp_path / f"{data}.fits.fz"), "status": "downloaded"}
+    started = []
+    def funpack(path, **kwargs):
+        started.append(path)
+        lost.wait(timeout=5)
+        time.sleep(0.2)  # the job ends while these two are still running
+        return {"filename": path.name, "src": str(path), "dest": str(path)[:-3], "status": "unpacked"}
+    monkeypatch.setattr(lco_download, "_frame", frame)
+    monkeypatch.setattr(lco, "_funpack_file", funpack)
+    monkeypatch.setattr(lco, "_ARCHIVE_FUNPACK_WORKERS", 2)
+    with pytest.raises(lco_download.LeaseLost):
+        lco_download._download({"frames": list(map(str, range(30))), "root": str(tmp_path)}, lease)
+    # Twenty unpacks were queued; only the two already running may finish.
+    assert len(started) == 2
 
 
 def test_retry_count_is_clamped_and_backoff_checks_lease(monkeypatch, tmp_path, lease):

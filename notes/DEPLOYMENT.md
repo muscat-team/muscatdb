@@ -1383,7 +1383,13 @@ executor before its next operation or publish. Socket reads have a 10-second
 timeout, transfers a total deadline of `MUSCAT_LCO_ARCHIVE_TRANSFER_DEADLINE_S`
 (default 120 seconds, longer when the response declares more than 256 KiB/s can
 deliver in that time; frame metadata publishes no size), and funpack its existing
-300-second timeout. Files are written to attempt-specific sibling temporary
+300-second timeout. Frame transfers reuse kept-alive HTTPS connections (one pool
+per process, `lco_transport`); a fresh TLS connection per frame cost about half
+of each transfer over the round trip to the archive's S3 bucket. Request counts
+are unchanged: every hop, redirects included, is still validated and admitted by
+the shared limiter. Each frame is funpacked as soon as it is on disk, by
+`MUSCAT_LCO_ARCHIVE_FUNPACK_WORKERS` (default 2) workers per job, while later
+frames transfer; a lost lease cancels queued unpacks. Files are written to attempt-specific sibling temporary
 paths and renamed only while ownership remains valid. A hard NFS stall can
 delay a thread's exit; it cannot authorize an old attempt to publish after it
 resumes. Failed transient transfers retain the existing per-frame retry budget;

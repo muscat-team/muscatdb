@@ -234,27 +234,39 @@ def _scope(url):
     return None  # Observation Portal uses its own limits; no archive debit.
 
 
+def admit(url, *, authorized):
+    """Wait for this hop's shared budget; every transport calls this per hop."""
+    scope = _scope(url)
+    if scope:
+        acquire(scope, anonymous=not authorized, check=_CHECK.get())
+
+
+def throttled(url, status, retry_after):
+    """Publish a shared cooldown for a throttling reply; return its seconds."""
+    scope = _scope(url)
+    if scope and (status == 429 or (scope == "storage" and status == 503)):
+        return coordinator().cooldown(scope, retry_after)
+    return None
+
+
 class ArchiveRateHandler(urllib.request.BaseHandler):
     """Intercept every HTTP hop, including redirects, before error processing."""
 
     handler_order = 490
 
     def http_request(self, req):
-        scope = _scope(req.full_url)
-        if scope:
-            acquire(scope, anonymous=not req.has_header("Authorization"), check=_CHECK.get())
+        admit(req.full_url, authorized=req.has_header("Authorization"))
         return req
 
     https_request = http_request
 
     def http_response(self, req, response):
-        scope = _scope(req.full_url)
-        if scope and (response.code == 429 or (scope == "storage" and response.code == 503)):
-            try:
-                seconds = coordinator().cooldown(scope, response.headers.get("Retry-After"))
-            except Exception:
-                response.close()
-                raise
+        try:
+            seconds = throttled(req.full_url, response.code, response.headers.get("Retry-After"))
+        except Exception:
+            response.close()
+            raise
+        if seconds is not None:
             # Preserve the coordinated wait for HTTPError/API consumers. Do
             # not copy response bodies or URLs into public error messages.
             del response.headers["Retry-After"]

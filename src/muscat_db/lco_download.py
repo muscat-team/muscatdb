@@ -271,39 +271,81 @@ def _discard_partial_files(job: dict) -> None:
                 path.unlink(missing_ok=True)
 
 
+class _Unpacker:
+    """Unpack each frame as soon as it is on disk, while later frames transfer.
+
+    Unpacking is local CPU work and sends no archive request, so overlapping
+    it with downloads leaves only the last few frames' unpack after the final
+    transfer instead of a whole serial pass.
+    """
+
+    def __init__(self, lease: Lease, root: Path):
+        self.lease, self.root = lease, root
+        self.suffix = "." + lease.job["lease_token"]
+        self.pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=lco._ARCHIVE_FUNPACK_WORKERS, thread_name_prefix="lco-archive-unpack")
+        self.seen: set[str] = set()
+        self.running: set[concurrent.futures.Future] = set()
+        self.results: list[dict] = []
+
+    def submit(self, results: list[dict]) -> None:
+        # _funpack_paths keeps only downloaded/existing .fz frames.
+        for path in lco._funpack_paths(results):
+            if str(path) not in self.seen:
+                self.seen.add(str(path))
+                self.running.add(self.pool.submit(lco._funpack_file, path, check=self.lease.check,
+                                                  temp_suffix=self.suffix))
+
+    def collect(self, *, block: bool = False) -> None:
+        done = (concurrent.futures.wait(self.running, return_when=concurrent.futures.FIRST_COMPLETED).done
+                if block
+                else {future for future in self.running if future.done()})
+        self.running -= done
+        # result() re-raises LeaseLost, which ends the job like a download would.
+        self.results.extend(_safe_result(future.result(), self.root) for future in done)
+
+    def close(self) -> None:
+        self.pool.shutdown(wait=True, cancel_futures=True)
+
+
 def _download(manifest: dict, lease: Lease):
     root = Path(manifest["root"])
-    results, unpacked = [], []
+    results = []
     save = _progress_saver(lease)
+    unpacker = _Unpacker(lease, root)
     # Submit only a bounded window. A cancellation never leaves thousands of
     # pending network calls in an executor's internal queue.
     frames = iter(manifest["frames"])
-    with concurrent.futures.ThreadPoolExecutor(max_workers=lco_queue.FRAME_WORKERS) as pool:
-        pending = set()
-        for frame in frames:
-            pending.add(pool.submit(_frame, frame, manifest, lease))
-            if len(pending) >= lco_queue.FRAME_WORKERS:
-                break
-        while pending:
-            done, pending = concurrent.futures.wait(pending, return_when=concurrent.futures.FIRST_COMPLETED)
-            for future in done:
-                results.append(_safe_result(future.result(), root))
-            save({"results": results, "frames_done": len(results)})
-            for _ in done:
-                frame = next(frames, None)
-                if frame is not None:
-                    lease.check()
-                    pending.add(pool.submit(_frame, frame, manifest, lease))
-    save({"results": results, "frames_done": len(results)}, force=True)
-    paths = lco._funpack_paths(results)
-    lease.checkpoint({"phase": "funpacking", "funpack_total": len(paths)})
-    for path in paths:
-        lease.check()
-        result = lco._funpack_file(path, check=lease.check, temp_suffix="." + lease.job["lease_token"])
-        unpacked.append(_safe_result(result, root))
-        save({"funpack_results": unpacked, "funpack_done": len(unpacked)})
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=lco_queue.FRAME_WORKERS) as pool:
+            pending = set()
+            for frame in frames:
+                pending.add(pool.submit(_frame, frame, manifest, lease))
+                if len(pending) >= lco_queue.FRAME_WORKERS:
+                    break
+            while pending:
+                done, pending = concurrent.futures.wait(pending, return_when=concurrent.futures.FIRST_COMPLETED)
+                finished = [_safe_result(future.result(), root) for future in done]
+                results.extend(finished)
+                unpacker.submit(finished)
+                unpacker.collect()
+                save({"results": results, "frames_done": len(results),
+                      "funpack_results": unpacker.results, "funpack_done": len(unpacker.results)})
+                for _ in done:
+                    frame = next(frames, None)
+                    if frame is not None:
+                        lease.check()
+                        pending.add(pool.submit(_frame, frame, manifest, lease))
+        save({"results": results, "frames_done": len(results)}, force=True)
+        lease.checkpoint({"phase": "funpacking", "funpack_total": len(unpacker.seen)})
+        while unpacker.running:
+            unpacker.collect(block=True)
+            save({"funpack_results": unpacker.results, "funpack_done": len(unpacker.results)})
+    finally:
+        unpacker.close()
+    unpacked = unpacker.results
     save({"funpack_results": unpacked, "funpack_done": len(unpacked)}, force=True)
-    failures =[r for r in results + unpacked if r["status"] == "error"]
+    failures = [r for r in results + unpacked if r["status"] == "error"]
     return ("One or more archive frames failed" if failures else None,
             bool(failures) and all(r.get("retryable", False) for r in failures))
 

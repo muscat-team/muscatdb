@@ -228,6 +228,77 @@ def test_download_transport_has_limiter_and_lease_context(http, monkeypatch, tmp
     assert lco_rate._CHECK.get() is None
 
 
+def test_download_redirect_validates_and_admits_every_hop(http, monkeypatch):
+    base, reply, requests, coord = http
+    reply.update(body=b"frame bytes")
+    validated = []
+    monkeypatch.setattr(lco, "_validate_download_url", lambda url: validated.append(url) or url)
+    with lco._open_download_url(base + "/redirect", timeout=5) as response:
+        assert response.read(1 << 20) == b"frame bytes"
+    assert validated == [base + "/redirect", base + "/storage"]
+    assert requests == ["/redirect", "/storage"]
+    assert [c.args for c in coord.reserve.call_args_list] == [("archive",), ("storage",)]
+
+
+def test_download_redirect_to_untrusted_host_is_never_requested(http, monkeypatch):
+    base, reply, requests, coord = http
+    def validate(url):
+        if url.endswith("/storage"):
+            raise lco.LcoError("refusing to download from untrusted URL", status=400)
+        return url
+    monkeypatch.setattr(lco, "_validate_download_url", validate)
+    with pytest.raises(lco.LcoError, match="untrusted"):
+        lco._open_download_url(base + "/redirect", timeout=5)
+    assert requests == ["/redirect"]
+    assert coord.reserve.call_count == 1
+
+
+@pytest.mark.parametrize("status", [429, 503])
+def test_download_throttle_publishes_cooldown_without_url(http, monkeypatch, status):
+    base, reply, requests, coord = http
+    reply.update(status=status, headers={"Retry-After": "7"}, body=b"private response")
+    monkeypatch.setattr(lco, "_validate_download_url", lambda url: url)
+    with pytest.raises(urllib.error.HTTPError) as error:
+        lco._open_download_url(base + "/storage?signature=secret", timeout=5)
+    assert error.value.code == status
+    assert error.value.headers["Retry-After"] == "123"
+    assert "secret" not in str(error.value) and "secret" not in str(error.value.filename)
+    coord.cooldown.assert_called_once_with("storage", "7")
+
+
+def test_download_connections_are_kept_alive(monkeypatch, tmp_path):
+    ports = []
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self):
+            ports.append(self.client_address[1])
+            body = b"frame"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setattr(lco, "_validate_download_url", lambda url: url)
+    monkeypatch.setattr(lco_rate, "_scope", lambda url: None)
+    try:
+        for name in ("a.fits.fz", "b.fits.fz"):
+            lco._download_to_file(f"http://127.0.0.1:{server.server_port}/storage",
+                                  tmp_path / name, check=lambda: None, deadline_s=5)
+            assert (tmp_path / name).read_bytes() == b"frame"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+    assert len(ports) == 2 and ports[0] == ports[1]
+
+
 def test_scopes_separate_api_and_storage():
     assert lco_rate._scope("https://archive-api.lco.global/frames/") == "archive"
     assert lco_rate._scope("https://archive-lco-global.s3.us-west-2.amazonaws.com/x?signature=secret") == "storage"

@@ -43,7 +43,7 @@ from muscat_db.database import (
     user_lco_token_configured,
 )
 from muscat_db.instruments import INSTRUMENTS
-from muscat_db import lco_rate
+from muscat_db import lco_rate, lco_transport
 
 logger = logging.getLogger(__name__)
 
@@ -234,9 +234,9 @@ class _ValidatedApiRedirectHandler(urllib.request.HTTPRedirectHandler):
 
     urllib replays request headers on every hop, so a redirect issued by (or
     injected into) an API response would hand ``Authorization: Token <secret>``
-    to the destination. The archive-download path already validates each hop via
-    :class:`_ValidatedArchiveRedirectHandler`; this closes the same gap for the
-    portal/archive API calls.
+    to the destination. The archive-download path already validates each hop
+    (``lco_transport.open_url``); this closes the same gap for the portal/archive
+    API calls.
     """
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -1091,8 +1091,8 @@ def _validate_download_url(url: str) -> str:
 
     Hostname allowlisting prevents arbitrary destinations, while resolving and
     checking every address prevents an allowed hostname from reaching a local or
-    private service.  Redirects pass through the same function via
-    :class:`_ValidatedArchiveRedirectHandler`.
+    private service.  Every redirect hop passes through the same function
+    (see ``lco_transport.open_url``).
     """
     parsed = urllib.parse.urlparse(url or "")
     host = (parsed.hostname or "").lower()
@@ -1132,19 +1132,14 @@ def _validate_download_url(url: str) -> str:
     return url
 
 
-class _ValidatedArchiveRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Reapply the archive URL policy before urllib follows each redirect."""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        _validate_download_url(newurl)
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
-
-
 def _open_download_url(url: str, timeout: float):
-    """Open an archive URL with redirect validation enabled for every hop."""
-    _validate_download_url(url)
-    opener = urllib.request.build_opener(_ValidatedArchiveRedirectHandler(), lco_rate.ArchiveRateHandler())
-    return opener.open(url, timeout=timeout)
+    """Open an archive URL on a kept-alive connection, validating every hop.
+
+    Each hop, the first included, passes ``_validate_download_url`` and the
+    shared limiter before any request is sent (see ``lco_transport``).
+    """
+    return lco_transport.open_url(url, timeout=timeout, validate=_validate_download_url,
+                                  chunk=_DOWNLOAD_CHUNK)
 
 
 # Per-frame download timeout (seconds), applied to each socket read. A stalled
