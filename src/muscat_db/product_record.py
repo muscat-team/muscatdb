@@ -14,7 +14,7 @@ Record layout (``_product.json`` in the run directory)::
       "author": "<nginx user>" | "",
       "created_at": "<iso utc>",
       "backfilled": false,
-      "inputs": [ {kind: "frames", ...}, {kind: "product", ...}, ... ] | null,
+      "inputs": [ {kind: "frames" | "product" | "manual" | "upload", ...}, ... ] | null,
       "settings": {...},
       "tool_versions": {"muscat_db": ..., "prose": ..., "timer": ..., "harmonic": ...},
       "modified_by": "<nginx user>",   # only after someone else re-ran it
@@ -62,7 +62,10 @@ LEVELS = ("photometry", "transit_fit", "ttv_fit")
 # points from many nights, but nothing legitimate approaches this.
 MAX_INPUTS = 5000
 
-_INPUT_KINDS = ("frames", "product", "manual")
+# ``upload`` is a light curve uploaded from a pipeline muscat-db does not run
+# (issue #382): ``{"kind": "upload", "facility": ..., "files": [{"role",
+# "name", "sha256", "bytes"}, ...]}``. See :mod:`muscat_db.lc_upload`.
+_INPUT_KINDS = ("frames", "product", "manual", "upload")
 
 
 def _compact(name: str) -> str:

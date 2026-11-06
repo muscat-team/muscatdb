@@ -34,7 +34,7 @@ def test_slot_survives_reconcile_between_claim_and_spawn(launch, pipeline, row_p
     store = job_store.DatabaseJobStore()
     seen = {}
     real_popen = subprocess.Popen
-    monkeypatch.setattr(transit_fit, "_copy_lightcurve_for_timer", lambda src, dst: None)
+    monkeypatch.setattr(transit_fit, "_copy_lightcurve_for_timer", lambda *a, **k: None)
 
     def spawn(*args, **kwargs):
         if not kwargs.get("start_new_session"):
@@ -102,7 +102,7 @@ def _rows(store, row_prefix):
 @pytest.mark.parametrize("launch, pipeline, row_prefix", FIT_CASES)
 def test_sync_jobs_in_the_window_does_not_launch_the_job_twice(launch, pipeline, row_prefix, db, monkeypatch, tmp_path):  # noqa: F811
     store = job_store.DatabaseJobStore()
-    monkeypatch.setattr(transit_fit, "_copy_lightcurve_for_timer", lambda src, dst: None)
+    monkeypatch.setattr(transit_fit, "_copy_lightcurve_for_timer", lambda *a, **k: None)
     seen = {}
 
     def during():
@@ -120,7 +120,7 @@ def test_sync_jobs_in_the_window_does_not_launch_the_job_twice(launch, pipeline,
 @pytest.mark.parametrize("launch, pipeline, row_prefix", FIT_CASES)
 def test_cancel_in_the_window_is_refused_instead_of_lost(launch, pipeline, row_prefix, db, monkeypatch, tmp_path):  # noqa: F811
     store = job_store.DatabaseJobStore()
-    monkeypatch.setattr(transit_fit, "_copy_lightcurve_for_timer", lambda src, dst: None)
+    monkeypatch.setattr(transit_fit, "_copy_lightcurve_for_timer", lambda *a, **k: None)
     seen = {}
 
     def during():
@@ -152,7 +152,7 @@ def _fail_prep(monkeypatch, pipeline):
 @pytest.mark.parametrize("launch, pipeline, row_prefix", CASES)
 def test_a_failure_before_the_spawn_releases_the_claim(launch, pipeline, row_prefix, db, monkeypatch, tmp_path):  # noqa: F811
     store = job_store.DatabaseJobStore()
-    monkeypatch.setattr(transit_fit, "_copy_lightcurve_for_timer", lambda src, dst: None)
+    monkeypatch.setattr(transit_fit, "_copy_lightcurve_for_timer", lambda *a, **k: None)
     _fail_prep(monkeypatch, pipeline)
 
     with pytest.raises(OSError, match="disk full"):
@@ -166,7 +166,7 @@ def test_a_failure_before_the_spawn_releases_the_claim(launch, pipeline, row_pre
 @pytest.mark.parametrize("launch, pipeline, row_prefix", CASES)
 def test_a_failed_relaunch_keeps_the_previous_runs_row(launch, pipeline, row_prefix, db, monkeypatch, tmp_path):  # noqa: F811
     store = job_store.DatabaseJobStore()
-    monkeypatch.setattr(transit_fit, "_copy_lightcurve_for_timer", lambda src, dst: None)
+    monkeypatch.setattr(transit_fit, "_copy_lightcurve_for_timer", lambda *a, **k: None)
     _spawn_hook(monkeypatch, lambda: None)
     launch(monkeypatch, store, "ann", tmp_path)  # first attempt only to learn the row's identity
     first = _rows(store, row_prefix)[0]
