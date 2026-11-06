@@ -397,8 +397,58 @@ def _watch(page, problems: Problems) -> None:
     page.on("requestfailed", on_failed)
 
 
+# CI sets this to a directory; a failing test leaves its Playwright trace and
+# browser problems there, named by worker and test, for upload as an artifact.
+ARTIFACTS_ENV = "MUSCAT_BROWSER_ARTIFACTS"
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """Keep each phase's report on the item, so fixture teardown can see failures."""
+    outcome = yield
+    report = outcome.get_result()
+    setattr(item, f"_report_{report.when}", report)
+
+
+def _test_failed(node) -> bool:
+    return any(
+        getattr(node, f"_report_{when}", None) is not None
+        and getattr(node, f"_report_{when}").failed
+        for when in ("setup", "call")
+    )
+
+
+def _artifact_stem(directory: str, node) -> Path:
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "main")
+    name = "".join(c if c.isalnum() or c in "-_." else "_" for c in node.nodeid)
+    out = Path(directory)
+    out.mkdir(parents=True, exist_ok=True)
+    return out / f"{worker}-{name[-150:]}"
+
+
+def _stop_tracing(context, artifacts: str | None, node, problems: list[str]) -> None:
+    """Save the trace of a failed test; never let capturing it fail the test.
+
+    A test may close its own context (a download, a pop-out), which ends the
+    trace with it; that is reported as a warning, not a teardown error.
+    """
+    if not artifacts:
+        return
+    failed = _test_failed(node) or bool(problems)
+    stem = _artifact_stem(artifacts, node) if failed else None
+    if stem is not None and problems:
+        Path(str(stem) + ".problems.txt").write_text("\n".join(problems) + "\n")
+    try:
+        context.tracing.stop(path=str(stem) + ".trace.zip" if stem is not None else None)
+    except sync_api.Error as exc:
+        if failed:
+            import warnings
+            warnings.warn(f"no browser trace for {node.nodeid}: {exc}", stacklevel=1)
+
+
 @pytest.fixture
-def page(browser, live_server):
+def page(browser, live_server, request):
+    artifacts = os.environ.get(ARTIFACTS_ENV) or None
     context = browser.new_context(
         base_url=live_server.url,
         extra_http_headers={"X-Forwarded-User": ADMIN, "X-MuSCAT-Proxy-Secret": PROXY_SECRET},
@@ -416,7 +466,11 @@ def page(browser, live_server):
     pg = context.new_page()
     pg.set_default_timeout(10_000)
     pg.problems = problems
+    if artifacts:
+        context.tracing.start(screenshots=True, snapshots=True)
     yield pg
+    bad = problems.unexpected()
+    _stop_tracing(context, artifacts, request.node, bad)
     context.close()
     bad = problems.unexpected()
     if bad:

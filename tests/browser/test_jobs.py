@@ -65,7 +65,9 @@ def test_rerun_launches_with_the_stored_options(page, monkeypatch):
     assert resp.value.ok
     assert [(i, d, t) for i, d, t, _ in launches] == [("muscat3", "261001", "TOI-1000")]
     assert launches[0][3]["options"]["run_name"] == RUN_ID
-    assert _row(page, DONE_KEY).get_attribute("data-status") == "running"
+    # jobs.html updates the row a few promise steps after the response event
+    # fires, so a one-shot read here races it (#365, release #396).
+    expect(_row(page, DONE_KEY)).to_have_attribute("data-status", "running")
 
 
 def test_rerun_failure_is_reported_and_the_button_recovers(page, monkeypatch):

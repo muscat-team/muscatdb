@@ -24,6 +24,10 @@ jobs:
         run: uv sync --dev
       - name: Run ruff
         run: uv run ruff check --output-format=github .
+      # The pytest jobs run browser and non-browser tests as two invocations
+      # (scripts/ci_pytest.py). This fails if a test falls into neither, or both.
+      - name: Check the browser/non-browser test split
+        run: uv run python scripts/ci_pytest.py check-split
 
   test:
     name: pytest (py${{ matrix.python-version }})
@@ -47,10 +51,21 @@ jobs:
       # broken install fail here instead of silently dropping that coverage.
       - name: Install Playwright Chromium
         run: uv run playwright install --with-deps chromium-headless-shell
+      # Non-browser tests at -n auto, then browser tests at -n 2 --dist loadfile
+      # (#365): under -n auto the browser tests competed with the unit tests
+      # and flaked on slow requests. Both invocations always run.
       - name: Run fast test suite
         env:
           MUSCAT_REQUIRE_BROWSER: "1"
-        run: uv run pytest -n auto --tb=short -q
+          MUSCAT_BROWSER_ARTIFACTS: browser-artifacts
+        run: uv run python scripts/ci_pytest.py run
+      - name: Upload browser failure traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-traces-py${{ matrix.python-version }}
+          path: browser-artifacts/
+          if-no-files-found: ignore
 
   test-postgres:
     name: pytest (postgres control plane)
@@ -111,10 +126,20 @@ jobs:
       # the current level (CI ~69%, local ~68% -- they differ because some tests
       # skip without the external conda tools) so ordinary variance cannot fail a
       # PR. Raise it as coverage improves; the target is 80%.
+      # The gate (scripts/ci_pytest.py COVERAGE_FLOOR) is applied once, to the
+      # combined coverage of the non-browser and browser invocations.
       - name: Run tests with coverage
         env:
           MUSCAT_REQUIRE_BROWSER: "1"
-        run: uv run pytest -n auto --tb=short -q --cov=src/muscat_db --cov-report=xml --cov-report=term-missing --cov-fail-under=68
+          MUSCAT_BROWSER_ARTIFACTS: browser-artifacts
+        run: uv run python scripts/ci_pytest.py run --cov --fail-under 68
+      - name: Upload browser failure traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-traces-coverage
+          path: browser-artifacts/
+          if-no-files-found: ignore
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
         with:

@@ -63,3 +63,4 @@ temp.txt
 # Generated static documentation snapshot output directory. Built during CI
 # or locally with `muscat-db build-static-site`, deliberately NOT tracked.
 /site/
+browser-artifacts/
