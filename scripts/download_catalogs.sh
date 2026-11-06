@@ -45,7 +45,7 @@ download_csv \
   "toi" "TOIs.csv"
 
 download_csv \
-  "SELECT pl_name, hostname, tic_id, discoverymethod, disc_facility, st_spectype, disc_year, disc_pubdate, ra AS ra_x, dec AS dec_x, sy_pmra, sy_pmdec, pl_tranmid, pl_tranmiderr1, pl_tranmiderr2, pl_orbper, pl_orbpererr1, pl_orbpererr2, pl_orbsmax, pl_rade, pl_radj, pl_bmasse, pl_bmassj, pl_bmassprov, pl_eqt, pl_insol, pl_ratror, pl_trandep, pl_trandur, pl_trandurerr1, pl_trandurerr2, pl_imppar, pl_orbincl, pl_orbeccen, pl_dens, st_teff, st_rad, st_mass, st_logg, st_met, st_dens, sy_dist, sy_vmag, sy_tmag, sy_gaiamag, sy_kmag, sy_snum, cb_flag, st_age, st_ageerr1, st_agelim, ttv_flag, pl_projobliq, st_nrvc, st_nspec, st_nphot FROM pscomppars" \
+  "SELECT pl_name, hostname, tic_id, discoverymethod, disc_facility, st_spectype, disc_year, disc_pubdate, ra AS ra_x, dec AS dec_x, sy_pmra, sy_pmdec, pl_tranmid, pl_tranmiderr1, pl_tranmiderr2, pl_orbper, pl_orbpererr1, pl_orbpererr2, pl_orbsmax, pl_rade, pl_radj, pl_bmasse, pl_bmassj, pl_bmassprov, pl_eqt, pl_insol, pl_ratror, pl_trandep, pl_trandur, pl_trandurerr1, pl_trandurerr2, pl_tranmid_reflink, pl_orbper_reflink, pl_trandur_reflink, pl_imppar, pl_orbincl, pl_orbeccen, pl_dens, st_teff, st_rad, st_mass, st_logg, st_met, st_dens, sy_dist, sy_vmag, sy_tmag, sy_gaiamag, sy_kmag, sy_snum, cb_flag, st_age, st_ageerr1, st_agelim, ttv_flag, pl_projobliq, st_nrvc, st_nspec, st_nphot FROM pscomppars" \
   "pscomppars" "nexsci_pscomppars.csv"
 
 download_csv \

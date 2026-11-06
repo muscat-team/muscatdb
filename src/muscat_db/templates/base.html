@@ -527,11 +527,39 @@
     // The CSS ::after pseudo-element reads from data-tip; the native title
     // attribute would create a duplicate tooltip bubble.
     // Also watch for dynamically inserted tooltips via MutationObserver.
+    // Each icon is also made focusable (the bubble shows on :focus) and gets
+    // the text as its accessible description, via a hidden node outside any
+    // <label> so the help text does not leak into the input's accessible name.
+    var _tipSeq = 0;
+    function _tipDescHost() {
+      var host = document.getElementById('help-tip-descs');
+      if (!host && document.body) {
+        host = document.createElement('div');
+        host.id = 'help-tip-descs';
+        host.hidden = true;
+        document.body.appendChild(host);
+      }
+      return host;
+    }
     window.initTooltips = function (root) {
-      (root || document).querySelectorAll('.help-tooltip').forEach(function (el) {
-        if (el.getAttribute('data-tip')) return;
+      root = root || document;
+      var icons = Array.prototype.slice.call(root.querySelectorAll('.help-tooltip'));
+      if (root.matches && root.matches('.help-tooltip')) icons.push(root);
+      icons.forEach(function (el) {
         var t = el.getAttribute('title');
-        if (t) { el.setAttribute('data-tip', t); el.removeAttribute('title'); }
+        if (t && !el.getAttribute('data-tip')) { el.setAttribute('data-tip', t); el.removeAttribute('title'); }
+        var tip = el.getAttribute('data-tip');
+        if (!tip || el.getAttribute('aria-describedby')) return;
+        var host = _tipDescHost();
+        if (!host) return;
+        var desc = document.createElement('span');
+        desc.id = 'help-tip-' + (++_tipSeq);
+        desc.textContent = tip;
+        host.appendChild(desc);
+        if (!el.hasAttribute('tabindex')) el.setAttribute('tabindex', '0');
+        if (!el.getAttribute('role')) el.setAttribute('role', 'button');
+        if (!el.getAttribute('aria-label')) el.setAttribute('aria-label', 'Help');
+        el.setAttribute('aria-describedby', desc.id);
       });
     };
     if (document.readyState === 'loading') {

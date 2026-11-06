@@ -15,3 +15,11 @@ def test_downloaded_catalogs_include_ephemeris_columns():
     assert "pl_tranmid, pl_tranmiderr1, pl_tranmiderr2" in query_text
     assert "pl_orbper, pl_orbpererr1, pl_orbpererr2" in query_text
     assert "pl_trandur, pl_trandurerr1, pl_trandurerr2" in query_text
+
+
+def test_downloaded_nasa_catalog_includes_reference_papers():
+    """The schedule page names the paper behind each NASA t0/period/duration (#383)."""
+    script = (
+        Path(__file__).resolve().parent.parent / "scripts" / "download_catalogs.sh"
+    ).read_text()
+    assert "pl_tranmid_reflink, pl_orbper_reflink, pl_trandur_reflink" in script
