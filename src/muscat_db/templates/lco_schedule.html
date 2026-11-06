@@ -59,6 +59,12 @@
     background: transparent; color: var(--text-dim);
     font-weight: 500; opacity: 0.5;
   }
+  /* Where the current t0 / period / duration came from (catalog, seed of a
+     linear fit, per-parameter papers). Spans the whole grid row. */
+  #ephem-provenance { grid-column: 1 / -1; font-size: 0.78rem; color: var(--text-dim); line-height: 1.5; }
+  #ephem-provenance:empty { display: none; }
+  #ephem-provenance .prov-line { display: block; }
+  #ephem-provenance .prov-key { color: var(--text); font-weight: 600; }
   /* t0/period are greyed while a TTV model is the ephemeris source: the server
      ignores them (scheduling follows the model's predicted mid-times), so they
      are shown for reference but not editable. */
@@ -99,15 +105,15 @@
   <div class="lco-grid">
     <div class="lco-field"><label for="sch-target">Target <span class="help-tooltip" title="Target star name. Matches normalized names from muscat-db (e.g. HIP 67522, TOI-1234).">?</span></label><input id="sch-target" type="text" placeholder="e.g. WASP-12" list="target-datalist" autocomplete="off"><datalist id="target-datalist"></datalist></div>
     <div class="lco-field"><label for="sch-planet">Planet <span class="help-tooltip" title="Planet letter identifier (e.g. b, c). Used to look up the ephemeris for this planet.">?</span></label><input id="sch-planet" type="text" placeholder="e.g. b" style="max-width: 90px;"></div>
-    <div class="lco-field"><label for="sch-source">Ephemeris source <span class="help-tooltip" title="Where t0 / period come from. 'linear fit' refines the ephemeris across all of this target's completed transit fits; individual datasets use that fit's t0/period directly (same as the Planetary Reference Ephemerides on the Ephemeris page). Click 'Fetch ephemeris' to populate datasets.">?</span></label>
+    <div class="lco-field"><label for="sch-source">Ephemeris source <span class="help-tooltip" title="Where t0 / period come from. Auto uses the reference ephemeris (NASA, else TOI, else the local CSV) and names the one it picked. 'linear fit' refines the ephemeris across all of this target's completed transit fits, seeded from that reference ephemeris; individual datasets use that fit's t0/period directly (same as the Planetary Reference Ephemerides on the Ephemeris page). Sources load as soon as a target is entered; 'Fetch ephemeris' re-pulls the catalogs and picks up newly completed fits.">?</span></label>
       <select id="sch-source">
         <option value="">Auto</option>
         <option value="nasa">NASA catalog</option>
         <option value="toi">TOI catalog</option>
         <option value="linear">linear fit</option>
-        <option value="shared_gsheet" disabled>Shared Google Sheet — fetch ephemeris to check availability</option>
+        <option value="shared_gsheet" disabled>Shared Google Sheet — enter a target to check availability</option>
         <option value="shared_gsheet_tc" disabled>Shared Google Sheet — transit-center fit (unavailable)</option>
-        <option value="gsheet" disabled>My Google Sheet (private) — configure in Settings</option>
+        <option value="gsheet" disabled>My Google Sheet (private) — not configured (set up in Settings)</option>
         <option value="gsheet_tc" disabled>My Google Sheet (private) — transit-center fit (unavailable)</option>
         <option value="upload">Uploaded mid-times</option>
       </select>
@@ -119,6 +125,7 @@
     <div class="lco-field"><label for="sch-t0">t0 (BJD) <span class="ephem-src none" id="src-t0">—</span> <span class="help-tooltip" title="BJD_TDB. Enter mean,uncertainty. Populated by Fetch ephemeris; editable.">?</span></label><input id="sch-t0" type="text" inputmode="decimal" placeholder="e.g. 2459000.5,0.0003"></div>
     <div class="lco-field"><label for="sch-period">Period (d) <span class="ephem-src none" id="src-period">—</span> <span class="help-tooltip" title="Orbital period in days. Auto-filled by Fetch ephemeris. Enter mean,uncertainty (e.g. 1.0914,0.00001).">?</span></label><input id="sch-period" type="text" inputmode="decimal" placeholder="e.g. 1.0914,0.00001"></div>
     <div class="lco-field"><label for="sch-duration">Duration (hr) <span class="ephem-src none" id="src-duration">—</span> <span class="help-tooltip" title="From the catalog when available; override here. Enter mean,uncertainty.">?</span></label><input id="sch-duration" type="text" inputmode="decimal" placeholder="e.g. 2.5,0.1"></div>
+    <div id="ephem-provenance" aria-live="polite"></div>
     <div class="lco-field"><label for="sch-pad-before">Pre-ingress (min) <span class="help-tooltip" title="Minutes to add before ingress (start of transit). Extends the scheduling window earlier to ensure baseline coverage.">?</span></label><input id="sch-pad-before" type="number" step="any" value="60"></div>
     <div class="lco-field"><label for="sch-pad-after">Post-egress (min) <span class="help-tooltip" title="Minutes to add after egress (end of transit). Extends the scheduling window later to ensure baseline coverage.">?</span></label><input id="sch-pad-after" type="number" step="any" value="60"></div>
     <div class="lco-field"><label for="sch-include-padding" style="margin: 0;">Include padding in obs check <span class="help-tooltip" title="When on, the padded baseline (start→end) must also be observable for a transit to rate 'full'. When off, padding is used only for the displayed span and the observability check spans just the transit (mid ± duration/2).">?</span></label>
@@ -169,7 +176,7 @@
     </div>
   </div>
   <div class="lco-actions">
-    <button class="btn" type="button" id="btn-fetch-ephem">Fetch ephemeris</button>
+    <button class="btn" type="button" id="btn-fetch-ephem" title="Target info loads automatically when a target is entered. Click to re-pull the NASA/TOI catalogs and pick up transit fits completed since.">Fetch ephemeris</button>
     <button class="btn" type="button" id="btn-fov" title="Optimize field-of-view pointing for this target">Show FOV</button>
     <button class="btn primary" type="button" id="btn-gen-windows">Generate windows</button>
     <label class="lco-field" style="flex-direction: row; align-items: center; gap: 0.4rem;"
@@ -525,7 +532,7 @@
   var fieldSources = {};   // field id -> source label ('NASA' | 'manual' | ...)
   var ephemTarget = '';    // target the ephemeris fields currently describe
 
-  function setFieldSource(id, source) {
+  function setFieldSource(id, source, detail) {
     fieldSources[id] = source || '';
     var b = el(SRC_BADGE[id]); if (!b) return;
     if (source) {
@@ -534,6 +541,14 @@
     } else {
       b.textContent = '—';
       b.className = 'ephem-src none';
+    }
+    // The badge is terse (LINEAR, AUTO → NASA); the detail says what seeded it.
+    if (source && detail) {
+      b.title = detail;
+      b.setAttribute('aria-label', source + ': ' + detail);
+    } else {
+      b.removeAttribute('title');
+      b.removeAttribute('aria-label');
     }
   }
 
@@ -1214,6 +1229,12 @@
       '<option value="toi">TOI catalog</option>' +
       '<option value="linear">linear fit</option>' +
       '<option value="upload">Uploaded mid-times</option>';
+    var linSeed = (info.linear_fit_seed || {})[planet];
+    if (linSeed) {
+      var t0Ref = (linSeed.refs || {}).t0;
+      sel.querySelector('option[value="linear"]').textContent =
+        'linear fit (seeded from ' + linSeed.source + (t0Ref ? ': ' + t0Ref.label : '') + ')';
+    }
     // One option per completed TTV run: scheduling from a TTV model uses that
     // run's predicted mid-times rather than a linear ephemeris, so the run has
     // to be part of the selection.
@@ -1237,7 +1258,7 @@
       var option = document.createElement('option');
       option.value = item[0];
       option.disabled = !item[2];
-      option.textContent = item[1] + (item[2] ? '' : ' — not configured');
+      option.textContent = item[1] + (item[2] ? '' : ' — not configured (set up in Settings)');
       sel.appendChild(option);
     });
     (info.datasets || []).forEach(function (d, i) {
@@ -1298,10 +1319,77 @@
     var ref = (info.reference_ephemeris || {})[planet] || {};
     var nasa = (info.nasa_ephemeris || {})[planet] || {};
     var toi = (info.toi_ephemeris || {})[planet] || {};
-    if (ref.t0 != null && ref.period != null) return { label: 'AUTO', data: ref };
-    if (nasa.t0 != null && nasa.period != null) return { label: 'NASA', data: nasa };
-    if (toi.t0 != null && toi.period != null) return { label: 'TOI', data: toi };
-    return null;
+    var pick = null;
+    if (ref.t0 != null && ref.period != null) pick = ref;
+    else if (nasa.t0 != null && nasa.period != null) pick = nasa;
+    else if (toi.t0 != null && toi.period != null) pick = toi;
+    if (!pick) return null;
+    var from = pick.source || (pick === toi ? 'TOI' : pick === nasa ? 'NASA' : 'catalog');
+    return { label: 'AUTO → ' + from, source: from, data: pick };
+  }
+
+  // --- Ephemeris provenance panel (#ephem-provenance) ----------------------
+  // Says which catalog / paper each value came from. Built with DOM nodes,
+  // never innerHTML: labels and URLs come from the archive.
+  function refNode(entry, field) {
+    var ref = ((entry && entry.refs) || {})[field];
+    if (!ref) return document.createTextNode('reference not recorded');
+    if (!ref.url) return document.createTextNode(ref.label);
+    var a = document.createElement('a');
+    a.href = ref.url;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.textContent = ref.label + ' ↗';
+    return a;
+  }
+  function sameRef(a, b) {
+    return (!a && !b) || (!!a && !!b && a.label === b.label && a.url === b.url);
+  }
+  // "NASA — Leonardi et al. 2024 ↗" when every field shares a paper, else
+  // "NASA — t0: A ↗; period: B ↗" (the archive picks a paper per parameter).
+  function catalogNodes(sourceName, entry, fields) {
+    var nodes = [document.createTextNode(sourceName + ' — ')];
+    var refs = (entry && entry.refs) || {};
+    var shared = fields.every(function (f) { return sameRef(refs[f], refs[fields[0]]); });
+    if (shared) { nodes.push(refNode(entry, fields[0])); return nodes; }
+    fields.forEach(function (f, i) {
+      if (i) nodes.push(document.createTextNode('; '));
+      nodes.push(document.createTextNode(f + ': '));
+      nodes.push(refNode(entry, f));
+    });
+    return nodes;
+  }
+  function renderProvenance(lines) {
+    var box = el('ephem-provenance');
+    if (!box) return;
+    box.textContent = '';
+    (lines || []).forEach(function (line) {
+      if (!line) return;
+      var row = document.createElement('span');
+      row.className = 'prov-line';
+      var key = document.createElement('span');
+      key.className = 'prov-key';
+      key.textContent = line[0] + ' ';
+      row.appendChild(key);
+      line[1].forEach(function (n) { row.appendChild(n); });
+      box.appendChild(row);
+    });
+  }
+  // Duration line; `note` says why it is borrowed from another catalog.
+  function durationLine(durSrc, durEntry, note) {
+    if (!durSrc) return null;
+    var nodes = durEntry ? catalogNodes(durSrc, durEntry, ['duration']) : [document.createTextNode(durSrc)];
+    if (note) nodes.push(document.createTextNode(' (' + note + ')'));
+    return ['Duration:', nodes];
+  }
+  function linearSeedLine(seed, target) {
+    var nodes = catalogNodes(seed.source, seed, ['t0', 'period']);
+    nodes.push(document.createTextNode(' · '));
+    var a = document.createElement('a');
+    a.href = '/ephemeris?targets=' + encodeURIComponent(target || '');
+    a.textContent = 'check on the Ephemeris page';
+    nodes.push(a);
+    return ['Linear fit seeded from', nodes];
   }
 
   function applySource(info, opts) {
@@ -1329,12 +1417,18 @@
     // Duration follows the selected catalog when it provides one (toi -> TOI,
     // nasa -> NASA); other sources (auto / dataset / linear) have no duration of
     // their own, so fall back to NASA then TOI.
-    var dur = null, durUnc = null, durSrc = null;
-    if (source === 'toi' && toi.duration != null) { dur = toi.duration; durUnc = toi.duration_unc; durSrc = 'TOI'; }
-    else if (source === 'nasa' && nasa.duration != null) { dur = nasa.duration; durUnc = nasa.duration_unc; durSrc = 'NASA'; }
-    else if (nasa.duration != null) { dur = nasa.duration; durUnc = nasa.duration_unc; durSrc = 'NASA'; }
-    else if (toi.duration != null) { dur = toi.duration; durUnc = toi.duration_unc; durSrc = 'TOI'; }
+    var dur = null, durUnc = null, durSrc = null, durEntry = null;
+    if (source === 'toi' && toi.duration != null) { durEntry = toi; durSrc = 'TOI'; }
+    else if (source === 'nasa' && nasa.duration != null) { durEntry = nasa; durSrc = 'NASA'; }
+    else if (nasa.duration != null) { durEntry = nasa; durSrc = 'NASA'; }
+    else if (toi.duration != null) { durEntry = toi; durSrc = 'TOI'; }
+    if (durEntry) { dur = durEntry.duration; durUnc = durEntry.duration_unc; }
+    // Duration borrowed from a catalog other than the t0/period source.
+    function durNote(t0Src, why) {
+      return durSrc && durSrc !== t0Src ? why : '';
+    }
     if (dur != null) { setVal('sch-duration', tupleString(dur, durUnc)); setFieldSource('sch-duration', durSrc); }
+    renderProvenance([]);
 
     if (source === 'upload') {
       saveOptions();
@@ -1353,6 +1447,10 @@
         setVal('sch-period', tupleString(seed.data.period, seed.data.period_unc));
         setFieldSource('sch-t0', seed.label);
         setFieldSource('sch-period', seed.label);
+        renderProvenance([
+          ['t0 / period (reference only):', catalogNodes(seed.source, seed.data, ['t0', 'period'])],
+          durationLine(durSrc, durEntry, durNote(seed.source, 'the TTV model has no duration of its own')),
+        ]);
       }
       saveOptions();
       msg('msg-windows',
@@ -1374,8 +1472,12 @@
       }
       setVal('sch-t0', tupleString(auto.data.t0, auto.data.t0_unc));
       setVal('sch-period', tupleString(auto.data.period, auto.data.period_unc));
-      setFieldSource('sch-t0', auto.label);
-      setFieldSource('sch-period', auto.label);
+      setFieldSource('sch-t0', auto.label, 'Auto resolved to the ' + auto.source + ' ephemeris');
+      setFieldSource('sch-period', auto.label, 'Auto resolved to the ' + auto.source + ' ephemeris');
+      renderProvenance([
+        ['t0 / period:', catalogNodes(auto.source, auto.data, ['t0', 'period'])],
+        durationLine(durSrc, durEntry, durNote(auto.source, auto.source + ' has no duration for ' + planet)),
+      ]);
       saveOptions();
       msg('msg-windows', auto.label + ': t0=' + auto.data.t0 + ', P=' + auto.data.period + ' d' + (dur != null ? ', dur=' + dur + ' h' : ''), 'ok');
       return;
@@ -1396,6 +1498,10 @@
       setVal('sch-period', tupleString(ephem.period, ephem.period_unc));
       setFieldSource('sch-t0', source.toUpperCase());
       setFieldSource('sch-period', source.toUpperCase());
+      renderProvenance([
+        ['t0 / period:', catalogNodes(source.toUpperCase(), ephem, ['t0', 'period'])],
+        durationLine(durSrc, durEntry, durNote(source.toUpperCase(), source.toUpperCase() + ' has no duration for ' + planet)),
+      ]);
       saveOptions();
       msg('msg-windows', source.toUpperCase() + ': t0=' + ephem.t0 + ', P=' + ephem.period + ' d' + (dur != null ? ', dur=' + dur + ' h' : ''), 'ok');
       return;
@@ -1417,6 +1523,7 @@
       setVal('sch-period', tupleString(g.period, g.period_unc));
       setFieldSource('sch-t0', sheetBadge); setFieldSource('sch-period', sheetBadge);
       if (g.duration != null) { dur = g.duration; setVal('sch-duration', tupleString(g.duration, g.duration_unc)); setFieldSource('sch-duration', sheetBadge); }
+      else renderProvenance([durationLine(durSrc, durEntry, 'the sheet has no duration for ' + planet)]);
       saveOptions();
       msg('msg-windows', sheetLabel + ': t0=' + g.t0 + ', P=' + g.period + ' d' + (dur != null ? ', dur=' + dur + ' h' : ''), 'ok');
       return;
@@ -1434,6 +1541,7 @@
       setVal('sch-t0', tupleString(gt.t0, gt.t0_unc));
       setVal('sch-period', tupleString(gt.period, gt.period_unc));
       setFieldSource('sch-t0', sheetBadge); setFieldSource('sch-period', sheetBadge);
+      renderProvenance([durationLine(durSrc, durEntry, 'a transit-center fit has no duration of its own')]);
       saveOptions();
       msg('msg-windows', sheetLabel + ' linear fit: t0=' + gt.t0 + ', P=' + gt.period + ' d' + (dur != null ? ', dur=' + dur + ' h' : ''), 'ok');
       return;
@@ -1451,6 +1559,7 @@
       // Prefer the fit's own duration (hours); otherwise keep the catalog value
       // already set above.
       if (pe.duration != null) { dur = pe.duration; setVal('sch-duration', tupleString(pe.duration, pe.duration_unc)); setFieldSource('sch-duration', 'FIT'); }
+      else renderProvenance([durationLine(durSrc, durEntry, 'this fit has no duration')]);
       saveOptions();
       msg('msg-windows', datasetLabel(ds) + ': t0=' + pe.t0 + ', P=' + pe.period + ' d' + (dur != null ? ', dur=' + dur + ' h' : ''), 'ok');
       return;
@@ -1460,6 +1569,16 @@
     if (!datasets.length) { msg('msg-windows', 'No completed transit fits for ' + lastInfoTarget, 'err'); return; }
     var seed = ref.t0 != null && ref.period != null ? ref : (nasa.t0 != null && nasa.period != null ? nasa : toi);
     if (!seed || seed.t0 == null || seed.period == null) { msg('msg-windows', 'No seed ephemeris to anchor the linear fit', 'err'); return; }
+    // The server reports the same seed with its catalog and papers; fall back
+    // to the entry's own tag for an older server response.
+    var seedInfo = (info.linear_fit_seed || {})[planet] ||
+      { source: seed.source || 'catalog', refs: seed.refs || {}, t0: seed.t0, period: seed.period };
+    var seedRef = (seedInfo.refs || {}).t0;
+    var seedDetail = 'Linear fit seeded from ' + seedInfo.source + (seedRef ? ' (' + seedRef.label + ')' : '');
+    var provLines = [
+      linearSeedLine(seedInfo, lastInfoTarget),
+      durationLine(durSrc, durEntry, durSrc ? 'linear fit has no duration of its own' : ''),
+    ];
     var calcBody = {
       target: lastInfoTarget, fit_method: 'unweighted', planets_ephem: {},
       datasets: datasets.map(function (d) {
@@ -1467,14 +1586,16 @@
       })
     };
     calcBody.planets_ephem[planet] = { t0: seed.t0, period: seed.period };
+    renderProvenance(provLines);
     MuscatFetch.fetchJson('/api/ephemeris/calculate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(calcBody) })
       .then(function (cd) {
         var res = cd.ok && cd.results ? cd.results[planet] : null;
         if (!res) { msg('msg-windows', 'Linear fit unavailable for ' + planet, 'err'); return; }
         setVal('sch-t0', tupleString(res.t0_fit, res.t0_fit_unc));
         setVal('sch-period', tupleString(res.period_fit, res.period_fit_unc));
-        setFieldSource('sch-t0', 'LINEAR');
-        setFieldSource('sch-period', 'LINEAR');
+        setFieldSource('sch-t0', 'LINEAR', seedDetail);
+        setFieldSource('sch-period', 'LINEAR', seedDetail);
+        renderProvenance(provLines);
         saveOptions();
         var nfit = (res.points || []).filter(function (p) { return p.checked; }).length;
         msg('msg-windows', (res.was_fit ? 'Linear fit' : 'Seed (need ≥2 epochs)') + ': t0=' + res.t0_fit + ', P=' + res.period_fit + ' d (' + nfit + ' epochs)', 'ok');
@@ -2815,7 +2936,7 @@
       // then calls applySource to populate the fields.
       refreshTargetFields({ silent: true });
     } else {
-      msg('msg-windows', 'Enter a target (and click "Fetch ephemeris") to load t0 / period / duration', 'err');
+      msg('msg-windows', 'Enter a target to load t0 / period / duration', 'err');
     }
   });
   var MIDTIMES_MAX_BYTES = 256000;  // matches midtimes.MAX_TEXT_CHARS on the server
@@ -2874,7 +2995,7 @@
     tip.style.display = 'none';
     document.body.appendChild(tip);
     var table = el('windows-table');
-    table.addEventListener('mouseover', function (e) {
+    function show(e) {
       var icon = e.target.closest('th .help-tooltip');
       if (!icon) return;
       tip.textContent = icon.getAttribute('data-tip') || icon.getAttribute('title') || '';
@@ -2885,10 +3006,15 @@
       var left = Math.min(Math.max(8, r.left + r.width / 2 - t.width / 2), window.innerWidth - t.width - 8);
       tip.style.top = top + 'px';
       tip.style.left = left + 'px';
-    });
-    table.addEventListener('mouseout', function (e) {
+    }
+    function hide(e) {
       if (e.target.closest('th .help-tooltip')) tip.style.display = 'none';
-    });
+    }
+    // Keyboard focus shows the bubble too (initTooltips makes icons focusable).
+    table.addEventListener('mouseover', show);
+    table.addEventListener('focusin', show);
+    table.addEventListener('mouseout', hide);
+    table.addEventListener('focusout', hide);
   })();
 
   el('win-filter').addEventListener('change', function () {
