@@ -24,8 +24,11 @@ commits installed in separate environments, selected by `deploy/engines.toml`
 and `deploy/workers.toml`. muscat-db stores their inputs, launches them as
 background jobs, and renders their outputs; the science lives in the packages.
 
-The photometry pin is prose2 3.5.1. It corrects exposure-midpoint timestamps and
-measurement uncertainties, and drops frames with invalid target measurements.
+The photometry pin is prose2 3.5.3. It applies saturation limits in native
+pixel units (electrons for BANZAI data, ADU for MuSCAT/MuSCAT2) and screens
+shared-reference comparisons separately in each band. Screening uses one
+representative frame per band, not every exposure. It retains the 3.5.1
+exposure-midpoint, measurement-uncertainty, and invalid-target corrections.
 Existing reductions and transit fits keep their original results; rerun them
 under a new run name to obtain the corrections while preserving the comparison.
 CSV/NPZ formats and existing command options remain compatible. The new

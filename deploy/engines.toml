@@ -3,14 +3,14 @@
 # while workers may still be using it.
 [engines.prose]
 repository = "https://github.com/jpdeleon/prose2"
-# Release v3.5.1 (jpdeleon/prose2#48), including exposure-midpoint times,
-# corrected uncertainties, and invalid-target frame rejection.
-commit = "dd19c2e238336f3cf25cc9f3af2581c3366ba210"
-environment = "prose-prod-dd19c2e2"
+# Release v3.5.3, including native-unit saturation thresholds and config
+# matching (jpdeleon/prose2#49), plus per-band shared-reference screening (jpdeleon/prose2#51).
+commit = "714b4071b8b329d113a6a3ae2d0aeb788ed5fc72"
+environment = "prose-prod-714b4071"
 source_environment = "prose"
 module = "prose"
 # Frozen instrument definitions include the MuSCAT3/4 camera-ID aliases.
-frozen_config_sha256 = "54955f39468408dbd14676ba4943772998c5fc28e2b995f0f5dced548ca26be0"
+frozen_config_sha256 = "4f6701ae520755f487888c4ea95da92edddc3650b250ee4f47a88722edf796e0"
 # The working editable metadata predates prose2's matplotlib<3.9 requirement.
 # Pin the newest compatible 3.8 release rather than bypassing pip check.
 [engines.prose.dependency_overrides]
