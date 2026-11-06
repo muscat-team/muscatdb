@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from playwright.sync_api import expect
 
 # Seven site cards have an LCO weather feed (MuSCAT4 and Sinistro share COJ);
@@ -148,8 +149,35 @@ def _bot_texts(page):
     return page.locator('#chat-messages .message.private .message-body').all_inner_texts()
 
 
-def test_bot_exchange_survives_reload_in_time_order(page):
+@pytest.fixture(params=[False, True], ids=['immediate-identity', 'deferred-identity'])
+def bot_identity(page, request):
+    """Exercise persistence with identity held until the test releases it."""
+    if request.param:
+        page.add_init_script("""
+          const realFetch = window.fetch.bind(window);
+          const identityGate = new Promise(resolve => { window.releaseIdentity = resolve; });
+          window.fetch = (...args) => {
+            const response = realFetch(...args);
+            return args[0] === '/whoami' ? identityGate.then(() => response) : response;
+          };
+        """)
+
+    def ready():
+        # Transport creation follows registration of onUserResolved. Awaiting
+        # the same promise here runs after its synchronous history restoration.
+        page.wait_for_function('Boolean(window.__chatTransport && window.MuscatWhoami)')
+        user = page.evaluate("""async () => {
+          if (window.releaseIdentity) window.releaseIdentity();
+          return await window.MuscatWhoami;
+        }""")
+        assert user == 'admin'
+
+    return ready
+
+
+def test_bot_exchange_survives_reload_in_time_order(page, bot_identity):
     page.goto('/targets')
+    bot_identity()
     page.click('#minimize-chat')
     _receive(page, 'message', _private_question('@bot what is finalizing?', 1791000100))
     _receive(page, 'message', {**_agent('It is the **grace** window.'), 'ts': 1791000101})
@@ -157,6 +185,7 @@ def test_bot_exchange_survives_reload_in_time_order(page):
     _receive(page, 'message', {**_agent('It is the **grace** window.'), 'ts': 1791000101})
 
     page.reload()  # the chat stays expanded across the reload
+    bot_identity()
     messages = page.locator('#chat-messages .message.private')
     expect(messages).to_have_count(2)
     assert _bot_texts(page) == ['@bot what is finalizing?', 'It is the grace window.']
@@ -170,26 +199,32 @@ def test_bot_exchange_survives_reload_in_time_order(page):
     assert texts == ['earlier', '@bot what is finalizing?', 'It is the grace window.', 'later']
 
 
-def test_bot_message_can_be_deleted_and_stays_deleted(page):
+def test_bot_message_can_be_deleted_and_stays_deleted(page, bot_identity):
     page.goto('/targets')
+    bot_identity()
     page.click('#minimize-chat')
     _receive(page, 'message', _private_question('@bot hi', 1791000300))
     _receive(page, 'message', {**_agent('Hello!'), 'ts': 1791000301})
     reply = page.locator('#chat-messages .message.agent')
     reply.get_by_role('button', name='Delete this message').click()
     expect(reply).to_have_count(0)
-    assert _bot_texts(page) == ['@bot hi']
+    assert page.evaluate("JSON.parse(localStorage.getItem('muscat-bot-chat:admin')).map(m => m.text)") == ['@bot hi']
+    expect(page.locator('#chat-messages .message.private .message-body')).to_have_text(['@bot hi'])
 
     page.reload()  # the chat stays expanded across the reload
-    assert _bot_texts(page) == ['@bot hi']
+    bot_identity()
+    expect(page.locator('#chat-messages .message.private .message-body')).to_have_text(['@bot hi'])
     page.locator('#chat-messages .message.private').get_by_role('button', name='Delete this message').click()
     expect(page.locator('#chat-messages .message.private')).to_have_count(0)
+    assert page.evaluate("JSON.parse(localStorage.getItem('muscat-bot-chat:admin'))") == []
     page.reload()  # the chat stays expanded across the reload
+    bot_identity()
     expect(page.locator('#chat-messages .message.private')).to_have_count(0)
 
 
-def test_bot_history_is_kept_per_user(page):
+def test_bot_history_is_kept_per_user(page, bot_identity):
     page.goto('/targets')
+    bot_identity()
     page.click('#minimize-chat')
     _receive(page, 'message', {**_agent('for admin only'), 'ts': 1791000400})
     keys = page.evaluate("Object.keys(localStorage).filter(k => k.startsWith('muscat-bot-chat:'))")
