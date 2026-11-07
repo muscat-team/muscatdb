@@ -198,12 +198,69 @@
   </label>
 </div>
 
+{# Issue #382: light curves from pipelines muscat-db does not run. The
+   uploader assigns every role by picking columns; names are never read. #}
+<details class="phot-section phot-fold" id="lc-upload" data-max-bytes="{{ upload_max_bytes }}"
+         {% if sel_inst == 'external' and not csvs %}open{% endif %}>
+  <summary><h2>Upload an External Light Curve</h2></summary>
+  <p style="font-size: 0.85rem; color: var(--text-dim); margin: 0.5rem 0 0.75rem;">
+    For a light curve from another facility's pipeline. Choose which column is time, flux, error and
+    which enter the detrending design matrix; covariates may come from a second file joined on a key
+    column. Saved uploads appear under instrument <strong>external</strong>.
+  </p>
+  <div class="selector-group" style="margin-bottom: 1rem;">
+    <label for="lcu-target">Target
+      <input type="text" id="lcu-target" value="{{ sel_target }}" placeholder="TOI-1234" autocomplete="off">
+    </label>
+    <label for="lcu-date">Night (yymmdd)
+      <input type="text" id="lcu-date" value="{{ sel_date }}" inputmode="numeric" pattern="\d{6}" maxlength="6" size="7">
+    </label>
+    <label for="lcu-facility">Facility
+      <input type="text" id="lcu-facility" maxlength="80" placeholder="ASTEP, SPECULOOS-S, ...">
+    </label>
+    <label for="lcu-band">Band
+      <select id="lcu-band">
+        {% for b in upload_bands %}<option value="{{ b }}">{{ b }}</option>{% endfor %}
+      </select>
+    </label>
+    <label for="lcu-time-system">Time system
+      <select id="lcu-time-system">
+        {% for t in upload_time_systems %}<option value="{{ t }}">{{ t }}</option>{% endfor %}
+      </select>
+    </label>
+  </div>
+  <div class="selector-group" style="margin-bottom: 1rem;">
+    <label for="lcu-primary">Light curve file
+      <input type="file" id="lcu-primary" accept=".csv,.tsv,.txt,.dat,.tbl">
+    </label>
+    <label for="lcu-ancillary">Covariates file (optional)
+      <input type="file" id="lcu-ancillary" accept=".csv,.tsv,.txt,.dat,.tbl">
+    </label>
+  </div>
+  <div id="lcu-primary-map"></div>
+  <div id="lcu-ancillary-map"></div>
+  <div style="display: flex; gap: 0.5rem; align-items: center;">
+    <button class="btn primary" type="button" id="lcu-save" disabled>Save Upload</button>
+  </div>
+  <div class="lco-msg" id="lcu-msg" role="status" aria-live="polite"></div>
+</details>
+<script src="{{ static_url('js/lcUpload.js') }}"></script>
+
 {% if not (sel_inst and sel_date and sel_target) %}
   <div class="empty-state">
     <div class="empty-icon">📈</div>
     <h2>Transit Fitting Pipeline</h2>
     <p>
       Select an instrument, date, and target above to configure parameters and run the transit fitting analysis using the conda-based <strong>timer</strong> tool.
+    </p>
+  </div>
+{% elif not csvs and sel_inst == 'external' %}
+  <div class="empty-state">
+    <div class="empty-icon">📤</div>
+    <h2>No Uploaded Light Curves</h2>
+    <p>
+      Nothing has been uploaded for <strong>{{ sel_target }}</strong> on night <strong>{{ sel_date }}</strong>.
+      Use <em>Upload an External Light Curve</em> above.
     </p>
   </div>
 {% elif not csvs %}
@@ -3073,7 +3130,7 @@
   {% endif %}
   <a href="/jobs" class="btn solid">To Jobs</a>
   {% if sel_inst and sel_date and sel_target %}
-    <a href="/photometry?inst={{ sel_inst }}&amp;date={{ sel_date }}&amp;target={{ sel_target | urlencode }}" class="btn solid">To Photometry</a>
+    {% if sel_inst != 'external' %}<a href="/photometry?inst={{ sel_inst }}&amp;date={{ sel_date }}&amp;target={{ sel_target | urlencode }}" class="btn solid">To Photometry</a>{% endif %}
   {% else %}
     <a href="/photometry" class="btn solid">To Photometry</a>
   {% endif %}

@@ -13,7 +13,8 @@ was made from. One rule applies at every level:
 * otherwise visible only when *every* input is. A frames input is visible when
   all of its PROPIDs are, and a blank PROPID counts as denied for a scoped
   viewer (:func:`muscat_db.access.is_denied`). A product input is visible when
-  that upstream product is. A manual input has no frames behind it.
+  that upstream product is. A manual input has no frames behind it, nor
+  does an upload (#382): both are visible to every viewer.
 
 A product input is pinned when it is written (:func:`pin_product_inputs`): the
 upstream's maker and its own inputs are copied into the entry, so what
@@ -235,7 +236,7 @@ class ProductVisibility:
         if not isinstance(entry, dict):
             return False
         kind = entry.get("kind")
-        if kind == "manual":
+        if kind in ("manual", "upload"):
             return True
         if kind == "frames":
             proposals = entry.get("proposal_ids")

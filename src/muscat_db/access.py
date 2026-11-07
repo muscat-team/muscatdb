@@ -35,6 +35,7 @@ from collections.abc import Callable, Iterable
 
 from muscat_db import access_groups, target_keys
 from muscat_db.database import ScopedDenied, get_conn, sql_not_denied
+from muscat_db.instruments import EXTERNAL_INSTRUMENT
 
 logger = logging.getLogger(__name__)
 
@@ -209,10 +210,18 @@ class NightVisibility:
         Nothing on such a night can be tied to an allowlisted proposal, so a
         scoped viewer fails closed; other viewers keep the old behaviour.
         """
+        if instrument == EXTERNAL_INSTRUMENT:
+            return False
         return isinstance(self.denied, ScopedDenied) and not self._night(instrument, obsdate)
 
     def hidden(self, instrument: str, obsdate: str, target: str) -> bool:
-        """True when the viewer may not see *target*'s data on this night."""
+        """True when the viewer may not see *target*'s data on this night.
+
+        The ``external`` pseudo-instrument has no frames or proposals, so it
+        is never an unknown night (:meth:`unknown_night`) and has no rows to
+        deny: its uploads are visible to every viewer (#382), and each
+        product's record still decides for itself
+        (:mod:`muscat_db.product_visibility`)."""
         if not self.denied:
             return False
         if self.unknown_night(instrument, obsdate):
