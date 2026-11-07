@@ -15,7 +15,10 @@ the ``--cov-fail-under`` gate is applied once, to the combined figure.
 
 ``check-split`` collects the full suite and both selections and fails unless
 the selections are disjoint and together cover the full collection, so a
-test cannot silently drop out of CI when the split paths drift.
+test cannot silently drop out of CI when the split paths drift. It also fails
+when a test outside the browser selection requests the Playwright ``page``
+fixture (say ``tests/sub/test_x_browser.py``), since that test would otherwise
+run in the parallel non-browser invocation.
 
 Usage:
     uv run python scripts/ci_pytest.py run [--cov] [--fail-under N]
@@ -35,6 +38,23 @@ BROWSER_GLOB = "tests/*_browser.py"
 BROWSER_WORKERS = "2"
 COVERAGE_FLOOR = 68  # the ratchet from ci.yml; target 80%
 COMMON = ["--tb=short", "-q"]
+BROWSER_FIXTURE = "page"
+
+# Collects in-process with a plugin that names every test requesting the
+# browser fixture, directly or through another fixture. A test parametrized on
+# an argument of that name (``@parametrize("page", ["/photometry"])``) lists it
+# in fixturenames too, but is not a browser test.
+_FIXTURE_PROBE = """
+import sys, pytest
+class Probe:
+    def pytest_collection_modifyitems(self, items):
+        name = sys.argv[1]
+        for item in items:
+            params = getattr(getattr(item, "callspec", None), "params", {})
+            if name in getattr(item, "fixturenames", ()) and name not in params:
+                print("USES " + item.nodeid)
+sys.exit(pytest.main(["--collect-only", "-q", "-p", "no:cacheprovider", *sys.argv[2:]], plugins=[Probe()]))
+"""
 
 
 def browser_paths() -> list[str]:
@@ -79,11 +99,26 @@ def _collect(args: list[str]) -> set[str]:
     return {line for line in out.stdout.splitlines() if "::" in line}
 
 
+def _fixture_users(args: list[str]) -> set[str]:
+    """Node ids in the selection *args* that request the browser fixture."""
+    cmd = [sys.executable, "-c", _FIXTURE_PROBE, BROWSER_FIXTURE, *args]
+    out = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True)
+    if out.returncode not in (0, 5):
+        sys.stderr.write(out.stdout + out.stderr)
+        raise SystemExit(f"collection failed: {' '.join(args)}")
+    return {line[len("USES "):] for line in out.stdout.splitlines() if line.startswith("USES ")}
+
+
 def check_split() -> int:
     full = _collect([])
     rest = _collect(non_browser_args())
     browser = _collect(browser_paths())
     problems = []
+    if stray := _fixture_users(non_browser_args()):
+        problems.append(
+            f"{len(stray)} tests use the {BROWSER_FIXTURE!r} fixture outside the browser selection "
+            f"(move them under {BROWSER_DIR}/ or name them {BROWSER_GLOB}), e.g. {sorted(stray)[:3]}"
+        )
     if overlap := rest & browser:
         problems.append(f"{len(overlap)} tests in both selections, e.g. {sorted(overlap)[:3]}")
     if missing := full - rest - browser:

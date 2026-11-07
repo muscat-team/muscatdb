@@ -490,6 +490,9 @@ tr.filter-row th input.invalid { border-color: var(--red); }
   transform: translateY(100%);
   transition: transform 0.25s ease;
   z-index: 9998;
+  /* Text only. It slides over the bottom of the viewport during every /api/
+     request, so it must not swallow clicks meant for what lies beneath. */
+  pointer-events: none;
 }
 #status-bar.visible { transform: translateY(0); }
 #status-bar .dot {

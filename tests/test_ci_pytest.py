@@ -59,12 +59,13 @@ def test_coverage_gate_is_applied_once_to_the_combined_data(ci, monkeypatch):
     assert "--cov-append" in second and "--cov-fail-under=70" in second
 
 
-def _fake_collect(ci, monkeypatch, full, rest, browser):
+def _fake_collect(ci, monkeypatch, full, rest, browser, stray=frozenset()):
     def collect(args):
         if not args:
             return set(full)
         return set(rest) if args[0] == "tests" else set(browser)
     monkeypatch.setattr(ci, "_collect", collect)
+    monkeypatch.setattr(ci, "_fixture_users", lambda args: set(stray) if args[0] == "tests" else set())
 
 
 def test_split_check_passes_for_a_disjoint_complete_split(ci, monkeypatch, capsys):
@@ -91,3 +92,29 @@ def test_split_check_holds_for_the_real_suite_paths(ci):
     # The real collection is checked in CI's ruff job; here only that the
     # selections name paths that exist, so a rename cannot leave one empty.
     assert all((ci.REPO / p).exists() for p in ci.browser_paths())
+
+
+def test_split_check_fails_on_a_browser_test_outside_the_browser_paths(ci, monkeypatch, capsys):
+    # e.g. tests/sub/test_x_browser.py: in the non-browser selection, so the
+    # complete/disjoint check alone passes it.
+    _fake_collect(ci, monkeypatch, {"a::t", "b::t"}, {"a::t"}, {"b::t"}, stray={"a::t"})
+    assert ci.check_split() == 1
+    assert "use the 'page' fixture outside the browser selection" in capsys.readouterr().err
+
+
+def test_fixture_probe_finds_direct_and_indirect_users(ci, tmp_path):
+    (tmp_path / "conftest.py").write_text(
+        "import pytest\n"
+        "@pytest.fixture\ndef page():\n    return object()\n"
+        "@pytest.fixture\ndef logged_in(page):\n    return page\n"
+    )
+    (tmp_path / "test_x_browser.py").write_text(
+        "def test_direct(page): pass\n"
+        "def test_indirect(logged_in): pass\n"
+        "def test_plain(): pass\n"
+        "import pytest\n"
+        "@pytest.mark.parametrize('page', ['/photometry'])\n"
+        "def test_a_url_argument_named_page(page): pass\n"
+    )
+    users = ci._fixture_users([str(tmp_path)])
+    assert {u.split("::")[-1] for u in users} == {"test_direct", "test_indirect"}

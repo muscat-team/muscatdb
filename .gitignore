@@ -64,3 +64,5 @@ temp.txt
 # or locally with `muscat-db build-static-site`, deliberately NOT tracked.
 /site/
 browser-artifacts/
+# Written by `ci_pytest.py run --cov` (CI uploads it as an artifact).
+/coverage.xml

@@ -66,6 +66,8 @@ jobs:
           name: browser-traces-py${{ matrix.python-version }}
           path: browser-artifacts/
           if-no-files-found: ignore
+          # Traces record request headers and the repository is public.
+          retention-days: 7
 
   test-postgres:
     name: pytest (postgres control plane)
@@ -140,6 +142,8 @@ jobs:
           name: browser-traces-coverage
           path: browser-artifacts/
           if-no-files-found: ignore
+          # Traces record request headers and the repository is public.
+          retention-days: 7
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
         with:
