@@ -15,6 +15,11 @@ Model (design: issue #228):
 * the fields of one grant are ANDed, ``NULL`` means "any";
 * ``everyone`` contains every user (and anonymous viewers) unless a row in
   ``group_exclusions`` removes them -- that is how a scoped viewer is expressed;
+* once ``access explicit-groups --apply`` has run (#354, marked by the built-in
+  ``public`` group), membership is explicit instead: a user is in exactly the
+  groups listed in ``group_members``, ``everyone`` is gone, the team's grants
+  live in ``muscatjp``, and the anonymous viewer (the public static site) is
+  in ``public`` only. A user in no group sees nothing;
 * a grant to one nginx user is stored as a grant to the hidden single-member
   group ``user:<name>``, so there is one mechanism and one evaluator.
 
@@ -42,6 +47,11 @@ logger = logging.getLogger(__name__)
 
 EVERYONE = "everyone"
 ADMIN = "admin"
+# Explicit membership (#354). PUBLIC is built in and its existence is what
+# switches a database to explicit membership; TEAM_GROUP is an ordinary group
+# that takes over everyone's grants and the team chat room (chat:public).
+PUBLIC = "public"
+TEAM_GROUP = "muscatjp"
 USER_PREFIX = "user:"
 SEED_NOTE = "migrated from blocklist"
 SEED_BY = "migration"
@@ -163,22 +173,92 @@ def _missing_table(exc: sqlite3.OperationalError) -> bool:
     return "no such table" in str(exc)
 
 
-def is_active(conn: sqlite3.Connection) -> bool:
-    """Whether the group model decides visibility (rollout step 2).
-
-    It does once ``access groups-seed`` has created the ``everyone`` group.
-    Before that, a database has no grants at all, and reading it allow-only
-    would hide everything from every non-admin, so the blocklist still decides.
-    """
+def _builtin_exists(conn: sqlite3.Connection, name: str) -> bool:
     try:
-        return conn.execute("SELECT 1 FROM groups WHERE name = ?", (EVERYONE,)).fetchone() is not None
+        return conn.execute(
+            "SELECT 1 FROM groups WHERE name = ? AND builtin = 1", (name,)
+        ).fetchone() is not None
     except sqlite3.OperationalError as exc:
         if _missing_table(exc):
             return False
         raise
 
 
+def is_active(conn: sqlite3.Connection) -> bool:
+    """Whether the group model decides visibility (rollout step 2).
+
+    It does once ``access groups-seed`` has created the ``everyone`` group, or
+    the explicit-membership migration (#354) has replaced it with ``public``.
+    Before that, a database has no grants at all, and reading it allow-only
+    would hide everything from every non-admin, so the blocklist still decides.
+    """
+    try:
+        return conn.execute(
+            "SELECT 1 FROM groups WHERE name IN (?, ?)", (EVERYONE, PUBLIC)
+        ).fetchone() is not None
+    except sqlite3.OperationalError as exc:
+        if _missing_table(exc):
+            return False
+        raise
+
+
+def explicit_membership(conn: sqlite3.Connection) -> bool:
+    """Whether membership is explicit (#354): the built-in ``public`` group,
+    created only by the explicit-groups migration, exists."""
+    return _builtin_exists(conn, PUBLIC)
+
+
+def shared_groups(conn: sqlite3.Connection) -> tuple[str, ...]:
+    """The groups a proposal is shared with by ``access unrestrict`` and
+    taken from by ``access restrict``: ``everyone`` before #354, the team
+    group and ``public`` after, so the static site keeps matching the team."""
+    return (TEAM_GROUP, PUBLIC) if explicit_membership(conn) else (EVERYONE,)
+
+
+def team_group(conn: sqlite3.Connection) -> str:
+    """The group whose grants define "shared with the team"."""
+    return TEAM_GROUP if explicit_membership(conn) else EVERYONE
+
+
+def in_team(conn: sqlite3.Connection, username: str) -> bool:
+    """Whether *username* is on the team: not excluded from ``everyone``
+    before #354, a member of the team group after. Not being on the team is
+    what makes a user a scoped viewer (#202)."""
+    if explicit_membership(conn):
+        return conn.execute(
+            "SELECT 1 FROM group_members WHERE groupname = ? AND username = ?",
+            (TEAM_GROUP, username),
+        ).fetchone() is not None
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM group_exclusions WHERE groupname = ? AND username = ?",
+            (EVERYONE, username),
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        if _missing_table(exc):
+            return True
+        raise
+    return row is None
+
+
+def set_in_team(conn: sqlite3.Connection, username: str, member: bool, by: str = "") -> bool:
+    """Put *username* on the team or take them off it. Returns whether a row
+    changed. ``users.scoped`` is kept as a mirror until it is retired."""
+    if explicit_membership(conn):
+        changed = (
+            add_member(conn, TEAM_GROUP, username, by)
+            if member
+            else remove_member(conn, TEAM_GROUP, username)
+        )
+    else:
+        changed = set_excluded(conn, EVERYONE, username, not member)
+    conn.execute("UPDATE users SET scoped = ? WHERE username = ?", (0 if member else 1, username))
+    return changed
+
+
 def _group_names_for(conn: sqlite3.Connection, user: str | None, is_admin: bool) -> frozenset[str]:
+    if explicit_membership(conn):
+        return _explicit_group_names_for(conn, user, is_admin)
     groups: set[str] = set()
     excluded: set[str] = set()
     if user:
@@ -197,6 +277,23 @@ def _group_names_for(conn: sqlite3.Connection, user: str | None, is_admin: bool)
     if is_admin:
         groups.add(ADMIN)
     return frozenset(groups - excluded)
+
+
+def _explicit_group_names_for(
+    conn: sqlite3.Connection, user: str | None, is_admin: bool
+) -> frozenset[str]:
+    """Explicit membership (#354): a user's own ``group_members`` rows (and
+    ``admin`` for an admin), nothing implied. Anonymous is in ``public`` only."""
+    if not user:
+        return frozenset({PUBLIC})
+    groups = {
+        r[0].lower()
+        for r in conn.execute("SELECT groupname FROM group_members WHERE username = ?", (user,))
+    }
+    groups.add(user_group(user))
+    if is_admin:
+        groups.add(ADMIN)
+    return frozenset(groups)
 
 
 _SELECT_FIELDS = "id, groupname, proposal_id, instrument, target, date_from, date_to"
@@ -246,25 +343,30 @@ def _build_grants(conn: sqlite3.Connection, rows: list[tuple]) -> tuple[Grant, .
 
 def load_access(db_path: str, user: str | None) -> Access:
     """The :class:`Access` for *user* (``None`` = anonymous, who is in
-    ``everyone`` only). A database with no group tables yet grants nothing,
-    which is the safe reading; any other error propagates, because failing
-    open would expose data."""
+    ``everyone`` only, or ``public`` under explicit membership). A database
+    with no group tables yet grants nothing, which is the safe reading; any
+    other error propagates, because failing open would expose data."""
     with get_conn(db_path) as conn:
-        admin = False
-        if user:
-            row = conn.execute("SELECT is_admin FROM users WHERE username = ?", (user,)).fetchone()
-            admin = bool(row and row[0])
-        try:
-            groups = _group_names_for(conn, user, admin)
-            rows = _select_grants(
-                conn, f"groupname IN ({','.join('?' for _ in groups)})", sorted(groups)
-            )
-        except sqlite3.OperationalError as exc:
-            if _missing_table(exc):
-                return Access(user, admin, frozenset())
-            raise
-        grants = _build_grants(conn, rows)
-    return Access(user, admin, groups, grants)
+        return load_access_conn(conn, user)
+
+
+def load_access_conn(conn: sqlite3.Connection, user: str | None) -> Access:
+    """:func:`load_access` on an open connection, so a migration can compare
+    visibility inside its own transaction."""
+    admin = False
+    if user:
+        row = conn.execute("SELECT is_admin FROM users WHERE username = ?", (user,)).fetchone()
+        admin = bool(row and row[0])
+    try:
+        groups = _group_names_for(conn, user, admin)
+        rows = _select_grants(
+            conn, f"groupname IN ({','.join('?' for _ in groups)})", sorted(groups)
+        )
+    except sqlite3.OperationalError as exc:
+        if _missing_table(exc):
+            return Access(user, admin, frozenset())
+        raise
+    return Access(user, admin, groups, _build_grants(conn, rows))
 
 
 _GRANT_COLUMNS = (
@@ -302,14 +404,36 @@ def remove_target_grants(
 
 def revoke_grant(conn: sqlite3.Connection, grant_id: int, revoked_by: str = "") -> dict | None:
     """Revoke one grant by id. Returns the revoked row, or ``None`` if no live
-    grant has that id."""
+    grant has that id.
+
+    Under explicit membership (#354) the public site mirrors the team, so
+    revoking a team grant also revokes ``public``'s copy of it."""
     row = conn.execute(
         f"SELECT {_GRANT_COLUMNS} FROM group_grants WHERE id = ?", (grant_id,)
     ).fetchone()
     if row is None:
         return None
+    revoked = dict(zip([c.strip() for c in _GRANT_COLUMNS.split(",")], row))
     _archive_grants(conn, "id = ?", (grant_id,), revoked_by)
-    return dict(zip([c.strip() for c in _GRANT_COLUMNS.split(",")], row))
+    if explicit_membership(conn) and revoked["groupname"].lower() == TEAM_GROUP:
+        _archive_grants(
+            conn,
+            "groupname = ? AND proposal_id IS ? AND instrument IS ? AND target IS ? "
+            "AND date_from IS ? AND date_to IS ?",
+            (PUBLIC, revoked["proposal_id"], revoked["instrument"], revoked["target"],
+             revoked["date_from"], revoked["date_to"]),
+            revoked_by,
+        )
+    return revoked
+
+
+def grant_groups(conn: sqlite3.Connection, group: str) -> tuple[str, ...]:
+    """The groups a grant to *group* is written to: a team grant is mirrored
+    to ``public`` under explicit membership (#354), so the static site keeps
+    showing what the team sees."""
+    if explicit_membership(conn) and group.lower() == TEAM_GROUP:
+        return (TEAM_GROUP, PUBLIC)
+    return (group,)
 
 
 # ── writes (CLI only) ───────────────────────────────────────────────────
@@ -453,6 +577,8 @@ def seed_from_blocklist(db_path: str, dry_run: bool = False) -> SeedReport:
     """
     with get_conn(db_path) as conn:
         _apply_schema(conn)
+        if explicit_membership(conn):
+            raise RuntimeError("membership is explicit (#354); there is no `everyone` to seed")
         report = _seed(conn)
         if dry_run:
             conn.rollback()
@@ -601,7 +727,7 @@ def _seed(conn: sqlite3.Connection) -> SeedReport:
 # user) and short enough to read in a table.
 _GROUP_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 _YYMMDD = re.compile(r"\d{6}")
-RESERVED_GROUPS = (EVERYONE, ADMIN)
+RESERVED_GROUPS = (EVERYONE, ADMIN, PUBLIC)
 
 
 def check_group_name(name: str) -> str | None:

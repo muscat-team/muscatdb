@@ -35,14 +35,20 @@ The README "Multi-User Deployment" section has the full walkthrough; the essenti
 sudo bash deploy/setup-nginx.sh
 
 # Manage users (writes the htpasswd file + the SQLite users row)
-sudo env "PATH=$PATH" uv run muscat-db htpasswd add <user>
+sudo env "PATH=$PATH" uv run muscat-db htpasswd add <user> --group muscatjp
 uv run muscat-db htpasswd delete <user>
 uv run muscat-db htpasswd list
 # Make an existing user admin without touching their password
 uv run muscat-db htpasswd promote <user>
 
 # Restrict an LCO proposal's observations and grant users access (issues #144, #228)
-uv run muscat-db access restrict <proposal_id>     # revokes the proposal's `everyone` grant
+# One-time (#354): make access explicit group membership. Dry run first; it
+# compares every user's and the anonymous viewer's visible rows before and
+# after, and writes nothing if any would change. Restart the server after.
+uv run muscat-db access explicit-groups
+uv run muscat-db access explicit-groups --apply
+
+uv run muscat-db access restrict <proposal_id>     # revokes the proposal's team (`everyone`, after #354 `muscatjp` + `public`) grant
 uv run muscat-db access unrestrict <proposal_id>   # also shares a newly ingested proposal (groups are allow-only)
 uv run muscat-db access grant <user> <proposal_id>
 uv run muscat-db access revoke <user> <proposal_id>
