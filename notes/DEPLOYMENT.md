@@ -120,6 +120,26 @@ Then run it without `--dry-run`, or let the nightly `build-db` do it.
 
 Connect to production via SSH tunnel: `ssh -L 8000:localhost:8000 <user>@muscat-ut2` → http://localhost:8000. Staging's public port is `:8002` (`ssh -L 8002:localhost:8002`).
 
+### When the site stalls
+
+Pages load slowly or nginx answers 500 while the server process is still up:
+plain `def` routes share one pool of about 40 worker threads, and slow requests
+can hold all of them. Production stalled this way twice on 2026-11-07, on
+Jobs-page status polls. `/healthz` and the `/_auth/cf` login check no longer
+wait in that pool, so they keep answering during a stall. To find the cause:
+
+* The server log (tmux pane `muscatdbgui:0`) names each request still waiting
+  for an answer after `MUSCAT_SLOW_REQUEST_S` (2 s) with `request still
+  running after …`, and each finished one that took longer with `slow request:`.
+  The access log cannot show these: it records a request only once it finishes.
+* `kill -USR1 <server pid>` writes every thread's Python stack, showing what
+  each busy thread is doing. The host's `kernel.yama.ptrace_scope=1` blocks
+  `gdb` and `py-spy` from attaching, so this is the way to see them. With about
+  90 threads the dump runs past the pane's scrollback, so set
+  `MUSCAT_STACK_DUMP_PATH` in `.web-env` to send it to a file instead.
+* Save the pane before restarting (`tmux capture-pane -p -t muscatdbgui:0 -S
+  -200000 > ~/temp/prod_8001_<date>.log`): a restart clears it.
+
 ### Authentication boundary and deployment verification
 
 nginx authenticates browser users and forwards both `X-Forwarded-User` and a
