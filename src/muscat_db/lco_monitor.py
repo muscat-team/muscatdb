@@ -385,6 +385,13 @@ def _prepared_downloads(snapshot: dict) -> tuple[set[str], dict[str, str]]:
 
 def _finish_download(request: dict, snapshot: dict, *, path: str, now: float) -> bool:
     ready, errors = _prepared_downloads(snapshot)
+    # The shared limiter refused these before they reached LCO: wait, but do not
+    # move a frame that may be perfectly available toward 'abandoned'.
+    deferred = {
+        str(row.get("filename") or ""): float(row["retry_after"])
+        for row in snapshot.get("results") or []
+        if row.get("retry_after")
+    }
     with get_conn(path) as conn:
         for filename in ready:
             conn.execute(
@@ -393,6 +400,13 @@ def _finish_download(request: dict, snapshot: dict, *, path: str, now: float) ->
                 (now, request["request_id"], filename),
             )
         for filename, error in errors.items():
+            if filename in deferred:
+                conn.execute(
+                    "UPDATE lco_observation_frames SET state='error', error=?, updated_at=? "
+                    "WHERE request_id=? AND filename=?",
+                    (error, now, request["request_id"], filename),
+                )
+                continue
             # Count the attempt, and stop retrying a frame that has burned
             # through its budget: 'abandoned' is excluded from _download_rows, so
             # one permanently unavailable product can no longer keep `pending`
@@ -413,7 +427,10 @@ def _finish_download(request: dict, snapshot: dict, *, path: str, now: float) ->
             "downloaded_count=?, next_poll_at=?, updated_at=?, last_error=? WHERE request_id=? AND monitor_state!='canceled'",
             (
                 downloaded,
-                now if not errors else now + _error_delay(int(request.get("error_count") or 0) + 1),
+                now if not errors else now + max(
+                    _error_delay(int(request.get("error_count") or 0) + 1),
+                    max(deferred.values(), default=0),
+                ),
                 now,
                 "; ".join(sorted(set(errors.values())))[:2000],
                 request["request_id"],
@@ -476,10 +493,11 @@ def _mark_error(request_id: int, error: Exception, *, path: str, now: float) -> 
             "SELECT error_count FROM lco_observation_requests WHERE request_id=?", (request_id,)
         ).fetchone()
         count = int(current[0] if current else 0) + 1
+        delay = max(_error_delay(count), getattr(error, "retry_after", None) or 0)
         conn.execute(
             "UPDATE lco_observation_requests SET monitor_state='monitoring', error_count=?, last_error=?, "
             "next_poll_at=?, updated_at=? WHERE request_id=? AND monitor_state!='canceled'",
-            (count, str(error)[:2000], now + _error_delay(count), now, request_id),
+            (count, str(error)[:2000], now + delay, now, request_id),
         )
         conn.commit()
 
@@ -512,7 +530,7 @@ def process_request(request: dict, *, path: str | None = None, now: float | None
                 # In-memory download jobs disappear on restart. Atomic files and
                 # persisted frame metadata make safely re-queuing them idempotent.
                 snapshot = {"state": "lost", "results": [], "funpack_results": []}
-            if snapshot.get("state") in {"pending", "running"}:
+            if snapshot.get("state") in {"pending", "running", "cancelling"}:
                 with get_conn(path) as conn:
                     conn.execute(
                         "UPDATE lco_observation_requests SET next_poll_at=?, updated_at=? WHERE request_id=? AND monitor_state!='canceled'",
@@ -520,7 +538,9 @@ def process_request(request: dict, *, path: str | None = None, now: float | None
                     )
                     conn.commit()
                 return
-            if snapshot.get("state") == "done":
+            if snapshot.get("state") == "done" or (
+                snapshot.get("durable") and snapshot.get("state") == "error"
+            ):
                 if not _finish_download(request, snapshot, path=path, now=now):
                     return
                 request = {**request, "download_job_id": ""}
@@ -639,6 +659,7 @@ def process_request(request: dict, *, path: str | None = None, now: float | None
                 overwrite=False,
                 auto_ingest=False,
                 user_name=_MONITOR_DOWNLOAD_USER,
+                credential_user=request.get("user_name") or "",
             )
             with get_conn(path) as conn:
                 conn.execute(

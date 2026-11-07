@@ -68,6 +68,18 @@ def _row(path, request_id=101):
         )
 
 
+def test_shared_archive_cooldown_delays_monitor_without_losing_request(monitor_db):
+    result, payload = _submission()
+    lco_monitor.record_submission(result, payload, "alice", path=monitor_db, now=100)
+    error = lco.LcoError("Shared LCO request budget or cooldown active", status=429, retry_after=86400)
+    lco_monitor._mark_error(101, error, path=monitor_db, now=200)
+    row = _row(monitor_db)
+    assert row["next_poll_at"] == 86600
+    assert row["monitor_state"] == "monitoring"
+    assert row["user_name"] == "alice"
+    assert row["error_count"] == 1
+
+
 def test_record_submission_persists_each_child_and_waits_for_window(monitor_db):
     result, payload = _submission()
     rows = lco_monitor.record_submission(
@@ -141,7 +153,8 @@ def test_monitor_downloads_final_frames_then_scans_and_ingests(monitor_db, tmp_p
     )
     queued = []
 
-    def fake_start(frames, overwrite=False, auto_ingest=False, user_name=None):
+    def fake_start(frames, overwrite=False, auto_ingest=False, user_name=None, credential_user=None):
+        assert credential_user == "alice"
         assert auto_ingest is False
         queued.extend(frames)
         return {"job_id": "download-1", "state": "pending"}
@@ -219,7 +232,7 @@ def test_monitor_downloads_incrementally_and_waits_for_every_raw_frame(
     monkeypatch.setattr("muscat_db.lco.archive_search_all", lambda *args, **kwargs: next(pages))
     monkeypatch.setattr(
         "muscat_db.lco.start_archive_download",
-        lambda frames, overwrite=False, auto_ingest=False, user_name=None: {"job_id": "one", "state": "pending"},
+        lambda frames, overwrite=False, auto_ingest=False, user_name=None, credential_user=None: {"job_id": "one", "state": "pending"},
     )
 
     lco_monitor.process_request(_row(monitor_db), path=monitor_db, now=200)
@@ -273,7 +286,7 @@ def test_monitor_queues_downloads_one_acceptable_batch_at_a_time(
     )
     queued = []
 
-    def fake_start(batch, overwrite=False, auto_ingest=False, user_name=None):
+    def fake_start(batch, overwrite=False, auto_ingest=False, user_name=None, credential_user=None):
         # Mirror the real guard so an oversized batch fails here the way it would
         # in production, instead of passing silently.
         if len(batch) > lco._ARCHIVE_DOWNLOAD_MAX_FRAMES:
@@ -332,7 +345,7 @@ def test_terminal_request_with_partial_reduction_ingests_after_grace(
     )
     monkeypatch.setattr(
         "muscat_db.lco.start_archive_download",
-        lambda batch, overwrite=False, auto_ingest=False, user_name=None: {"job_id": "dl-1", "state": "pending"},
+        lambda batch, overwrite=False, auto_ingest=False, user_name=None, credential_user=None: {"job_id": "dl-1", "state": "pending"},
     )
     lco_monitor.process_request(_row(monitor_db), path=monitor_db, now=200)
     assert _row(monitor_db)["terminal_seen_at"] == 200
@@ -448,14 +461,16 @@ def test_monitor_downloads_use_a_dedicated_slot_bucket(monitor_db, tmp_path, mon
     )
     seen = {}
 
-    def fake_start(batch, overwrite=False, auto_ingest=False, user_name=None):
+    def fake_start(batch, overwrite=False, auto_ingest=False, user_name=None, credential_user=None):
         seen["user_name"] = user_name
+        seen["credential_user"] = credential_user
         return {"job_id": "dl", "state": "pending"}
 
     monkeypatch.setattr("muscat_db.lco.start_archive_download", fake_start)
     lco_monitor.process_request(_row(monitor_db), path=monitor_db, now=200)
     assert seen["user_name"] == lco_monitor._MONITOR_DOWNLOAD_USER
     assert seen["user_name"] != "anonymous"
+    assert seen["credential_user"] == ""
 
 
 def test_monitor_errors_back_off_and_remain_retryable(monitor_db, monkeypatch):
@@ -478,3 +493,29 @@ def test_database_lease_allows_only_one_live_owner(monitor_db):
     assert lco_monitor._acquire_lease(monitor_db, "worker-a", 100)
     assert not lco_monitor._acquire_lease(monitor_db, "worker-b", 101)
     assert lco_monitor._acquire_lease(monitor_db, "worker-b", 100 + lco_monitor._LEASE_S + 1)
+
+
+def test_frame_refused_by_the_shared_limiter_spends_no_attempt(monitor_db, tmp_path, monkeypatch):
+    monkeypatch.setenv("MUSCAT_LCO_DIR", str(tmp_path))
+    result, payload = _submission(state="COMPLETED")
+    lco_monitor.record_submission(result, payload, None, path=monitor_db, now=100)
+    reduced = _frame(91, 1)
+    with get_conn_for(monitor_db) as conn:
+        lco_monitor._upsert_reduced_frames(conn, 101, [reduced], 200)
+        conn.commit()
+    snapshot = {
+        "state": "done",
+        "results": [{"filename": reduced["filename"], "status": "error",
+                     "error": "Shared LCO request budget or cooldown active", "retry_after": 7200}],
+        "funpack_results": [],
+    }
+    lco_monitor._finish_download(_row(monitor_db), snapshot, path=monitor_db, now=300)
+    with sqlite3.connect(monitor_db) as conn:
+        state, attempts = conn.execute(
+            "SELECT state, attempts FROM lco_observation_frames WHERE request_id=101"
+        ).fetchone()
+        next_poll = conn.execute(
+            "SELECT next_poll_at FROM lco_observation_requests WHERE request_id=101"
+        ).fetchone()[0]
+    assert (state, attempts) == ("error", 0)
+    assert next_poll >= 300 + 7200

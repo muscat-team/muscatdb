@@ -547,6 +547,10 @@ def test_observing_duration_follows_the_window_until_set_by_hand(page, lco_accou
     with page.expect_response("**/api/lco/observing-duration", timeout=60_000):
         end_input.fill(new_end)
         end_input.press("Tab")
+    # Response headers can arrive before the promise renders the new fit. The
+    # temporary blank field also differs from default_h, so wait for readiness.
+    expect(field).to_be_enabled()
+    expect(field).not_to_have_value("")
     expect(field).not_to_have_value(f"{default_h:.2f}")
     shorter_h = float(field.input_value())
     # The fit is clipped to what the target can be observed, so an hour off the
