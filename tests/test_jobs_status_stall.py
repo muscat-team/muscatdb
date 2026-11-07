@@ -17,6 +17,9 @@ from fastapi.testclient import TestClient
 
 from muscat_db import transit_fit, web
 
+# Captured at import, before any fixture swaps in a fake scanner.
+_REAL_DISCOVER = transit_fit._discover_orphan_fits
+
 
 def _fit_row(key: str) -> dict:
     return dict(key=key, type="transit_fit", inst="muscat3", date="261020", target="T",
@@ -94,6 +97,23 @@ def test_swapping_the_scanner_takes_effect_at_once(scanner, monkeypatch):
     assert transit_fit.orphan_fits(set())
     monkeypatch.setattr(transit_fit, "_discover_orphan_fits", lambda _existing: [])
     assert transit_fit.orphan_fits(set()) == []
+
+
+def test_pointing_at_another_fit_tree_rescans(monkeypatch, tmp_path):
+    """A scan belongs to the tree it walked: after MUSCAT_TIMER_DIR changes,
+    the old tree's fits must not be served (CI caught this across tests)."""
+    monkeypatch.setattr(transit_fit, "_discover_orphan_fits", _REAL_DISCOVER)
+    transit_fit.invalidate_orphan_fits()
+    for name in ("a", "b"):
+        (tmp_path / name).mkdir()
+    out = tmp_path / "a" / "muscat3" / "261020" / "T" / "run1" / "out"
+    out.mkdir(parents=True)
+    (out / "lc.png").write_bytes(b"")
+    monkeypatch.setenv("MUSCAT_TIMER_DIR", str(tmp_path / "a"))
+    assert [r["key"] for r in transit_fit.orphan_fits(set())] == ["transit_fit:muscat3/261020/T/run1"]
+    monkeypatch.setenv("MUSCAT_TIMER_DIR", str(tmp_path / "b"))
+    assert transit_fit.orphan_fits(set()) == []
+    transit_fit.invalidate_orphan_fits()
 
 
 def test_deleting_a_fit_drops_it_from_the_snapshot(scanner, monkeypatch, tmp_path):

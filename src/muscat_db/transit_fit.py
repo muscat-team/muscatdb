@@ -2551,6 +2551,13 @@ def _detect_run_type(rdir: pathlib.Path) -> str:
     return "full"
 
 
+def _timer_root() -> pathlib.Path:
+    """The fit tree ``_discover_orphan_fits`` walks."""
+    return pathlib.Path(
+        os.environ.get("MUSCAT_TIMER_DIR", str(pathlib.Path.home() / "ql" / "timer"))
+    )
+
+
 def _discover_orphan_fits(existing: set[str]) -> list[dict]:
     """Scan disk for completed fits not yet in the jobs table.
 
@@ -2559,9 +2566,7 @@ def _discover_orphan_fits(existing: set[str]) -> list[dict]:
     ``transit_fit:{inst}/{date}/{target}``) and per-run ``{target}/<run_id>/out/``
     (key ``…/{target}/{run_id}``) — whose key is not in *existing*.
     """
-    base = pathlib.Path(
-        os.environ.get("MUSCAT_TIMER_DIR", str(pathlib.Path.home() / "ql" / "timer"))
-    )
+    base = _timer_root()
     orphans: list[dict] = []
     if not base.is_dir():
         return orphans
@@ -2631,34 +2636,35 @@ class _OrphanFitSnapshot:
     """The last scan of the fit tree, shared by every request.
 
     A scan covers every fit on disk; callers drop the keys already in the job
-    store when they read it. The scan is tied to the scanner that produced it,
-    so swapping ``_discover_orphan_fits`` (the static-site export does this to
-    keep live runs out of the public site, and tests do it to fake the tree)
-    takes effect on the next read instead of serving the old scanner's rows.
+    store when they read it. The scan is tied to its source, the scanner and
+    the tree it walked, so swapping ``_discover_orphan_fits`` (the static-site
+    export does this to keep live runs out of the public site, and tests do it
+    to fake the tree) or pointing ``MUSCAT_TIMER_DIR`` elsewhere takes effect
+    on the next read instead of serving rows from the old source.
     """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()  # guards the three fields below
         self._scan_lock = threading.Lock()  # one scan at a time
         self._rows: tuple[dict, ...] | None = None
-        self._scanner: Callable | None = None
+        self._source: tuple[Callable, pathlib.Path] | None = None
         self._taken_at = 0.0
 
-    def _current(self) -> tuple[tuple[dict, ...] | None, Callable | None, float]:
+    def _current(self) -> tuple[tuple[dict, ...] | None, tuple | None, float]:
         with self._lock:
-            return self._rows, self._scanner, self._taken_at
+            return self._rows, self._source, self._taken_at
 
-    def _scan(self, scanner: Callable) -> tuple[dict, ...]:
+    def _scan(self, source: tuple[Callable, pathlib.Path]) -> tuple[dict, ...]:
         """Caller holds ``_scan_lock``."""
-        rows = tuple(scanner(set()))
+        rows = tuple(source[0](set()))
         with self._lock:
-            self._rows, self._scanner, self._taken_at = rows, scanner, time.monotonic()
+            self._rows, self._source, self._taken_at = rows, source, time.monotonic()
         return rows
 
     def rows(self) -> tuple[dict, ...]:
-        rows, scanner, taken_at = self._current()
-        current = _discover_orphan_fits
-        if rows is not None and scanner is current:
+        rows, scanned, taken_at = self._current()
+        current = (_discover_orphan_fits, _timer_root())
+        if rows is not None and scanned == current:
             stale = time.monotonic() - taken_at > _ORPHAN_SCAN_MAX_AGE_S
             # Only one reader rescans a stale snapshot; the rest keep serving
             # it meanwhile instead of queueing behind that scan.
@@ -2671,14 +2677,14 @@ class _OrphanFitSnapshot:
         # No usable scan yet (startup, after a delete, or a swapped scanner):
         # wait for one, sharing it with every reader that arrives meanwhile.
         with self._scan_lock:
-            rows, scanner, _ = self._current()
-            if rows is not None and scanner is current:
+            rows, scanned, _ = self._current()
+            if rows is not None and scanned == current:
                 return rows
             return self._scan(current)
 
     def refresh(self) -> None:
         with self._scan_lock:
-            self._scan(_discover_orphan_fits)
+            self._scan((_discover_orphan_fits, _timer_root()))
 
     def invalidate(self) -> None:
         with self._lock:
