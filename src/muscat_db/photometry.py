@@ -23,7 +23,9 @@ This module never trusts user input for filesystem access: see
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections import Counter
+from collections.abc import Callable, Sequence
+from typing import Protocol
 from concurrent.futures import Future, TimeoutError as FutureTimeoutError
 import csv as _csv
 import datetime
@@ -177,6 +179,18 @@ MULTISITE_MODES: dict[str, tuple[str, ...]] = {
 # Backwards-compatible aliases (still imported by transit_fit.py and others).
 SINISTRO_SITES = MULTISITE_SITES["sinistro"]
 SINISTRO_MODES = MULTISITE_MODES["sinistro"]
+
+
+def allowed_sites(inst: str | None) -> tuple[str, ...]:
+    """Sites a run of *inst* may name; sinistro's for any other instrument
+    (unchanged from before the per-instrument split)."""
+    return MULTISITE_SITES.get(inst or "", SINISTRO_SITES)
+
+
+def allowed_modes(inst: str | None) -> tuple[str, ...]:
+    """Readout modes a run of *inst* may name; sinistro's for any instrument
+    without its own entry in ``MULTISITE_MODES``."""
+    return MULTISITE_MODES.get(inst or "", SINISTRO_MODES)
 
 # TELESCOP-value prefix per multi-site instrument, e.g. "1m0-05"/"0m4-06".
 # Used to reconstruct the canonical TELESCOP value from a filename's compact
@@ -1201,6 +1215,44 @@ class RunDescriptor:
     run_type: str = "full"
 
 
+class ChipRun(Protocol):
+    """What ``run_chip_labels`` reads from a run: photometry's
+    ``RunDescriptor`` and transit_fit's both provide it."""
+
+    run_id: str
+    site: str
+    telescope: str
+    mode: str
+    run_name: str
+    is_legacy: bool
+
+
+def run_chip_labels(runs: Sequence[ChipRun]) -> dict[str, str]:
+    """A distinct Run-chip label per ``run_id`` (photometry and transit-fit pages).
+
+    A run keeps its plain run name unless another listed run shares it --
+    e.g. one sinistro night reduced per telescope stores ``run_name="default"``
+    for both ``tel06-default`` and ``tel08-default`` -- in which case the name
+    is qualified by the run's site/telescope/mode ("default · 1m0-06"). Runs
+    that still collide (same name and scope) fall back to their run id, which
+    is unique and is what the ``run=`` URL parameter uses.
+    """
+    def name(r: ChipRun) -> str:
+        return "legacy" if r.is_legacy else (r.run_name or r.run_id)
+
+    def qualified(r: ChipRun) -> str:
+        scope = " ".join(p for p in (r.site, r.telescope, r.mode) if p)
+        return f"{name(r)} · {scope}" if scope else r.run_id
+
+    name_counts = Counter(name(r) for r in runs)
+    labels = {r.run_id: (qualified(r) if name_counts[name(r)] > 1 else name(r)) for r in runs}
+    label_counts = Counter(labels.values())
+    return {
+        run_id: (run_id if label_counts[label] > 1 and run_id else label)
+        for run_id, label in labels.items()
+    }
+
+
 def _read_run_meta(d: Path) -> dict:
     try:
         return json.loads((d / _RUN_META_NAME).read_text())
@@ -1524,7 +1576,7 @@ def _coord_ok(value) -> bool:
     return len(parts) <= 2 and all(_COORD_PART_RE.fullmatch(p) for p in parts)
 
 
-def forwarded_option_error(o: dict) -> str | None:
+def forwarded_option_error(o: dict, inst: str | None = None) -> str | None:
     """``"<option> <value>"`` for the first free-text option that
     ``build_command`` would forward and that is not an allowed value, else
     ``None``.
@@ -1548,9 +1600,9 @@ def forwarded_option_error(o: dict) -> str | None:
         ("ccd_trim", compact("ccd_trim"), _INTPAIR_RE.fullmatch(compact("ccd_trim"))),
         ("wcs_method", text("wcs_method"), text("wcs_method") in ("twirl", "astrometry.net")),
         ("centroid_method", text("centroid_method"), text("centroid_method") in CENTROID_METHODS),
-        ("site", text("site"), text("site").lower() in SINISTRO_SITES),
+        ("site", text("site"), text("site").lower() in allowed_sites(inst)),
         ("telescope", text("telescope"), TELESCOPE_RE.fullmatch(text("telescope"))),
-        ("mode", text("mode"), text("mode") in SINISTRO_MODES),
+        ("mode", text("mode"), text("mode") in allowed_modes(inst)),
         ("cmap", text("cmap"), text("cmap") in CMAP_CHOICES),
         ("nan_imputation_method", text("nan_imputation_method"),
          text("nan_imputation_method") in NAN_IMPUTATION_METHODS),
@@ -1745,14 +1797,16 @@ def validate_run_options(o: dict, inst: str | None = None) -> str | None:
     if (o.get("nan_imputation_method") or "linear") not in NAN_IMPUTATION_METHODS:
         return f"NaN imputation method must be one of {', '.join(NAN_IMPUTATION_METHODS)}"
     site = (o.get("site") or "").strip().lower()
-    if site and site not in SINISTRO_SITES:
-        return f"site must be one of {', '.join(SINISTRO_SITES)}"
+    sites = allowed_sites(inst)
+    if site and site not in sites:
+        return f"site must be one of {', '.join(sites)}"
     telescope = (o.get("telescope") or "").strip()
     if telescope and not TELESCOPE_RE.match(telescope):
         return "telescope id may only contain letters, digits and hyphens"
     mode = (o.get("mode") or "").strip()
-    if mode and mode not in SINISTRO_MODES:
-        return f"mode must be one of {', '.join(SINISTRO_MODES)}"
+    modes = allowed_modes(inst)
+    if mode and mode not in modes:
+        return f"mode must be one of {', '.join(modes)}"
     for key, label in (("comparison_ids", "comparison IDs"), ("avoid_comparison_ids", "avoid comparison IDs")):
         if not _all_numeric(o.get(key), _INT_ITEM_RE):
             return f"{label} must be comma-separated integers"
@@ -1768,7 +1822,7 @@ def validate_run_options(o: dict, inst: str | None = None) -> str | None:
         return "target coordinates must be 'RA Dec' in degrees or sexagesimal (e.g. 159.157968 -64.798231)"
     # build_command refuses the same values, so a run accepted here never
     # fails at launch; the checks above give the friendlier message first.
-    bad = forwarded_option_error(o)
+    bad = forwarded_option_error(o, inst)
     if bad:
         return f"invalid {bad}"
     return None
@@ -1793,7 +1847,7 @@ def build_command(
     function without ``validate_run_options`` (the fleet worker, sync_jobs).
     """
     o = normalize_run_options(options)
-    bad = forwarded_option_error(o)
+    bad = forwarded_option_error(o, inst)
     if bad:
         raise ValueError(f"refusing to build the prose command: invalid {bad}")
     args = [
