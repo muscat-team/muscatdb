@@ -2079,6 +2079,7 @@ def delete_fit(inst: str, date: str, target: str, run_id: str = "") -> dict:
                 removed += 1
             except OSError as exc:
                 logger.warning("could not delete fit run %s", rdir, exc_info=True)
+                invalidate_orphan_fits()  # rmtree may have removed part of it
                 return {"ok": False, "delete_failed": True,
                         "error": f"could not delete the run: {exc.strerror or exc}"}
     else:
@@ -2106,6 +2107,7 @@ def delete_fit(inst: str, date: str, target: str, run_id: str = "") -> dict:
                     logger.warning("could not delete %s", p, exc_info=True)
                     failed.append(p.name)
             if failed:
+                invalidate_orphan_fits()  # the other files are already gone
                 return {"ok": False, "delete_failed": True,
                         "error": f"could not delete: {', '.join(failed)}"}
 
@@ -2121,6 +2123,7 @@ def delete_fit(inst: str, date: str, target: str, run_id: str = "") -> dict:
         _FIT_JOBS.pop(job_key, None)
 
     _fit_outputs_cache.clear()
+    invalidate_orphan_fits()
 
     return {"ok": True, "count": removed}
 
@@ -2611,6 +2614,96 @@ def _discover_orphan_fits(existing: set[str]) -> list[dict]:
                         "date": date,
                     })
     return orphans
+
+
+# How often the server rescans the fit tree for fits run outside the web UI.
+# Request handlers read the last scan instead of walking the tree themselves:
+# every Jobs-page poll used to rescan it (about 1.2 s on production), and a
+# burst of polls holding every worker thread stalled the server (2026-11-07).
+# The cost is that such a fit takes up to this long to appear on the Jobs page.
+ORPHAN_SCAN_INTERVAL_S = max(5.0, float(os.environ.get("MUSCAT_ORPHAN_FIT_SCAN_S", "30")))
+# A scan older than this means the background refresh has stopped, so the next
+# reader rescans rather than serving it indefinitely.
+_ORPHAN_SCAN_MAX_AGE_S = 3 * ORPHAN_SCAN_INTERVAL_S
+
+
+class _OrphanFitSnapshot:
+    """The last scan of the fit tree, shared by every request.
+
+    A scan covers every fit on disk; callers drop the keys already in the job
+    store when they read it. The scan is tied to the scanner that produced it,
+    so swapping ``_discover_orphan_fits`` (the static-site export does this to
+    keep live runs out of the public site, and tests do it to fake the tree)
+    takes effect on the next read instead of serving the old scanner's rows.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()  # guards the three fields below
+        self._scan_lock = threading.Lock()  # one scan at a time
+        self._rows: tuple[dict, ...] | None = None
+        self._scanner: Callable | None = None
+        self._taken_at = 0.0
+
+    def _current(self) -> tuple[tuple[dict, ...] | None, Callable | None, float]:
+        with self._lock:
+            return self._rows, self._scanner, self._taken_at
+
+    def _scan(self, scanner: Callable) -> tuple[dict, ...]:
+        """Caller holds ``_scan_lock``."""
+        rows = tuple(scanner(set()))
+        with self._lock:
+            self._rows, self._scanner, self._taken_at = rows, scanner, time.monotonic()
+        return rows
+
+    def rows(self) -> tuple[dict, ...]:
+        rows, scanner, taken_at = self._current()
+        current = _discover_orphan_fits
+        if rows is not None and scanner is current:
+            stale = time.monotonic() - taken_at > _ORPHAN_SCAN_MAX_AGE_S
+            # Only one reader rescans a stale snapshot; the rest keep serving
+            # it meanwhile instead of queueing behind that scan.
+            if stale and self._scan_lock.acquire(blocking=False):
+                try:
+                    return self._scan(current)
+                finally:
+                    self._scan_lock.release()
+            return rows
+        # No usable scan yet (startup, after a delete, or a swapped scanner):
+        # wait for one, sharing it with every reader that arrives meanwhile.
+        with self._scan_lock:
+            rows, scanner, _ = self._current()
+            if rows is not None and scanner is current:
+                return rows
+            return self._scan(current)
+
+    def refresh(self) -> None:
+        with self._scan_lock:
+            self._scan(_discover_orphan_fits)
+
+    def invalidate(self) -> None:
+        with self._lock:
+            self._rows = None
+
+
+_ORPHAN_FITS = _OrphanFitSnapshot()
+
+
+def orphan_fits(existing: set[str]) -> list[dict]:
+    """Fits on disk that are not in the job store (*existing*), as synthetic
+    ``done`` job rows, from the last scan of the fit tree. Each call returns
+    fresh copies, so a caller may annotate them freely."""
+    return [dict(r) for r in _ORPHAN_FITS.rows() if r["key"] not in existing]
+
+
+def refresh_orphan_fits() -> None:
+    """Rescan the fit tree now. The web server runs this in the background
+    every ``ORPHAN_SCAN_INTERVAL_S``."""
+    _ORPHAN_FITS.refresh()
+
+
+def invalidate_orphan_fits() -> None:
+    """Drop the last scan so the next read rescans, e.g. after deleting a fit."""
+    _ORPHAN_FITS.invalidate()
 
 
 def _detect_process_running(rdir: pathlib.Path) -> bool:

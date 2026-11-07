@@ -130,6 +130,22 @@ ENV_VARS: tuple[EnvVar, ...] = (
     ),
     EnvVar("MUSCAT_JOB_RECONCILE_INTERVAL_S", "2", "Server-side job reconciliation cadence (seconds)"),
     EnvVar(
+        "MUSCAT_ORPHAN_FIT_SCAN_S", "30",
+        "How often the server rescans the transit-fit tree for fits run outside "
+        "the web UI (seconds, minimum 5); such a fit takes up to this long to "
+        "appear on the Jobs page",
+    ),
+    EnvVar(
+        "MUSCAT_SLOW_REQUEST_S", "2",
+        "Requests slower than this (seconds) are logged, and ones still waiting "
+        "for an answer after it are reported while stuck",
+    ),
+    EnvVar(
+        "MUSCAT_STACK_DUMP_PATH", "",
+        "File that `kill -USR1 <server pid>` appends every thread's stack to "
+        "(empty: the server's stderr)",
+    ),
+    EnvVar(
         "MUSCAT_JOB_HEARTBEAT_STALE_S", "30",
         "Staleness window before a running job with no in-memory tracker in this "
         "process, but a fresh heartbeat from another instance, is left alone "

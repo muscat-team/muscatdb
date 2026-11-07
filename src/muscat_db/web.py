@@ -221,7 +221,8 @@ from muscat_db.database import (
 )
 from muscat_db.job_store import get_job_store, notify_enabled, set_owner, uses_shared_control_plane, wait_for_work_or_sleep
 from muscat_db.target_refresh import FinishedJobWatcher, refresh_worker_finished_targets
-from muscat_db.cache import LRUCache
+from muscat_db.cache import LRUCache, TTLCache
+from muscat_db import request_watch
 from muscat_db.instruments import INSTRUMENTS
 
 logger = logging.getLogger(__name__)
@@ -324,6 +325,19 @@ def _resolve_stale_cancelling() -> None:
         print(f"[startup] resolved {n} stale 'cancelling' job row(s) to 'cancelled'")
 
 
+async def _orphan_fit_scan_loop() -> None:
+    """Rescan the fit tree for fits run outside the web UI, so request
+    handlers read the last scan instead of each walking the tree."""
+    while True:
+        try:
+            await asyncio.to_thread(fit.refresh_orphan_fits)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("background scan for fits run outside the web UI failed")
+        await asyncio.sleep(fit.ORPHAN_SCAN_INTERVAL_S)
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     """Create the database and schema on startup if they don't exist."""
@@ -358,7 +372,18 @@ async def _lifespan(app: FastAPI):
     # launches collide with a standalone `muscatdb worker` process's.
     set_owner("web")
     _resolve_stale_cancelling()
+    request_watch.configure_logging()
+    try:
+        if request_watch.install_stack_dump():
+            print(f"[startup] `kill -USR1 {os.getpid()}` dumps every thread's stack")
+    except OSError as exc:
+        print(f"[startup] WARNING: thread stack dumps unavailable: {exc}")
     reconcile_task = asyncio.create_task(_job_reconciliation_loop())
+    background = [
+        reconcile_task,
+        asyncio.create_task(_orphan_fit_scan_loop()),
+        asyncio.create_task(request_watch.watch_loop()),
+    ]
     observation_monitor = None
     if os.environ.get("MUSCAT_LCO_MONITOR_ENABLED", "1") == "1":
         observation_monitor = lco_monitor.ObservationMonitor(db)
@@ -367,11 +392,13 @@ async def _lifespan(app: FastAPI):
     try:
         yield
     finally:
-        reconcile_task.cancel()
-        try:
-            await reconcile_task
-        except asyncio.CancelledError:
-            pass
+        for task in background:
+            task.cancel()
+        for task in background:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
         if observation_monitor is not None:
             observation_monitor.stop()
         await http_client.shutdown()
@@ -383,6 +410,8 @@ sio_app = socketio.ASGIApp(sio, app)
 # The targets page is ~2.8 MB of highly repetitive HTML; gzip shrinks it ~16x,
 # which is the dominant cost when serving over an SSH port-forward tunnel.
 app.add_middleware(GZipMiddleware, minimum_size=1000)
+# Outermost, so its timing covers every other middleware as well.
+app.add_middleware(request_watch.RequestWatch)
 
 from fastapi import APIRouter
 from muscat_db.directory_listing import ListingStaticFiles
@@ -723,8 +752,12 @@ if not _mount_muscat2_quicklook(app, MUSCAT2_HTML_DIR):
 
 
 @app.get("/healthz", include_in_schema=False)
-def healthz():
-    """Minimal public liveness probe; it deliberately exposes no app state."""
+async def healthz():
+    """Minimal public liveness probe; it deliberately exposes no app state.
+
+    ``async`` so it answers on the event loop: as a plain ``def`` it queued
+    for a worker thread, and when slow requests held them all it timed out
+    although the server was still running (2026-11-07)."""
     return {"ok": True}
 
 jinja = Environment(
@@ -6893,7 +6926,7 @@ def api_ephemeris_targets():
         fit.sync_jobs()
         all_jobs = get_job_store().all()
         existing_keys = {j["key"] for j in all_jobs if j["type"] == "transit_fit"}
-        orphan_fits = fit._discover_orphan_fits(existing_keys)
+        orphan_fits = fit.orphan_fits(existing_keys)
         all_jobs.extend(orphan_fits)
         all_jobs = _visible_jobs(all_jobs)
         completed = [j for j in all_jobs if j["type"] == "transit_fit" and j["state"] == "done"]
@@ -7060,7 +7093,7 @@ def api_ephemeris_target_info(target: str, request: Request):
         fit.sync_jobs()
         all_jobs = get_job_store().all()
         existing_keys = {j["key"] for j in all_jobs if j["type"] == "transit_fit"}
-        orphan_fits = fit._discover_orphan_fits(existing_keys)
+        orphan_fits = fit.orphan_fits(existing_keys)
         all_jobs.extend(orphan_fits)
         all_jobs = _visible_jobs(all_jobs)
 
@@ -7361,7 +7394,7 @@ def api_ephemeris_calculate(payload: dict = Body(...)):
         fit.sync_jobs()
         all_jobs = get_job_store().all()
         existing_keys = {j["key"] for j in all_jobs if j["type"] == "transit_fit"}
-        orphan_fits = fit._discover_orphan_fits(existing_keys)
+        orphan_fits = fit.orphan_fits(existing_keys)
         all_jobs.extend(orphan_fits)
         all_jobs = _visible_jobs(all_jobs)
 
@@ -7768,16 +7801,36 @@ def jobs_lco_archive_ingest_date(payload: dict = Body(...)):
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
 
 
+# Polls of the same job list that overlap share one computation instead of
+# each building it: many open Jobs tabs (or tabs still running an older,
+# non-waiting poller) once held every worker thread this way (2026-11-07).
+# ttl=0 keeps nothing afterwards, so a poll that starts after a job changes
+# always sees the change.
+_JOB_ROWS_IN_FLIGHT = TTLCache(ttl=0.0, maxsize=8)
+
+
+@_JOB_ROWS_IN_FLIGHT
+def _shared_job_rows(collect_rows: Callable[[], list[dict]], _scanner: Callable) -> tuple[dict, ...]:
+    """Job-store rows plus fits run outside the web UI, before per-viewer
+    filtering. The row source and the fit scanner are arguments only so that
+    swapping either (tests, the static-site export) gets its own computation
+    rather than sharing one built from the other."""
+    rows = collect_rows()
+    # Fits completed on disk outside the web UI, from the background scan.
+    existing_keys = {j["key"] for j in rows if j["type"] == "transit_fit"}
+    return (*rows, *fit.orphan_fits(existing_keys))
+
+
+def _all_job_rows() -> list[dict]:
+    """Every job row, as copies the caller may annotate without affecting the
+    other requests sharing the same computation."""
+    rows = _shared_job_rows(_jobs_with_lco_archive_rows, fit._discover_orphan_fits)
+    return [dict(row) for row in rows]
+
+
 @app.get("/jobs", response_class=HTMLResponse)
 def jobs_page():
-    all_jobs = _jobs_with_lco_archive_rows()
-
-    # Discover fits completed on-disk outside the web UI.
-    existing_keys = {j["key"] for j in all_jobs if j["type"] == "transit_fit"}
-    orphan_fits = fit._discover_orphan_fits(existing_keys)
-    if orphan_fits:
-        all_jobs.extend(orphan_fits)
-    all_jobs = _visible_jobs(all_jobs)
+    all_jobs = _visible_jobs(_all_job_rows())
     all_jobs.sort(key=lambda j: j.get("started_at", 0), reverse=True)
 
     stored_keys = _stored_job_keys()
@@ -7824,13 +7877,7 @@ def jobs_status(active_only: bool = False, watch: Annotated[list[str] | None, Qu
         }
         return {"active": list(active_by_key.values())}
 
-    all_jobs = _jobs_with_lco_archive_rows()
-
-    # Discover fits completed on-disk outside the web UI.
-    existing_keys = {j["key"] for j in all_jobs if j["type"] == "transit_fit"}
-    orphan_fits = fit._discover_orphan_fits(existing_keys)
-    if orphan_fits:
-        all_jobs.extend(orphan_fits)
+    all_jobs = _all_job_rows()
 
     # Each viewer supplies its live row keys. Repeated polls (and different
     # server workers) can then return the same completion independently, without
@@ -8804,7 +8851,7 @@ def _transit_fit_available() -> Callable[[str, str, str, str], bool]:
         fit.sync_jobs()
         jobs = get_job_store().all()
         existing_keys = {j["key"] for j in jobs if j["type"] == "transit_fit"}
-        jobs.extend(fit._discover_orphan_fits(existing_keys))
+        jobs.extend(fit.orphan_fits(existing_keys))
     keys = {
         (j["instrument"], j["obsdate"], _normalize_target_name(j["target"], norm_overrides), j.get("run_id") or "")
         for j in jobs
