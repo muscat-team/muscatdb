@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from email.utils import parsedate_to_datetime
 from functools import lru_cache
+import hashlib
 import json
 import logging
 import math
@@ -24,11 +25,20 @@ logger = logging.getLogger(__name__)
 DAY = 86400
 # One bad header must not park every profile's archive traffic indefinitely.
 MAX_RETRY_AFTER_S = DAY
+# A shared cooldown stops dev, staging, production and every worker at once, so
+# one client's Retry-After may park them only briefly. Peers re-probe after it,
+# and a throttle that is still real publishes a fresh cooldown.
+MAX_SHARED_COOLDOWN_S = 900
+# A release's policy binds every peer only while that release is still running.
+# A branch with lower limits stops tightening production this long after it stops.
+POLICY_TTL_S = 3600
 _LOCK = 389404
 _CHECK = ContextVar("lco_request_check", default=None)
 # Deliberately aggregates all identities, leaving headroom under LCO's per-user
-# allowance. Staging and production run different releases between a merge and
-# a release, so a difference tightens to the stricter value (see _strictest).
+# allowance: LCO does not say whether it counts per account, token or IP, and one
+# aggregate budget is safe under all three. Staging and production run different
+# releases between a merge and a release, so peers enforce the strictest policy
+# among recently active releases (see Coordinator._effective_policy).
 _POLICY = {"api_interval": 1.0, "api_daily": 4000, "anonymous_daily": 500,
            "storage_interval": 0.25}
 
@@ -51,10 +61,16 @@ def _strictest(stored, local):
     return merged
 
 
-def _error(message, status=503, retry_after=60):
+def _error(message, status=503, retry_after=None):
+    """Only a budget or cooldown refusal carries ``retry_after``.
+
+    A missing DSN or an unreachable coordinator is not a rate limit: waiting
+    cannot fix it, so callers must fail at once instead of sleeping on it.
+    """
     from muscat_db.lco import LcoError
 
-    return LcoError(message, status=status, retry_after=math.ceil(retry_after))
+    return LcoError(message, status=status,
+                    retry_after=None if retry_after is None else math.ceil(retry_after))
 
 
 def retry_after_seconds(value, now):
@@ -125,6 +141,9 @@ class Coordinator:
                     conn.execute("""CREATE TABLE IF NOT EXISTS lco_api_requests (
                         at double precision NOT NULL, anonymous boolean NOT NULL)""")
                     conn.execute("CREATE INDEX IF NOT EXISTS lco_api_requests_at ON lco_api_requests(at)")
+                    conn.execute("""CREATE TABLE IF NOT EXISTS lco_rate_policies (
+                        digest text PRIMARY KEY, policy jsonb NOT NULL,
+                        seen_at double precision NOT NULL)""")
                 yield conn
             self._ready = True
         except Exception as exc:
@@ -133,17 +152,40 @@ class Coordinator:
             logger.warning("LCO request coordinator failed: %s", type(exc).__name__)
             raise _error("Shared LCO request coordinator unavailable") from None
 
-    def _state(self, conn, scope):
+    def _effective_policy(self, conn, now):
+        """The strictest policy among releases seen within ``POLICY_TTL_S``.
+
+        This process's own policy always applies. Another release's tightening
+        lapses an hour after its last request, so a stopped branch or laptop
+        cannot lower production's limits permanently.
+        """
+        own = json.dumps(self._policy, sort_keys=True)
+        conn.execute(
+            "INSERT INTO lco_rate_policies(digest, policy, seen_at) VALUES (%s, %s, %s) "
+            "ON CONFLICT (digest) DO UPDATE SET seen_at=greatest(lco_rate_policies.seen_at, excluded.seen_at)",
+            (hashlib.sha256(own.encode()).hexdigest(), own, now))
+        conn.execute("DELETE FROM lco_rate_policies WHERE seen_at < %s", (now - POLICY_TTL_S,))
+        policy = dict(self._policy)
+        for (stored,) in conn.execute("SELECT policy FROM lco_rate_policies ORDER BY digest").fetchall():
+            policy = _strictest(stored, policy)
+        return policy
+
+    def _state(self, conn, scope, now):
         if scope not in {"archive", "storage"}:
             raise ValueError("unknown request scope")
+        policy = self._effective_policy(conn, now)
         conn.execute("INSERT INTO lco_rate_state(scope, policy) VALUES (%s, %s) ON CONFLICT DO NOTHING",
-                     (scope, json.dumps(self._policy)))
+                     (scope, json.dumps(policy)))
         stored, next_at, cooldown = conn.execute(
             "SELECT policy, next_at, cooldown_until FROM lco_rate_state WHERE scope=%s", (scope,)
         ).fetchone()
-        policy = _strictest(stored, self._policy)
         if policy != stored:
+            # Informational only: the effective policy is recomputed every time.
             conn.execute("UPDATE lco_rate_state SET policy=%s WHERE scope=%s", (json.dumps(policy), scope))
+        if cooldown > now + MAX_SHARED_COOLDOWN_S:
+            # A longer cooldown stored by an older release, or by hand.
+            cooldown = now + MAX_SHARED_COOLDOWN_S
+            conn.execute("UPDATE lco_rate_state SET cooldown_until=%s WHERE scope=%s", (cooldown, scope))
         return policy, next_at, cooldown
 
     def reserve(self, scope, *, anonymous=False):
@@ -153,8 +195,8 @@ class Coordinator:
         still count. No future permits are issued ahead of a shared cooldown.
         """
         with self._transaction() as conn:
-            policy, next_at, cooldown = self._state(conn, scope)
             now = self._now(conn)
+            policy, next_at, cooldown = self._state(conn, scope, now)
             ready = max(next_at, cooldown)
             if scope == "archive":
                 conn.execute("DELETE FROM lco_api_requests WHERE at <= %s", (now - DAY,))
@@ -176,9 +218,13 @@ class Coordinator:
 
     def cooldown(self, scope, header):
         with self._transaction() as conn:
-            self._state(conn, scope)
             now = self._now(conn)
+            self._state(conn, scope, now)
             seconds = retry_after_seconds(header, now)
+            if seconds > MAX_SHARED_COOLDOWN_S:
+                logger.warning("Shortened a shared LCO %s cooldown of %.0f s to %d s",
+                               scope, seconds, MAX_SHARED_COOLDOWN_S)
+                seconds = MAX_SHARED_COOLDOWN_S
             until = conn.execute(
                 "UPDATE lco_rate_state SET cooldown_until=greatest(cooldown_until,%s) "
                 "WHERE scope=%s RETURNING cooldown_until", (now + seconds, scope)

@@ -11,6 +11,7 @@ every hop, redirects included, is still validated and admitted one at a time.
 from __future__ import annotations
 
 import email.message
+import logging
 import math
 import os
 import threading
@@ -20,6 +21,10 @@ import urllib.parse
 import httpx
 
 from muscat_db import lco_rate
+
+# httpx logs every request URL at INFO, and archive frame URLs are signed. Keep
+# a future root-logger change from writing those signatures into logs.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # Covers the local path's eight frame threads with room for a redirect hop.
 _POOL_SIZE = 16

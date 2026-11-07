@@ -196,7 +196,7 @@ ENV_VARS: tuple[EnvVar, ...] = (
     EnvVar("MUSCAT_LCO_DOWNLOAD_SPOOL", None,
            "Absolute shared credential spool for PostgreSQL archive downloads (service owner, mode 700)."),
     EnvVar("MUSCAT_LCO_RATE_DSN", None,
-           "Shared PostgreSQL archive request limiter, identical for web/monitor/workers and dev/prod; required for archive HTTP requests.",
+           "Shared PostgreSQL archive request limiter, identical for web/monitor/workers/cron and dev/prod; required for archive HTTP requests (missing or unreachable fails at once with 503).",
            secret=True),
     EnvVar("MUSCAT_LCO_ARCHIVE_DOWNLOAD_WORKERS", "1", "Concurrent local LCO download jobs (SQLite only)"),
     EnvVar("MUSCAT_LCO_ARCHIVE_DOWNLOAD_FRAME_WORKERS", "8", "Frame workers per local download (SQLite only)"),

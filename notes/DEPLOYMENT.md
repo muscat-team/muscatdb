@@ -1283,8 +1283,10 @@ does not itself install/restart units or provision directories.
 reaches production, within about 5 minutes, and neither provisions anything.
 
 1. Before merging to `test`: create the limiter database and put
-   `MUSCAT_LCO_RATE_DSN` in the staging web environment and `pg.env`. Without it,
-   every archive request returns 503 as soon as the code deploys.
+   `MUSCAT_LCO_RATE_DSN` in the staging web environment, `pg.env`, and the
+   deploy checkout's `.env` (cron jobs such as `lco-sync` do not inherit the web
+   service's environment, but read that `.env`). Without it, every archive
+   request returns 503 as soon as the code deploys.
 2. Before the release PR: do the same for the production web environment.
 3. Apply the worker units and provision the spool for the profile.
 4. Set `MUSCAT_LCO_FLEET_DOWNLOADS=1` for that web process and restart it. Run the
@@ -1324,7 +1326,9 @@ when changing the queue's profile/database. Export that same secret into each
 web service environment as well. The generated `web-env` output and systemd
 units intentionally contain no DSN. `MUSCAT_LCO_RATE_DSN` does not fall back to
 the queue DSN: absent credentials, missing dependencies, unreachable PostgreSQL
-or a malformed stored policy fail closed with a safe HTTP 503. Science workers and
+or a malformed stored policy fail closed with a safe HTTP 503, immediately and
+without a `Retry-After`: these are configuration faults or outages, not rate
+limits, so no caller sleeps on them. Science workers and
 Observation Portal scheduling remain usable; archive searches/downloads require
 this configuration. No production database or credentials were provisioned as
 part of this change.
@@ -1336,7 +1340,13 @@ headroom below both conflicting LCO publications: the [archive guide lists
 5,000 authenticated / 3,500 anonymous requests per day](https://lco.global/documentation/archive-documentation/),
 while the [developer reference lists 50,000 / 1,000 per 24 hours](https://developers.lco.global/#archive)
 (checked 2026-11-05). We use the lower limit for each identity class, rather than
-assuming which upstream quota is enforced. All archive metadata searches,
+assuming which upstream quota is enforced. Neither page says whether LCO counts
+the allowance per account, per API token or per IP address, nor whether the day
+is rolling or calendar (rechecked 2026-11-07); "all logged in users are limited
+to" suggests per user. One aggregate budget is the only choice that stays inside
+the limit under all three, so it is shared by every user, the monitor and the
+archive panel. If LCO confirms per-account counting, the budget can be split per
+identity. All archive metadata searches,
 pagination, monitor queries and worker URL refreshes use this ledger; every
 redirect hop is charged according to its destination. Failed HTTP requests and
 abandoned permits still count. A transaction/advisory lock and PostgreSQL clock
@@ -1344,18 +1354,28 @@ serialize admissions; no midnight reset or process restart replenishes the
 budget. Only fixed scope names, timestamps, policy numbers and an anonymous
 flag are stored, never tokens, token hashes, users, URLs or signed query strings.
 Staging and production run different releases between a merge and a release, so
-each process enforces the stricter of its own policy and the stored one and writes
-back any tightening. Lowering a limit in code therefore takes effect everywhere as
-soon as one release runs it. Raising one takes both the code change and a manual
-update of `policy` in `lco_rate_state`, after every process runs the new code.
+each process records its policy in `lco_rate_policies` with a last-seen time, and
+every process enforces the strictest policy seen within the last hour
+(`POLICY_TTL_S`), never laxer than its own. Lowering a limit in code therefore
+takes effect everywhere as soon as one release runs it, and lasts only while that
+release keeps running: a branch, dev server or laptop with lower limits stops
+tightening production an hour after its last archive request. Raising a limit
+takes effect an hour after the last process running the old code stops. No
+manual update is needed in either direction. The `policy` column of
+`lco_rate_state` only shows the policy last applied.
 
 S3/object GETs have a separate shared four-starts-per-second pace and do not
 consume the archive API daily allowance. Existing job/frame concurrency ceilings
 still apply. API and storage scopes each propagate HTTP 429 cooldowns; storage
 503s also trigger cooldowns. `Retry-After` delta seconds and HTTP dates are
 honored using database time, with a 60-second fallback for missing/malformed
-values, a one-second minimum and a one-day maximum. Longer existing cooldowns are
-never shortened. To clear one by hand, run
+values and a one-second minimum. A shared cooldown lasts at most 15 minutes
+(`MAX_SHARED_COOLDOWN_S`) whatever the header says, because it stops dev,
+staging, production and every worker at once: peers re-probe after it, and a
+throttle that is still real publishes a new cooldown. A longer stored cooldown,
+left by an older release or set by hand, is shortened to 15 minutes from the next
+admission. Otherwise a later, shorter `Retry-After` never shortens an existing
+cooldown. To clear one by hand, run
 `UPDATE lco_rate_state SET cooldown_until = 0 WHERE scope = 'archive'` (or
 `'storage'`) in the limiter database.
 Peers recheck admission after the wait, so recovery is paced. Already-started

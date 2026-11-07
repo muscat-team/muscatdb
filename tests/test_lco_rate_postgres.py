@@ -20,7 +20,7 @@ def rate(monkeypatch):
     monkeypatch.setenv("MUSCAT_LCO_RATE_DSN", _DSN)
     lco_rate._coordinator.cache_clear()
     with psycopg.connect(_DSN) as conn:
-        conn.execute("DROP TABLE IF EXISTS lco_api_requests, lco_rate_state")
+        conn.execute("DROP TABLE IF EXISTS lco_api_requests, lco_rate_state, lco_rate_policies")
     now = [86399.0]
     monkeypatch.setattr(lco_rate.Coordinator, "_now", staticmethod(lambda conn: now[0]))
     yield lco_rate.Coordinator(_DSN), now
@@ -165,18 +165,56 @@ def test_stricter_release_tightens_every_running_version(rate):
     assert coordinator.reserve("archive") > 0
 
 
-def test_malformed_stored_policy_fails_closed(rate):
+def test_stopped_release_stops_tightening_after_policy_ttl(rate):
+    coordinator, now = rate
+    assert coordinator.reserve("archive") == 0
+    strict = lco_rate.Coordinator(_DSN, policy=dict(lco_rate._POLICY, api_interval=600))
+    now[0] += 1
+    assert strict.reserve("archive") == pytest.approx(0)
+    now[0] += 1
+    assert coordinator.reserve("archive") == pytest.approx(599)  # still active: binds everyone
+    # The strict branch stops. Once its last request is older than the TTL,
+    # production paces by its own policy again; nothing permanent remains.
+    now[0] = now[0] + lco_rate.POLICY_TTL_S
+    assert coordinator.reserve("archive") == 0
+    now[0] += 1
+    assert coordinator.reserve("archive") == 0
+
+
+def test_malformed_recorded_policy_fails_closed(rate):
     import psycopg
 
     coordinator, _ = rate
     assert coordinator.reserve("archive") == 0
     with psycopg.connect(_DSN) as conn:
-        conn.execute("UPDATE lco_rate_state SET policy = '{\"api_daily\": \"oops\"}'")
+        conn.execute("UPDATE lco_rate_policies SET policy = '{\"api_daily\": \"oops\"}'")
     with pytest.raises(lco.LcoError) as error:
         coordinator.reserve("archive")
     assert error.value.status == 503
+    assert error.value.retry_after is None
 
 
 def test_absurd_retry_after_is_persisted_clamped(rate):
     coordinator, _ = rate
-    assert coordinator.cooldown("archive", "99999999999") == lco_rate.MAX_RETRY_AFTER_S
+    assert coordinator.cooldown("archive", "99999999999") == lco_rate.MAX_SHARED_COOLDOWN_S
+
+
+def test_one_day_retry_after_parks_peers_only_briefly(rate):
+    coordinator, now = rate
+    peer = lco_rate.Coordinator(_DSN)
+    assert coordinator.cooldown("archive", "86400") == lco_rate.MAX_SHARED_COOLDOWN_S
+    assert peer.reserve("archive") == lco_rate.MAX_SHARED_COOLDOWN_S
+    now[0] += lco_rate.MAX_SHARED_COOLDOWN_S
+    assert peer.reserve("archive") == 0  # re-probe; a real throttle sets a new one
+
+
+def test_longer_stored_cooldown_is_shortened(rate):
+    import psycopg
+
+    coordinator, now = rate
+    assert coordinator.reserve("archive") == 0
+    with psycopg.connect(_DSN) as conn:  # left by an older release or by hand
+        conn.execute("UPDATE lco_rate_state SET cooldown_until = %s", (now[0] + 86400,))
+    assert coordinator.reserve("archive") == lco_rate.MAX_SHARED_COOLDOWN_S
+    now[0] += lco_rate.MAX_SHARED_COOLDOWN_S
+    assert coordinator.reserve("archive") == 0

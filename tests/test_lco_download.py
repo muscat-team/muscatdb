@@ -413,3 +413,22 @@ def test_long_admission_wait_returns_to_the_caller(monkeypatch):
     monkeypatch.setattr(lco.time, "sleep", sleeps.append)
     assert lco._download_frame_with_retry({"filename": "f"})["retry_after"] == 3600
     assert sleeps == []
+
+
+@pytest.mark.parametrize("dsn", ["", "postgresql://user:secret@127.0.0.1:1/none"])
+def test_missing_or_unreachable_coordinator_fails_the_frame_at_once(monkeypatch, tmp_path, dsn):
+    # Not a rate limit: no retry_after, so the frame is not slept on 5 x 60 s.
+    monkeypatch.setenv("MUSCAT_LCO_RATE_DSN", dsn)
+    lco_rate._coordinator.cache_clear()
+    monkeypatch.setattr(lco, "frame_destination", lambda frame: ("muscat3", "date", tmp_path / "frame.fits"))
+    monkeypatch.setattr(lco, "_ARCHIVE_DOWNLOAD_FRAME_RETRIES", 3)
+    sleeps = []
+    monkeypatch.setattr(lco.time, "sleep", sleeps.append)
+    frame = {"filename": "frame.fits", "url": "https://archive-lco-global.s3.amazonaws.com/frame.fits.fz"}
+    result = lco._download_frame_with_retry(frame)
+    lco_rate._coordinator.cache_clear()
+    assert result["status"] == "error"
+    assert "coordinator" in result["error"]
+    assert "retry_after" not in result
+    assert sleeps == []
+    assert "secret" not in json.dumps(result)

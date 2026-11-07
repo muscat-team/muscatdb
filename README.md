@@ -327,6 +327,10 @@ outage cannot block the rebuild:
 30 17 * * * cd $MUSCATDB_ROOT && uv run muscat-db lco-sync KEY2026B-001 --user <name> --no-ingest >> $MUSCATDB_ROOT/logs/lco-sync.log 2>&1; bash deploy/nightly.sh run
 ```
 
+Cron does not inherit the web service's environment. `lco-sync` reads
+`MUSCAT_LCO_RATE_DSN` from the checkout's `.env` (found from the `cd` above), so
+put it there as well; without it the archive request fails at once with 503.
+
 - **Whole nights.** The unit of work is a dataset: one instrument night (the
   `<Instrument>/<DAY-OBS>` directory). A night is selected when any of its
   frames has a DATE_OBS in the window, and it is then synced whole, even when

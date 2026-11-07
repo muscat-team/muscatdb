@@ -108,6 +108,7 @@ def test_no_fallback_to_profile_database(monkeypatch):
     with pytest.raises(lco.LcoError) as error:
         lco_rate.acquire("archive")
     assert error.value.status == 503
+    assert error.value.retry_after is None  # configuration, not a rate limit
     assert "secret" not in str(error.value)
 
 
@@ -119,6 +120,7 @@ def test_unavailable_coordinator_does_not_leak_dsn(monkeypatch):
     with pytest.raises(lco.LcoError) as error:
         lco_rate.Coordinator("private-dsn").reserve("archive")
     assert error.value.status == 503
+    assert error.value.retry_after is None  # an outage is not a rate limit
     assert "password" not in str(error.value)
     assert error.value.__suppress_context__
 
@@ -313,3 +315,12 @@ def test_http_date_wait_uses_reference_clock():
 def test_policy_value_added_by_a_newer_release_is_adopted():
     assert lco_rate._strictest({"api_daily": 4000}, {"api_daily": 4000, "storage_interval": 0.25}) == {
         "api_daily": 4000, "storage_interval": 0.25}
+
+
+def test_signed_urls_never_reach_logs_through_httpx():
+    import logging
+
+    from muscat_db import lco_transport  # noqa: F401  (import sets the level)
+
+    # Its own level, so a root logger lowered to INFO still drops httpx URLs.
+    assert logging.getLogger("httpx").level == logging.WARNING
