@@ -25,7 +25,16 @@ import yaml
 
 from muscat_db import jobs, database
 from muscat_db._optimize_helper import DONE_MARKER as _OPTIMIZE_DONE_MARKER
-from muscat_db.job_store import current_instance_id, current_owner, get_job_store
+from muscat_db.job_store import (
+    abandon_claimed_launch,
+    begin_claimed_launch,
+    current_instance_id,
+    current_owner,
+    finish_claimed_launch,
+    get_job_store,
+    is_launching,
+    mark_claimed_launch,
+)
 from muscat_db.job_limits import JobLimitExceeded, claim_caps, claim_caps_for_row, enqueue_caps, full_job_cap, limit_refusal, params_with_running_cap
 from muscat_db import __meta__, __muscatdb_version__, __version__
 from muscat_db.instruments import INSTRUMENTS
@@ -1771,9 +1780,19 @@ def start_fit(
 
         # Claim a cross-process concurrency slot for full jobs (test jobs are
         # capped above instead). Not yet claimed here just means queue below.
+        # The claim registers the running row in the same transaction, so a
+        # concurrent reconcile_slots never sees the slot without it (#325).
         claimed_slot = False
+        launch_row = {
+            "type_": "transit_fit", "inst": inst, "date": date, "target": target,
+            "run_id": run_id, "run_type": run_type, "params": params_json,
+            "run_name": run_name, "user_name": user_name, "started_at": time.time(),
+        }
+        previous = begin_claimed_launch(get_job_store(), launch_row) if run_type == "full" else None
         if run_type == "full":
-            claimed_slot = get_job_store().claim_slot("transit_fit", key, _MAX_FULL_JOBS, **claim_caps(user_name))
+            claimed_slot = get_job_store().claim_slot("transit_fit", key, _MAX_FULL_JOBS, running_row=launch_row, **claim_caps(user_name))
+            if claimed_slot:
+                mark_claimed_launch(launch_row)  # under _FIT_LOCK, so sync_jobs skips it until registered
         at_capacity = run_type == "full" and not claimed_slot
 
         # Queue full jobs when at capacity
@@ -1795,80 +1814,89 @@ def start_fit(
                 return {"ok": False, "error": jobs.server_fault("The job could not be queued because the job database is not writable", exc)}
             return {"ok": True, "key": key, "queued": True, "run_id": run_id}
 
-    # Working directory
-    rdir.mkdir(parents=True, exist_ok=True)
+    try:
+        # Working directory
+        rdir.mkdir(parents=True, exist_ok=True)
 
-    # Preserve existing products so timer can reuse them when clobber is false.
-    # When overwrite is selected, fit.yaml sets clobber=true and timer owns the
-    # invalidation/replacement of its cached results.
-    # Full fits always clobber — otherwise timer reuses the cached test-run
-    # trace (20 draws) and exits immediately, misleading the user into thinking
-    # their full-fit request was silently ignored.
-    narrowband_aliases = _write_fit_inputs(
-        rdir, inst, date, target, csvs, options,
-        site=site, telescope=telescope, mode=mode, run_name=run_name, run_id=run_id,
-        run_type=run_type)
-    _write_fit_product(rdir, inst, date, target, csvs, options, test_run, user_name)
+        # Preserve existing products so timer can reuse them when clobber is false.
+        # When overwrite is selected, fit.yaml sets clobber=true and timer owns the
+        # invalidation/replacement of its cached results.
+        # Full fits always clobber — otherwise timer reuses the cached test-run
+        # trace (20 draws) and exits immediately, misleading the user into thinking
+        # their full-fit request was silently ignored.
+        narrowband_aliases = _write_fit_inputs(
+            rdir, inst, date, target, csvs, options,
+            site=site, telescope=telescope, mode=mode, run_name=run_name, run_id=run_id,
+            run_type=run_type)
+        _write_fit_product(rdir, inst, date, target, csvs, options, test_run, user_name)
 
-    # Clear cached outputs so the next page load reads fresh results from disk.
-    _fit_outputs_cache.clear()
+        # Clear cached outputs so the next page load reads fresh results from disk.
+        _fit_outputs_cache.clear()
 
-    # Launch process: timer-fit for a full run, the optimize-only helper
-    # (no MCMC) for a test run.
-    cmd = _fit_command(rdir, run_type)
-    log_path = rdir / "timer-fit.log"
-    logf = open(log_path, "w")
-    _write_log_banner(logf, cmd, options, narrowband_aliases)
-    logf.flush()
+        # Launch process: timer-fit for a full run, the optimize-only helper
+        # (no MCMC) for a test run.
+        cmd = _fit_command(rdir, run_type)
+        log_path = rdir / "timer-fit.log"
+        logf = open(log_path, "w")
+        _write_log_banner(logf, cmd, options, narrowband_aliases)
+        logf.flush()
+
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(rdir),
+                stdout=logf,
+                stderr=subprocess.STDOUT,
+                text=True,
+                start_new_session=True,
+                # Core pinning (architecture issue #51, 2.4): no-op unless
+                # MUSCAT_JOB_MAX_THREADS is configured.
+                env={**os.environ, **jobs.core_pinning_env()},
+            )
+            try:
+                with open(rdir / "timer-fit.pid", "w") as pidf:
+                    pidf.write(str(proc.pid))
+            except Exception:
+                logger.debug("failed to write timer-fit.pid in %s", rdir, exc_info=True)
+        except (FileNotFoundError, OSError) as exc:
+            if claimed_slot:
+                abandon_claimed_launch(get_job_store(), "transit_fit", key, launch_row, f"Failed to launch: {exc}", previous=previous)
+            logf.write(f"\nfailed to launch fitting: {exc}\n")
+            logf.close()
+            return {"ok": False, "error": jobs.server_fault("The server could not start the transit fit", exc)}
+    except BaseException:
+        if claimed_slot:
+            abandon_claimed_launch(get_job_store(), "transit_fit", key, launch_row, "Launch failed before the process started", previous=previous)
+        raise
 
     try:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(rdir),
-            stdout=logf,
-            stderr=subprocess.STDOUT,
-            text=True,
-            start_new_session=True,
-            # Core pinning (architecture issue #51, 2.4): no-op unless
-            # MUSCAT_JOB_MAX_THREADS is configured.
-            env={**os.environ, **jobs.core_pinning_env()},
-        )
-        try:
-            with open(rdir / "timer-fit.pid", "w") as pidf:
-                pidf.write(str(proc.pid))
-        except Exception:
-            logger.debug("failed to write timer-fit.pid in %s", rdir, exc_info=True)
-    except (FileNotFoundError, OSError) as exc:
+        with _FIT_LOCK:
+            _FIT_JOBS[key] = TransitFitJob(
+                key=key, inst=inst, date=date, target=target,
+                cmd=cmd, proc=proc, logf=logf, log_path=log_path,
+                run_type=run_type, run_id=run_id, site=site, telescope=telescope, mode=mode, run_name=run_name,
+            )
+            # Record new job in the database
+            get_job_store().save(
+                type_="transit_fit",
+                inst=inst,
+                date=date,
+                target=target,
+                run_id=run_id,
+                state="running",
+                returncode=None,
+                elapsed=0,
+                started_at=_FIT_JOBS[key].started_at,
+                run_type=run_type,
+                params=params_json,
+                run_name=run_name,
+                user_name=user_name,
+                owner=current_owner(),
+                instance_id=current_instance_id(),
+            )
+    finally:
         if claimed_slot:
-            get_job_store().release_slot("transit_fit", key)
-        logf.write(f"\nfailed to launch fitting: {exc}\n")
-        logf.close()
-        return {"ok": False, "error": jobs.server_fault("The server could not start the transit fit", exc)}
-
-    with _FIT_LOCK:
-        _FIT_JOBS[key] = TransitFitJob(
-            key=key, inst=inst, date=date, target=target,
-            cmd=cmd, proc=proc, logf=logf, log_path=log_path,
-            run_type=run_type, run_id=run_id, site=site, telescope=telescope, mode=mode, run_name=run_name,
-        )
-        # Record new job in the database
-        get_job_store().save(
-            type_="transit_fit",
-            inst=inst,
-            date=date,
-            target=target,
-            run_id=run_id,
-            state="running",
-            returncode=None,
-            elapsed=0,
-            started_at=_FIT_JOBS[key].started_at,
-            run_type=run_type,
-            params=params_json,
-            run_name=run_name,
-            user_name=user_name,
-            owner=current_owner(),
-            instance_id=current_instance_id(),
-        )
+            finish_claimed_launch(launch_row)
 
     return {"ok": True, "key": key, "run_id": run_id}
 
@@ -2051,6 +2079,7 @@ def delete_fit(inst: str, date: str, target: str, run_id: str = "") -> dict:
                 removed += 1
             except OSError as exc:
                 logger.warning("could not delete fit run %s", rdir, exc_info=True)
+                invalidate_orphan_fits()  # rmtree may have removed part of it
                 return {"ok": False, "delete_failed": True,
                         "error": f"could not delete the run: {exc.strerror or exc}"}
     else:
@@ -2078,6 +2107,7 @@ def delete_fit(inst: str, date: str, target: str, run_id: str = "") -> dict:
                     logger.warning("could not delete %s", p, exc_info=True)
                     failed.append(p.name)
             if failed:
+                invalidate_orphan_fits()  # the other files are already gone
                 return {"ok": False, "delete_failed": True,
                         "error": f"could not delete: {', '.join(failed)}"}
 
@@ -2093,6 +2123,7 @@ def delete_fit(inst: str, date: str, target: str, run_id: str = "") -> dict:
         _FIT_JOBS.pop(job_key, None)
 
     _fit_outputs_cache.clear()
+    invalidate_orphan_fits()
 
     return {"ok": True, "count": removed}
 
@@ -2110,6 +2141,8 @@ def cancel_fit(inst: str, date: str, target: str, run_id: str = "") -> dict:
             # May be a pending job (in DB but not yet launched)
             db_key = f"transit_fit:{key}"
             found = [j for j in store.all() if j["key"] == db_key]
+            if is_launching(db_key):
+                return {"ok": False, "error": "the fit is still starting; try again in a moment"}
             if found and found[0]["state"] == "pending":
                 if store.cancel_pending(db_key):
                     return {"ok": True, "key": key}
@@ -2518,6 +2551,13 @@ def _detect_run_type(rdir: pathlib.Path) -> str:
     return "full"
 
 
+def _timer_root() -> pathlib.Path:
+    """The fit tree ``_discover_orphan_fits`` walks."""
+    return pathlib.Path(
+        os.environ.get("MUSCAT_TIMER_DIR", str(pathlib.Path.home() / "ql" / "timer"))
+    )
+
+
 def _discover_orphan_fits(existing: set[str]) -> list[dict]:
     """Scan disk for completed fits not yet in the jobs table.
 
@@ -2526,9 +2566,7 @@ def _discover_orphan_fits(existing: set[str]) -> list[dict]:
     ``transit_fit:{inst}/{date}/{target}``) and per-run ``{target}/<run_id>/out/``
     (key ``…/{target}/{run_id}``) — whose key is not in *existing*.
     """
-    base = pathlib.Path(
-        os.environ.get("MUSCAT_TIMER_DIR", str(pathlib.Path.home() / "ql" / "timer"))
-    )
+    base = _timer_root()
     orphans: list[dict] = []
     if not base.is_dir():
         return orphans
@@ -2581,6 +2619,97 @@ def _discover_orphan_fits(existing: set[str]) -> list[dict]:
                         "date": date,
                     })
     return orphans
+
+
+# How often the server rescans the fit tree for fits run outside the web UI.
+# Request handlers read the last scan instead of walking the tree themselves:
+# every Jobs-page poll used to rescan it (about 1.2 s on production), and a
+# burst of polls holding every worker thread stalled the server (2026-11-07).
+# The cost is that such a fit takes up to this long to appear on the Jobs page.
+ORPHAN_SCAN_INTERVAL_S = max(5.0, float(os.environ.get("MUSCAT_ORPHAN_FIT_SCAN_S", "30")))
+# A scan older than this means the background refresh has stopped, so the next
+# reader rescans rather than serving it indefinitely.
+_ORPHAN_SCAN_MAX_AGE_S = 3 * ORPHAN_SCAN_INTERVAL_S
+
+
+class _OrphanFitSnapshot:
+    """The last scan of the fit tree, shared by every request.
+
+    A scan covers every fit on disk; callers drop the keys already in the job
+    store when they read it. The scan is tied to its source, the scanner and
+    the tree it walked, so swapping ``_discover_orphan_fits`` (the static-site
+    export does this to keep live runs out of the public site, and tests do it
+    to fake the tree) or pointing ``MUSCAT_TIMER_DIR`` elsewhere takes effect
+    on the next read instead of serving rows from the old source.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()  # guards the three fields below
+        self._scan_lock = threading.Lock()  # one scan at a time
+        self._rows: tuple[dict, ...] | None = None
+        self._source: tuple[Callable, pathlib.Path] | None = None
+        self._taken_at = 0.0
+
+    def _current(self) -> tuple[tuple[dict, ...] | None, tuple | None, float]:
+        with self._lock:
+            return self._rows, self._source, self._taken_at
+
+    def _scan(self, source: tuple[Callable, pathlib.Path]) -> tuple[dict, ...]:
+        """Caller holds ``_scan_lock``."""
+        rows = tuple(source[0](set()))
+        with self._lock:
+            self._rows, self._source, self._taken_at = rows, source, time.monotonic()
+        return rows
+
+    def rows(self) -> tuple[dict, ...]:
+        rows, scanned, taken_at = self._current()
+        current = (_discover_orphan_fits, _timer_root())
+        if rows is not None and scanned == current:
+            stale = time.monotonic() - taken_at > _ORPHAN_SCAN_MAX_AGE_S
+            # Only one reader rescans a stale snapshot; the rest keep serving
+            # it meanwhile instead of queueing behind that scan.
+            if stale and self._scan_lock.acquire(blocking=False):
+                try:
+                    return self._scan(current)
+                finally:
+                    self._scan_lock.release()
+            return rows
+        # No usable scan yet (startup, after a delete, or a swapped scanner):
+        # wait for one, sharing it with every reader that arrives meanwhile.
+        with self._scan_lock:
+            rows, scanned, _ = self._current()
+            if rows is not None and scanned == current:
+                return rows
+            return self._scan(current)
+
+    def refresh(self) -> None:
+        with self._scan_lock:
+            self._scan((_discover_orphan_fits, _timer_root()))
+
+    def invalidate(self) -> None:
+        with self._lock:
+            self._rows = None
+
+
+_ORPHAN_FITS = _OrphanFitSnapshot()
+
+
+def orphan_fits(existing: set[str]) -> list[dict]:
+    """Fits on disk that are not in the job store (*existing*), as synthetic
+    ``done`` job rows, from the last scan of the fit tree. Each call returns
+    fresh copies, so a caller may annotate them freely."""
+    return [dict(r) for r in _ORPHAN_FITS.rows() if r["key"] not in existing]
+
+
+def refresh_orphan_fits() -> None:
+    """Rescan the fit tree now. The web server runs this in the background
+    every ``ORPHAN_SCAN_INTERVAL_S``."""
+    _ORPHAN_FITS.refresh()
+
+
+def invalidate_orphan_fits() -> None:
+    """Drop the last scan so the next read rescans, e.g. after deleting a fit."""
+    _ORPHAN_FITS.invalidate()
 
 
 def _detect_process_running(rdir: pathlib.Path) -> bool:
@@ -2691,6 +2820,8 @@ def sync_jobs() -> None:
             row = next((j for j in db_jobs if j["key"] == db_key), None)
             if row is None:
                 continue
+            if is_launching(db_key):
+                continue  # claimed by a launch in this process that has not spawned yet
             owner = row.get("owner") or ""
             if owner and owner != current_owner():
                 # Another role's process launched this job; only its own

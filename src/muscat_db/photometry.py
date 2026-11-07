@@ -23,7 +23,9 @@ This module never trusts user input for filesystem access: see
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections import Counter
+from collections.abc import Callable, Sequence
+from typing import Protocol
 from concurrent.futures import Future, TimeoutError as FutureTimeoutError
 import csv as _csv
 import datetime
@@ -44,7 +46,16 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from muscat_db import jobs, database, exposure as exp_calc, catalog as catalog_lookup
-from muscat_db.job_store import current_instance_id, current_owner, get_job_store
+from muscat_db.job_store import (
+    abandon_claimed_launch,
+    begin_claimed_launch,
+    current_instance_id,
+    current_owner,
+    finish_claimed_launch,
+    get_job_store,
+    is_launching,
+    mark_claimed_launch,
+)
 from muscat_db.job_limits import JobLimitExceeded, claim_caps, claim_caps_for_row, enqueue_caps, full_job_cap, limit_refusal, params_with_running_cap
 from muscat_db.ref_time import is_valid_ref_time
 from muscat_db.instruments import INSTRUMENTS
@@ -168,6 +179,18 @@ MULTISITE_MODES: dict[str, tuple[str, ...]] = {
 # Backwards-compatible aliases (still imported by transit_fit.py and others).
 SINISTRO_SITES = MULTISITE_SITES["sinistro"]
 SINISTRO_MODES = MULTISITE_MODES["sinistro"]
+
+
+def allowed_sites(inst: str | None) -> tuple[str, ...]:
+    """Sites a run of *inst* may name; sinistro's for any other instrument
+    (unchanged from before the per-instrument split)."""
+    return MULTISITE_SITES.get(inst or "", SINISTRO_SITES)
+
+
+def allowed_modes(inst: str | None) -> tuple[str, ...]:
+    """Readout modes a run of *inst* may name; sinistro's for any instrument
+    without its own entry in ``MULTISITE_MODES``."""
+    return MULTISITE_MODES.get(inst or "", SINISTRO_MODES)
 
 # TELESCOP-value prefix per multi-site instrument, e.g. "1m0-05"/"0m4-06".
 # Used to reconstruct the canonical TELESCOP value from a filename's compact
@@ -1192,6 +1215,44 @@ class RunDescriptor:
     run_type: str = "full"
 
 
+class ChipRun(Protocol):
+    """What ``run_chip_labels`` reads from a run: photometry's
+    ``RunDescriptor`` and transit_fit's both provide it."""
+
+    run_id: str
+    site: str
+    telescope: str
+    mode: str
+    run_name: str
+    is_legacy: bool
+
+
+def run_chip_labels(runs: Sequence[ChipRun]) -> dict[str, str]:
+    """A distinct Run-chip label per ``run_id`` (photometry and transit-fit pages).
+
+    A run keeps its plain run name unless another listed run shares it --
+    e.g. one sinistro night reduced per telescope stores ``run_name="default"``
+    for both ``tel06-default`` and ``tel08-default`` -- in which case the name
+    is qualified by the run's site/telescope/mode ("default · 1m0-06"). Runs
+    that still collide (same name and scope) fall back to their run id, which
+    is unique and is what the ``run=`` URL parameter uses.
+    """
+    def name(r: ChipRun) -> str:
+        return "legacy" if r.is_legacy else (r.run_name or r.run_id)
+
+    def qualified(r: ChipRun) -> str:
+        scope = " ".join(p for p in (r.site, r.telescope, r.mode) if p)
+        return f"{name(r)} · {scope}" if scope else r.run_id
+
+    name_counts = Counter(name(r) for r in runs)
+    labels = {r.run_id: (qualified(r) if name_counts[name(r)] > 1 else name(r)) for r in runs}
+    label_counts = Counter(labels.values())
+    return {
+        run_id: (run_id if label_counts[label] > 1 and run_id else label)
+        for run_id, label in labels.items()
+    }
+
+
 def _read_run_meta(d: Path) -> dict:
     try:
         return json.loads((d / _RUN_META_NAME).read_text())
@@ -1515,7 +1576,7 @@ def _coord_ok(value) -> bool:
     return len(parts) <= 2 and all(_COORD_PART_RE.fullmatch(p) for p in parts)
 
 
-def forwarded_option_error(o: dict) -> str | None:
+def forwarded_option_error(o: dict, inst: str | None = None) -> str | None:
     """``"<option> <value>"`` for the first free-text option that
     ``build_command`` would forward and that is not an allowed value, else
     ``None``.
@@ -1539,9 +1600,9 @@ def forwarded_option_error(o: dict) -> str | None:
         ("ccd_trim", compact("ccd_trim"), _INTPAIR_RE.fullmatch(compact("ccd_trim"))),
         ("wcs_method", text("wcs_method"), text("wcs_method") in ("twirl", "astrometry.net")),
         ("centroid_method", text("centroid_method"), text("centroid_method") in CENTROID_METHODS),
-        ("site", text("site"), text("site").lower() in SINISTRO_SITES),
+        ("site", text("site"), text("site").lower() in allowed_sites(inst)),
         ("telescope", text("telescope"), TELESCOPE_RE.fullmatch(text("telescope"))),
-        ("mode", text("mode"), text("mode") in SINISTRO_MODES),
+        ("mode", text("mode"), text("mode") in allowed_modes(inst)),
         ("cmap", text("cmap"), text("cmap") in CMAP_CHOICES),
         ("nan_imputation_method", text("nan_imputation_method"),
          text("nan_imputation_method") in NAN_IMPUTATION_METHODS),
@@ -1736,14 +1797,16 @@ def validate_run_options(o: dict, inst: str | None = None) -> str | None:
     if (o.get("nan_imputation_method") or "linear") not in NAN_IMPUTATION_METHODS:
         return f"NaN imputation method must be one of {', '.join(NAN_IMPUTATION_METHODS)}"
     site = (o.get("site") or "").strip().lower()
-    if site and site not in SINISTRO_SITES:
-        return f"site must be one of {', '.join(SINISTRO_SITES)}"
+    sites = allowed_sites(inst)
+    if site and site not in sites:
+        return f"site must be one of {', '.join(sites)}"
     telescope = (o.get("telescope") or "").strip()
     if telescope and not TELESCOPE_RE.match(telescope):
         return "telescope id may only contain letters, digits and hyphens"
     mode = (o.get("mode") or "").strip()
-    if mode and mode not in SINISTRO_MODES:
-        return f"mode must be one of {', '.join(SINISTRO_MODES)}"
+    modes = allowed_modes(inst)
+    if mode and mode not in modes:
+        return f"mode must be one of {', '.join(modes)}"
     for key, label in (("comparison_ids", "comparison IDs"), ("avoid_comparison_ids", "avoid comparison IDs")):
         if not _all_numeric(o.get(key), _INT_ITEM_RE):
             return f"{label} must be comma-separated integers"
@@ -1759,7 +1822,7 @@ def validate_run_options(o: dict, inst: str | None = None) -> str | None:
         return "target coordinates must be 'RA Dec' in degrees or sexagesimal (e.g. 159.157968 -64.798231)"
     # build_command refuses the same values, so a run accepted here never
     # fails at launch; the checks above give the friendlier message first.
-    bad = forwarded_option_error(o)
+    bad = forwarded_option_error(o, inst)
     if bad:
         return f"invalid {bad}"
     return None
@@ -1784,7 +1847,7 @@ def build_command(
     function without ``validate_run_options`` (the fleet worker, sync_jobs).
     """
     o = normalize_run_options(options)
-    bad = forwarded_option_error(o)
+    bad = forwarded_option_error(o, inst)
     if bad:
         raise ValueError(f"refusing to build the prose command: invalid {bad}")
     args = [
@@ -2203,9 +2266,19 @@ def start_run(
 
         # Claim a cross-process concurrency slot for full jobs (test jobs are
         # capped above instead). Not yet claimed here just means queue below.
+        # The claim registers the running row in the same transaction, so a
+        # concurrent reconcile_slots never sees the slot without it (#325).
         claimed_slot = False
+        launch_row = {
+            "type_": "photometry", "inst": inst, "date": date, "target": target,
+            "run_id": run_id, "run_type": run_type, "params": run_params_json,
+            "run_name": run_name, "user_name": user_name, "started_at": time.time(),
+        }
+        previous = begin_claimed_launch(get_job_store(), launch_row) if run_type == "full" else None
         if run_type == "full":
-            claimed_slot = get_job_store().claim_slot("photometry", key, _MAX_FULL_JOBS, **claim_caps(user_name))
+            claimed_slot = get_job_store().claim_slot("photometry", key, _MAX_FULL_JOBS, running_row=launch_row, **claim_caps(user_name))
+            if claimed_slot:
+                mark_claimed_launch(launch_row)
         at_capacity = run_type == "full" and not claimed_slot
 
         # Queue full jobs when at capacity
@@ -2229,90 +2302,101 @@ def start_run(
             return {"ok": True, "key": key, "queued": True, "run_id": run_id}
 
         try:
-            rdir = run_output_dir(inst, date, target, run_id)
-        except ValueError as exc:
-            if claimed_slot:
-                get_job_store().release_slot("photometry", key)
-            return {"ok": False, "error": str(exc)}
-        if overwrite:
-            ok, removed, delete_error = _delete_reduction_files(inst, date, target, run_id, keep_record=True)
-            if not ok:
+            try:
+                rdir = run_output_dir(inst, date, target, run_id)
+            except ValueError as exc:
                 if claimed_slot:
-                    get_job_store().release_slot("photometry", key)
-                return {"ok": False, "error": jobs.server_fault("The previous reduction products could not be deleted before the re-run", delete_error)}
-            if removed:
-                logger.info(f"start_run: deleted {removed} previous product(s) for {key} before overwrite run")
-        rdir.mkdir(parents=True, exist_ok=True)
+                    abandon_claimed_launch(get_job_store(), "photometry", key, launch_row, str(exc), previous=previous)
+                return {"ok": False, "error": str(exc)}
+            if overwrite:
+                ok, removed, delete_error = _delete_reduction_files(inst, date, target, run_id, keep_record=True)
+                if not ok:
+                    if claimed_slot:
+                        abandon_claimed_launch(get_job_store(), "photometry", key, launch_row, f"Previous products could not be deleted: {delete_error}", previous=previous)
+                    return {"ok": False, "error": jobs.server_fault("The previous reduction products could not be deleted before the re-run", delete_error)}
+                if removed:
+                    logger.info(f"start_run: deleted {removed} previous product(s) for {key} before overwrite run")
+            rdir.mkdir(parents=True, exist_ok=True)
 
-        _write_run_meta(rdir, inst=inst, date=date, target=target, run_id=run_id, site=site, telescope=telescope, mode=mode, run_name=run_name, run_type=run_type)
-        _write_run_product(rdir, inst=inst, date=date, target=target, opts=opts, test_run=test_run, user_name=user_name, site=site, telescope=telescope, mode=mode, run_name=run_name, frames=frames)
-        cmd = build_command(inst, date, target, opts, test_run=test_run, run_id=run_id)
-        log_path = _run_log_path(rdir, inst, date, target, run_id)
-        logf = open(log_path, "w")
-        _write_log_header(logf, cmd, target_coord_note(target, opts, command=cmd))
-        try:
-            env = _job_env()
-            proc = subprocess.Popen(
-                cmd,
-                cwd=str(rdir),
-                stdout=logf,
-                stderr=subprocess.STDOUT,
-                text=True,
-                # Own session/process group so Cancel can kill the whole tree
-                # (prose spawns multiprocessing workers via SequenceParallel).
-                start_new_session=True,
-                env=env,
-            )
+            _write_run_meta(rdir, inst=inst, date=date, target=target, run_id=run_id, site=site, telescope=telescope, mode=mode, run_name=run_name, run_type=run_type)
+            _write_run_product(rdir, inst=inst, date=date, target=target, opts=opts, test_run=test_run, user_name=user_name, site=site, telescope=telescope, mode=mode, run_name=run_name, frames=frames)
+            cmd = build_command(inst, date, target, opts, test_run=test_run, run_id=run_id)
+            log_path = _run_log_path(rdir, inst, date, target, run_id)
+            logf = open(log_path, "w")
+            _write_log_header(logf, cmd, target_coord_note(target, opts, command=cmd))
             try:
-                with open(rdir / _PID_FILE_NAME, "w") as pidf:
-                    pidf.write(str(proc.pid))
-            except OSError:
-                logger.debug("failed to write %s in %s", _PID_FILE_NAME, rdir, exc_info=True)
-        except (FileNotFoundError, OSError) as exc:
-            if claimed_slot:
-                get_job_store().release_slot("photometry", key)
-            logf.write(f"\nfailed to launch pipeline: {exc}\n")
-            logf.close()
-            return {"ok": False, "error": jobs.server_fault("The server could not start the photometry pipeline", exc)}
-        _JOBS[key] = Job(
-            key=key, inst=inst, date=date, target=target,
-            cmd=cmd, proc=proc, logf=logf, log_path=log_path,
-            run_type=run_type, run_id=run_id, site=site, telescope=telescope, mode=mode, run_name=run_name,
-        )
-        # Record new job in the database
-        try:
-                get_job_store().save(
-                type_="photometry",
-                inst=inst,
-                date=date,
-                target=target,
-                state="running",
-                returncode=None,
-                elapsed=0,
-                started_at=_JOBS[key].started_at,
-                run_type=run_type,
-                params=run_params_json,
-                run_id=run_id,
-                run_name=run_name,
-                user_name=user_name,
-                owner=current_owner(),
-                instance_id=current_instance_id(),
-            )
-        except sqlite3.OperationalError as exc:
-            # DB write failed (e.g. read-only database). Roll back the launched
-            # process and job so we don't leak a running pipeline we can't track.
-            if claimed_slot:
-                get_job_store().release_slot("photometry", key)
-            try:
-                proc.terminate()
-            except OSError:
-                pass
-            try:
+                env = _job_env()
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=str(rdir),
+                    stdout=logf,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    # Own session/process group so Cancel can kill the whole tree
+                    # (prose spawns multiprocessing workers via SequenceParallel).
+                    start_new_session=True,
+                    env=env,
+                )
+                try:
+                    with open(rdir / _PID_FILE_NAME, "w") as pidf:
+                        pidf.write(str(proc.pid))
+                except OSError:
+                    logger.debug("failed to write %s in %s", _PID_FILE_NAME, rdir, exc_info=True)
+            except (FileNotFoundError, OSError) as exc:
+                if claimed_slot:
+                    abandon_claimed_launch(get_job_store(), "photometry", key, launch_row, f"Failed to launch: {exc}", previous=previous)
+                logf.write(f"\nfailed to launch pipeline: {exc}\n")
                 logf.close()
-            except OSError:
-                pass
-            _JOBS.pop(key, None)
-            return {"ok": False, "error": jobs.server_fault("The job could not be recorded because the job database is not writable", exc)}
+                return {"ok": False, "error": jobs.server_fault("The server could not start the photometry pipeline", exc)}
+        except BaseException:
+            if claimed_slot:
+                abandon_claimed_launch(get_job_store(), "photometry", key, launch_row, "Launch failed before the process started", previous=previous)
+            raise
+
+        try:
+            _JOBS[key] = Job(
+                key=key, inst=inst, date=date, target=target,
+                cmd=cmd, proc=proc, logf=logf, log_path=log_path,
+                run_type=run_type, run_id=run_id, site=site, telescope=telescope, mode=mode, run_name=run_name,
+            )
+            # Record new job in the database
+            try:
+                    get_job_store().save(
+                    type_="photometry",
+                    inst=inst,
+                    date=date,
+                    target=target,
+                    state="running",
+                    returncode=None,
+                    elapsed=0,
+                    started_at=_JOBS[key].started_at,
+                    run_type=run_type,
+                    params=run_params_json,
+                    run_id=run_id,
+                    run_name=run_name,
+                    user_name=user_name,
+                    owner=current_owner(),
+                    instance_id=current_instance_id(),
+                )
+            except sqlite3.OperationalError as exc:
+                # DB write failed (e.g. read-only database). Roll back the launched
+                # process and job so we don't leak a running pipeline we can't track.
+                if claimed_slot:
+                    abandon_claimed_launch(get_job_store(), "photometry", key, launch_row, f"Database not writable: {exc}", previous=previous)
+                try:
+                    proc.terminate()
+                except OSError:
+                    pass
+                try:
+                    logf.close()
+                except OSError:
+                    pass
+                _JOBS.pop(key, None)
+                return {"ok": False, "error": jobs.server_fault("The job could not be recorded because the job database is not writable", exc)}
+        finally:
+            if claimed_slot:
+                finish_claimed_launch(launch_row)
+
     return {"ok": True, "key": key, "run_id": run_id}
 
 
@@ -2824,6 +2908,8 @@ def sync_jobs() -> None:
             parts = rest.split("/")
             if len(parts) < 3:
                 continue
+            if is_launching(db_key):
+                continue  # claimed by a launch in this process that has not spawned yet
             inst, date, target = parts[:3]
             run_id = "/".join(parts[3:]) if len(parts) > 3 else ""
             started_at = time.time()

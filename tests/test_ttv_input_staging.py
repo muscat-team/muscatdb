@@ -300,7 +300,7 @@ def test_queue_drain_prep_failure_after_claim_errors_the_row_and_keeps_draining(
         bad = [s for s in saves if s["target"] == "BAD"]
         assert [s["state"] for s in bad] == ["error"]
         assert "disk full" in bad[0]["error_desc"]
-        assert released == [ttv_fit.ttv_job_key("BAD", "r1")]
+        assert released == [ttv_fit.ttv_slot_key(ttv_fit.ttv_job_key("BAD", "r1"))]
         assert len(launched) == 1
     finally:
         for job in fake_jobs.values():

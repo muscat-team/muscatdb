@@ -993,7 +993,33 @@
     });
   }
 
+  // Each status poll runs the full Jobs reconciliation server-side (about 2 s
+  // of CPU on production). A fixed setInterval kept firing while the previous
+  // poll was still unanswered, so a slow server got ever more concurrent polls
+  // from every open tab until its worker pool was exhausted and even /healthz
+  // and the auth subrequest timed out (nginx 500). Schedule the next poll only
+  // after the previous one settles, and not at all while the tab is hidden.
+  var POLL_INTERVAL_MS = 3000;
+  var pollInFlight = false;
+  var poller = window.MuscatJobPolling.createTimeoutPoller(pollRunning);
+
+  function schedulePoll() {
+    if (document.hidden) return;
+    poller.schedule(POLL_INTERVAL_MS);
+  }
+
+  document.addEventListener('visibilitychange', function() {
+    if (document.hidden) {
+      poller.stop();
+    } else {
+      poller.stop();
+      pollRunning();
+    }
+  });
+
   function pollRunning() {
+    if (pollInFlight || document.hidden) return;
+    pollInFlight = true;
     var watchedKeys = [];
     allRows.forEach(function(row) {
       if (['running', 'pending', 'cancelling'].indexOf(row.getAttribute('data-status')) !== -1) {
@@ -1108,7 +1134,11 @@
         // Always re-apply filters to refresh status counts and visibility
         applyFilters();
       })
-      .catch(function() {});
+      .catch(function() {})
+      .then(function() {
+        pollInFlight = false;
+        schedulePoll();
+      });
   }
 
   // ── Initialise ──────────────────────────────────────────────────────────
@@ -1229,7 +1259,7 @@
   // Poll while the Jobs page is open so archive downloads submitted from other
   // pages can appear here even if no active row existed at initial page load.
   setInterval(refreshLiveElapsed, 1000);
-  setInterval(pollRunning, 3000);
+  schedulePoll();
 })();
 </script>
 {% endblock %}

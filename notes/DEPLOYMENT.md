@@ -120,6 +120,26 @@ Then run it without `--dry-run`, or let the nightly `build-db` do it.
 
 Connect to production via SSH tunnel: `ssh -L 8000:localhost:8000 <user>@muscat-ut2` → http://localhost:8000. Staging's public port is `:8002` (`ssh -L 8002:localhost:8002`).
 
+### When the site stalls
+
+Pages load slowly or nginx answers 500 while the server process is still up:
+plain `def` routes share one pool of about 40 worker threads, and slow requests
+can hold all of them. Production stalled this way twice on 2026-11-07, on
+Jobs-page status polls. `/healthz` and the `/_auth/cf` login check no longer
+wait in that pool, so they keep answering during a stall. To find the cause:
+
+* The server log (tmux pane `muscatdbgui:0`) names each request still waiting
+  for an answer after `MUSCAT_SLOW_REQUEST_S` (2 s) with `request still
+  running after …`, and each finished one that took longer with `slow request:`.
+  The access log cannot show these: it records a request only once it finishes.
+* `kill -USR1 <server pid>` writes every thread's Python stack, showing what
+  each busy thread is doing. The host's `kernel.yama.ptrace_scope=1` blocks
+  `gdb` and `py-spy` from attaching, so this is the way to see them. With about
+  90 threads the dump runs past the pane's scrollback, so set
+  `MUSCAT_STACK_DUMP_PATH` in `.web-env` to send it to a file instead.
+* Save the pane before restarting (`tmux capture-pane -p -t muscatdbgui:0 -S
+  -200000 > ~/temp/prod_8001_<date>.log`): a restart clears it.
+
 ### Authentication boundary and deployment verification
 
 nginx authenticates browser users and forwards both `X-Forwarded-User` and a
@@ -961,7 +981,7 @@ The current pins are:
 
 | Engine | Repository | Commit | Candidate environment |
 |---|---|---|---|
-| prose2 | `jpdeleon/prose2` | `dd19c2e238336f3cf25cc9f3af2581c3366ba210` (v3.5.1) | `prose-prod-dd19c2e2` |
+| prose2 | `jpdeleon/prose2` | `714b4071b8b329d113a6a3ae2d0aeb788ed5fc72` (v3.5.3) | `prose-prod-714b4071` |
 | timer | `john-livingston/timer` | `b8428258c9b62266532173af4abd7fbafee6dcef` | `timer-prod-b8428258` |
 | harmonic | `john-livingston/harmonic` | `a32fb8e32ca776e0e6e7dc92ad4232cef1f12194` | `harmonic-prod-a32fb8e3` |
 
@@ -1050,6 +1070,35 @@ the candidate's scientific settings, then update the packaged YAML and both
 recorded SHA-256 values (`muscat_db/prose_config.py` and `engines.toml`) together.
 Never regenerate the production snapshot automatically at launch or by following
 live symlinks.
+
+### Prose2 3.5.3 candidate (2026-11-06)
+
+- Owner repository: `https://github.com/jpdeleon/prose2`.
+- Release/tag commit: `714b4071b8b329d113a6a3ae2d0aeb788ed5fc72` (`v3.5.3`).
+- Candidate environment: `prose-prod-714b4071`; keep `prose-prod-dd19c2e2`
+  available for rollback.
+- Frozen configuration SHA-256:
+  `4f6701ae520755f487888c4ea95da92edddc3650b250ee4f47a88722edf796e0`.
+
+This incorporates native-unit saturation thresholds and configuration matching
+from jpdeleon/prose2#49 and per-band shared-reference screening from
+jpdeleon/prose2#51. BANZAI frames use their header `SATURATE` in electrons;
+MuSCAT/MuSCAT2 retain matched telescope limits in ADU. Shared-reference runs
+screen comparisons on each band's representative middle frame, using its own
+threshold and native pixels. This is not per-exposure saturation masking.
+
+The telescope definitions in prose2 are unchanged between v3.5.1 and v3.5.3.
+The reviewed frozen settings, aliases, and source-file hashes are preserved;
+only its engine commit/version provenance and resulting digest change.
+`deploy/conda/production/prose.json` records the candidate installation.
+
+Provision and verify the candidate with `uv run python deploy/engines.py install
+prose` (once) and `uv run python deploy/engines.py verify prose --record` before
+activation. Coordinate the web process and production workers using the engine
+procedure above; the PR does not restart services or switch running jobs.
+For rollback, restore the previous pin, snapshot, checksum, and worker profile
+together. Existing light curves remain unchanged; rerun under a new run name
+to compare saturation exclusions and photometry.
 
 ### Prose2 3.5.1 candidate (2026-10-28)
 

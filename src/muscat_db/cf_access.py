@@ -30,7 +30,10 @@ import re
 import threading
 from typing import Protocol
 
+import anyio
+import anyio.to_thread
 import jwt
+from anyio.lowlevel import RunVar
 from fastapi import APIRouter, Request, Response
 
 from muscat_db.auth import (
@@ -137,15 +140,36 @@ def _from_nginx(request: Request) -> bool:
     return hmac.compare_digest(request.headers.get(PROXY_SECRET_HEADER, ""), expected)
 
 
+# nginx runs this check before every request, so it gets worker threads of its
+# own instead of FastAPI's shared pool. Queued behind that pool, it timed out
+# whenever slow requests held every thread, and nginx answered every page with
+# 500 (2026-11-07). Verification still runs on a thread, not the event loop,
+# because a cold key cache fetches Cloudflare's signing keys over the network.
+_AUTH_THREADS = 8
+_auth_limiter: RunVar[anyio.CapacityLimiter] = RunVar("muscat_cf_auth_limiter")
+
+
+def _auth_threads() -> anyio.CapacityLimiter:
+    """This event loop's limiter (a limiter is bound to the loop it is made on)."""
+    try:
+        return _auth_limiter.get()
+    except LookupError:
+        limiter = anyio.CapacityLimiter(_AUTH_THREADS)
+        _auth_limiter.set(limiter)
+        return limiter
+
+
 @router.get(AUTH_PATH, include_in_schema=False)
-def cf_auth(request: Request) -> Response:
+async def cf_auth(request: Request) -> Response:
     """``auth_request`` target: 204 + ``X-Auth-Email`` or 401/403/503."""
     if not _from_nginx(request):
         return Response(status_code=403)
     if not configured():
         logger.error("Cloudflare Access is not configured (MUSCAT_CF_TEAM_DOMAIN/MUSCAT_CF_AUD)")
         return Response(status_code=503)
-    email = verified_email(request.headers.get(JWT_HEADER))
+    email = await anyio.to_thread.run_sync(
+        verified_email, request.headers.get(JWT_HEADER), limiter=_auth_threads(),
+    )
     if email is None:
         return Response(status_code=401)
     return Response(status_code=204, headers={EMAIL_HEADER: email})
