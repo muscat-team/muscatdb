@@ -237,6 +237,36 @@ def test_a_free_run_name_launches_without_a_popup(page, launched):
     expect(page.locator("#message-modal")).not_to_have_class("visible")
 
 
+def test_the_status_bar_does_not_swallow_a_click_on_the_run_button(page, launched):
+    """The fixed #status-bar slides over the bottom of the viewport while any
+    /api/ request is in flight. In CI, fill()'s command-preview request raised
+    it just as the Run button, scrolled to the viewport's bottom edge, was
+    clicked, and the click landed on the bar instead (#407). A button under
+    the bar must still launch."""
+    _open_photometry(page, run_name="brand-new")
+    page.wait_for_function("!document.getElementById('status-bar').classList.contains('visible')")
+    page.evaluate("""() => {
+        document.getElementById('run-test-btn').scrollIntoView({block: 'end'});
+        window.MuscatLoadingBar.setFetch(true);
+    }""")
+    page.wait_for_function("""() => {
+        const bar = document.getElementById('status-bar');
+        return bar.classList.contains('visible')
+            && new DOMMatrix(getComputedStyle(bar).transform).f === 0;
+    }""")
+    button = page.locator("#run-test-btn").bounding_box()
+    x, y = button["x"] + button["width"] / 2, button["y"] + button["height"] - 4
+    assert page.locator("#status-bar").bounding_box()["y"] < y  # the bar covers the point
+
+    # mouse.click, not locator.click: it clicks where a user would, without
+    # Playwright's wait for the element to be unobscured.
+    with page.expect_response("**/api/photometry/run") as resp:
+        page.mouse.click(x, y)
+
+    assert resp.value.status == 200
+    assert launched == ["brand_new"]
+
+
 def test_transit_fit_save_as_launches_under_the_suggested_name(page, launched):
     page.goto(FIT_URL)
     _query_toi_catalog(page)

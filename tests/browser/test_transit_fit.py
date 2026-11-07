@@ -360,7 +360,14 @@ def test_sampler_and_detrending_options_persist_and_reach_the_fitter(page, fitte
     assert {key: options[key] for key in flags} == {key: str(value).lower() for key, value in flags.items()}
 
 
-def test_run_selector_loads_the_selected_fit_results(page, live_server):
+@pytest.fixture
+def extra_fit_run(page, live_server):
+    """A second fit run of the seeded target, removed only once the page is closed.
+
+    Removing it in the test body raced the page's outstanding requests: the
+    browser fixture recorded a 404 for fit.png still loading (#365). Teardown
+    closes the page first, so nothing can still be reading the run directory.
+    """
     import shutil
     import yaml
     parent = live_server.root / 'timer/muscat3/261001/TOI-1000'
@@ -369,13 +376,24 @@ def test_run_selector_loads_the_selected_fit_results(page, live_server):
     (extra / 'meta.yaml').write_text(yaml.safe_dump({'run_id': 'fit-extra', 'run_name': 'another fit', 'mode': 'full', 'site': 'ogg'}))
     (extra / 'out/summary.csv').write_text('parameter,mean,std\nt0[0],2461314.87,0.0005\n')
     try:
-        page.goto(URL)
-        page.locator('a.site-chip', has_text='another fit').click()
-        page.wait_for_url('**run=fit-extra')
-        expect(page.locator('body')).to_contain_text('2461314.87')
-        assert 'fit-extra' in page.locator('img[src*="/fit.png"]').first.get_attribute('src')
+        yield extra
     finally:
+        page.close()
         shutil.rmtree(extra)
+
+
+def test_run_selector_loads_the_selected_fit_results(page, extra_fit_run):
+    page.goto(URL)
+    page.locator('a.site-chip', has_text='another fit').click()
+    page.wait_for_url('**run=fit-extra')
+    expect(page.locator('body')).to_contain_text('2461314.87')
+    image = page.locator('img[src*="/fit.png"]').first
+    assert 'fit-extra' in image.get_attribute('src')
+    image.evaluate("""img => img.complete || new Promise(done => {
+      img.addEventListener('load', done, {once: true});
+      img.addEventListener('error', done, {once: true});
+    })""")
+    assert image.evaluate('img => img.naturalWidth') > 0
 
 
 # Middle of the seeded light curves (2461314.80 to 2461314.918, see seed.LIGHTCURVE).
