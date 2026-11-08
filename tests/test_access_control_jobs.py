@@ -278,6 +278,69 @@ def test_transit_fit_previous_fit_list_skips_hidden_nights(client):
     assert RUN not in html
 
 
+def _previous_fit_runs(client, monkeypatch, user, **params):
+    """The ``runs_json`` the transit-fit page hands its "Previous Fit" picker."""
+    captured: dict = {}
+    real_render = web._render
+
+    def spy(template, **ctx):
+        captured.update(ctx)
+        return real_render(template, **ctx)
+
+    monkeypatch.setattr(web, "_render", spy)
+    assert _get(client, "/transit-fit", user=user, **params).status_code == 200
+    return [(r["inst"], r["date"], r["run_id"]) for r in captured["runs_json"]]
+
+
+def test_transit_fit_previous_fit_list_content_and_order(client, monkeypatch):
+    # An admin sees both nights of HIDDENTGT, newest first; a restricted viewer
+    # sees neither; OPENTGT's one run shows for both.
+    params = dict(inst=INST, date="260103")
+    assert _previous_fit_runs(client, monkeypatch, "root", target="HIDDENTGT", **params) == [
+        (INST, "260103", RUN), (INST, "260102", RUN),
+    ]
+    assert _previous_fit_runs(client, monkeypatch, "alice", target="HIDDENTGT", **params) == []
+    for user in ("root", "alice"):
+        assert _previous_fit_runs(client, monkeypatch, user, target="OPENTGT", **params) == [
+            (INST, "260103", RUN),
+        ]
+
+
+def test_transit_fit_previous_fit_list_only_touches_nights_that_have_a_run(client, monkeypatch):
+    # Issue #417: the picker used to check visibility and list runs for every
+    # night of every instrument, ~3,700 pairs in production, though a target's
+    # runs sit under only a few of them.
+    listed: list[tuple[str, str]] = []
+    real_list = fit.list_fit_runs
+
+    def spy_list(inst, date, target):
+        listed.append((inst, date))
+        return real_list(inst, date, target)
+
+    queried: list[tuple[str, str]] = []
+    real_night = NightVisibility._night
+
+    def spy_night(self, instrument, obsdate):
+        queried.append((instrument, obsdate))
+        return real_night(self, instrument, obsdate)
+
+    monkeypatch.setattr(fit, "list_fit_runs", spy_list)
+    monkeypatch.setattr(NightVisibility, "_night", spy_night)
+    resp = _get(client, "/transit-fit", inst=INST, date="260103", target="OPENTGT")
+    assert resp.status_code == 200
+    # OPENTGT has a fit directory on 260103 only.
+    assert {d for _, d in listed} == {"260103"}
+    assert {d for _, d in queried} <= {"260103"}
+
+
+def test_transit_fit_previous_fit_list_ignores_unsafe_target(client):
+    # ``..`` must stay a refusal, not become a directory scan of the timer root.
+    assert fit.dates_with_target_dir(INST, "..") == set()
+    assert fit.dates_with_target_dir(INST, "a/b") == set()
+    assert fit.dates_with_target_dir("no-such-instrument", "OPENTGT") == set()
+    assert fit.dates_with_target_dir(INST, "OPEN TGT") == {"260103"}
+
+
 # ── status endpoints ────────────────────────────────────────────────────
 
 _NONE = {"state": "none", "log": "", "returncode": None, "elapsed": 0}

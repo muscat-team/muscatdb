@@ -3069,12 +3069,19 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
     if target:
         import yaml as _yaml
         for inst_name in INSTRUMENTS:
+            # Only nights with a fit directory for this target can hold a run:
+            # start there, and check visibility only for nights that do
+            # (#417: it used to cover every night of every instrument).
+            fit_dates = fit.dates_with_target_dir(inst_name, target)
+            if not fit_dates:
+                continue
             inst_dates = {d["obsdate"] for d in _get_dates(db, inst_name)}
             inst_dates.update(phot.output_dates(inst_name))
-            for d in sorted(inst_dates, reverse=True):
-                if nights.hidden(inst_name, d, target):
+            for d in sorted(inst_dates & fit_dates, reverse=True):
+                night_runs = fit.list_fit_runs(inst_name, d, target)
+                if not night_runs or nights.hidden(inst_name, d, target):
                     continue
-                for r in fit.list_fit_runs(inst_name, d, target):
+                for r in night_runs:
                     if all_runs_products.hidden("transit_fit", inst_name, d, target, r.run_id):
                         continue
                     key = (inst_name, d, r.run_id)

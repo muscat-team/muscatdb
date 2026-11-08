@@ -2469,6 +2469,24 @@ def _parse_run_dir_name(name: str) -> tuple[str, str, str, str]:
     return site, telescope, mode, "-".join(parts)
 
 
+def dates_with_target_dir(inst: str, target: str) -> set[str]:
+    """Dates under *inst* that have a fit directory for *target*.
+
+    A run can only exist where ``{inst}/{date}/{target}/`` does, so this is the
+    complete candidate set for :func:`list_fit_runs` at one stat per date,
+    rather than a path resolution and directory check for every night the
+    catalog knows. An unsafe *target* gives an empty set, as it does there.
+    """
+    try:
+        tname = _target_dir_name(target)
+    except ValueError:
+        return set()
+    base = _timer_root().expanduser().resolve(strict=False) / inst
+    if not base.is_dir():
+        return set()
+    return {d.name for d in base.iterdir() if (d / tname).is_dir()}
+
+
 def list_fit_runs(inst: str, date: str, target: str) -> list[RunDescriptor]:
     """Enumerate the runs that exist for a target, newest-first.
 
