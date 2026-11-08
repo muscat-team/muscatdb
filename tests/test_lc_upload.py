@@ -363,7 +363,9 @@ def test_upload_input_follows_the_target_for_a_scoped_viewer(env):  # noqa: F811
     from muscat_db.access import NightVisibility
     from muscat_db.product_visibility import ProductVisibility
 
-    denied = access.denied_proposal_ids_for(env, "eve")  # restricted in the fixture
+    access.set_scoped(env, "eve", True)
+    access.grant_target(env, "eve", OPEN_TARGET, "root")
+    denied = access.denied_proposal_ids_for(env, "eve")
     assert denied
     nights = NightVisibility(env, denied)
     # An LCO night with no summaries fails closed; an upload night is not gated by nights.
@@ -526,11 +528,13 @@ def test_column_cap_is_enforced(monkeypatch):
         lc_upload.parse_table("p.csv", _table_of(2, 4))
 
 
-def test_viewer_cannot_upload_under_a_target_they_cannot_see(http, prose_dir):
+def test_viewer_cannot_upload_under_a_target_they_cannot_see(http, prose_dir, env):  # noqa: F811
+    from muscat_db import access
+    access.set_scoped(env, "eve", True)
     r = _upload(http, "alice", target=HIDDEN_TARGET)
     assert r.status_code == 403 and HIDDEN_TARGET in r.json()["error"]
     # A name nobody observed fails closed for a restricted viewer too, and says the same.
-    r = _upload(http, "alice", target="NEVEROBSERVED")
+    r = _upload(http, "eve", target="NEVEROBSERVED")
     assert r.status_code == 403
     assert not list(prose_dir.glob("external/*"))
     assert _upload(http, "root", target=HIDDEN_TARGET).status_code == 200
@@ -594,3 +598,100 @@ def test_delete_hidden_or_unknown_runs_404_and_only_uploads_are_deletable(http):
     assert _delete(http, "alice", saved["run_id"], HIDDEN_TARGET).status_code == 404
     assert _delete(http, "root", "not-an-upload").status_code == 400
     assert _delete(http, "root", "upload-0000000000000000").status_code == 404
+
+
+@pytest.fixture(params=[False, True], ids=["implicit-groups", "explicit-groups"])
+def upload_access(env, request):  # noqa: F811
+    from muscat_db import access, access_explicit, access_groups
+    from muscat_db.database import get_conn
+
+    access.set_scoped(env, "eve", True)
+    access.set_scoped(env, "mallory", True)
+    access.grant_target(env, "eve", "TOI-9999", "root")
+    with get_conn(env) as conn:
+        # This compound grant must not turn into a target-only grant.
+        access_groups.add_grant(conn, "user:mallory", target="TOI-9999", proposal_id="PRIVATE")
+        if request.param:
+            access_explicit.migrate(conn, extra_users=["alice", "bob", "eve", "mallory", "root"])
+        conn.commit()
+    return env
+
+
+@pytest.mark.parametrize("user,allowed", [("alice", True), ("eve", True), ("mallory", False)])
+def test_never_observed_target_upload_permissions(http, upload_access, user, allowed):
+    # The review's contract: team membership or an unqualified target grant;
+    # a spelling alias must use the same stable target key.
+    response = _upload(http, user, target="TOI09999.01")
+    assert response.status_code == (200 if allowed else 403), response.text
+
+
+def test_never_observed_upload_visibility_and_pinned_fit_after_delete(http, upload_access):
+    response = _upload(http, "root", target="TOI-9999")
+    assert response.status_code == 200, response.text
+    saved = response.json()
+    params = {"inst": EXTERNAL_INSTRUMENT, "date": DATE, "target": "TOI-9999"}
+    csvs = fit.get_csv_lightcurves(EXTERNAL_INSTRUMENT, DATE, "TOI-9999")
+    rdir = fit.fit_output_dir(EXTERNAL_INSTRUMENT, DATE, "TOI-9999", "default")
+    rdir.mkdir(parents=True)
+    fit._write_fit_product(rdir, EXTERNAL_INSTRUMENT, DATE, "TOI-9999", csvs, {}, False, "root")
+    (rdir / "out").mkdir()
+    (rdir / "out" / "summary.csv").write_text("parameter,mean\nt0[0],2461044.0\n")
+    for user, visible in [("alice", True), ("eve", True), ("mallory", False)]:
+        page = http.get("/transit-fit", headers=_headers(user), params=params)
+        assert (saved["file"] in page.text) is visible, user
+        picker = http.get("/transit-fit", headers=_headers(user), params={"inst": EXTERNAL_INSTRUMENT, "date": DATE})
+        assert ("TOI-9999" in picker.text) is visible, user
+    assert _delete(http, "root", saved["run_id"], "TOI-9999").status_code == 200
+    for user, visible in [("alice", True), ("eve", True), ("mallory", False)]:
+        response = http.get("/api/transit-fit/outputs", headers=_headers(user), params={**params, "run": "default"})
+        assert response.status_code == 200
+        assert response.json()["outputs"]["has_any"] is visible, user
+
+
+@pytest.mark.parametrize("field,value", [
+    ("target", "x" * 300), ("run_id", "upload-" + "x" * 300),
+    ("target", "星" * 100), ("run_id", "upload-" + "星" * 84),
+])
+def test_delete_oversized_components_returns_400_without_removing_upload(http, field, value):
+    saved = _upload(http, "alice").json()
+    payload = {"date": DATE, "target": OPEN_TARGET, "run_id": saved["run_id"], field: value}
+    response = http.post("/api/lc-upload/delete", headers=_headers("root"), json=payload)
+    assert response.status_code == 400, response.text
+    assert phot.run_output_dir(EXTERNAL_INSTRUMENT, DATE, OPEN_TARGET, saved["run_id"]).is_dir()
+
+
+def test_save_rejects_oversized_utf8_csv_name_before_creating_directories(http, prose_dir):
+    response = _upload(http, "root", target="星" * 84)
+    assert response.status_code == 400, response.text
+    assert "bytes" in response.json()["error"]
+    assert not list(prose_dir.glob("external/*"))
+
+
+def test_save_accepts_utf8_filename_at_portable_boundary(http):
+    # 213 bytes of target + the 42-byte CSV/temp suffix reaches NAME_MAX=255.
+    response = _upload(http, "root", target="星" * 71)
+    assert response.status_code == 200, response.text
+
+
+@pytest.mark.parametrize("restriction", [
+    {"instrument": "muscat3"}, {"date_from": "260101"}, {"date_from": "260101", "date_to": "260104"},
+])
+def test_never_observed_compound_target_grant_does_not_bypass_constraints(http, upload_access, restriction):
+    from muscat_db import access_groups
+    from muscat_db.database import get_conn
+    with get_conn(upload_access) as conn:
+        access_groups.add_grant(conn, "user:mallory", target="NEWSTAR", **restriction)
+        conn.commit()
+    assert _upload(http, "mallory", target="NEWSTAR").status_code == 403
+
+
+def test_observed_restricted_alias_does_not_use_unobserved_team_rule(http, upload_access):
+    from muscat_db.database import get_conn
+    from tests.test_access_control import _RESTRICTED
+    with get_conn(upload_access) as conn:
+        conn.execute(
+            "INSERT INTO summaries (instrument, obsdate, ccd, object, proposal_id) VALUES (?, ?, 0, ?, ?)",
+            ("muscat3", DATE, "TOI-12345", _RESTRICTED),
+        )
+        conn.commit()
+    assert _upload(http, "alice", target="TOI012345.01").status_code == 403

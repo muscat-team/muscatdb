@@ -244,7 +244,7 @@ class ProductVisibility:
             # Follows the target it was filed under; no target recorded
             # fails closed (its maker still sees it, via the record).
             target = entry.get("target")
-            return isinstance(target, str) and bool(target) and self.nights.target_visible(target)
+            return isinstance(target, str) and bool(target) and self.nights.target_visible(target, self.username)
         if kind == "frames":
             proposals = entry.get("proposal_ids")
             if not entry.get("resolved") or not isinstance(proposals, list) or not proposals:

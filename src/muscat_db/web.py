@@ -3947,9 +3947,9 @@ async def lc_upload_save(request: Request):
 def _lc_upload_save(request: Request, payload: dict) -> JSONResponse:
     target = str(payload.get("target") or "").strip()
     # An upload is filed under a target and seen by whoever may see that target
-    # (#382), so only such a viewer may add one. A name nobody observed is
-    # refused alike for a restricted viewer, so the refusal reveals nothing.
-    if not _night_visibility().target_visible(target):
+    # (#382), so only such a viewer may add one. Unobserved targets use team
+    # membership or an explicit target grant, without bypassing observed data.
+    if not _night_visibility().target_visible(target, request.state.user):
         return _upload_refused(
             lc_upload.UploadError(f"you may not upload under target {target!r}"), 403
         )
@@ -3989,6 +3989,11 @@ def lc_upload_delete(request: Request, payload: dict = Body(...)):
     date = str(payload.get("date") or "").strip()
     target = str(payload.get("target") or "").strip()
     run_id = str(payload.get("run_id") or "").strip()
+    try:
+        lc_upload.validate_component_bytes(target, "target")
+        lc_upload.validate_component_bytes(run_id, "run id")
+    except lc_upload.UploadError as exc:
+        return _upload_refused(exc)
     if not run_id.startswith(lc_upload.RUN_PREFIX):
         return _upload_refused(lc_upload.UploadError("only an uploaded light curve can be deleted here"))
     if not phot.valid_date(date) or not target:

@@ -32,8 +32,8 @@ Decisions on #382, all of which refuse rather than guess:
   those rows.
 * the same primary file (same checksum) cannot be uploaded twice; the refusal
   names the product that already holds it.
-* visibility: an ``upload`` input is visible to every viewer, like a ``manual``
-  one (:mod:`muscat_db.product_visibility`).
+* visibility follows the target's access rules; uploaders retain access to
+  their own products (:mod:`muscat_db.product_visibility`).
 """
 
 from __future__ import annotations
@@ -70,6 +70,7 @@ MAX_CELLS = 2_000_000
 MAX_REQUEST_BYTES = 2 * ((MAX_UPLOAD_BYTES * 4) // 3 + 4) + 64 * 1024
 MAX_FACILITY_LEN = 80
 MAX_TARGET_LEN = 100
+MAX_COMPONENT_BYTES = 255
 
 TIME_SYSTEMS = ("BJD_TDB",)
 
@@ -552,6 +553,16 @@ def _file_name(name: Any) -> str:
     return base[:255] or "upload"
 
 
+def validate_component_bytes(name: str, label: str) -> None:
+    """Refuse names that cannot be stored on a filesystem with NAME_MAX=255."""
+    try:
+        size = len(name.encode("utf-8"))
+    except UnicodeEncodeError:
+        raise UploadError(f"{label} must be valid UTF-8 text") from None
+    if size > MAX_COMPONENT_BYTES:
+        raise UploadError(f"{label} must fit in {MAX_COMPONENT_BYTES} UTF-8 bytes")
+
+
 def lightcurve_name(target: str, band: str, date: str, run_id: str) -> str:
     """The normalized CSV's name: the photometry convention the transit fit
     parses (``<target>_<inst>_<band>_<date>...``)."""
@@ -651,6 +662,8 @@ def save_upload(
     )
 
     csv_name = lightcurve_name(target_dir, band, date, run_id)
+    # Atomic writing adds .tmp: validate that longer component before mkdir.
+    validate_component_bytes(csv_name + ".tmp", "generated CSV filename")
     try:
         rdir.parent.mkdir(parents=True, exist_ok=True)
     except OSError as exc:

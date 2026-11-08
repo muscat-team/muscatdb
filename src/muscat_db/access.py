@@ -234,10 +234,10 @@ class NightVisibility:
             matched = [visible for obj, visible in rows if self.normalize(obj) == norm]
         return not any(matched)
 
-    def target_visible(self, target: str) -> bool:
+    def target_visible(self, target: str, username: str | None = None) -> bool:
         """Whether the viewer may see *target* on any night: some summary of
-        it falls under their grants. A name no summary carries is not visible
-        to a restricted viewer (fail closed); an unrestricted one sees all.
+        it falls under their grants. An unobserved target is visible to team
+        members or a viewer with a target-only grant for its stable key.
 
         Used for products that belong to a target rather than a night, such as
         an uploaded light curve (#382). Names match like :meth:`hidden`.
@@ -252,9 +252,32 @@ class NightVisibility:
         rows = [(o or "", p, i, d) for o, p, i, d in self._target_rows]
         want = _compact(target)
         matched = [r for r in rows if _compact(r[0]) == want]
+        key = target_keys.target_key(target)
+        if not matched and key:
+            # An alias of an observed, restricted target must not fall through
+            # to the rule for names that have never been observed.
+            with get_conn(self.db_path) as conn:
+                keys = target_keys.object_key_map(conn)
+            matched = [r for r in rows if keys.get(r[0]) == key]
         if not matched and self.normalize is not None:
             norm = self.normalize(target)
             matched = [r for r in rows if self.normalize(r[0]) == norm]
+        if not matched:
+            if not key:
+                return False
+            if username:
+                with get_conn(self.db_path) as conn:
+                    if access_groups.is_active(conn) and access_groups.in_team(conn, username):
+                        return True
+            # With no observation there is no proposal, instrument or date
+            # to satisfy a compound grant. Only a target-only grant applies.
+            return isinstance(self.denied, ScopedDenied) and any(
+                rule.target is not None
+                and rule.proposal_id is None and rule.instrument is None
+                and rule.date_from is None and rule.date_to is None
+                and target_keys.grant_key(rule.target_key, rule.target) == key
+                for rule in self.denied.rules
+            )
         return any(
             not is_denied(pid, self.denied, instrument=inst, obsdate=date, obj=obj)
             for obj, pid, inst, date in matched

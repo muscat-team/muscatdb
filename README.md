@@ -687,15 +687,19 @@ An upload is refused, with nothing written, when:
   existing product when you may see it, and does not otherwise;
 * you may not see the target. An upload is filed under a target and visible to
   its uploader and to anyone who may see that target (the same target grants
-  as for observed data), so only such a viewer can upload under it. A name no
-  observation carries is refused for a restricted viewer; admins and unrestricted
-  viewers can upload under any name.
+  as for observed data), so only such a viewer can upload under it. A target
+  never observed by MuSCAT is available to team members and scoped viewers with
+  a target-only grant for that name. Other scoped viewers cannot upload or see
+  it. A grant limited by proposal, instrument or date does not grant access to
+  an unobserved target. Generated filenames must fit in 255 UTF-8 bytes,
+  including the temporary writing suffix.
 
 A mistaken upload (wrong mapping, band, night or target) is removed with the
 **Delete** button under *Upload an External Light Curve* on the same night and
 target, by its uploader, a member of a group they share, or an admin; the same
-file can then be uploaded again. Saved column-mapping presets for recurring
-formats are not implemented yet.
+file can then be uploaded again. Existing fits retain their pinned input record
+when an upload is deleted, so deletion does not change those fits' visibility.
+Saved column-mapping presets for recurring formats are not implemented yet.
 
 
 ### Target LCO archive inventory
