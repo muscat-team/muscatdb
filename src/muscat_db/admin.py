@@ -44,12 +44,15 @@ class Change(BaseModel):
 @router.get("/state")
 def state(actor: str = Depends(require_admin)):
     with get_conn(db_path()) as conn:
-        users = [dict(zip(("username", "email", "admin", "last_login", "scoped"), row))
+        # "scoped" = off the team: excluded from everyone, or after #354 not in
+        # the team group (access_groups.in_team decides either way).
+        users = [dict(zip(("username", "email", "admin", "last_login"), row))
                  for row in conn.execute(
-                     "SELECT username, email, is_admin, last_login, "
-                     "EXISTS(SELECT 1 FROM group_exclusions e WHERE e.username=users.username "
-                     "AND e.groupname='everyone') FROM users ORDER BY username")]
-    return {"users": users, "groups": groups.list_groups(db_path()), "instruments": sorted(INSTRUMENTS)}
+                     "SELECT username, email, is_admin, last_login FROM users ORDER BY username")]
+        users = [{**u, "scoped": not groups.in_team(conn, u["username"])} for u in users]
+        team = groups.team_group(conn)
+    return {"users": users, "groups": groups.list_groups(db_path()), "instruments": sorted(INSTRUMENTS),
+            "team_group": team}
 
 
 @router.post("/change")
@@ -81,13 +84,11 @@ def change(body: Change, actor: str = Depends(require_admin)):
                              (body.username, body.username))
                 conn.execute("UPDATE users SET email=? WHERE username=?", (email, body.username))
                 if not user:
-                    groups.set_excluded(conn, groups.EVERYONE, body.username, True)
-                    conn.execute("UPDATE users SET scoped=1 WHERE username=?", (body.username,))
+                    groups.set_in_team(conn, body.username, False, by=actor)
             elif body.action == "clear_email":
                 conn.execute("UPDATE users SET email=NULL WHERE username=?", (body.username,))
             elif body.action == "scope":
-                groups.set_excluded(conn, groups.EVERYONE, body.username, body.scoped)
-                conn.execute("UPDATE users SET scoped=? WHERE username=?", (body.scoped, body.username))
+                groups.set_in_team(conn, body.username, not body.scoped, by=actor)
             elif body.action == "group":
                 problem = groups.check_group_name(body.group)
                 if problem:
@@ -110,13 +111,18 @@ def change(body: Change, actor: str = Depends(require_admin)):
                         raise ValueError("Unknown account")
                     groups.ensure_group(conn, body.group, builtin=True)
                     groups.add_member(conn, body.group, username, actor)
+                elif body.group.lower() == groups.PUBLIC:
+                    raise ValueError(
+                        f"The public site mirrors {groups.TEAM_GROUP}; grant to that group instead")
                 elif not groups.group_exists(conn, body.group):
                     raise ValueError("Unknown group")
                 selector = groups.check_selector(
                     proposal_id=body.proposal_id, instrument=body.instrument, target=body.target,
                     date=None, date_from=body.date_from or None, date_to=body.date_to or None,
                     instruments=INSTRUMENTS)
-                if not groups.add_grant(conn, body.group, **asdict(selector), note=body.note, granted_by=actor):
+                added = [groups.add_grant(conn, group, **asdict(selector), note=body.note, granted_by=actor)
+                         for group in groups.grant_groups(conn, body.group)]
+                if not added[0]:
                     raise ValueError("Equivalent grant already exists")
             elif body.action == "revoke":
                 if groups.revoke_grant(conn, body.grant_id, actor) is None:

@@ -4,6 +4,7 @@
   const message = document.getElementById('admin-message');
   const content = document.getElementById('admin-content');
   let busy = false;
+  let lastTeam = '';  // the team group from the last /state (everyone, or muscatjp after #354)
   const heading = root.querySelector('h3');
   heading.addEventListener('keydown', event => {
     if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); heading.click(); }
@@ -29,7 +30,9 @@
     const data = await api('/api/admin/state');
     document.getElementById('admin-summary').textContent = `${data.users.length} accounts · ${data.users.filter(user => user.email).length} Cloudflare mappings · ${data.groups.reduce((count, group) => count + group.grants.length, 0)} active grants`;
     const users = root.querySelector('#admin-users tbody'); users.replaceChildren();
-    data.users.forEach(user => row(users, [user.username, user.email, user.admin ? 'Admin: all observations' : user.scoped ? 'Explicit grants only' : 'Includes everyone', user.last_login]));
+    const team = data.team_group || 'everyone';
+    lastTeam = team;
+    data.users.forEach(user => row(users, [user.username, user.email, user.admin ? 'Admin: all observations' : user.scoped ? 'Explicit grants only' : team === 'everyone' ? 'Includes everyone' : 'On the team (' + team + ')', user.last_login]));
     const names = data.users.filter(user => !user.admin).map(user => user.username);
     root.querySelectorAll('[data-users]').forEach(select => options(select, names));
     const selectedAccount = root.querySelector('#admin-account');
@@ -40,7 +43,7 @@
     selectedAccount.onchange = showScope;
     showScope();
     const custom = data.groups.filter(group => !group.builtin && !group.name.startsWith('user:')).map(group => group.name);
-    root.querySelectorAll('[data-groups]').forEach(select => options(select, select.dataset.groups === 'custom' ? custom : [...new Set(['everyone', ...custom, ...names.map(name => 'user:' + name)])]));
+    root.querySelectorAll('[data-groups]').forEach(select => options(select, select.dataset.groups === 'custom' ? custom : [...new Set([team, ...custom, ...names.map(name => 'user:' + name)])]));
     const instrument = root.querySelector('#admin-instrument');
     options(instrument, ['', ...data.instruments]); instrument.options[0].textContent = 'Any instrument';
     const memberships = root.querySelector('#admin-memberships'); memberships.replaceChildren();
@@ -76,7 +79,7 @@
     body.action = event.submitter.value || form.dataset.adminAction;
     if (body.action === 'scope') body.scoped = body.scoped === 'true';
     if (['clear_email', 'scope', 'leave'].includes(body.action) && !await window.showConfirmModal('Change account access', 'Apply this access change to ' + body.username + '?')) return;
-    if (body.action === 'grant' && body.group === 'everyone' && !await window.showConfirmModal('Grant shared access', 'Grant these observations to everyone, except accounts limited to explicit grants?')) return;
+    if (body.action === 'grant' && body.group === (lastTeam || 'everyone') && !await window.showConfirmModal('Grant shared access', 'Grant these observations to the whole team (' + body.group + ') and the public site?')) return;
     save(body);
   }));
   document.getElementById('admin-refresh').addEventListener('click', () => refresh().then(() => { message.textContent = 'Updated.'; }).catch(error => { message.textContent = error.message; }));

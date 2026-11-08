@@ -24,6 +24,7 @@ import time
 from collections import deque
 
 from . import access
+from . import access_groups
 from . import chat_agent
 from . import jobs
 from .auth import (
@@ -142,6 +143,11 @@ def _allowed_rooms(user: str | None) -> set[str]:
         with db.get_conn(db.db_path()) as conn:
             db._ensure_chat_schema(conn, db.db_path())
             groups = conn.execute("SELECT name FROM groups WHERE builtin = 0").fetchall()
+            # Under explicit membership (#354) the team group's room is
+            # chat:public, so it gets no group:<name> room of its own.
+            not_rooms = {"everyone", "admin"}
+            if access_groups.explicit_membership(conn):
+                not_rooms |= {access_groups.TEAM_GROUP, access_groups.PUBLIC}
             memberships = {r[0] for r in conn.execute(
                 "SELECT groupname FROM group_members WHERE username = ?", (user,)
             )}
@@ -150,7 +156,7 @@ def _allowed_rooms(user: str | None) -> set[str]:
             )}
         rooms.update(
             f"group:{name}" for (name,) in groups
-            if name not in {"everyone", "admin"} and not name.startswith("user:")
+            if name not in not_rooms and not name.startswith("user:")
             and name in memberships and name not in excluded
         )
     except Exception:
