@@ -26,6 +26,8 @@ PRIMARY = (DATA / "collab_lightcurve.csv").read_bytes()
 ANCILLARY = (DATA / "collab_covariates.tsv").read_bytes()
 DATE = "260103"
 TARGET = "TOI-9999"
+OPEN_TARGET = "OPENTGT"  # observed under an open proposal in the access fixture
+HIDDEN_TARGET = "HIDDENTGT"  # observed only under the restricted one
 
 BASE_MAPPING = Mapping(
     time="time_bjd", flux="rel_flux_T1", err="rel_flux_err_T1", time_system="BJD_TDB",
@@ -259,6 +261,7 @@ def test_save_writes_the_normalized_csv_and_product_record(prose_dir):
     assert record["inputs"] == [{
         "kind": "upload",
         "facility": "ASTEP",
+        "target": TARGET,
         "files": [
             {"role": "primary", "name": "collab_lightcurve.csv", "sha256": sha, "bytes": len(PRIMARY)},
             {"role": "ancillary", "name": "collab_covariates.tsv",
@@ -355,19 +358,23 @@ def test_upload_covariates_ignores_a_photometry_run(tmp_path):
 # --------------------------------------------------------------------------
 
 
-def test_upload_input_is_visible_to_a_scoped_viewer(env):  # noqa: F811
+def test_upload_input_follows_the_target_for_a_scoped_viewer(env):  # noqa: F811
+    from muscat_db import access
     from muscat_db.access import NightVisibility
-    from muscat_db.database import ScopedDenied
     from muscat_db.product_visibility import ProductVisibility
 
-    denied = ScopedDenied({"SECRET", ""}, allowed={"OPEN"})
+    denied = access.denied_proposal_ids_for(env, "eve")  # restricted in the fixture
+    assert denied
     nights = NightVisibility(env, denied)
-    # Fails closed for an LCO night with no summaries, but not for uploads.
+    # An LCO night with no summaries fails closed; an upload night is not gated by nights.
     assert nights.hidden("muscat3", DATE, TARGET)
     assert not nights.hidden(EXTERNAL_INSTRUMENT, DATE, TARGET)
     assert not nights.unknown_night(EXTERNAL_INSTRUMENT, DATE)
     vis = ProductVisibility("eve", denied, nights)
-    assert vis._input_visible({"kind": "upload", "files": []}, 0)
+    assert vis._input_visible({"kind": "upload", "target": OPEN_TARGET, "files": []}, 0)
+    assert not vis._input_visible({"kind": "upload", "target": HIDDEN_TARGET, "files": []}, 0)
+    assert not vis._input_visible({"kind": "upload", "target": TARGET, "files": []}, 0)  # never observed
+    assert not vis._input_visible({"kind": "upload", "files": []}, 0)  # no target recorded
     assert not vis._input_visible({"kind": "bogus"}, 0)
 
 
@@ -389,7 +396,7 @@ def test_http_inspect_then_save_then_list_on_the_page(http):
     assert r.status_code == 200 and r.json()["columns"][0] == "time_bjd"
 
     payload = {
-        "target": TARGET, "date": DATE, "band": "r", "facility": "ASTEP",
+        "target": OPEN_TARGET, "date": DATE, "band": "r", "facility": "ASTEP",
         "primary": {"name": "p.csv", "content_b64": _b64(PRIMARY)},
         "ancillary": {"name": "a.tsv", "content_b64": _b64(ANCILLARY)},
         "mapping": {**JOIN_MAPPING.__dict__, "covariates": ["AIRMASS"], "ancillary_covariates": ["fwhm_arcsec"]},
@@ -397,12 +404,12 @@ def test_http_inspect_then_save_then_list_on_the_page(http):
     r = http.post("/api/lc-upload/save", headers=_headers("alice"), json=payload)
     assert r.status_code == 200, r.text
     saved = r.json()
-    rdir = phot.run_output_dir(EXTERNAL_INSTRUMENT, DATE, TARGET, saved["run_id"])
+    rdir = phot.run_output_dir(EXTERNAL_INSTRUMENT, DATE, OPEN_TARGET, saved["run_id"])
     assert product_record.read_record(rdir)["author"] == "alice"
 
     # alice is a restricted viewer in this fixture, and still sees the upload.
     page = http.get("/transit-fit", headers=_headers("alice"),
-                    params={"inst": EXTERNAL_INSTRUMENT, "date": DATE, "target": TARGET})
+                    params={"inst": EXTERNAL_INSTRUMENT, "date": DATE, "target": OPEN_TARGET})
     assert page.status_code == 200
     assert saved["file"] in page.text
     assert 'id="lc-upload"' in page.text
@@ -423,7 +430,7 @@ def test_http_inspect_refusals(http, body, needle):
 
 def test_http_save_refuses_jd_utc(http):
     payload = {
-        "target": TARGET, "date": DATE, "band": "r", "facility": "ASTEP",
+        "target": OPEN_TARGET, "date": DATE, "band": "r", "facility": "ASTEP",
         "primary": {"name": "p.csv", "content_b64": _b64(PRIMARY)},
         "mapping": {**BASE_MAPPING.__dict__, "covariates": [], "time_system": "JD_UTC"},
     }
@@ -464,3 +471,126 @@ def test_concurrent_save_of_the_same_file_is_refused_not_an_error(prose_dir, mon
     # The first upload is intact.
     rdir = phot.run_output_dir(EXTERNAL_INSTRUMENT, DATE, TARGET, first["run_id"])
     assert (rdir / first["file"]).is_file() and product_record.read_record(rdir)
+
+
+# --------------------------------------------------------------------------
+# Review of #409: 400s, caps, visibility follows the target, delete
+# --------------------------------------------------------------------------
+
+
+def _payload(target=OPEN_TARGET, data=PRIMARY, **extra):
+    return {
+        "target": target, "date": DATE, "band": "r", "facility": "ASTEP",
+        "primary": {"name": "p.csv", "content_b64": _b64(data)},
+        "mapping": {**BASE_MAPPING.__dict__, "covariates": ["AIRMASS"]},
+        **extra,
+    }
+
+
+def _upload(http, user="alice", **kw):
+    return http.post("/api/lc-upload/save", headers=_headers(user), json=_payload(**kw))
+
+
+_HUGE_FIELD = b'time_bjd;rel_flux_T1\n"' + b"x" * 200_000 + b'";1\n'
+
+
+@pytest.mark.parametrize("path,body", [
+    ("/api/lc-upload/save", _payload(target="a\x00b")),
+    ("/api/lc-upload/save", _payload(target="x" * 300)),
+    ("/api/lc-upload/save", _payload(data=_HUGE_FIELD)),
+    ("/api/lc-upload/inspect", {"file": {"name": "p.csv", "content_b64": _b64(_HUGE_FIELD)}}),
+])
+def test_http_unexpected_input_is_a_400_not_a_500(http, path, body, prose_dir):
+    r = http.post(path, headers=_headers("root"), json=body)
+    assert r.status_code == 400, r.text
+    assert r.json()["ok"] is False and r.json()["error"]
+    assert not list(prose_dir.glob("external/*"))
+
+
+def _table_of(n_rows, n_cols):
+    head = ",".join(f"c{i}" for i in range(n_cols))
+    return ("\n".join([head] + [",".join("1" for _ in range(n_cols))] * n_rows)).encode()
+
+
+def test_row_cap_is_enforced(monkeypatch):
+    monkeypatch.setattr(lc_upload, "MAX_ROWS", 3)
+    assert len(lc_upload.parse_table("p.csv", _table_of(3, 2)).rows) == 3
+    with pytest.raises(UploadError, match="more than 3 rows"):
+        lc_upload.parse_table("p.csv", _table_of(4, 2))
+
+
+def test_column_cap_is_enforced(monkeypatch):
+    monkeypatch.setattr(lc_upload, "MAX_COLUMNS", 3)
+    assert len(lc_upload.parse_table("p.csv", _table_of(2, 3)).columns) == 3
+    with pytest.raises(UploadError, match="more than 3 columns"):
+        lc_upload.parse_table("p.csv", _table_of(2, 4))
+
+
+def test_viewer_cannot_upload_under_a_target_they_cannot_see(http, prose_dir):
+    r = _upload(http, "alice", target=HIDDEN_TARGET)
+    assert r.status_code == 403 and HIDDEN_TARGET in r.json()["error"]
+    # A name nobody observed fails closed for a restricted viewer too, and says the same.
+    r = _upload(http, "alice", target="NEVEROBSERVED")
+    assert r.status_code == 403
+    assert not list(prose_dir.glob("external/*"))
+    assert _upload(http, "root", target=HIDDEN_TARGET).status_code == 200
+
+
+def test_an_upload_is_visible_to_whoever_may_see_its_target(http):
+    saved = _upload(http, "root", target=OPEN_TARGET).json()
+    params = {"inst": EXTERNAL_INSTRUMENT, "date": DATE, "target": OPEN_TARGET}
+    page = http.get("/transit-fit", headers=_headers("alice"), params=params)
+    assert saved["file"] in page.text  # alice did not upload it, but may see the target
+
+
+def test_an_upload_under_a_hidden_target_is_hidden_and_not_in_the_picker(http):
+    saved = _upload(http, "root", target=HIDDEN_TARGET).json()
+    params = {"inst": EXTERNAL_INSTRUMENT, "date": DATE}
+    for user, listed in (("root", True), ("alice", False)):
+        page = http.get("/transit-fit", headers=_headers(user), params=params)
+        assert (HIDDEN_TARGET in page.text) is listed, user
+        page = http.get("/transit-fit", headers=_headers(user), params={**params, "target": HIDDEN_TARGET})
+        assert (saved["file"] in page.text) is listed, user
+
+
+def test_duplicate_refusal_does_not_name_an_upload_the_submitter_cannot_see(http):
+    saved = _upload(http, "root", target=HIDDEN_TARGET).json()
+    r = _upload(http, "alice", target=OPEN_TARGET)
+    assert r.status_code == 400 and "already uploaded" in r.json()["error"]
+    assert saved["run_id"] not in r.json()["error"] and HIDDEN_TARGET not in r.json()["error"]
+
+
+def test_duplicate_refusal_names_a_visible_upload(http):
+    saved = _upload(http, "alice").json()
+    r = _upload(http, "alice")
+    assert saved["run_id"] in r.json()["error"]
+
+
+def _delete(http, user, run_id, target=OPEN_TARGET):
+    return http.post("/api/lc-upload/delete", headers=_headers(user),
+                     json={"date": DATE, "target": target, "run_id": run_id})
+
+
+def test_uploader_can_delete_a_mistaken_upload_and_upload_again(http, prose_dir):
+    saved = _upload(http, "alice").json()
+    rdir = phot.run_output_dir(EXTERNAL_INSTRUMENT, DATE, OPEN_TARGET, saved["run_id"])
+    assert rdir.is_dir()
+    assert _delete(http, "alice", saved["run_id"]).status_code == 200
+    assert not rdir.exists()
+    again = _upload(http, "alice", band="i")  # same file, corrected band
+    assert again.status_code == 200, again.text
+
+
+def test_delete_is_refused_to_someone_who_does_not_own_the_upload(http):
+    saved = _upload(http, "alice").json()
+    r = _delete(http, "bob", saved["run_id"])
+    assert r.status_code == 403
+    assert phot.run_output_dir(EXTERNAL_INSTRUMENT, DATE, OPEN_TARGET, saved["run_id"]).is_dir()
+    assert _delete(http, "root", saved["run_id"]).status_code == 200
+
+
+def test_delete_hidden_or_unknown_runs_404_and_only_uploads_are_deletable(http):
+    saved = _upload(http, "root", target=HIDDEN_TARGET).json()
+    assert _delete(http, "alice", saved["run_id"], HIDDEN_TARGET).status_code == 404
+    assert _delete(http, "root", "not-an-upload").status_code == 400
+    assert _delete(http, "root", "upload-0000000000000000").status_code == 404

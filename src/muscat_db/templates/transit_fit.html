@@ -243,6 +243,19 @@
     <button class="btn primary" type="button" id="lcu-save" disabled>Save Upload</button>
   </div>
   <div class="lco-msg" id="lcu-msg" role="status" aria-live="polite"></div>
+  {% if sel_inst == 'external' and csvs %}
+  {# A mistaken upload (wrong mapping, band, night or target) is deleted and uploaded again. #}
+  <div id="lcu-existing" style="margin-top: 1rem;" data-date="{{ sel_date }}" data-target="{{ sel_target }}">
+    <h3 style="font-size: 0.95rem; margin-bottom: 0.4rem;">Uploads for this night and target</h3>
+    {% for csv in csvs if csv.run_id %}
+    <div style="display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.3rem;">
+      <span class="lcu-existing-name" style="font-size: 0.85rem;">{{ csv.name }}</span>
+      <button class="btn sm lcu-delete" type="button" data-run-id="{{ csv.run_id }}"
+              aria-label="Delete upload {{ csv.name }}">Delete</button>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
 </details>
 <script src="{{ static_url('js/lcUpload.js') }}"></script>
 

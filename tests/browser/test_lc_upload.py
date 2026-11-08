@@ -90,6 +90,16 @@ def test_upload_maps_columns_joins_saves_and_reaches_the_fit(page):
     expect(page.locator(".csv-card")).to_have_count(1)
     expect(page.locator(".csv-card .lc-name")).to_contain_text(result["file"])
 
+    # A mistaken upload is deleted from the page, which makes room to save it again.
+    page.click("#lc-upload > summary")
+    expect(page.locator(".lcu-existing-name")).to_have_text(result["file"])
+    page.click(".lcu-delete")
+    expect(page.locator("#message-modal-ok")).to_have_text("Delete")
+    with page.expect_response("**/api/lc-upload/delete") as deleted:
+        page.click("#message-modal-ok")
+    assert deleted.value.status == 200
+    expect(page.locator(".empty-state h2")).to_have_text("No Uploaded Light Curves")
+
 
 def test_external_night_without_uploads_points_at_the_form(page):
     page.goto("/transit-fit?inst=external&date=260105&target=TOI-1")

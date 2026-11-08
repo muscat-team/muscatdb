@@ -223,6 +223,35 @@
         });
     }
 
+    function deleteUpload(button) {
+      var box = el('lcu-existing');
+      var name = button.getAttribute('aria-label').replace('Delete upload ', '');
+      window.showConfirmModal('Delete upload', 'Delete ' + name + '? It can be uploaded again afterwards.',
+        { confirmLabel: 'Delete', confirmClass: 'btn primary' }).then(function (ok) {
+        if (!ok) return;
+        button.disabled = true;
+        post('/api/lc-upload/delete', {
+          date: box.dataset.date, target: box.dataset.target, run_id: button.dataset.runId,
+        })
+          .then(function (res) {
+            if (!res.ok) throw new Error(res.error || 'delete refused');
+            window.location.reload();
+          })
+          .catch(function (err) {
+            setMsg(err.message, 'err');
+            button.disabled = false;
+          });
+      });
+    }
+
+    var existing = el('lcu-existing');
+    if (existing) {
+      existing.addEventListener('click', function (ev) {
+        var button = ev.target.closest('.lcu-delete');
+        if (button) deleteUpload(button);
+      });
+    }
+
     el('lcu-primary').addEventListener('change', function () { loadFile('primary'); });
     el('lcu-ancillary').addEventListener('change', function () { loadFile('ancillary'); });
     el('lcu-time-system').addEventListener('change', validate);

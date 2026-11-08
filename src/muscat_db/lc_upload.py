@@ -46,6 +46,7 @@ import math
 import os
 import re
 import shutil
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -68,6 +69,7 @@ MAX_CELLS = 2_000_000
 # mapping and form fields.
 MAX_REQUEST_BYTES = 2 * ((MAX_UPLOAD_BYTES * 4) // 3 + 4) + 64 * 1024
 MAX_FACILITY_LEN = 80
+MAX_TARGET_LEN = 100
 
 TIME_SYSTEMS = ("BJD_TDB",)
 
@@ -246,6 +248,13 @@ def parse_table(name: str, data: bytes) -> Table:
     Refuses a table with no header, blank or repeated column names, a row
     whose cell count differs from the header's, or too many rows or columns.
     """
+    try:
+        return _parse_table(name, data)
+    except csv.Error as exc:  # e.g. a delimited field over the csv module's size limit
+        raise UploadError(f"{name}: cannot read the delimited text ({exc})") from None
+
+
+def _parse_table(name: str, data: bytes) -> Table:
     text = decode(name, data)
     lines = _content_lines(text)
     if not lines:
@@ -570,11 +579,16 @@ def save_upload(
     ancillary_name: str | None = None,
     ancillary_data: bytes | None = None,
     author: str | None = None,
+    can_see: Callable[[str, str, str], bool] | None = None,
 ) -> dict:
     """Validate, normalize and store one upload as an external product.
 
     Returns ``{"inst", "date", "target", "run_id", "file", "warnings"}``.
     Raises :class:`UploadError` for anything refused; nothing is written then.
+
+    *can_see* takes ``(date, target, run_id)`` of an existing upload and says
+    whether the submitter may see it; the duplicate refusal names the earlier
+    upload only when they may. Without it, every upload is named.
     """
     from muscat_db import photometry
 
@@ -588,6 +602,10 @@ def save_upload(
         target_dir = jobs.target_dir_name(target)
     except ValueError:
         raise UploadError("target is required and must be a plain name") from None
+    if len(target_dir) > MAX_TARGET_LEN or not target_dir.isprintable():
+        raise UploadError(
+            f"target must be printable text of at most {MAX_TARGET_LEN} characters"
+        )
     if band not in BANDS:
         raise UploadError(f"band must be one of: {', '.join(BANDS)}")
     facility = _clean_facility(facility)
@@ -604,10 +622,10 @@ def save_upload(
     primary_sha = checksum(primary_data)
     existing = find_checksum(primary_sha)
     if existing is not None:
-        raise UploadError(
-            f"{primary_name} was already uploaded (same checksum) as "
-            f"{existing.parent.parent.parent.name}/{existing.parent.name}/{existing.name}"
-        )
+        where = (existing.parent.parent.parent.name, existing.parent.name, existing.name)
+        if can_see is None or can_see(*where):
+            raise UploadError(f"{primary_name} was already uploaded (same checksum) as {'/'.join(where)}")
+        raise UploadError(f"{primary_name} was already uploaded (same checksum)")
 
     run_id = f"{RUN_PREFIX}{primary_sha[:_CHECKSUM_PREFIX_LEN]}"
     rdir = photometry.run_output_dir(EXTERNAL_INSTRUMENT, date, target_dir, run_id)
@@ -619,7 +637,7 @@ def save_upload(
     record = product_record.build_record(
         "photometry",
         author=author,
-        inputs=[{"kind": "upload", "facility": facility, "files": files}],
+        inputs=[{"kind": "upload", "facility": facility, "target": target_dir, "files": files}],
         settings={
             "source": "upload",
             "facility": facility,
@@ -633,13 +651,18 @@ def save_upload(
     )
 
     csv_name = lightcurve_name(target_dir, band, date, run_id)
-    rdir.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        rdir.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise UploadError(f"could not create the upload directory ({exc.strerror or exc})") from None
     try:
         # Atomic claim: a concurrent save of the same file (a double submit)
         # loses here rather than both passing the checksum scan above.
         rdir.mkdir()
     except FileExistsError:
         raise UploadError(f"an upload already occupies {run_id} for {target_dir} on {date}") from None
+    except OSError as exc:
+        raise UploadError(f"could not create the upload directory ({exc.strerror or exc})") from None
     try:
         _write_csv(rdir / csv_name, norm)
         if not product_record.write_record(rdir, record):

@@ -684,10 +684,17 @@ An upload is refused, with nothing written, when:
 * a covariate has no numeric value in any row (timer's `bin_df` would drop
   every row). A covariate missing in only some rows is kept with a warning;
 * the same file (same checksum) was uploaded before. The message names the
-  existing product.
+  existing product when you may see it, and does not otherwise;
+* you may not see the target. An upload is filed under a target and visible to
+  its uploader and to anyone who may see that target (the same target grants
+  as for observed data), so only such a viewer can upload under it. A name no
+  observation carries is refused for a restricted viewer; admins and unrestricted
+  viewers can upload under any name.
 
-Uploads are visible to every viewer, like a manually entered point: they have
-no frames or proposals behind them. Saved column-mapping presets for recurring
+A mistaken upload (wrong mapping, band, night or target) is removed with the
+**Delete** button under *Upload an External Light Curve* on the same night and
+target, by its uploader, a member of a group they share, or an admin; the same
+file can then be uploaded again. Saved column-mapping presets for recurring
 formats are not implemented yet.
 
 

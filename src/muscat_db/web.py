@@ -2999,8 +2999,8 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
     denied = _viewer_denied()
     nights = _night_visibility(denied)
     if inst == EXTERNAL_INSTRUMENT:
-        # Uploads have no obslog nights and are visible to every viewer
-        # (#382): the nights are the ones holding an upload.
+        # Uploads have no obslog nights: the nights are the ones holding an
+        # upload (#382); each upload is gated by its own record below.
         dates = phot.output_dates(inst)
     elif inst:
         dates = _visible_obsdates(db, inst, denied)
@@ -3010,6 +3010,17 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
         targets = sorted({
             name.replace(" ", "") for name in obj_set if not nights.hidden(inst, date, name)
         })
+        if inst == EXTERNAL_INSTRUMENT and denied:
+            # An upload has no obslog night to gate it: list a target only
+            # when one of its uploads on this date is visible.
+            products = _product_visibility(denied)
+            targets = [
+                t for t in targets
+                if any(
+                    not products.hidden("photometry", inst, date, t, _photometry_run_of_csv(c))
+                    for c in fit.get_csv_lightcurves(inst, date, t)
+                )
+            ]
     # Issue #144: a hidden target renders like a never-observed name, which
     # has no lightcurves and no runs.
     if inst and date and target and not nights.hidden(inst, date, target):
@@ -3934,11 +3945,20 @@ async def lc_upload_save(request: Request):
 
 
 def _lc_upload_save(request: Request, payload: dict) -> JSONResponse:
+    target = str(payload.get("target") or "").strip()
+    # An upload is filed under a target and seen by whoever may see that target
+    # (#382), so only such a viewer may add one. A name nobody observed is
+    # refused alike for a restricted viewer, so the refusal reveals nothing.
+    if not _night_visibility().target_visible(target):
+        return _upload_refused(
+            lc_upload.UploadError(f"you may not upload under target {target!r}"), 403
+        )
+    products = _product_visibility()
     try:
         primary_name, primary_data = _upload_file(payload, "primary", required=True)
         ancillary = _upload_file(payload, "ancillary", required=False)
         result = lc_upload.save_upload(
-            target=str(payload.get("target") or "").strip(),
+            target=target,
             date=str(payload.get("date") or "").strip(),
             band=str(payload.get("band") or "").strip(),
             facility=payload.get("facility"),
@@ -3948,6 +3968,9 @@ def _lc_upload_save(request: Request, payload: dict) -> JSONResponse:
             ancillary_name=ancillary[0] if ancillary else None,
             ancillary_data=ancillary[1] if ancillary else None,
             author=request.state.user,
+            can_see=lambda date, tgt, run: not products.hidden(
+                "photometry", EXTERNAL_INSTRUMENT, date, tgt, run
+            ),
         )
     except lc_upload.UploadError as exc:
         return _upload_refused(exc)
@@ -3956,6 +3979,35 @@ def _lc_upload_save(request: Request, payload: dict) -> JSONResponse:
         request.state.user or "-", result["inst"], result["date"], result["target"], result["run_id"],
     )
     return JSONResponse({"ok": True, **result})
+
+
+@lc_upload_router.post("/delete")
+def lc_upload_delete(request: Request, payload: dict = Body(...)):
+    """Remove an uploaded light curve so a mistaken one (wrong mapping, band,
+    night or target) can be uploaded again (#382). Only uploads are deletable
+    here, by their uploader, a group-mate or an admin, like any other run."""
+    date = str(payload.get("date") or "").strip()
+    target = str(payload.get("target") or "").strip()
+    run_id = str(payload.get("run_id") or "").strip()
+    if not run_id.startswith(lc_upload.RUN_PREFIX):
+        return _upload_refused(lc_upload.UploadError("only an uploaded light curve can be deleted here"))
+    if not phot.valid_date(date) or not target:
+        return _upload_refused(lc_upload.UploadError("date and target are required"))
+    _require_visible_run("photometry", EXTERNAL_INSTRUMENT, date, target, run_id)
+    try:
+        exists = phot.run_output_dir(EXTERNAL_INSTRUMENT, date, target, run_id).is_dir()
+    except ValueError:
+        exists = False
+    if not exists:
+        raise HTTPException(404, f"upload {run_id!r} not found")
+    owner = _require_may_modify_run(
+        "photometry", EXTERNAL_INSTRUMENT, date, target, run_id, action="delete"
+    )
+    result = phot.delete_reduction(EXTERNAL_INSTRUMENT, date, target, run_id=run_id)
+    if not result.get("ok"):
+        return JSONResponse(result, status_code=400)
+    _record_run_change("delete", "photometry", EXTERNAL_INSTRUMENT, date, target, run_id, owner)
+    return JSONResponse(result)
 
 
 @transit_fit_router.get("/status")

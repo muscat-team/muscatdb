@@ -180,6 +180,7 @@ class NightVisibility:
         self.denied = denied
         self.normalize = normalize
         self._rows: dict[tuple[str, str], list[tuple[str, bool]]] = {}
+        self._target_rows: list[tuple] | None = None
 
     def _night(self, instrument: str, obsdate: str) -> list[tuple[str, bool]]:
         """``(object, visible)`` per summary on one night."""
@@ -217,9 +218,8 @@ class NightVisibility:
 
         The ``external`` pseudo-instrument has no frames or proposals, so it
         is never an unknown night (:meth:`unknown_night`) and has no rows to
-        deny: its uploads are visible to every viewer (#382), and each
-        product's record still decides for itself
-        (:mod:`muscat_db.product_visibility`)."""
+        deny: each upload's own record decides who sees it, by the target
+        it was filed under (:mod:`muscat_db.product_visibility`)."""
         if not self.denied:
             return False
         if self.unknown_night(instrument, obsdate):
@@ -233,6 +233,32 @@ class NightVisibility:
             norm = self.normalize(target)
             matched = [visible for obj, visible in rows if self.normalize(obj) == norm]
         return not any(matched)
+
+    def target_visible(self, target: str) -> bool:
+        """Whether the viewer may see *target* on any night: some summary of
+        it falls under their grants. A name no summary carries is not visible
+        to a restricted viewer (fail closed); an unrestricted one sees all.
+
+        Used for products that belong to a target rather than a night, such as
+        an uploaded light curve (#382). Names match like :meth:`hidden`.
+        """
+        if not self.denied:
+            return True
+        if self._target_rows is None:
+            with get_conn(self.db_path) as conn:
+                self._target_rows = conn.execute(
+                    "SELECT object, proposal_id, instrument, obsdate FROM summaries"
+                ).fetchall()
+        rows = [(o or "", p, i, d) for o, p, i, d in self._target_rows]
+        want = _compact(target)
+        matched = [r for r in rows if _compact(r[0]) == want]
+        if not matched and self.normalize is not None:
+            norm = self.normalize(target)
+            matched = [r for r in rows if self.normalize(r[0]) == norm]
+        return any(
+            not is_denied(pid, self.denied, instrument=inst, obsdate=date, obj=obj)
+            for obj, pid, inst, date in matched
+        )
 
     def matched_objects(self, instrument: str, obsdate: str, target: str) -> list[str]:
         """Raw ``object`` spellings on this night that *target* names, matched
