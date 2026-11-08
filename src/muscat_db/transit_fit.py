@@ -2469,6 +2469,39 @@ def _parse_run_dir_name(name: str) -> tuple[str, str, str, str]:
     return site, telescope, mode, "-".join(parts)
 
 
+def target_fit_dates(inst: str, target: str) -> list[str]:
+    """Find candidate timer nights without resolving every observation night.
+
+    This is uncached directory discovery, not an access decision. Callers must
+    still check night and product visibility before exposing any run. Resolve
+    matching paths through ``fit_output_dir`` to retain its root confinement.
+    """
+    try:
+        name = _target_dir_name(target)
+        instrument = _run_dir_name(inst)
+        root = pathlib.Path(os.environ.get(
+            "MUSCAT_TIMER_DIR", str(pathlib.Path.home() / "ql" / "timer")
+        )).expanduser().resolve(strict=False)
+        base = (root / instrument).resolve(strict=False)
+        base.relative_to(root)
+    except ValueError:
+        return []
+    if not base.is_dir():
+        return []
+    dates = []
+    for night in base.iterdir():
+        if len(night.name) != 6 or not night.name.isascii() or not night.name.isdigit():
+            continue
+        if not (night / name).is_dir():
+            continue
+        try:
+            fit_output_dir(inst, night.name, target)
+        except ValueError:
+            continue
+        dates.append(night.name)
+    return sorted(dates, reverse=True)
+
+
 def list_fit_runs(inst: str, date: str, target: str) -> list[RunDescriptor]:
     """Enumerate the runs that exist for a target, newest-first.
 

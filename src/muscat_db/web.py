@@ -3097,12 +3097,20 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
     if target:
         import yaml as _yaml
         for inst_name in INSTRUMENTS:
+            candidate_dates = fit.target_fit_dates(inst_name, target)
+            if not candidate_dates:
+                continue
+            # Keep the existing obslog/prose date eligibility and ordering, but
+            # do not query unrelated instruments or check empty nights' access.
             inst_dates = {d["obsdate"] for d in _get_dates(db, inst_name)}
             inst_dates.update(phot.output_dates(inst_name))
-            for d in sorted(inst_dates, reverse=True):
-                if nights.hidden(inst_name, d, target):
+            for d in candidate_dates:
+                if d not in inst_dates:
                     continue
-                for r in fit.list_fit_runs(inst_name, d, target):
+                previous_runs = fit.list_fit_runs(inst_name, d, target)
+                if not previous_runs or nights.hidden(inst_name, d, target):
+                    continue
+                for r in previous_runs:
                     if all_runs_products.hidden("transit_fit", inst_name, d, target, r.run_id):
                         continue
                     key = (inst_name, d, r.run_id)
