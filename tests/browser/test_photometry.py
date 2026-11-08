@@ -68,6 +68,11 @@ def test_products_of_the_run_are_shown(page):
     page.goto(URL)
     page.wait_for_load_state("networkidle")
     page.wait_for_load_state("networkidle")
+    # Products load as the user scrolls; offscreen figures must stay deferred.
+    for name in ("lightcurves", "covariates", "stacks", "gp ref"):
+        img = page.locator(f'img[alt="{name}"]')
+        img.scroll_into_view_if_needed()
+        page.wait_for_function("i => i.complete && i.naturalWidth > 0", arg=img.element_handle())
     images = _loaded_images(page)
     for name in ("lightcurves", "covariates", "stacks"):
         assert f"TOI-1000_muscat3_261001_{name}.png" in images

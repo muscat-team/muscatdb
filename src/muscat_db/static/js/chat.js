@@ -1174,9 +1174,9 @@ document.addEventListener("DOMContentLoaded", () => {
     });
 
     // Restore prior minimize state (UI only); the pop-out window always starts expanded.
-    let storedMin = "0";
+    let storedMin = !isPopout && isMobileViewport() ? "1" : "0";
     if (!isPopout) {
-        try { storedMin = localStorage.getItem("muscat-chat-min") || "0"; } catch (e) {}
+        try { storedMin = localStorage.getItem("muscat-chat-min") ?? storedMin; } catch (e) {}
     }
     setMinimized(storedMin === "1");
 

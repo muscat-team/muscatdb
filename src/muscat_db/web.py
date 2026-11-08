@@ -64,6 +64,7 @@ from fastapi.exception_handlers import (
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.middleware.gzip import GZipMiddleware
+from muscat_db import image_delivery
 from fastapi.responses import (
     FileResponse,
     HTMLResponse,
@@ -2862,6 +2863,21 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
                 nb_headers, nb_rows = phot.csv_preview(rdir / nearby_info["file"], n=100)
                 nearby_preview = {"headers": nb_headers, "rows": nb_rows}
 
+    # Presentation metadata is separate from the photometry product contract.
+    image_info = {}
+    if outputs:
+        rdir = phot.run_output_dir(inst, date, target, sel_run or None)
+        for item in outputs.get("summary_items", []):
+            image_info[item["file"]] = image_delivery.metadata(rdir / item["file"])
+        for prods in outputs.get("bands", {}).values():
+            for key in ("ref", "apertures", "cutouts", "alignment", "gif"):
+                if key in prods:
+                    name = prods[key]["file"]
+                    image_info[name] = image_delivery.metadata(rdir / name)
+        for name in outputs.get("masters", []):
+            path = phot.safe_artifact_path(inst, date, name)
+            image_info[name] = image_delivery.metadata(path) if path else {}
+
     # Merge URL parameter overrides with defaults
     # Sinistro's site/telescope/mode selectors double as page view filters and
     # reduction options.  Seed the option controls from the validated URL so a
@@ -2893,7 +2909,7 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
         sel_run=sel_run or "",
         can_modify_run=_viewer_may_modify_run("photometry", inst, date, route_target, sel_run or ""),
         dates=dates, targets=targets,
-        outputs=outputs, previews=previews,
+        outputs=outputs, previews=previews, image_info=image_info,
         nearby_preview=nearby_preview,
         command=command, raw_missing=raw_missing,
         default_bands=phot.DEFAULT_BANDS,
@@ -8230,11 +8246,11 @@ def photometry_ref_time_preview(inst: str, date: str, target: str, jd: float):
 
 @photometry_router.get("/file/{inst}/{date}/{target}/run/{run_id}/{name}", response_class=FileResponse,
                        responses={200: {"content": {"application/octet-stream": {"schema": {"type": "string", "format": "binary"}}}}})
-def photometry_file_run(inst: str, date: str, target: str, run_id: str, name: str):
+def photometry_file_run(request: Request, inst: str, date: str, target: str, run_id: str, name: str, preview_width: int | None = None):
     path = phot.safe_run_artifact_path(inst, date, target, run_id, name)
     if path is None or _run_hidden("photometry", inst, date, target, run_id):
         raise HTTPException(404, "artifact not found")
-    return FileResponse(str(path), headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"})
+    return image_delivery.image_response(path, request, preview_width)
 
 
 def _legacy_artifact_hidden(inst: str, date: str, name: str) -> bool:
@@ -8251,11 +8267,11 @@ def _legacy_artifact_hidden(inst: str, date: str, name: str) -> bool:
 
 @photometry_router.get("/file/{inst}/{date}/{name}", response_class=FileResponse,
                        responses={200: {"content": {"application/octet-stream": {"schema": {"type": "string", "format": "binary"}}}}})
-def photometry_file(inst: str, date: str, name: str):
+def photometry_file(request: Request, inst: str, date: str, name: str, preview_width: int | None = None):
     path = phot.safe_artifact_path(inst, date, name)
     if path is None or _legacy_artifact_hidden(inst, date, name):
         raise HTTPException(404, "artifact not found")
-    return FileResponse(str(path), headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"})
+    return image_delivery.image_response(path, request, preview_width)
 
 
 def _photometry_download_all(inst: str, date: str, target: str, run_id: str | None):
