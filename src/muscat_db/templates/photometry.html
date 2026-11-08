@@ -1,6 +1,24 @@
 {% extends "base.html" %}
 {% block title %}Photometry — MuSCAT-db{% endblock %}
 {% block content %}
+{% macro product_image(base, name, version, alt, eager=false, animation=false, sizes='(max-width: 820px) calc(100vw - 58px), 754px') %}
+  {% set info = image_info.get(name, {}) %}
+  {% set original = base ~ '/' ~ name ~ '?v=' ~ (info.get('version') or version) %}
+  {% set preview = original ~ '&preview_width=960' %}
+  {% set ns = namespace(variants=[]) %}
+  {% for query_width, actual_width in info.get('variants', [(480, 480), (960, 960), (1560, 1560)]) %}
+    {% set ns.variants = ns.variants + [original ~ '&preview_width=' ~ query_width ~ ' ' ~ actual_width ~ 'w'] %}
+  {% endfor %}
+  {% set variants = ns.variants | join(', ') %}
+  <a href="{{ original }}" target="_blank">
+    <img class="phot-image" draggable="false" decoding="async" alt="{{ alt }}"
+      {% if info %}width="{{ info.width }}" height="{{ info.height }}"{% endif %}
+      {% if eager %}src="{{ preview }}" srcset="{{ variants }}" fetchpriority="high" loading="eager"
+      {% else %}data-src="{{ preview }}" data-srcset="{{ variants }}"{% endif %}
+      sizes="{{ sizes }}">
+  </a>
+  {% if animation %}<button type="button" class="animation-toggle" data-original="{{ original }}" aria-pressed="false">Play animation</button>{% endif %}
+{% endmacro %}
 <style>
   /* Page-specific styles only. Shared components (buttons, .opt* form fields,
      .opt-section-title, .opt-collapse, details.adv, .run-panel, .run-cmd,
@@ -71,7 +89,7 @@
   <a id="job-banner-link" style="margin-left:0.5rem; font-weight:600;" href="#">view</a>
 </div>
 
-<form class="selector-group" method="get" action="/photometry" id="phot-form">
+<form class="selector-group phot-picker" method="get" action="/photometry" id="phot-form">
   <label for="sel-inst">Instrument
     <select id="sel-inst" name="inst">
       <option value="">— select —</option>
@@ -226,9 +244,7 @@
               <span>{{ item.key }} - {{ item.file }} (Created: {{ item.created_at }})</span>
               <span class="drag-handle" title="Drag to reorder">⠿</span>
             </figcaption>
-            <a href="{{ file_base }}/{{ item.file }}?v={{ item.version }}" target="_blank">
-              <img draggable="false" loading="lazy" src="{{ file_base }}/{{ item.file }}?v={{ item.version }}" alt="{{ item.key }}">
-            </a>
+            {{ product_image(file_base, item.file, item.version, item.key, eager=loop.first) }}
           </figure>
         {% endfor %}
       </div>
@@ -294,9 +310,7 @@
                 <span>{{ band }} · {{ key }} (Created: {{ prods[key].created_at }})</span>
                 <span class="drag-handle" title="Drag to reorder">⠿</span>
               </figcaption>
-              <a href="{{ file_base }}/{{ prods[key].file }}?v={{ prods[key].version }}" target="_blank">
-                <img draggable="false" loading="lazy" src="{{ file_base }}/{{ prods[key].file }}?v={{ prods[key].version }}" alt="{{ band }} {{ key }}">
-              </a>
+              {{ product_image(file_base, prods[key].file, prods[key].version, band ~ ' ' ~ key, animation=(key == 'gif')) }}
             </figure>
             {% endif %}
           {% endfor %}
@@ -338,21 +352,19 @@
   </div>
 
   {% if outputs.masters %}
-  <div class="phot-section">
-    <h2>Master Calibration Images</h2>
+  <details class="phot-section phot-fold phot-masters">
+    <summary><h2>Master Calibration Images</h2></summary>
     <div class="fig-grid" style="grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));">
       {% for filename in outputs.masters %}
       <figure class="fig">
         <figcaption class="cap">
           <span>{{ filename }}</span>
         </figcaption>
-        <a href="/api/photometry/file/{{ sel_inst }}/{{ sel_date }}/{{ filename }}" target="_blank">
-          <img draggable="false" loading="lazy" src="/api/photometry/file/{{ sel_inst }}/{{ sel_date }}/{{ filename }}" alt="{{ filename }}">
-        </a>
+        {{ product_image('/api/photometry/file/' ~ sel_inst ~ '/' ~ sel_date, filename, '', filename, sizes='(max-width: 600px) calc(100vw - 58px), 480px') }}
       </figure>
       {% endfor %}
     </div>
-  </div>
+  </details>
   {% endif %}
 
   {# ---- unified run / re-run panel with full option set ---- #}
@@ -2122,4 +2134,5 @@
     <a href="/transit-fit?inst={{ sel_inst }}&amp;date={{ sel_date }}&amp;target={{ sel_target | urlencode }}" class="btn solid">To Transit Fit</a>
   {% endif %}
 </div>
+<script src="/static/js/photometry-images.js"></script>
 {% endblock %}

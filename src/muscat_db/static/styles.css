@@ -1996,3 +1996,22 @@ body.chat-popout #minimize-chat {
   font: inherit;
 }
 #target-lco-details .hint { color: var(--text-dim); font-size: 0.85rem; }
+
+/* Photometry previews reserve their intrinsic ratio before any download. */
+.fig:has(.phot-image) { min-width: 0; margin-inline: 0; }
+.fig:has(.phot-image) .cap { min-width: 0; overflow-wrap: anywhere; }
+.fig:has(.phot-image) .cap > span:first-child { min-width: 0; }
+.phot-image:not([src]) { background: var(--input-bg); }
+.animation-toggle { align-self: flex-start; }
+.phot-masters { margin-bottom: 2rem; }
+@media (max-width: 600px) {
+  .phot-picker { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 0.5rem; padding: 0.75rem; }
+  .phot-picker label { min-width: 0; }
+  .phot-picker label:has(#sel-target) { grid-column: 1 / -1; }
+  .phot-picker select { width: 100%; min-width: 0; }
+  .phot-section { min-width: 0; }
+  .phot-section .opt-grid { grid-template-columns: minmax(0, 1fr); }
+  .phot-section .opt-span2 { grid-column: auto; }
+  .phot-section .opt { min-width: 0; }
+  .phot-section .opt input, .phot-section .opt select { max-width: 100%; min-width: 0; }
+}
