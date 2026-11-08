@@ -66,20 +66,29 @@ document.addEventListener("DOMContentLoaded", () => {
         !!(currentUser && data.user && data.kind !== "system" &&
            data.user.toLowerCase() === currentUser.toLowerCase());
 
+    // MuscatChatReady resolves, with the resolved user ("" when anonymous or
+    // when /whoami failed), once identity handling and the private @bot log
+    // restoration have both run. Anything that reads the restored chat state
+    // awaits it instead of relying on page load or on the order of promise
+    // reactions to /whoami (#393).
+    let resolveChatReady = () => {};
+    window.MuscatChatReady = new Promise((resolve) => { resolveChatReady = resolve; });
     const onUserResolved = (u) => {
-        if (!u || u === currentUser) return;
-        currentUser = u;
-        refreshOwnership();
-        restoreBotLog();
-        restoreSavedRoom();
+        if (u && u !== currentUser) {
+            currentUser = u;
+            refreshOwnership();
+            restoreBotLog();
+            restoreSavedRoom();
+        }
+        resolveChatReady(currentUser);
     };
     if (window.MuscatWhoami && typeof window.MuscatWhoami.then === "function") {
-        window.MuscatWhoami.then(onUserResolved);
+        window.MuscatWhoami.then(onUserResolved, () => onUserResolved(""));
     } else {
         fetch("/whoami", { headers: { "X-Requested-With": "fetch" } })
             .then((r) => (r.ok ? r.json() : null))
             .then((d) => onUserResolved(d && typeof d.user === "string" ? d.user.trim() : ""))
-            .catch(() => {});
+            .catch(() => onUserResolved(""));
     }
 
     fetch("/chat/users", { headers: { "X-Requested-With": "fetch" } })
