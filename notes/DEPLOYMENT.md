@@ -421,6 +421,73 @@ registered at スタードメイン, nameservers on Cloudflare), Zero Trust team
 `green-mouse-b7d3.cloudflareaccess.com`, tunnel route to `:8010`,
 cloudflared 2026.10.4 from apt.
 
+### Chat assistant model store on ut4
+
+The chat assistant (`src/muscat_db/chat_agent.py`) calls ollama on muscat-ut4
+through `scripts/ollama_tunnel.sh`. The systemd `ollama` service there runs as
+user `ollama`, listens on `127.0.0.1:11434`, and by default reads its models from
+`/usr/share/ollama/.ollama/models`. That path is a root-owned symlink, created
+2026-10-28, to `/mnt_ut2/raid_ut2/services/ollama/models` on ut2. The NFS mount
+goes over ut4's 1 GbE `eno1`, so loading a model ran at line rate. The 10 GbE
+X550T port (`enp25s0`) has no cable in it. ollama unloads a model after 5 idle
+minutes, so the first chat after a quiet spell paid the full load. For
+gemma4:latest that came close to `MUSCAT_OLLAMA_TIMEOUT_S` (120 s).
+
+**Change (2026-11-08).** `scripts/ollama_models_local.sh` copies the chat model's
+blobs to `/var/lib/ollama/models` on ut4's local SSD and verifies each one
+against its sha256. It copies every manifest and symlinks every other blob back
+to NFS, so `ollama list` is unchanged. Then it points the service at the new
+directory with a drop-in:
+
+```ini
+# /etc/systemd/system/ollama.service.d/models-local.conf
+[Service]
+Environment=OLLAMA_MODELS=/var/lib/ollama/models
+```
+
+The NFS store and the 2026-10-28 symlink are untouched. The script restarts
+ollama and compares the model list before and after. If ollama does not answer,
+or the list changed, it removes the drop-in again on its own. Only gemma4:latest
+(8.9 GiB) is local, which put ut4's `/` at 76% (104 GB free).
+
+| | Before (NFS, 1 GbE) | After (local SSD) |
+|---|---|---|
+| Read throughput, gemma4 blob (O_DIRECT) | 116 MB/s | **537 MB/s** |
+| gemma4:latest load (`load_duration`) | 97 s | **7.8 s** |
+| Load when the blob is not in page cache | — | ~18 s worst case (9.6 GB ÷ 537 MB/s) |
+| Generation | 85 tok/s | 97 tok/s |
+
+The 7.8 s load was served from page cache, because the copy had just been
+written. After a reboot, or once the cache evicts the blob, expect up to ~18 s.
+A model still on NFS loads at the old speed: qwen3:8b (5.2 GB) took 50 s. The
+tunnel and all 8 models were reachable from ut2 after the switch.
+
+Usage, run on ut4:
+
+```bash
+sudo bash scripts/ollama_models_local.sh                                # gemma4:latest
+sudo bash scripts/ollama_models_local.sh gemma4:latest qwen3.6:latest   # several models
+sudo bash scripts/ollama_models_local.sh --rollback                     # NFS only again
+```
+
+Rollback keeps `/var/lib/ollama`. Delete it with `sudo rm -rf /var/lib/ollama`.
+Side effects:
+- `ollama pull` now writes to the local SSD.
+- A model whose blob is deleted from NFS breaks its symlink here.
+- When you change the chat model (`MUSCAT_OLLAMA_MODEL`), rerun the script with
+  the new tag, or that model loads from NFS.
+
+**Engines considered and rejected (2026-11-08).**
+- [oLLM](https://github.com/Mega4alik/ollm) streams bf16 weights and the KV
+  cache from SSD to fit large contexts into about 8 GB of VRAM. It targets
+  offline batch work. It has no HTTP server and does not support gemma4. ut4's
+  two 24 GB TITAN RTX cards already hold every installed model.
+- [colibri](https://github.com/JustVugg/colibri) v2.1.0 does not support the
+  `gemma4` architecture. On qwen3.6 (36B MoE, Q4_K_M), reading ollama's own GGUF
+  in place on one TITAN RTX, it decoded at 107–117 tok/s against ollama's 82–86,
+  with a shorter time to first token. It serves OpenAI `/v1` only, not
+  `/api/chat`. Revisit it only if the chat moves to a Qwen MoE model.
+
 ---
 
 ## Cluster inventory
@@ -910,6 +977,13 @@ cannot be recovered at all if this host is lost.
 
 The state observed at any given time is tracked in the issue that covers it rather
 than here, so this section does not go stale: see #77.
+
+Record, 2026-10-22: prose2 `github.com/jpdeleon/prose2` @ `main` `8c3b0aa7`
+(no tracked changes; one untracked planning note, `INSTRUMENT_DECISION_TABLE_PLAN.md`).
+It adds jpdeleon/prose2#22: `SequenceParallel` serializes its blocks once per run
+instead of once per image, which lifts photometry from ~4 to ~20 frames/s on this
+host with bit-identical fluxes. Local `main` now tracks `origin/main`; before this
+it had no upstream, so a bare `git pull` failed.
 
 Record, 2026-10-13: prose2 `github.com/jpdeleon/prose2` @ `main` `eb8e8183`
 (clean). It includes jpdeleon/prose2#11 (`ep60` SOPHIA camera name; `up`/`Y`/`w`
