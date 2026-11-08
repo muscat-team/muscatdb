@@ -96,15 +96,21 @@ def test_preview_cache_reuses_encoded_bytes(artifact, monkeypatch):
 def test_preview_cache_prunes_to_budget(artifact, monkeypatch):
     from muscat_db import image_delivery
     client, path, url = artifact
-    monkeypatch.setattr(image_delivery, '_CACHE_LIMIT', 5000)
-    for color in ('red', 'blue', 'green', 'black'):
+    root = path.parents[3] / 'cache/image-previews'
+    Image.new('RGB', (1600, 800), 'red').save(path)
+    assert client.get(url + '?preview_width=480').status_code == 200
+    # Size the budget from a real preview: compressed sizes depend on the zlib
+    # build, so a fixed byte count may never force a prune.
+    (first,) = root.glob('*.png')
+    limit = int(first.stat().st_size * 2.5)
+    monkeypatch.setattr(image_delivery, '_CACHE_LIMIT', limit)
+    for color in ('blue', 'green', 'black'):
         Image.new('RGB', (1600, 800), color).save(path)
         assert client.get(url + '?preview_width=480').status_code == 200
-    root = path.parents[3] / 'cache/image-previews'
-    assert root.is_dir()
-    assert list(root.glob('*.png'))
-    assert sum(p.stat().st_size for p in root.glob('*.png')) <= 5000
-    assert len(list(root.glob('*.png'))) < 4
+    cached = list(root.glob('*.png'))
+    assert cached
+    assert sum(p.stat().st_size for p in cached) <= limit
+    assert not first.exists()  # the oldest preview is evicted first
 
 
 def test_palette_png_preview_is_smoothly_resampled(artifact):
