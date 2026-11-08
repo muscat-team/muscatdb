@@ -105,3 +105,37 @@ def test_preview_cache_prunes_to_budget(artifact, monkeypatch):
     assert list(root.glob('*.png'))
     assert sum(p.stat().st_size for p in root.glob('*.png')) <= 5000
     assert len(list(root.glob('*.png'))) < 4
+
+
+def test_palette_png_preview_is_smoothly_resampled(artifact):
+    client, path, url = artifact
+    checker = Image.new('P', (1600, 800))
+    checker.putpalette([0, 0, 0, 255, 255, 255] + [0] * 756)
+    checker.putdata([(x + y) % 2 for y in range(800) for x in range(1600)])
+    checker.save(path)
+    response = client.get(url, params={'preview_width': 480})
+    assert response.status_code == 200
+    preview = Image.open(io.BytesIO(response.content)).convert('L')
+    values = {preview.getpixel((x, 120)) for x in range(100, 200)}
+    # A fine black/white checkerboard averages to mid-grey; nearest-neighbour
+    # sampling would only ever return pure black or white.
+    assert values - {0, 255}
+    assert all(60 < v < 200 for v in values)
+
+
+def test_cached_preview_does_not_wait_for_an_encode(artifact):
+    import threading
+    from muscat_db import image_delivery
+    client, _, url = artifact
+    first = client.get(url + '?preview_width=480')
+    assert first.status_code == 200
+    result = {}
+    worker = threading.Thread(
+        target=lambda: result.update(r=client.get(url + '?preview_width=480')), daemon=True)
+    with image_delivery._ENCODE_LOCK:
+        worker.start()
+        worker.join(timeout=5)
+        finished = not worker.is_alive()
+    worker.join(timeout=5)
+    assert finished, 'cache hit blocked behind the encode lock'
+    assert result['r'].content == first.content

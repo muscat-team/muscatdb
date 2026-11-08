@@ -46,24 +46,39 @@ def metadata(path: Path) -> dict:
         return {}
 
 
+def _read_cached(dest: Path) -> bytes | None:
+    try:
+        return dest.read_bytes()
+    except FileNotFoundError:
+        return None
+
+
 def _preview(path: Path, width: int, stamp: tuple[int, int, int]) -> bytes:
     root = Path(os.environ.get('MUSCAT_TMPDIR', str(Path.home() / 'temp'))).expanduser() / 'image-previews'
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     key = hashlib.sha256(f'png-v1:{path.resolve()}:{stamp}:{width}'.encode()).hexdigest()
     dest = root / (key + '.png')
+    cached_bytes = _read_cached(dest)
+    if cached_bytes is not None:
+        return cached_bytes
     # Bound decoding to one image per web process. The file lock also coalesces
     # generation across workers sharing this host-local cache.
     import fcntl
     with _ENCODE_LOCK, (root / '.encode.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         try:
-            if dest.exists():
-                return dest.read_bytes()
+            cached_bytes = _read_cached(dest)
+            if cached_bytes is not None:
+                return cached_bytes
             with Image.open(path) as im:
                 im.seek(0)  # GIF previews are static posters.
+                # Palette images are resampled with nearest-neighbour by Pillow,
+                # so expand them first. Preserve alpha; never quantize plots.
+                if im.mode in ('P', 'PA', 'LA', 'La', 'RGBa') or 'transparency' in im.info:
+                    im = im.convert('RGBA')
+                elif im.mode == 'P' or im.mode not in ('RGB', 'L', 'I;16', 'I', 'F'):
+                    im = im.convert('RGB')
                 im.thumbnail((width, max(1, round(im.height * min(1, width / im.width)))), Image.Resampling.LANCZOS)
-                # Preserve alpha; never quantize scientific plot colours.
-                im = im.convert('RGBA' if 'transparency' in im.info or 'A' in im.getbands() else 'RGB')
                 buf = io.BytesIO()
                 im.save(buf, format='PNG', compress_level=3)
                 data = buf.getvalue()
