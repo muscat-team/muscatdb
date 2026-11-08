@@ -139,3 +139,14 @@ def test_cached_preview_does_not_wait_for_an_encode(artifact):
     worker.join(timeout=5)
     assert finished, 'cache hit blocked behind the encode lock'
     assert result['r'].content == first.content
+
+
+def test_rgba_preview_preserves_alpha(artifact):
+    client, path, url = artifact
+    Image.new('RGBA', (1600, 800), (10, 20, 30, 128)).save(path)
+    response = client.get(url + '?preview_width=480')
+    assert response.status_code == 200
+    preview = Image.open(io.BytesIO(response.content))
+    assert preview.mode == 'RGBA'
+    assert preview.size == (480, 240)
+    assert preview.getpixel((240, 120))[3] == 128
