@@ -712,8 +712,8 @@ NASA_B = {"t0": T0, "period": PERIOD, "duration": 2.5, "source": "NASA",
           "refs": {"t0": LEONARDI, "period": IVSHINA, "duration": LEONARDI}}
 
 
-def _provenance_info(ref, nasa=None, toi=None, datasets=()):
-    return {
+def _provenance_info(ref, nasa=None, toi=None, datasets=(), seed=...):
+    info = {
         'ok': True, 'target': 'TOI-1000', 'planets': ['b'], 'ttv_runs': [],
         'coordinates': {'ra': RA, 'dec': DEC, 'source': 'toi', 'epoch': 2015.5},
         'reference_ephemeris': {'b': ref}, 'nasa_ephemeris': {'b': nasa or {}},
@@ -722,6 +722,11 @@ def _provenance_info(ref, nasa=None, toi=None, datasets=()):
                                   'period': ref['period'], 'refs': ref.get('refs', {})}},
         'datasets': list(datasets), 'sheet_configured': False, 'shared_sheet_configured': False,
     }
+    if seed is None:  # an older server that does not report linear_fit_seed
+        del info['linear_fit_seed']
+    elif seed is not ...:
+        info['linear_fit_seed'] = {'b': seed}
+    return info
 
 
 def _load_target(page, info):
@@ -756,6 +761,42 @@ def test_linear_fit_names_its_seed_and_links_to_it(page):
         'href', '/ephemeris?targets=TOI-1000')
     expect(prov).to_contain_text('Duration: NASA')
     expect(prov).to_contain_text('linear fit has no duration of its own')
+
+
+DISTINCT_REF = {"t0": T0 + 1.0, "period": PERIOD + 0.1, "source": "local CSV"}
+DISTINCT_NASA = {"t0": T0 + 2.0, "period": PERIOD + 0.2, "source": "NASA"}
+DISTINCT_TOI = {"t0": T0 + 3.0, "period": PERIOD + 0.3, "source": "TOI"}
+_LINEAR_DATASET = {'instrument': 'muscat2', 'date': '260101', 'run_id': '', 'run_name': 'legacy',
+                   'target': 'TOI-1000', 'planets_fitted': 'b', 'planets_ephem': {'b': {}}}
+
+
+def _calculate_body(page, info):
+    _load_target(page, info)
+    page.route('**/api/ephemeris/calculate', lambda route: route.fulfill(json={
+        'ok': True, 'results': {'b': {'t0_fit': T0, 't0_fit_unc': 0.0002, 'period_fit': PERIOD,
+                                      'period_fit_unc': 0.00001, 'was_fit': True,
+                                      'points': [{'checked': True}] * 3}}}))
+    with page.expect_request('**/api/ephemeris/calculate') as req:
+        page.select_option('#sch-source', 'linear')
+    return req.value.post_data_json['planets_ephem']['b']
+
+
+def test_linear_fit_anchors_on_the_seed_the_server_reported(page):
+    # Reference, NASA and TOI all differ, and the server chose TOI: the fit must
+    # anchor on TOI even though the page would have picked the reference.
+    seed = {'source': 'TOI', 't0': DISTINCT_TOI['t0'], 'period': DISTINCT_TOI['period'], 'refs': {}}
+    info = _provenance_info(DISTINCT_REF, nasa=DISTINCT_NASA, toi=DISTINCT_TOI,
+                            datasets=[_LINEAR_DATASET], seed=seed)
+    body = _calculate_body(page, info)
+    assert body == {'t0': DISTINCT_TOI['t0'], 'period': DISTINCT_TOI['period']}
+    expect(page.locator('#ephem-provenance')).to_contain_text('Linear fit seeded from TOI')
+
+
+def test_linear_fit_falls_back_to_the_page_pick_for_an_older_server(page):
+    info = _provenance_info(DISTINCT_REF, nasa=DISTINCT_NASA, toi=DISTINCT_TOI,
+                            datasets=[_LINEAR_DATASET], seed=None)
+    body = _calculate_body(page, info)
+    assert body == {'t0': DISTINCT_REF['t0'], 'period': DISTINCT_REF['period']}
 
 
 def test_auto_names_the_catalog_it_resolved_to(page):

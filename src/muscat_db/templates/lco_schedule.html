@@ -1567,12 +1567,18 @@
 
     var datasets = info.datasets || [];
     if (!datasets.length) { msg('msg-windows', 'No completed transit fits for ' + lastInfoTarget, 'err'); return; }
-    var seed = ref.t0 != null && ref.period != null ? ref : (nasa.t0 != null && nasa.period != null ? nasa : toi);
-    if (!seed || seed.t0 == null || seed.period == null) { msg('msg-windows', 'No seed ephemeris to anchor the linear fit', 'err'); return; }
-    // The server reports the same seed with its catalog and papers; fall back
-    // to the entry's own tag for an older server response.
-    var seedInfo = (info.linear_fit_seed || {})[planet] ||
-      { source: seed.source || 'catalog', refs: seed.refs || {}, t0: seed.t0, period: seed.period };
+    // The server picks the seed and reports it with its catalog and papers. The
+    // fit anchors on that same t0/period so the label is true by construction;
+    // only an older server response without linear_fit_seed falls back to the
+    // page's own pick (reference, then NASA, then TOI).
+    var seedInfo = (info.linear_fit_seed || {})[planet];
+    if (!seedInfo || seedInfo.t0 == null || seedInfo.period == null) {
+      var pick = ref.t0 != null && ref.period != null ? ref : (nasa.t0 != null && nasa.period != null ? nasa : toi);
+      seedInfo = pick && pick.t0 != null && pick.period != null
+        ? { source: pick.source || 'catalog', refs: pick.refs || {}, t0: pick.t0, period: pick.period }
+        : null;
+    }
+    if (!seedInfo) { msg('msg-windows', 'No seed ephemeris to anchor the linear fit', 'err'); return; }
     var seedRef = (seedInfo.refs || {}).t0;
     var seedDetail = 'Linear fit seeded from ' + seedInfo.source + (seedRef ? ' (' + seedRef.label + ')' : '');
     var provLines = [
@@ -1585,7 +1591,7 @@
         return { target: d.target, instrument: d.instrument, date: d.date, run_id: d.run_id || '', checked: true };
       })
     };
-    calcBody.planets_ephem[planet] = { t0: seed.t0, period: seed.period };
+    calcBody.planets_ephem[planet] = { t0: seedInfo.t0, period: seedInfo.period };
     renderProvenance(provLines);
     MuscatFetch.fetchJson('/api/ephemeris/calculate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(calcBody) })
       .then(function (cd) {
