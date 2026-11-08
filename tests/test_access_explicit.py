@@ -265,6 +265,7 @@ def test_shared_sheet_is_withheld_from_non_members(db, monkeypatch):
     from muscat_db import web
     from muscat_db.database import set_user_ephem_sheet
 
+    monkeypatch.setenv("MUSCAT_DB_SECRET", "settings-secret")
     monkeypatch.setenv("MUSCAT_SHARED_EPHEM_SHEET_USER", "boss")
     set_user_ephem_sheet("boss", "https://docs.google.com/spreadsheets/d/ABCDEFGHIJKLMNOPQRSTUVWX/edit")
     access_explicit.run(db, apply=True)
