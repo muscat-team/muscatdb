@@ -35,6 +35,7 @@ from collections.abc import Callable, Iterable
 
 from muscat_db import access_groups, target_keys
 from muscat_db.database import ScopedDenied, get_conn, sql_not_denied
+from muscat_db.instruments import EXTERNAL_INSTRUMENT
 
 logger = logging.getLogger(__name__)
 
@@ -179,6 +180,7 @@ class NightVisibility:
         self.denied = denied
         self.normalize = normalize
         self._rows: dict[tuple[str, str], list[tuple[str, bool]]] = {}
+        self._target_rows: list[tuple] | None = None
 
     def _night(self, instrument: str, obsdate: str) -> list[tuple[str, bool]]:
         """``(object, visible)`` per summary on one night."""
@@ -207,10 +209,17 @@ class NightVisibility:
         Nothing on such a night can be tied to an allowlisted proposal, so a
         scoped viewer fails closed; other viewers keep the old behaviour.
         """
+        if instrument == EXTERNAL_INSTRUMENT:
+            return False
         return isinstance(self.denied, ScopedDenied) and not self._night(instrument, obsdate)
 
     def hidden(self, instrument: str, obsdate: str, target: str) -> bool:
-        """True when the viewer may not see *target*'s data on this night."""
+        """True when the viewer may not see *target*'s data on this night.
+
+        The ``external`` pseudo-instrument has no frames or proposals, so it
+        is never an unknown night (:meth:`unknown_night`) and has no rows to
+        deny: each upload's own record decides who sees it, by the target
+        it was filed under (:mod:`muscat_db.product_visibility`)."""
         if not self.denied:
             return False
         if self.unknown_night(instrument, obsdate):
@@ -224,6 +233,55 @@ class NightVisibility:
             norm = self.normalize(target)
             matched = [visible for obj, visible in rows if self.normalize(obj) == norm]
         return not any(matched)
+
+    def target_visible(self, target: str, username: str | None = None) -> bool:
+        """Whether the viewer may see *target* on any night: some summary of
+        it falls under their grants. An unobserved target is visible to team
+        members or a viewer with a target-only grant for its stable key.
+
+        Used for products that belong to a target rather than a night, such as
+        an uploaded light curve (#382). Names match like :meth:`hidden`.
+        """
+        if not self.denied:
+            return True
+        if self._target_rows is None:
+            with get_conn(self.db_path) as conn:
+                self._target_rows = conn.execute(
+                    "SELECT object, proposal_id, instrument, obsdate FROM summaries"
+                ).fetchall()
+        rows = [(o or "", p, i, d) for o, p, i, d in self._target_rows]
+        want = _compact(target)
+        matched = [r for r in rows if _compact(r[0]) == want]
+        key = target_keys.target_key(target)
+        if not matched and key:
+            # An alias of an observed, restricted target must not fall through
+            # to the rule for names that have never been observed.
+            with get_conn(self.db_path) as conn:
+                keys = target_keys.object_key_map(conn)
+            matched = [r for r in rows if keys.get(r[0]) == key]
+        if not matched and self.normalize is not None:
+            norm = self.normalize(target)
+            matched = [r for r in rows if self.normalize(r[0]) == norm]
+        if not matched:
+            if not key:
+                return False
+            if username:
+                with get_conn(self.db_path) as conn:
+                    if access_groups.is_active(conn) and access_groups.in_team(conn, username):
+                        return True
+            # With no observation there is no proposal, instrument or date
+            # to satisfy a compound grant. Only a target-only grant applies.
+            return isinstance(self.denied, ScopedDenied) and any(
+                rule.target is not None
+                and rule.proposal_id is None and rule.instrument is None
+                and rule.date_from is None and rule.date_to is None
+                and target_keys.grant_key(rule.target_key, rule.target) == key
+                for rule in self.denied.rules
+            )
+        return any(
+            not is_denied(pid, self.denied, instrument=inst, obsdate=date, obj=obj)
+            for obj, pid, inst, date in matched
+        )
 
     def matched_objects(self, instrument: str, obsdate: str, target: str) -> list[str]:
         """Raw ``object`` spellings on this night that *target* names, matched

@@ -1,0 +1,9 @@
+# Light curve from a collaborator pipeline (synthetic sample for #382 tests)
+# time is BJD_TDB; the column names are deliberately unlike prose's
+time_bjd,rel_flux_T1,rel_flux_err_T1,AIRMASS,sky_ppm,unused_text
+2461044.00000,1.0012,0.0011,1.21,310,a
+2461044.00500,0.9998,0.0011,1.20,305,b
+2461044.01000,0.9921,0.0012,1.19,300,c
+2461044.01500,0.9917,0.0012,1.18,nan,d
+2461044.02000,0.9994,0.0011,1.18,298,e
+2461044.02500,1.0003,0.0011,1.17,296,f

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import copy
 import datetime
 import contextvars
@@ -110,6 +112,8 @@ from muscat_db.auth import (
     csrf_error as _csrf_error,
 )
 from muscat_db import transit_fit as fit
+from muscat_db import lc_upload
+from muscat_db.instruments import EXTERNAL_INSTRUMENT
 from muscat_db import ttv_fit as ttv
 from muscat_db import ttv_selection
 from muscat_db import lco
@@ -433,6 +437,7 @@ from muscat_db.cf_access import AUTH_PATH as _CF_AUTH_PATH, router as cf_access_
 
 photometry_router = APIRouter(prefix="/api/photometry", tags=["photometry"])
 transit_fit_router = APIRouter(prefix="/api/transit-fit", tags=["transit-fit"])
+lc_upload_router = APIRouter(prefix="/api/lc-upload", tags=["lc-upload"])
 ttv_fit_router = APIRouter(prefix="/api/ttv-fit", tags=["ttv-fit"])
 exposure_router = APIRouter(prefix="/api/exposure", tags=["exposure"])
 # Upper bound accepted for the exposure calculator's seeing input (arcsec).
@@ -2938,7 +2943,7 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
 @app.get("/transit-fit", response_class=HTMLResponse)
 def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str = "", telescope: str = "", mode: str = "", run: str = ""):
     db = _db_path()
-    inst = inst if inst in INSTRUMENTS else ""
+    inst = inst if inst in fit.FIT_INSTRUMENTS else ""
     date = date if phot.valid_date(date) else ""
     target = (target or "").strip()
     # Multi-site-instrument-only view filters (which site / physical
@@ -2993,7 +2998,11 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
 
     denied = _viewer_denied()
     nights = _night_visibility(denied)
-    if inst:
+    if inst == EXTERNAL_INSTRUMENT:
+        # Uploads have no obslog nights: the nights are the ones holding an
+        # upload (#382); each upload is gated by its own record below.
+        dates = phot.output_dates(inst)
+    elif inst:
         dates = _visible_obsdates(db, inst, denied)
     if inst and date:
         obj_set = set(_get_objects(db, inst, date, denied=denied))
@@ -3001,6 +3010,17 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
         targets = sorted({
             name.replace(" ", "") for name in obj_set if not nights.hidden(inst, date, name)
         })
+        if inst == EXTERNAL_INSTRUMENT and denied:
+            # An upload has no obslog night to gate it: list a target only
+            # when one of its uploads on this date is visible.
+            products = _product_visibility(denied)
+            targets = [
+                t for t in targets
+                if any(
+                    not products.hidden("photometry", inst, date, t, _photometry_run_of_csv(c))
+                    for c in fit.get_csv_lightcurves(inst, date, t)
+                )
+            ]
     # Issue #144: a hidden target renders like a never-observed name, which
     # has no lightcurves and no runs.
     if inst and date and target and not nights.hidden(inst, date, target):
@@ -3096,13 +3116,12 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
     all_runs_products = _product_visibility(denied)
     if target:
         import yaml as _yaml
-        for inst_name in INSTRUMENTS:
+        for inst_name in fit.FIT_INSTRUMENTS:
             candidate_dates = fit.target_fit_dates(inst_name, target)
             if not candidate_dates:
                 continue
-            # Keep the existing obslog/prose date eligibility and ordering, but
-            # do not query unrelated instruments or check empty nights' access.
-            inst_dates = {d["obsdate"] for d in _get_dates(db, inst_name)}
+            # Keep obslog/prose date eligibility without querying unrelated nights.
+            inst_dates = set() if inst_name == EXTERNAL_INSTRUMENT else {d["obsdate"] for d in _get_dates(db, inst_name)}
             inst_dates.update(phot.output_dates(inst_name))
             for d in candidate_dates:
                 if d not in inst_dates:
@@ -3146,7 +3165,10 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
     target_norm_name = _normalize_target_name(target, _get_norm_name_overrides(db)) if target else ""
     return _render(
         "transit_fit.html",
-        instruments=list(INSTRUMENTS),
+        instruments=list(fit.FIT_INSTRUMENTS),
+        upload_bands=list(lc_upload.BANDS),
+        upload_time_systems=list(lc_upload.TIME_SYSTEMS),
+        upload_max_bytes=lc_upload.MAX_UPLOAD_BYTES,
         sel_inst=inst, sel_date=date, sel_target=target,
         target_norm_name=target_norm_name,
         sel_site=sel_site, sel_telescope=sel_telescope, sel_mode=sel_mode,
@@ -3826,6 +3848,173 @@ async def transit_fit_query_archive(target: str, source: str = "nasa", inst: str
         return JSONResponse({"ok": True, "params": params, "pl_name": pl_name})
 
 
+def _upload_file(payload: dict, key: str, *, required: bool) -> tuple[str, bytes] | None:
+    """``(name, bytes)`` of one uploaded file sent as ``{name, content_b64}``."""
+    entry = payload.get(key)
+    if entry is None and not required:
+        return None
+    if not isinstance(entry, dict) or not isinstance(entry.get("content_b64"), str):
+        raise lc_upload.UploadError(f"{key}: send the file as {{name, content_b64}}")
+    encoded = entry["content_b64"]
+    # base64 is 4/3 the size of the file: refuse before decoding a huge body.
+    if len(encoded) > (lc_upload.MAX_UPLOAD_BYTES * 4) // 3 + 4:
+        raise lc_upload.UploadError(
+            f"{key}: file is larger than {lc_upload.MAX_UPLOAD_BYTES // (1024 * 1024)} MB"
+        )
+    try:
+        data = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError):
+        raise lc_upload.UploadError(f"{key}: content is not valid base64") from None
+    return str(entry.get("name") or ""), data
+
+
+def _upload_refused(exc: lc_upload.UploadError, status: int = 400) -> JSONResponse:
+    return JSONResponse({"ok": False, "error": str(exc)}, status_code=status)
+
+
+class _UploadTooLarge(lc_upload.UploadError):
+    pass
+
+
+async def _upload_payload(request: Request) -> dict:
+    """The JSON body of an upload request, read with a size cap.
+
+    The cap is checked before anything is parsed: against the declared
+    ``Content-Length``, then while streaming, so a body without one cannot
+    get past it either. nginx caps bodies too, but a dev server has no nginx.
+    """
+    limit = lc_upload.MAX_REQUEST_BYTES
+    too_large = _UploadTooLarge(
+        f"the upload is larger than {lc_upload.MAX_UPLOAD_BYTES // (1024 * 1024)} MB per file"
+    )
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > limit:
+        raise too_large
+    chunks, size = [], 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > limit:
+            raise too_large
+        chunks.append(chunk)
+    try:
+        payload = json.loads(b"".join(chunks))
+    except ValueError:
+        raise lc_upload.UploadError("the request body is not JSON") from None
+    if not isinstance(payload, dict):
+        raise lc_upload.UploadError("the request body must be a JSON object")
+    return payload
+
+
+@lc_upload_router.post("/inspect")
+async def lc_upload_inspect(request: Request):
+    """The columns of an uploaded table, for the mapping form (#382).
+    Nothing is stored."""
+    try:
+        payload = await _upload_payload(request)
+    except _UploadTooLarge as exc:
+        return _upload_refused(exc, 413)
+    except lc_upload.UploadError as exc:
+        return _upload_refused(exc)
+    return await asyncio.to_thread(_lc_upload_inspect, payload)
+
+
+def _lc_upload_inspect(payload: dict) -> JSONResponse:
+    try:
+        name, data = _upload_file(payload, "file", required=True)
+        table = lc_upload.parse_table(name or "upload", data)
+    except lc_upload.UploadError as exc:
+        return _upload_refused(exc)
+    return JSONResponse({"ok": True, **lc_upload.describe(table)})
+
+
+@lc_upload_router.post("/save")
+async def lc_upload_save(request: Request):
+    """Store an uploaded light curve as an ``external`` product (#382).
+
+    Every refusal is a 400 (413 for an oversized body) naming the reason;
+    nothing is written then.
+    """
+    try:
+        payload = await _upload_payload(request)
+    except _UploadTooLarge as exc:
+        return _upload_refused(exc, 413)
+    except lc_upload.UploadError as exc:
+        return _upload_refused(exc)
+    # Parsing and writing are blocking: keep them off the event loop.
+    return await asyncio.to_thread(_lc_upload_save, request, payload)
+
+
+def _lc_upload_save(request: Request, payload: dict) -> JSONResponse:
+    target = str(payload.get("target") or "").strip()
+    # An upload is filed under a target and seen by whoever may see that target
+    # (#382), so only such a viewer may add one. Unobserved targets use team
+    # membership or an explicit target grant, without bypassing observed data.
+    if not _night_visibility().target_visible(target, request.state.user):
+        return _upload_refused(
+            lc_upload.UploadError(f"you may not upload under target {target!r}"), 403
+        )
+    products = _product_visibility()
+    try:
+        primary_name, primary_data = _upload_file(payload, "primary", required=True)
+        ancillary = _upload_file(payload, "ancillary", required=False)
+        result = lc_upload.save_upload(
+            target=target,
+            date=str(payload.get("date") or "").strip(),
+            band=str(payload.get("band") or "").strip(),
+            facility=payload.get("facility"),
+            mapping=lc_upload.Mapping.from_payload(payload.get("mapping")),
+            primary_name=primary_name,
+            primary_data=primary_data,
+            ancillary_name=ancillary[0] if ancillary else None,
+            ancillary_data=ancillary[1] if ancillary else None,
+            author=request.state.user,
+            can_see=lambda date, tgt, run: not products.hidden(
+                "photometry", EXTERNAL_INSTRUMENT, date, tgt, run
+            ),
+        )
+    except lc_upload.UploadError as exc:
+        return _upload_refused(exc)
+    logger.info(
+        "light curve uploaded by %s: %s/%s/%s/%s",
+        request.state.user or "-", result["inst"], result["date"], result["target"], result["run_id"],
+    )
+    return JSONResponse({"ok": True, **result})
+
+
+@lc_upload_router.post("/delete")
+def lc_upload_delete(request: Request, payload: dict = Body(...)):
+    """Remove an uploaded light curve so a mistaken one (wrong mapping, band,
+    night or target) can be uploaded again (#382). Only uploads are deletable
+    here, by their uploader, a group-mate or an admin, like any other run."""
+    date = str(payload.get("date") or "").strip()
+    target = str(payload.get("target") or "").strip()
+    run_id = str(payload.get("run_id") or "").strip()
+    try:
+        lc_upload.validate_component_bytes(target, "target")
+        lc_upload.validate_component_bytes(run_id, "run id")
+    except lc_upload.UploadError as exc:
+        return _upload_refused(exc)
+    if not run_id.startswith(lc_upload.RUN_PREFIX):
+        return _upload_refused(lc_upload.UploadError("only an uploaded light curve can be deleted here"))
+    if not phot.valid_date(date) or not target:
+        return _upload_refused(lc_upload.UploadError("date and target are required"))
+    _require_visible_run("photometry", EXTERNAL_INSTRUMENT, date, target, run_id)
+    try:
+        exists = phot.run_output_dir(EXTERNAL_INSTRUMENT, date, target, run_id).is_dir()
+    except ValueError:
+        exists = False
+    if not exists:
+        raise HTTPException(404, f"upload {run_id!r} not found")
+    owner = _require_may_modify_run(
+        "photometry", EXTERNAL_INSTRUMENT, date, target, run_id, action="delete"
+    )
+    result = phot.delete_reduction(EXTERNAL_INSTRUMENT, date, target, run_id=run_id)
+    if not result.get("ok"):
+        return JSONResponse(result, status_code=400)
+    _record_run_change("delete", "photometry", EXTERNAL_INSTRUMENT, date, target, run_id, owner)
+    return JSONResponse(result)
+
+
 @transit_fit_router.get("/status")
 def transit_fit_status(inst: str, date: str, target: str, run: str = ""):
     fit.sync_jobs()
@@ -3909,7 +4098,7 @@ def transit_fit_delete(payload: dict = Body(...)):
     date = (payload.get("date") or "").strip()
     target = (payload.get("target") or "").strip()
     run_id = (payload.get("run_id") or "").strip()
-    if inst not in INSTRUMENTS:
+    if inst not in fit.FIT_INSTRUMENTS:
         return JSONResponse({"ok": False, "error": "unknown instrument"}, status_code=400)
     if not phot.valid_date(date):
         return JSONResponse({"ok": False, "error": "invalid date"}, status_code=400)
@@ -3950,7 +4139,7 @@ def _transit_file_media(path: pathlib.Path) -> tuple[str, bool]:
 
 
 def _serve_transit_file(inst: str, date: str, target: str, name: str, run_id: str | None):
-    if inst not in INSTRUMENTS or not phot.valid_date(date):
+    if inst not in fit.FIT_INSTRUMENTS or not phot.valid_date(date):
         raise HTTPException(404, "invalid parameters")
     if ".." in name or "/" in name:
         raise HTTPException(400, "invalid filename")
@@ -4078,7 +4267,7 @@ def _create_zip_response(files_to_zip: list[tuple[pathlib.Path, str]], archive_n
 
 
 def _transit_fit_download_all(inst: str, date: str, target: str, run_id: str | None):
-    if inst not in INSTRUMENTS or not phot.valid_date(date):
+    if inst not in fit.FIT_INSTRUMENTS or not phot.valid_date(date):
         raise HTTPException(400, "invalid parameters")
     if run_id and (".." in run_id or "/" in run_id):
         raise HTTPException(400, "invalid run id")
@@ -9121,6 +9310,7 @@ def api_ttv_fit_command(payload: dict = Body(...)):
 
 app.include_router(photometry_router)
 app.include_router(transit_fit_router)
+app.include_router(lc_upload_router)
 app.include_router(exposure_router)
 app.include_router(jobs_router)
 app.include_router(target_router)

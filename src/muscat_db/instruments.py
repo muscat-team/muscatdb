@@ -172,6 +172,13 @@ INSTRUMENTS: dict[str, InstrumentConfig] = {
     "qhy600": QHY600,
 }
 
+# Pseudo-instrument for light curves uploaded from pipelines muscat-db does not
+# run (issue #382). Not in INSTRUMENTS: it has no frames, no telescope file and
+# no photometry, only products under ``<prose output>/external/<date>/_runs/``
+# that the transit fit can select. The facility and filter live in each
+# product's record.
+EXTERNAL_INSTRUMENT = "external"
+
 
 def get_instrument(name: str) -> InstrumentConfig:
     inst = INSTRUMENTS.get(name)
