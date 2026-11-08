@@ -62,6 +62,22 @@ numbers at fault.
 for non-empty malformed values. Negative integers retain the disabled (`0`)
 behavior.
 
+LCO archive downloads use the PostgreSQL worker queue when
+`MUSCAT_CONTROL_PLANE=postgres` and `MUSCAT_LCO_FLEET_DOWNLOADS=1`. Run the `lco_archive_download` worker pipeline
+and configure the same absolute `MUSCAT_LCO_DIR` and
+`MUSCAT_LCO_DOWNLOAD_SPOOL` paths on the web host and workers. The fleet admits
+two datasets at once, with four frame transfers each and one dataset per host;
+these slots are independent of the science pipeline limits. Progress survives
+web restarts and remains visible on Jobs. Downloads and unpacking run on workers;
+catalog scanning/registration stays on the control plane. SQLite installations
+retain the local downloader. All archive clients also require the `cluster`
+extra and `MUSCAT_LCO_RATE_DSN` pointing to one shared limiter database across
+web, monitor, workers, dev and prod. Missing coordination blocks archive HTTP
+requests. The shared policy allows one API start/second and 4,000 requests per
+rolling 24 hours; S3 downloads have separate pacing and shared cooldowns. See the
+[archive worker deployment notes](notes/DEPLOYMENT.md#lco-archive-worker-queue-389)
+for credentials, leases, resume behavior, and rollout checks.
+
 ## Requirements
 
 - Python ≥ 3.12
@@ -313,6 +329,10 @@ outage cannot block the rebuild:
 ```
 30 17 * * * cd $MUSCATDB_ROOT && uv run muscat-db lco-sync KEY2026B-001 --user <name> --no-ingest >> $MUSCATDB_ROOT/logs/lco-sync.log 2>&1; bash deploy/nightly.sh run
 ```
+
+Cron does not inherit the web service's environment. `lco-sync` reads
+`MUSCAT_LCO_RATE_DSN` from the checkout's `.env` (found from the `cd` above), so
+put it there as well; without it the archive request fails at once with 503.
 
 - **Whole nights.** The unit of work is a dataset: one instrument night (the
   `<Instrument>/<DAY-OBS>` directory). A night is selected when any of its

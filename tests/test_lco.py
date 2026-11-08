@@ -1030,20 +1030,6 @@ class FrameDestSecurityTest(unittest.TestCase):
                     "https://archive-api.lco.global/frames/1/"
                 )
 
-    def test_redirect_handler_revalidates_destination(self):
-        handler = lco._ValidatedArchiveRedirectHandler()
-        with self.assertRaisesRegex(lco.LcoError, "untrusted URL"):
-            handler.redirect_request(
-                lco.urllib.request.Request(
-                    "https://archive-api.lco.global/frames/1/"
-                ),
-                None,
-                302,
-                "Found",
-                {},
-                "https://169.254.169.254/latest/meta-data/",
-            )
-
 
 class _StallingResponse:
     """Fake urlopen result that yields no data and stalls on the first read,
@@ -1071,21 +1057,10 @@ class DownloadToFileTest(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.dir, ignore_errors=True)
 
-    def test_opener_installs_validated_redirect_handler(self):
-        public_dns = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443))]
-        opener = MagicMock()
-        with patch("muscat_db.lco.socket.getaddrinfo", return_value=public_dns), \
-                patch("muscat_db.lco.urllib.request.build_opener", return_value=opener) as build:
-            lco._open_download_url(
-                "https://archive-api.lco.global/frames/1/", timeout=12
-            )
-
-        self.assertIsInstance(
-            build.call_args.args[0], lco._ValidatedArchiveRedirectHandler
-        )
-        opener.open.assert_called_once_with(
-            "https://archive-api.lco.global/frames/1/", timeout=12
-        )
+    def test_untrusted_first_hop_sends_no_request(self):
+        with patch("muscat_db.lco_transport._client", side_effect=AssertionError("request sent")):
+            with self.assertRaisesRegex(lco.LcoError, "untrusted URL"):
+                lco._open_download_url("https://169.254.169.254/latest/meta-data/", timeout=12)
 
     def test_streams_atomically_and_leaves_no_part_file(self):
         dest = Path(self.dir) / "frame.fits.fz"

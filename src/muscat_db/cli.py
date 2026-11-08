@@ -2273,7 +2273,7 @@ def worker(
     ctx: typer.Context,
     pipeline: str = typer.Option(
         ..., "--pipeline",
-        help='Pipeline(s) to run: photometry, transit_fit, ttv_fit '
+        help='Pipeline(s) to run: photometry, transit_fit, ttv_fit, lco_archive_download '
              '(comma-separated for more than one), or "all".',
     ),
     db: str = _db_option(),

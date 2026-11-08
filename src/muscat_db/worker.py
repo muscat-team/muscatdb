@@ -76,12 +76,13 @@ def _pipeline_registry() -> dict[str, Callable[[], None]]:
     # Imported lazily: photometry/transit_fit/ttv_fit each pull in prose2/
     # timer/harmonic command-building helpers, which unrelated CLI commands
     # (and `muscat-db worker --help`) should not pay to import.
-    from muscat_db import photometry, transit_fit, ttv_fit
+    from muscat_db import lco_download, photometry, transit_fit, ttv_fit
 
     return {
         "photometry": photometry.sync_jobs,
         "transit_fit": transit_fit.sync_jobs,
         "ttv_fit": ttv_fit.sync_jobs,
+        "lco_archive_download": lco_download.sync_jobs,
     }
 
 

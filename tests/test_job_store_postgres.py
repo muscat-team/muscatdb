@@ -393,3 +393,21 @@ class TestSchemaEnsureConcurrency:
         store.save(**save_kwargs)
         assert store.claim_slot("photometry", "k", 1, user_name="ann", max_user_slots=1) is True
         assert store.get("photometry:muscat4/260101/HIP1")["cancel_requested_at"] == 0
+
+
+def test_process_exit_closes_the_default_pool_promptly():
+    """An unclosed pool cost ~20 s and four "couldn't stop thread" warnings
+    per exit (worker SIGTERM included): psycopg_pool's finalizer joined its
+    threads during interpreter shutdown, when they could no longer run."""
+    import subprocess
+    import sys
+
+    script = "from muscat_db import job_store; job_store.get_job_store().all()"
+    env = {**os.environ, "MUSCAT_CONTROL_PLANE": "postgres", "MUSCAT_POSTGRES_DSN": _DSN,
+           "MUSCAT_JOB_NOTIFY": "0"}
+    start = time.monotonic()
+    proc = subprocess.run([sys.executable, "-c", script], env=env, capture_output=True, text=True, timeout=60)
+    elapsed = time.monotonic() - start
+    assert proc.returncode == 0, proc.stderr
+    assert "couldn't stop thread" not in proc.stderr
+    assert elapsed < 10

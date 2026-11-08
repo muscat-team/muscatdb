@@ -268,6 +268,14 @@ def _reconcile_all_jobs() -> None:
     # Workers on a shared control plane leave target status to this process
     # (#298); on SQLite they refresh it themselves.
     if uses_shared_control_plane():
+        from muscat_db import lco_download
+
+        # Isolated like the worker's run_pass: an archive problem must not stop
+        # target status for finished science jobs.
+        try:
+            lco_download.sync_jobs()
+        except Exception as exc:
+            logger.warning("archive download sync failed: %s", type(exc).__name__)
         refresh_worker_finished_targets(_FINISHED_JOB_WATCHER, get_job_store())
 
 
@@ -360,6 +368,10 @@ async def _lifespan(app: FastAPI):
             "muscat/muscat2 calibration with --wcs_method astrometry.net will fail; "
             "use --wcs_method twirl (no API key) or export the key."
         )
+    from muscat_db import lco_download
+
+    for warning in lco_download.config_warnings():
+        print(f"[startup] WARNING: {warning}")
 
     from muscat_db import proxy, http_client
     await proxy.startup()
@@ -4702,7 +4714,8 @@ def api_ephemeris_view_get(slug: str):
 
 
 def _lco_error_response(e: "lco.LcoError") -> JSONResponse:
-    return JSONResponse(e.to_dict(), status_code=e.status)
+    headers = {"Retry-After": str(e.retry_after)} if e.retry_after is not None else None
+    return JSONResponse(e.to_dict(), status_code=e.status, headers=headers)
 
 
 @app.get("/settings", response_class=HTMLResponse)
@@ -7654,7 +7667,7 @@ def _lco_archive_download_row(job: dict) -> dict:
         run_name = f"{frames_done}/{frames_total} frames"
     details = "; ".join(dest_dirs) if dest_dirs else "Destination pending"
     if phase and phase not in {"done", state}:
-        details = f"{phase}: {details}"
+        details = f"{phase.replace('_', ' ')}: {details}"
     single_dataset = state == "done" and len(instruments) == 1 and len(obsdates) == 1
     obslog_url = _lco_obslog_url(instruments[0], obsdates[0]) if single_dataset else ""
     photometry_url = str(job.get("photometry_url") or "")
@@ -7668,6 +7681,7 @@ def _lco_archive_download_row(job: dict) -> dict:
     return {
         "key": f"lco_archive_download:{job_id}",
         "type": "lco_archive_download",
+        "durable": bool(job.get("durable")),
         "inst": ",".join(instruments) if instruments else "lco",
         "date": ",".join(obsdates) if obsdates else "mixed",
         "target": ", ".join(objects) if objects else "LCO archive",
@@ -7694,6 +7708,8 @@ _LCO_PERSIST_LOCK = threading.Lock()
 
 
 def _persist_lco_archive_download_row(row: dict) -> None:
+    if row.get("durable"):
+        return  # The queue owns both state and progress; never overwrite its payload.
     params = {
         "job_id": row.get("run_id") or "",
         "details": row.get("details") or "",
@@ -7741,6 +7757,8 @@ def _adapt_persisted_lco_archive_row(job: dict) -> dict:
         params = json.loads(row.get("params") or "{}")
     except (TypeError, json.JSONDecodeError):
         params = {}
+    if params.get("durable"):
+        return _lco_archive_download_row(params)
     job_id = str(params.get("job_id") or row.get("run_id") or "").strip()
     if job_id:
         row["key"] = f"lco_archive_download:{job_id}"
@@ -7793,7 +7811,8 @@ def _jobs_with_lco_archive_rows() -> list[dict]:
             merged[job["key"]] = job
             continue
         row = _adapt_persisted_lco_archive_row(job)
-        if row.get("state") in ("running", "pending", "cancelling") and row["key"] not in live_keys:
+        if (not row.get("durable") and row.get("state") in ("running", "pending", "cancelling")
+                and row["key"] not in live_keys):
             row = _orphaned_lco_archive_row(row)
             _persist_lco_archive_download_row(row)
         merged[row["key"]] = row

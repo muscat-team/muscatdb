@@ -7,6 +7,9 @@ recorder so nothing leaves the machine.
 from __future__ import annotations
 
 import importlib.util
+import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -17,6 +20,30 @@ _spec = importlib.util.spec_from_file_location("deploy_workers", _PATH)
 w = importlib.util.module_from_spec(_spec)
 sys.modules["deploy_workers"] = w
 _spec.loader.exec_module(w)
+
+
+@pytest.mark.parametrize("profile", ["dev", "prod"])
+def test_worker_wrapper_keeps_one_limiter_dsn_across_profiles(tmp_path, profile):
+    repo = tmp_path / "app"
+    (repo / "deploy").mkdir(parents=True)
+    script = repo / "deploy" / "worker-run.sh"
+    script.write_text((_PATH.parent / "worker-run.sh").read_text())
+    binary = repo / ".venv" / "bin" / "muscat-db"
+    binary.parent.mkdir(parents=True)
+    binary.write_text(f"#!{sys.executable}\nimport os, json\nprint(json.dumps(dict(os.environ)))\n")
+    binary.chmod(0o700)
+    secrets = tmp_path / "pg.env"
+    secrets.write_text("MUSCAT_POSTGRES_DSN=postgresql://role:private@localhost:5432/original\n"
+                       "MUSCAT_LCO_RATE_DSN=postgresql://role:private@shared:5432/limits\n")
+    secrets.chmod(0o600)
+    env = dict(os.environ, MUSCAT_WORKER_PG_ENV=str(secrets), MUSCAT_WORKER_PG_DATABASE=profile,
+               MUSCAT_WORKER_PG_HOST="queue-host")
+    result = subprocess.run(["bash", str(script), "ut3-lco_archive_download"], env=env,
+                            capture_output=True, text=True, check=True)
+    values = json.loads(result.stdout)
+    assert values["MUSCAT_POSTGRES_DSN"] == f"postgresql://role:private@queue-host:5432/{profile}"
+    assert values["MUSCAT_LCO_RATE_DSN"] == "postgresql://role:private@shared:5432/limits"
+    assert not result.stderr
 
 
 def _data(**over):
@@ -67,6 +94,21 @@ def test_parse_config_rejects_bad_input(mutate, message):
 def test_shipped_config_parses():
     cfg = w.load_config(w.DEFAULT_CONFIG)
     assert cfg.hosts, "deploy/workers.toml must define at least one host"
+
+
+def test_archive_profiles_keep_shared_paths_separate_and_supply_all_workers():
+    prod = w.load_config(w.DEFAULT_CONFIG, profile="prod")
+    dev = w.load_config(w.DEFAULT_CONFIG, profile="dev")
+    assert prod.archive_root == "/data"
+    assert dev.archive_root != prod.archive_root
+    assert dev.archive_spool != prod.archive_spool
+    for cfg in (prod, dev):
+        for host in cfg.hosts.values():
+            assert "lco_archive_download" in host.pipelines
+            env = w.render_env(cfg, host, "muscat-" + host.key)
+            assert f"MUSCAT_LCO_DIR={cfg.archive_root}" in env
+            assert f"MUSCAT_LCO_DOWNLOAD_SPOOL={cfg.archive_spool}" in env
+        assert cfg.archive_spool in w.web_env(cfg)
 
 
 # -- profiles -----------------------------------------------------------------
