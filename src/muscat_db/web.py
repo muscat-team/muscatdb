@@ -81,6 +81,7 @@ from jinja2 import Environment, FileSystemLoader
 
 from muscat_db import photometry as phot
 from muscat_db import photometry_api as phot_api
+from muscat_db import ttv_fit_api as ttv_api
 from muscat_db import ref_time as ref_time_lib
 from muscat_db import postprocess as postproc
 from muscat_db import exposure as exp_calc
@@ -9168,61 +9169,68 @@ def _resolve_ttv_options(options: dict) -> tuple[dict | None, str | None]:
     return {**cleaned, "csv_content": resolved.csv_content, "inputs": resolved.inputs}, None
 
 
-@ttv_fit_router.post("/start", response_class=JSONResponse)
-def api_start_ttv_fit(request: Request, payload: dict = Body(...)):
+@ttv_fit_router.post("/start", response_model=ttv_api.TtvActionResponse,
+                     responses={400: {"model": ttv_api.TtvActionResponse},
+                                429: {"model": ttv_api.TtvActionResponse}})
+def api_start_ttv_fit(request: Request, payload: ttv_api.TtvStartRequest):
+    payload = payload.model_dump(exclude_unset=True)
     target = (payload.get("target") or "").strip()
     options = payload.get("options") or {}
     if not target:
-        return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
+        return phot_api.response(ttv_api.TtvActionResponse, {"ok": False, "error": "target is required"}, status_code=400)
     # A fit starts only on a target the viewer can see something of; the inputs
     # it may use are checked one by one in _resolve_ttv_options.
     _require_visible_object(_db_path(), target)
     options, err = _resolve_ttv_options(options)
     if err:
-        return JSONResponse({"ok": False, "error": err}, status_code=400)
+        return phot_api.response(ttv_api.TtvActionResponse, {"ok": False, "error": err}, status_code=400)
     guard = _ReplaceGuard("ttv_fit", "", "", target, _confirm_of(payload))
     result = guard.after(ttv.start_ttv_fit(target, options, request.state.user, authorize_run=guard))
-    if result.get("limit_exceeded"):
-        return _launch_response(result)
-    return JSONResponse(result)
+    status = 429 if result.get("limit_exceeded") else 200
+    return phot_api.response(ttv_api.TtvActionResponse, result, status_code=status)
 
 
-@ttv_fit_router.post("/cancel", response_class=JSONResponse)
-def api_cancel_ttv_fit(payload: dict = Body(...)):
+@ttv_fit_router.post("/cancel", response_model=ttv_api.TtvActionResponse,
+                     responses={400: {"model": ttv_api.TtvActionResponse}})
+def api_cancel_ttv_fit(payload: ttv_api.TtvRunRequest):
+    payload = payload.model_dump(exclude_unset=True)
     target = (payload.get("target") or "").strip()
     run_name = (payload.get("run_name") or "").strip()
     if not target:
-        return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
+        return phot_api.response(ttv_api.TtvActionResponse, {"ok": False, "error": "target is required"}, status_code=400)
     _require_visible_ttv_run(target, run_name)
     owner = _require_may_modify_run("ttv_fit", "", "", target, run_name, action="cancel")
     res = ttv.cancel_ttv_fit(target, run_name)
     if res.get("ok"):
         _record_run_change("cancel", "ttv_fit", "", "", target, run_name, owner)
-    return JSONResponse(res)
+    return phot_api.response(ttv_api.TtvActionResponse, res)
 
 
-@ttv_fit_router.post("/delete", response_class=JSONResponse)
-def api_delete_ttv_fit(payload: dict = Body(...)):
+@ttv_fit_router.post("/delete", response_model=ttv_api.TtvActionResponse,
+                     responses={400: {"model": ttv_api.TtvActionResponse},
+                                500: {"model": ttv_api.TtvActionResponse}})
+def api_delete_ttv_fit(payload: ttv_api.TtvRunRequest):
+    payload = payload.model_dump(exclude_unset=True)
     target = (payload.get("target") or "").strip()
     run_name = (payload.get("run_name") or "").strip()
     if not target:
-        return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
+        return phot_api.response(ttv_api.TtvActionResponse, {"ok": False, "error": "target is required"}, status_code=400)
     _require_visible_ttv_run(target, run_name)
     owner = _require_may_modify_run("ttv_fit", "", "", target, run_name, action="delete")
     res = ttv.delete_ttv_fit(target, run_name)
     if res.get("ok"):
         _record_run_change("delete", "ttv_fit", "", "", target, run_name, owner)
-    return JSONResponse(res, status_code=500 if res.get("delete_failed") else 200)
+    return phot_api.response(ttv_api.TtvActionResponse, res, status_code=500 if res.get("delete_failed") else 200)
 
 
-@ttv_fit_router.get("/status", response_class=JSONResponse)
+@ttv_fit_router.get("/status", response_model=ttv_api.TtvJobStatus,
+                    responses={400: {"model": ttv_api.TtvActionResponse}})
 def ttv_fit_status(target: str = "", run_name: str = ""):
     if not target:
         return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
     if _ttv_run_hidden(target, run_name):
-        return JSONResponse(dict(_NO_JOB_STATUS))
-    status = ttv.job_status(target.strip(), run_name)
-    return JSONResponse(status)
+        return phot_api.response(ttv_api.TtvJobStatus, dict(_NO_JOB_STATUS))
+    return phot_api.response(ttv_api.TtvJobStatus, ttv.job_status(target.strip(), run_name))
 
 
 @ttv_fit_router.get("/log-stream")
@@ -9298,14 +9306,16 @@ def ttv_fit_download_all(target: str = "", run_name: str = ""):
     )
 
 
-@ttv_fit_router.post("/command", response_class=JSONResponse)
-def api_ttv_fit_command(payload: dict = Body(...)):
+@ttv_fit_router.post("/command", response_model=ttv_api.TtvCommandResponse,
+                     responses={400: {"model": ttv_api.TtvActionResponse}})
+def api_ttv_fit_command(payload: ttv_api.TtvCommandRequest):
+    payload = payload.model_dump(exclude_unset=True)
     target = (payload.get("target") or "").strip()
     options = payload.get("options") or {}
     if not target:
-        return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
+        return phot_api.response(ttv_api.TtvActionResponse, {"ok": False, "error": "target is required"}, status_code=400)
     cmd_str = ttv.get_ttv_command(target, options)
-    return JSONResponse({"ok": True, "command": cmd_str})
+    return phot_api.response(ttv_api.TtvCommandResponse, {"ok": True, "command": cmd_str})
 
 
 app.include_router(photometry_router)
