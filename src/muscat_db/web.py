@@ -7084,6 +7084,25 @@ def _target_coordinates(target: str) -> dict | None:
     return resolve_target_astrometry(target)
 
 
+def _linear_fit_seed(*candidates: dict | None) -> dict | None:
+    """Provenance of the seed the schedule page's linear fit anchors on.
+
+    The page seeds from the reference ephemeris, then NASA, then TOI (the first
+    with both t0 and period); this mirrors that order and returns
+    ``{"source", "t0", "period", "refs"}`` with ``source`` one of NASA / TOI /
+    local CSV and ``refs`` the per-parameter papers ({} when not recorded).
+    """
+    for entry in candidates:
+        if entry and entry.get("t0") is not None and entry.get("period") is not None:
+            return {
+                "source": entry.get("source") or "catalog",
+                "t0": entry["t0"],
+                "period": entry["period"],
+                "refs": dict(entry.get("refs") or {}),
+            }
+    return None
+
+
 @ephemeris_router.get("/target-info", response_class=JSONResponse)
 def api_ephemeris_target_info(target: str, request: Request):
     target = (target or "").strip()
@@ -7262,6 +7281,10 @@ def api_ephemeris_target_info(target: str, request: Request):
         sheet_fit_ephem.setdefault(pl, {})
 
     planets_sorted = sorted(list(seen_planets))
+    linear_fit_seed = {
+        pl: seed for pl in planets_sorted
+        if (seed := _linear_fit_seed(ref_ephem.get(pl), nasa_ephem.get(pl), toi_ephem.get(pl)))
+    }
 
     products = _product_visibility()
     return JSONResponse({
@@ -7272,6 +7295,9 @@ def api_ephemeris_target_info(target: str, request: Request):
         "reference_ephemeris": ref_ephem,
         "nasa_ephemeris": nasa_ephem,
         "toi_ephemeris": toi_ephem,
+        # The ephemeris the "linear fit" source anchors its epoch assignment on,
+        # with its catalog and papers, so the page can say what seeded the fit.
+        "linear_fit_seed": linear_fit_seed,
         "shared_sheet_configured": shared_cfg is not None,
         "shared_sheet_owner": _shared_ephem_sheet_owner(),
         "shared_sheet_is_mine": _request_user(request) == _shared_ephem_sheet_owner(),

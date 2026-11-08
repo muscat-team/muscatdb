@@ -1624,6 +1624,75 @@ def _adql_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+# Provenance tags on every per-planet ephemeris entry, so a page can say which
+# catalog a t0/period came from (the reference chain is NASA -> TOI -> local CSV).
+EPHEM_SOURCE_NASA = "NASA"
+EPHEM_SOURCE_TOI = "TOI"
+EPHEM_SOURCE_LOCAL = "local CSV"
+
+_NASA_ARCHIVE_BASE = "https://exoplanetarchive.ipac.caltech.edu"
+# pscomppars *_reflink column per entry field. The paper can differ per
+# parameter, so each is kept separately.
+_NASA_REFLINK_COLUMNS = {
+    "t0": "pl_tranmid_reflink",
+    "period": "pl_orbper_reflink",
+    "duration": "pl_trandur_reflink",
+}
+_REFLINK_HREF_RE = re.compile(r"""href\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))""", re.IGNORECASE)
+_HTML_TAG_RE = re.compile(r"<[^>]*>")
+
+
+def parse_nasa_reflink(value) -> dict | None:
+    """Parse a NASA Exoplanet Archive ``*_reflink`` anchor into ``{label, url}``.
+
+    The archive returns e.g. ``<a refstr=LEONARDI_ET_AL__2024
+    href=https://ui.adsabs.harvard.edu/abs/2024A&A...686A..84L/abstract
+    target=ref>Leonardi et al. 2024</a>`` with an unquoted href. A relative href
+    is resolved against the archive, a non-http(s) one is dropped (never put a
+    ``javascript:`` URL on a page), and an empty cell gives None.
+    """
+    import html as _html
+
+    if not isinstance(value, str) or not value.strip():
+        return None
+    label = " ".join(_html.unescape(_HTML_TAG_RE.sub("", value)).split())
+    url = None
+    m = _REFLINK_HREF_RE.search(value)
+    if m:
+        href = _html.unescape(next(g for g in m.groups() if g is not None)).strip()
+        if href.startswith("/"):
+            href = _NASA_ARCHIVE_BASE + href
+        if re.match(r"https?://", href, re.IGNORECASE):
+            url = href
+    if not label and not url:
+        return None
+    return {"label": label or url, "url": url}
+
+
+def _nasa_entry(row: dict, t0: float, period: float) -> dict:
+    """Build a NASA ephemeris entry (values, uncertainties, per-parameter refs)."""
+    entry = {"t0": t0, "period": period, "source": EPHEM_SOURCE_NASA}
+    dur = _safe_float(row.get("pl_trandur"))  # hours
+    if dur is not None:
+        entry["duration"] = dur
+    for key, base in (("t0_unc", "pl_tranmid"), ("period_unc", "pl_orbper"), ("duration_unc", "pl_trandur")):
+        unc = _get_err(row, base)
+        if unc is not None:
+            entry[key] = unc
+    refs = {}
+    for field, column in _NASA_REFLINK_COLUMNS.items():
+        if field == "duration" and "duration" not in entry:
+            continue
+        ref = parse_nasa_reflink(row.get(column))
+        if ref:
+            refs[field] = ref
+    # A catalog downloaded before the reflink columns were added has none;
+    # "refs" is then absent and the page says the reference is not recorded.
+    if refs:
+        entry["refs"] = refs
+    return entry
+
+
 def _query_target_planets_nasa(target: str) -> dict:
     import urllib.parse
 
@@ -1659,22 +1728,9 @@ def _query_target_planets_nasa(target: str) -> dict:
                         per = row.get("pl_orbper")
                         if pl_letter and t0 is not None and per is not None:
                             try:
-                                entry = {"t0": float(t0), "period": float(per)}
+                                entry = _nasa_entry(row, float(t0), float(per))
                             except ValueError:
                                 continue
-                            dur = _safe_float(row.get("pl_trandur"))  # hours
-                            if dur is not None:
-                                entry["duration"] = dur
-                            # Extract uncertainties
-                            t0_unc = _get_err(row, "pl_tranmid")
-                            per_unc = _get_err(row, "pl_orbper")
-                            dur_unc = _get_err(row, "pl_trandur")
-                            if t0_unc is not None:
-                                entry["t0_unc"] = t0_unc
-                            if per_unc is not None:
-                                entry["period_unc"] = per_unc
-                            if dur_unc is not None:
-                                entry["duration_unc"] = dur_unc
                             results[pl_letter] = entry
     except Exception:
         logger.debug("failed local NASA ephemeris lookup for %s", target, exc_info=True)
@@ -1712,21 +1768,18 @@ def _query_target_planets_nasa(target: str) -> dict:
                             per = row.get("pl_orbper")
                             if pl_letter and t0 and per:
                                 try:
-                                    entry = {"t0": float(t0), "period": float(per)}
+                                    entry = _nasa_entry(row, float(t0), float(per))
                                 except ValueError:
                                     continue
-                                dur = _safe_float(row.get("pl_trandur"))
-                                if dur is not None:
-                                    entry["duration"] = dur
-                                t0_unc = _get_err(row, "pl_tranmid")
-                                per_unc = _get_err(row, "pl_orbper")
-                                dur_unc = _get_err(row, "pl_trandur")
-                                if t0_unc is not None:
-                                    entry["t0_unc"] = t0_unc
-                                if per_unc is not None:
-                                    entry["period_unc"] = per_unc
-                                if dur_unc is not None:
-                                    entry["duration_unc"] = dur_unc
+                                # nexsci_ps has one row per paper: pl_refname
+                                # names it for every parameter of that row.
+                                if "refs" not in entry:
+                                    ref = parse_nasa_reflink(row.get("pl_refname"))
+                                    if ref:
+                                        entry["refs"] = {
+                                            f: ref for f in ("t0", "period", "duration")
+                                            if f != "duration" or "duration" in entry
+                                        }
 
                                 is_default = (row.get("default_flag") == "1")
                                 if is_default or pl_letter not in results:
@@ -1744,7 +1797,8 @@ def _query_target_planets_nasa(target: str) -> dict:
         cols = [
             "pl_name", "pl_tranmid", "pl_tranmiderr1", "pl_tranmiderr2",
             "pl_orbper", "pl_orbpererr1", "pl_orbpererr2",
-            "pl_trandur", "pl_trandurerr1", "pl_trandurerr2"
+            "pl_trandur", "pl_trandurerr1", "pl_trandurerr2",
+            *_NASA_REFLINK_COLUMNS.values(),
         ]
         col_str = ", ".join(cols)
         q = f"SELECT {col_str} FROM pscomppars WHERE hostname = {_adql_literal(host)} OR hostname LIKE {_adql_literal(host + '%')}"
@@ -1758,21 +1812,7 @@ def _query_target_planets_nasa(target: str) -> dict:
                     t0 = row.get("pl_tranmid")
                     per = row.get("pl_orbper")
                     if letter and t0 is not None and per is not None:
-                        entry = {"t0": float(t0), "period": float(per)}
-                        dur = _safe_float(row.get("pl_trandur"))  # hours
-                        if dur is not None:
-                            entry["duration"] = dur
-                        # Extract uncertainties
-                        t0_unc = _get_err(row, "pl_tranmid")
-                        per_unc = _get_err(row, "pl_orbper")
-                        dur_unc = _get_err(row, "pl_trandur")
-                        if t0_unc is not None:
-                            entry["t0_unc"] = t0_unc
-                        if per_unc is not None:
-                            entry["period_unc"] = per_unc
-                        if dur_unc is not None:
-                            entry["duration_unc"] = dur_unc
-                        results[letter] = entry
+                        results[letter] = _nasa_entry(row, float(t0), float(per))
         except Exception:
             logger.debug("failed online NASA ephemeris lookup for %s", target, exc_info=True)
 
@@ -2023,7 +2063,7 @@ def _query_target_planets_toi(target: str) -> dict:
                         per = row.get("period (days)")
                         if t0 is not None and per is not None:
                             try:
-                                entry = {"t0": float(t0), "period": float(per)}
+                                entry = {"t0": float(t0), "period": float(per), "source": EPHEM_SOURCE_TOI}
                             except ValueError:
                                 continue
                             dur = _safe_float(row.get("duration (hours)"))
@@ -2066,7 +2106,7 @@ def _query_target_planets_toi(target: str) -> dict:
                         try:
                             candidate_num = int(parts[1])
                             letter = chr(ord('b') + candidate_num - 1)
-                            entry = {"t0": float(t0), "period": float(per)}
+                            entry = {"t0": float(t0), "period": float(per), "source": EPHEM_SOURCE_TOI}
                         except Exception:
                             continue
                         dur = _safe_float(row.get("pl_trandurh"))  # hours
@@ -2120,6 +2160,7 @@ def _query_target_planets_catalog(target: str) -> dict:
                                 results["b"] = {
                                     "t0": float(t0_raw),
                                     "period": float(period_raw),
+                                    "source": EPHEM_SOURCE_LOCAL,
                                 }
                             except ValueError:
                                 pass
