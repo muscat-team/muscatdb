@@ -44,6 +44,7 @@ from muscat_db.photometry import (
     MULTISITE_MODES, _TELESCOPE_PREFIX, timer_conda_env,
 )
 from muscat_db.cache import register_cache
+from muscat_db.time_correction import SECONDS_PER_DAY, clock_offset_seconds, is_uncorrected_night
 from muscat_db.engine_identity import require_selected_env, version_probe
 
 _REPO_ROOT = pathlib.Path(__file__).parent.parent.parent.resolve()
@@ -1044,10 +1045,24 @@ _TIMER_COVARIATE_COLUMNS: tuple[str, ...] = (
 _MISSING_CELL = {"", "nan", "-nan", "none", "null", "na"}
 
 
+def _shift_time_cell(cell: str, offset_days: float) -> str:
+    """Add *offset_days* to one ``BJD_TDB`` cell; blank or non-numeric cells pass through."""
+    try:
+        return repr(float(cell) + offset_days)
+    except ValueError:
+        return cell
+
+
 def _copy_lightcurve_for_timer(
-    src: pathlib.Path, dst: pathlib.Path, extra_covariates: tuple[str, ...] = ()
+    src: pathlib.Path,
+    dst: pathlib.Path,
+    extra_covariates: tuple[str, ...] = (),
+    time_offset_s: float = 0.0,
 ) -> None:
     """Copy one light-curve CSV, keeping only the columns timer should model.
+
+    *time_offset_s* is added to ``BJD_TDB`` in the copy only; the source CSV is
+    never touched (see :mod:`muscat_db.time_correction`).
 
     *extra_covariates* are kept as well: an uploaded light curve's covariates
     (issue #382) carry the uploader's column names, chosen deliberately.
@@ -1082,11 +1097,17 @@ def _copy_lightcurve_for_timer(
         ):
             keep.append(idx)
 
+    time_idx = header.index("BJD_TDB")
+    offset_days = time_offset_s / SECONDS_PER_DAY
     with open(dst, "w", newline="") as fh:
         writer = csv.writer(fh)
         writer.writerow([header[i] for i in keep])
         for r in body:
-            writer.writerow([r[i] if i < len(r) else "" for i in keep])
+            cells = [r[i] if i < len(r) else "" for i in keep]
+            if offset_days:
+                pos = keep.index(time_idx)
+                cells[pos] = _shift_time_cell(cells[pos], offset_days)
+            writer.writerow(cells)
 
 
 def _write_fit_inputs(
@@ -1119,8 +1140,15 @@ def _write_fit_inputs(
     """
     from muscat_db.lc_upload import upload_covariates
 
+    if is_uncorrected_night(inst, date):
+        logger.warning(
+            "%s %s %s: inside the MuSCAT2 no-NTP window (issue #422) but has no measured "
+            "clock offset; times are left uncorrected",
+            inst, date, target,
+        )
+    time_offset_s = clock_offset_seconds(inst, date)
     for c in csvs:
-        _copy_lightcurve_for_timer(c, rdir / c.name, upload_covariates(c))
+        _copy_lightcurve_for_timer(c, rdir / c.name, upload_covariates(c), time_offset_s=time_offset_s)
 
     # fit.yaml
     trend_val = 1 if options.get("trend", "true") == "true" else 0
