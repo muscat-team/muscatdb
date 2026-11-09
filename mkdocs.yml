@@ -8,7 +8,9 @@ nav:
   - Home: index.md
   - Using muscat-db:
       - Getting started: using/getting-started.md
+      - Signing in and access: using/signing-in.md
       - Browse a night: using/browse-a-night.md
+      - Scheduling LCO observations: using/lco-scheduling.md
       - Exposure magnitude lookup: exposure.md
   - Science: science.md
   - Tech stack: tech-stack.md
