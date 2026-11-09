@@ -6,11 +6,12 @@
 ## Scope
 * muscat-db serves the MuSCAT team and a few collaborators (about 20 users). design for that, not for scale we do not have
 * prefer the smallest change that fixes the problem. no speculative options, settings, abstractions or code paths for cases nobody has hit
-* new infrastructure (a service, database, queue, worker type, cache layer or runtime dependency) needs an issue the maintainers have agreed to first, naming the measured problem it solves
+* new infrastructure (a service, database, queue, worker type, cache layer or runtime dependency) needs an agreed issue first, naming the measured problem it solves. agreed means a maintainer (john-livingston or jpdeleon) says so in a comment on the issue. a bug fix needs this only if it adds infrastructure
+* existing infrastructure (the worker fleet, the PostgreSQL control plane and LCO request coordinator) stays as it is. removing or simplifying any of it needs its own agreed issue
 * performance work states the user-facing symptom and a before/after measurement. optimize only what profiling shows users feel
-* fix data problems at their source (e.g. a one-off header correction script kept outside the repo), not with permanent code paths in muscat-db
-* keep a PR to one concern and under about 500 changed lines excluding tests; split larger work into steps that each stand alone
-* current priorities are the open issues labeled `priority`; check them before starting unrequested work
+* fix data problems at their source, not with permanent code paths in muscat-db. see the fits rule under Data
+* keep a PR to one concern and under about 500 changed lines. tests, lockfiles and generated files do not count, and neither does a pure move that changes no behavior (review it as a move only). split larger work into steps that each stand alone
+* current priorities are the open issues labeled `priority`. when none applies, small fixes and requested work are fine; ask before starting larger unrequested work
 
 ## Data
 * do not delete muscat.db and data/
@@ -24,7 +25,7 @@
 * for BANZAI-reduced fits data, saturation unit is e- when gain is 1 in header
 * sbig (SBIG STL-6303, the LCO 0.4m network's old CCD camera) is archival-only: LCO's live instrument API (observe.lco.global/api/instruments/) has no instrument_type code for it, so it cannot be scheduled, only downloaded from the archive and reduced. qhy600 (QHY600 CMOS on DeltaRho 350, the current 0.4m camera) is live and schedulable (instrument_type "0M4-SCICAM-QHY600"). Both are multi-site like sinistro (deployed across all 6 LCO sites, unlike sinistro's 5 -- sinistro has no unit at ogg). site availability must not be hardcoded: read live per-site schedulability from `/api/lco/instruments` (the schedule page annotates an unavailable site rather than removing it), and keep instrument_type "1M0-SCICAM-SINISTRO" unless a public LCO document says otherwise. prose2's get_instrument() and muscat-db's infer_archive_instrument() auto-detect both from a FITS header/archive metadata: sbig's INSTRUME is prefixed "kb" (e.g. kb27), qhy600's is prefixed "sq" (e.g. sq30-33, sq36, sq38, sq40, sq41, sq46 -- confirmed across coj/elp/ogg/tfn in a live archive scan, 2026-08).
 * muscat.db is updated daily via a cronjob (see [Cron (daily)](README.md#cron-daily) in the README for the crontab entry itself)
-* do not modify fits files directly, store metadata if needed
+* muscat-db code never modifies fits files; store metadata if needed. a one-off correction to raw data (e.g. a header fix) is done outside muscat-db, at the data's source so syncs do not undo it, and each one is recorded in notes/DATA_CORRECTIONS.md: files, keyword, old and new value, reason and date
 * the target page should cross-match using catalog CSV coordinates. If the target is in neither catalog, resolve via SIMBAD. As a last resort (not in any catalog and unresolved by SIMBAD), use the header pointing centre (the per-target coord_repr median RA/Dec).
 * do not send requests that overload external database when querying data
 

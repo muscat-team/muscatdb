@@ -12,22 +12,27 @@ Copy `.env.example` to `.env` only if you need to override a default (see
 
 ## Scope
 
-muscat-db serves the MuSCAT team and a few collaborators, about 20 users.
-Keep changes sized for that:
+muscat-db serves a small team and a few collaborators. Keep changes sized for
+that (the Scope section of `AGENTS.md` has the full rules):
 
 - Make the smallest change that fixes the problem. Skip options, settings and
   abstractions for cases nobody has hit yet.
-- Open an issue and get the maintainers' agreement before adding new
-  infrastructure: a service, database, queue, worker type, cache layer or
-  runtime dependency. The issue names the measured problem it solves.
+- Open an issue before adding new infrastructure: a service, database, queue,
+  worker type, cache layer or runtime dependency. It needs a maintainer's
+  agreement in a comment on the issue and names the measured problem it
+  solves. Existing infrastructure stays as it is unless an agreed issue says
+  otherwise.
 - A performance change says which user-facing symptom it fixes and shows a
   before/after measurement.
-- Fix a data problem where it happens, for example with a one-off script that
-  corrects the FITS headers, rather than with a permanent code path here.
-- Keep a PR to one concern and under about 500 changed lines, not counting
-  tests. Split larger work into steps that each stand on their own.
-- The open issues labeled `priority` are the current priorities. Check them
-  before starting work nobody asked for.
+- Fix a data problem at its source, for example by correcting FITS headers
+  where the data originates, rather than with a permanent code path here.
+  Record each such correction in `notes/DATA_CORRECTIONS.md`.
+- Keep a PR to one concern and under about 500 changed lines. Tests,
+  lockfiles, generated files and pure moves that change no behavior do not
+  count. Split larger work into steps that each stand on their own.
+- The open issues labeled `priority` are the current priorities. When none
+  applies, small fixes and requested work are fine; ask before starting larger
+  work nobody asked for.
 
 ## Before opening a PR
 

@@ -8,6 +8,7 @@
 
 ## Tests
 
-<!-- What ran, and the test that fails without the change. -->
+<!-- What ran, and the test that fails without the change. For docs-only or pure-move PRs: "n/a, because ...". -->
 
-Closes #
+<!-- Refs keeps the issue open until release; use Closes only when merging to test should close it. Other repos: owner/repo#N. -->
+Refs #
