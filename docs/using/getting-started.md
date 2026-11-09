@@ -120,5 +120,8 @@ The photometry and transit-fit pipelines run on the prose2 and timer engines.
 - **Observation planning**: [Scheduling LCO observations](lco-scheduling.md) covers the **LCO** page.
 - **Exposure times**: see [Exposure magnitude lookup](../exposure.md).
 
+To run muscat-db yourself or work on its code, see the
+[README](https://github.com/muscat-team/muscatdb#readme).
+
 To report a problem or ask for a feature, open an issue at
 [github.com/muscat-team/muscatdb/issues](https://github.com/muscat-team/muscatdb/issues).

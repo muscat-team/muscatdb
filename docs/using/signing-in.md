@@ -1,8 +1,7 @@
 # Signing in
 
-This page is for collaborators from partner teams. MuSCAT-DB is at
-[https://db.muscat-team.jp](https://db.muscat-team.jp). You sign in with a
-one-time PIN that is sent to your email address.
+MuSCAT-DB is at [https://db.muscat-team.jp](https://db.muscat-team.jp). You
+sign in with a one-time PIN that is sent to your email address.
 
 ## Before you can sign in
 
@@ -29,8 +28,8 @@ then shows a page titled **No access**. It says that you signed in as your
 address, but no MuSCAT-DB account is linked to that address. It asks you to
 contact an admin to create one.
 
-Ask a MuSCAT team admin to link the exact address shown on that page. If the
-address is wrong, tell the admin which address you meant to use.
+Ask an admin to link the exact address shown on that page. If the address is
+wrong, tell the admin which address you meant to use.
 
 ## What you can see
 
@@ -42,12 +41,7 @@ those groups.
 - Photometry runs, transit fits, and TTV fits appear only if you can see all
   the data they were made from. You always see the products you made yourself.
 
-Hidden data does not appear in lists. If you open a page or run an action for a
-target or night you may not see, MuSCAT-DB answers "not found", the same as for
-data that does not exist. A "not found" for something you expect to see may
-mean you lack access.
-
-To get more access, ask an admin.
+If you expect to see something that is not there, ask an admin.
 
 ## Chat rooms
 
@@ -56,21 +50,17 @@ for each shared group that you belong to.
 
 ## Signing out
 
-**Log out** is in the navigation menu, which appears only when the browser
-window is narrower than about 1240 pixels. On a wide window the navigation bar
-has no Log out button. Narrow the window until the menu button appears, then
-choose **Log out**.
+**Log out** is in the navigation menu, which appears when the browser window is
+1240 pixels wide or narrower. On a wider window the navigation bar has no Log
+out button. Narrow the window until the menu button appears, then choose
+**Log out**.
 
 You can also open `/logout` on the site address, for example
 `https://db.muscat-team.jp/logout`. This ends your session.
 
-## MuSCAT team members
-
-If you are a member of the MuSCAT team inside the institute, you may sign in a
-different way. Follow the team's internal instructions.
-
 ## Problems
 
-For account or access problems, ask a MuSCAT team admin. To report a bug, open
-an issue at [github.com/muscat-team/muscatdb/issues](https://github.com/muscat-team/muscatdb/issues).
+For account or access problems, ask the person who invited you to MuSCAT-DB.
+They can reach an admin. To report a bug, open an issue at
+[github.com/muscat-team/muscatdb/issues](https://github.com/muscat-team/muscatdb/issues).
 Never post account details, email addresses, or PINs in an issue.
