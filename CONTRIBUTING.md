@@ -10,6 +10,25 @@ uv run pre-commit install   # runs `ruff check` before each commit
 Copy `.env.example` to `.env` only if you need to override a default (see
 [Configuration](README.md#configuration)).
 
+## Scope
+
+muscat-db serves the MuSCAT team and a few collaborators, about 20 users.
+Keep changes sized for that:
+
+- Make the smallest change that fixes the problem. Skip options, settings and
+  abstractions for cases nobody has hit yet.
+- Open an issue and get the maintainers' agreement before adding new
+  infrastructure: a service, database, queue, worker type, cache layer or
+  runtime dependency. The issue names the measured problem it solves.
+- A performance change says which user-facing symptom it fixes and shows a
+  before/after measurement.
+- Fix a data problem where it happens, for example with a one-off script that
+  corrects the FITS headers, rather than with a permanent code path here.
+- Keep a PR to one concern and under about 500 changed lines, not counting
+  tests. Split larger work into steps that each stand on their own.
+- The open issues labeled `priority` are the current priorities. Check them
+  before starting work nobody asked for.
+
 ## Before opening a PR
 
 ```bash

@@ -1,7 +1,16 @@
 ## Philosophy
-* adapt scientific software standards focused on managing extreme complexity while ensuring reproducibility, portability, and performance
+* adapt scientific software standards: reproducibility, portability and correctness, with the simplest design that achieves them
 * maintain seamless integration between database, photometry, and transit fitting pipeline
 * do not implement critical design choices from assumptions without discussing implications
+
+## Scope
+* muscat-db serves the MuSCAT team and a few collaborators (about 20 users). design for that, not for scale we do not have
+* prefer the smallest change that fixes the problem. no speculative options, settings, abstractions or code paths for cases nobody has hit
+* new infrastructure (a service, database, queue, worker type, cache layer or runtime dependency) needs an issue the maintainers have agreed to first, naming the measured problem it solves
+* performance work states the user-facing symptom and a before/after measurement. optimize only what profiling shows users feel
+* fix data problems at their source (e.g. a one-off header correction script kept outside the repo), not with permanent code paths in muscat-db
+* keep a PR to one concern and under about 500 changed lines excluding tests; split larger work into steps that each stand alone
+* current priorities are the open issues labeled `priority`; check them before starting unrequested work
 
 ## Data
 * do not delete muscat.db and data/
@@ -44,12 +53,11 @@
 * test all GUI elements the same way a user interacts in practice
 * ensure all new inputs and checkboxes added to templates (e.g. photometry.html) are registered in the corresponding JavaScript helper arrays (collectOptions, restoreOptions, and the default settings listener) so they persist in localStorage across page navigation
 * the jobs are run in a 24-core remote server with 100 Gb memory so queuing heavy jobs should be handled safely
-* in the future, the pipeline will use celery and redis across several servers with 48, 120, and 120 cores
 
 ## Backend and Scripts
 * whenever appropriate, use the API when querying muscat-db: http://localhost:8000/docs
 * the output should be high-quality lightcurves from photometry, and robust inferences from transit fit
-* when writing new code, choose correctness over simplicity
+* when writing new code, choose correctness first, then the simplest code that is correct
 * check background processes; report any idle or background processes related to muscat-db before running a new one
 * all one-off scripts should live in $HOME/temp, but useful scripts should be kept in the repo
 * the server lives inside tmux session `muscatdbgui`. If you (the agent) restart muscat-db yourself, do it inside that same session.
@@ -57,7 +65,7 @@
 * to test a feature branch in the GUI, run it from its own worktree with `deploy/dev-server.sh start <worktree>` (off test: `git worktree add -b <branch> ~/temp/wt-<name> origin/test`). it serves on :8888 by default (`--port N` for another worktree alongside; 8000-8003 are refused), always inside tmux session `muscatdb-dev`, one window per port named `port-<N>` against staging's data (`~/deploy/test/muscat_test.db`, obslog, prose/timer/harmonic outputs), never production's `muscat.db`. never start a dev server from the dev checkout root: its `.env` has no `MUSCAT_DB_PATH`, so `serve` falls back to `./muscat.db`, the production DB. the staging DB is shared with :8003 and re-seeded nightly, so dev writes are visible on staging and do not persist. `stop`/`status` manage it; rerun `start` after template/JS edits
 
 ## Optimization
-* consider CPU parallelization with a JIT compiler such as Numba, porting the inner loop into Cython, or implementing a CUDA GPU function with Numba or CuPy
+* only after profiling shows a bottleneck users feel: consider CPU parallelization with a JIT compiler such as Numba, porting the inner loop into Cython, or implementing a CUDA GPU function with Numba or CuPy
 
 ## Git Branch
 
