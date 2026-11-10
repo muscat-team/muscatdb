@@ -1,7 +1,17 @@
 ## Philosophy
-* adapt scientific software standards focused on managing extreme complexity while ensuring reproducibility, portability, and performance
+* adapt scientific software standards: reproducibility, portability and correctness, with the simplest design that achieves them
 * maintain seamless integration between database, photometry, and transit fitting pipeline
 * do not implement critical design choices from assumptions without discussing implications
+
+## Scope
+* muscat-db serves the MuSCAT team and a few collaborators (about 20 users). design for that, not for scale we do not have
+* prefer the smallest change that fixes the problem. no speculative options, settings, abstractions or code paths for cases nobody has hit
+* new infrastructure (a service, database, queue, worker type, cache layer or runtime dependency) needs an agreed issue first, naming the measured problem it solves. agreed means a maintainer (currently john-livingston or jpdeleon) says so in a comment on the issue. a bug fix needs this only if it adds infrastructure
+* existing infrastructure (the worker fleet, the PostgreSQL control plane and LCO request coordinator) is not frozen and not endorsed: it stays as it is until an agreed issue changes it, and proposals to simplify or remove parts of it are welcome as issues. do not remove or rework it as a side effect of other work
+* performance work states the user-facing symptom and a before/after measurement. optimize only what profiling shows users feel
+* fix data problems at their source, not with permanent code paths in muscat-db. see the fits rule under Data
+* keep a PR to one concern and under about 500 changed lines. tests, lockfiles and generated files do not count, and neither does a pure move that changes no behavior (review it as a move only). split larger work into steps that each stand alone
+* current priorities are the open issues labeled `priority`. when none applies, small fixes and requested work are fine; ask before starting larger unrequested work
 
 ## Data
 * do not delete muscat.db and data/
@@ -15,7 +25,7 @@
 * for BANZAI-reduced fits data, saturation unit is e- when gain is 1 in header
 * sbig (SBIG STL-6303, the LCO 0.4m network's old CCD camera) is archival-only: LCO's live instrument API (observe.lco.global/api/instruments/) has no instrument_type code for it, so it cannot be scheduled, only downloaded from the archive and reduced. qhy600 (QHY600 CMOS on DeltaRho 350, the current 0.4m camera) is live and schedulable (instrument_type "0M4-SCICAM-QHY600"). Both are multi-site like sinistro (deployed across all 6 LCO sites, unlike sinistro's 5 -- sinistro has no unit at ogg). site availability must not be hardcoded: read live per-site schedulability from `/api/lco/instruments` (the schedule page annotates an unavailable site rather than removing it), and keep instrument_type "1M0-SCICAM-SINISTRO" unless a public LCO document says otherwise. prose2's get_instrument() and muscat-db's infer_archive_instrument() auto-detect both from a FITS header/archive metadata: sbig's INSTRUME is prefixed "kb" (e.g. kb27), qhy600's is prefixed "sq" (e.g. sq30-33, sq36, sq38, sq40, sq41, sq46 -- confirmed across coj/elp/ogg/tfn in a live archive scan, 2026-08).
 * muscat.db is updated daily via a cronjob (see [Cron (daily)](README.md#cron-daily) in the README for the crontab entry itself)
-* do not modify fits files directly, store metadata if needed
+* muscat-db code never modifies fits files; store metadata if needed. a one-off correction to raw data (e.g. a header fix) is done outside muscat-db, either at the data's source or on our copy with the sync excluded for those files, so a later sync cannot undo it. the original values must be kept (a backup outside the synced tree, an original-value header keyword, or both), and each correction is recorded in notes/DATA_CORRECTIONS.md: files, keyword, old and new value, where the originals are kept, reason and date
 * the target page should cross-match using catalog CSV coordinates. If the target is in neither catalog, resolve via SIMBAD. As a last resort (not in any catalog and unresolved by SIMBAD), use the header pointing centre (the per-target coord_repr median RA/Dec).
 * do not send requests that overload external database when querying data
 
@@ -44,12 +54,12 @@
 * test all GUI elements the same way a user interacts in practice
 * ensure all new inputs and checkboxes added to templates (e.g. photometry.html) are registered in the corresponding JavaScript helper arrays (collectOptions, restoreOptions, and the default settings listener) so they persist in localStorage across page navigation
 * the jobs are run in a 24-core remote server with 100 Gb memory so queuing heavy jobs should be handled safely
-* in the future, the pipeline will use celery and redis across several servers with 48, 120, and 120 cores
+* heavy jobs also run on the worker fleet (`deploy/workers.py`, hosts in `deploy/workers.toml`). an earlier plan to move the pipeline to Celery and Redis across several servers was dropped (#424); a change to how jobs are distributed needs an agreed issue
 
 ## Backend and Scripts
 * whenever appropriate, use the API when querying muscat-db: http://localhost:8000/docs
 * the output should be high-quality lightcurves from photometry, and robust inferences from transit fit
-* when writing new code, choose correctness over simplicity
+* when writing new code, choose correctness first, then the simplest code that is correct
 * check background processes; report any idle or background processes related to muscat-db before running a new one
 * all one-off scripts should live in $HOME/temp, but useful scripts should be kept in the repo
 * the server lives inside tmux session `muscatdbgui`. If you (the agent) restart muscat-db yourself, do it inside that same session.
@@ -57,7 +67,7 @@
 * to test a feature branch in the GUI, run it from its own worktree with `deploy/dev-server.sh start <worktree>` (off test: `git worktree add -b <branch> ~/temp/wt-<name> origin/test`). it serves on :8888 by default (`--port N` for another worktree alongside; 8000-8003 are refused), always inside tmux session `muscatdb-dev`, one window per port named `port-<N>` against staging's data (`~/deploy/test/muscat_test.db`, obslog, prose/timer/harmonic outputs), never production's `muscat.db`. never start a dev server from the dev checkout root: its `.env` has no `MUSCAT_DB_PATH`, so `serve` falls back to `./muscat.db`, the production DB. the staging DB is shared with :8003 and re-seeded nightly, so dev writes are visible on staging and do not persist. `stop`/`status` manage it; rerun `start` after template/JS edits
 
 ## Optimization
-* consider CPU parallelization with a JIT compiler such as Numba, porting the inner loop into Cython, or implementing a CUDA GPU function with Numba or CuPy
+* only after profiling shows a bottleneck users feel: consider CPU parallelization with a JIT compiler such as Numba, porting the inner loop into Cython, or implementing a CUDA GPU function with Numba or CuPy
 
 ## Git Branch
 
