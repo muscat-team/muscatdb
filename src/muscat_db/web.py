@@ -81,6 +81,7 @@ from jinja2 import Environment, FileSystemLoader
 
 from muscat_db import photometry as phot
 from muscat_db import photometry_api as phot_api
+from muscat_db import transit_fit_api as fit_api
 from muscat_db import ttv_fit_api as ttv_api
 from muscat_db import ref_time as ref_time_lib
 from muscat_db import postprocess as postproc
@@ -4016,23 +4017,24 @@ def lc_upload_delete(request: Request, payload: dict = Body(...)):
     return JSONResponse(result)
 
 
-@transit_fit_router.get("/status")
+@transit_fit_router.get("/status", response_model=fit_api.FitJobStatus)
 def transit_fit_status(inst: str, date: str, target: str, run: str = ""):
     fit.sync_jobs()
     if _run_hidden("transit_fit", inst, date, target, (run or "").strip()):
-        return JSONResponse(dict(_NO_JOB_STATUS))
-    return JSONResponse(fit.job_status(inst, date, target, run_id=(run or "").strip()))
+        return phot_api.response(fit_api.FitJobStatus, dict(_NO_JOB_STATUS))
+    return phot_api.response(fit_api.FitJobStatus, fit.job_status(inst, date, target, run_id=(run or "").strip()))
 
 
-@transit_fit_router.get("/outputs")
+@transit_fit_router.get("/outputs", response_model=fit_api.FitOutputsResponse)
 def transit_fit_outputs(inst: str, date: str, target: str, run: str = ""):
     """The data behind the results page as JSON (plots, summary rows,
     detection SNR), so scripts get it without scraping the page. A hidden run
     reads as empty, as it does for ``/status``."""
     run_id = (run or "").strip()
     if _run_hidden("transit_fit", inst, date, target, run_id):
-        return JSONResponse({"ok": True, "outputs": fit.empty_fit_outputs()})
-    return JSONResponse({"ok": True, "outputs": fit.get_fit_outputs(inst, date, target, run_id=run_id or None)})
+        return phot_api.response(fit_api.FitOutputsResponse, {"ok": True, "outputs": fit.empty_fit_outputs()})
+    outputs = fit.get_fit_outputs(inst, date, target, run_id=run_id or None)
+    return phot_api.response(fit_api.FitOutputsResponse, {"ok": True, "outputs": outputs})
 
 
 @transit_fit_router.get("/log-stream")
@@ -4046,8 +4048,11 @@ async def transit_fit_log_stream(request: Request, inst: str, date: str, target:
     ))
 
 
-@transit_fit_router.post("/run")
-def transit_fit_run(request: Request, payload: dict = Body(...)):
+@transit_fit_router.post("/run", response_model=fit_api.FitActionResponse,
+                         responses={400: {"model": fit_api.FitActionResponse},
+                                    429: {"model": fit_api.FitActionResponse}})
+def transit_fit_run(request: Request, payload: fit_api.FitRunRequest):
+    payload = payload.model_dump(exclude_unset=True)
     inst = (payload.get("inst") or "").strip()
     date = (payload.get("date") or "").strip()
     target = (payload.get("target") or "").strip()
@@ -4060,11 +4065,16 @@ def transit_fit_run(request: Request, payload: dict = Body(...)):
     guard = _ReplaceGuard("transit_fit", inst, date, target, _confirm_of(payload))
     result = fit.start_fit(inst, date, target, options, test_run=test_run, selected_csvs=selected_csvs, user_name=user_name,
                            authorize_run=guard)
-    return _launch_response(guard.after(result))
+    result = guard.after(result)
+    # 429 when a per-user job cap refused the launch (issue #265), 400 otherwise.
+    status = 200 if result.get("ok") else 429 if result.get("limit_exceeded") else 400
+    return phot_api.response(fit_api.FitActionResponse, result, status_code=status)
 
 
-@transit_fit_router.post("/logp")
-def transit_fit_logp(payload: dict = Body(...)):
+@transit_fit_router.post("/logp", response_model=fit_api.FitLogpResponse,
+                         responses={400: {"model": fit_api.FitLogpResponse}})
+def transit_fit_logp(payload: fit_api.FitLogpRequest):
+    payload = payload.model_dump(exclude_unset=True)
     inst = (payload.get("inst") or "").strip()
     date = (payload.get("date") or "").strip()
     target = (payload.get("target") or "").strip()
@@ -4073,13 +4083,13 @@ def transit_fit_logp(payload: dict = Body(...)):
     _require_visible_night(inst, date, target)
     selected_csvs = _restrict_csv_selection(inst, date, target, selected_csvs)
     result = fit.compute_logp(inst, date, target, options, selected_csvs=selected_csvs)
-    if not result.get("ok"):
-        return JSONResponse(result, status_code=400)
-    return JSONResponse(result)
+    return phot_api.response(fit_api.FitLogpResponse, result, status_code=200 if result.get("ok") else 400)
 
 
-@transit_fit_router.post("/cancel")
-def transit_fit_cancel(payload: dict = Body(...)):
+@transit_fit_router.post("/cancel", response_model=fit_api.FitActionResponse,
+                         responses={400: {"model": fit_api.FitActionResponse}})
+def transit_fit_cancel(payload: fit_api.FitCancelRequest):
+    payload = payload.model_dump(exclude_unset=True)
     inst = (payload.get("inst") or "").strip()
     date = (payload.get("date") or "").strip()
     target = (payload.get("target") or "").strip()
@@ -4088,29 +4098,32 @@ def transit_fit_cancel(payload: dict = Body(...)):
     owner = _require_may_modify_run("transit_fit", inst, date, target, run_id, action="cancel")
     result = fit.cancel_fit(inst, date, target, run_id=run_id)
     if not result.get("ok"):
-        return JSONResponse(result, status_code=400)
+        return phot_api.response(fit_api.FitActionResponse, result, status_code=400)
     _record_run_change("cancel", "transit_fit", inst, date, target, run_id, owner)
-    return JSONResponse(result)
+    return phot_api.response(fit_api.FitActionResponse, result)
 
 
-@transit_fit_router.post("/delete")
-def transit_fit_delete(payload: dict = Body(...)):
+@transit_fit_router.post("/delete", response_model=fit_api.FitActionResponse,
+                         responses={400: {"model": fit_api.FitActionResponse},
+                                    500: {"model": fit_api.FitActionResponse}})
+def transit_fit_delete(payload: fit_api.FitDeleteRequest):
+    payload = payload.model_dump(exclude_unset=True)
     inst = (payload.get("inst") or "").strip()
     date = (payload.get("date") or "").strip()
     target = (payload.get("target") or "").strip()
     run_id = (payload.get("run_id") or "").strip()
     if inst not in fit.FIT_INSTRUMENTS:
-        return JSONResponse({"ok": False, "error": "unknown instrument"}, status_code=400)
+        return phot_api.response(fit_api.FitActionResponse, {"ok": False, "error": "unknown instrument"}, status_code=400)
     if not phot.valid_date(date):
-        return JSONResponse({"ok": False, "error": "invalid date"}, status_code=400)
+        return phot_api.response(fit_api.FitActionResponse, {"ok": False, "error": "invalid date"}, status_code=400)
     if not (target or "").strip():
-        return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
+        return phot_api.response(fit_api.FitActionResponse, {"ok": False, "error": "target is required"}, status_code=400)
     _require_visible_run("transit_fit", inst, date, target, run_id)
     owner = _require_may_modify_run("transit_fit", inst, date, target, run_id, action="delete")
     result = fit.delete_fit(inst, date, target, run_id=run_id)
     if result.get("ok"):
         _record_run_change("delete", "transit_fit", inst, date, target, run_id, owner)
-    return JSONResponse(result, status_code=500 if result.get("delete_failed") else 200)
+    return phot_api.response(fit_api.FitActionResponse, result, status_code=500 if result.get("delete_failed") else 200)
 
 
 # Types the transit-fit page links to or offers for download. FileResponse would

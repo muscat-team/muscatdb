@@ -222,7 +222,7 @@ def test_log_probability_uses_selected_curves_and_recovers_after_failure(page, m
     calls = []
     def compute(*args, **kwargs):
         calls.append(kwargs)
-        return {'ok': True, 'logp': -123.456, 'text': 'logP= -123.456'}
+        return {'ok': True, 'logp': '-123.456', 'text': 'logP= -123.456'}
     monkeypatch.setattr(transit_fit, 'compute_logp', compute)
     _ready_to_fit(page)
     page.locator('.csv-checkbox').nth(1).uncheck()
