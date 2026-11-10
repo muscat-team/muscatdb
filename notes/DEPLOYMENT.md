@@ -35,14 +35,20 @@ The README "Multi-User Deployment" section has the full walkthrough; the essenti
 sudo bash deploy/setup-nginx.sh
 
 # Manage users (writes the htpasswd file + the SQLite users row)
-sudo env "PATH=$PATH" uv run muscat-db htpasswd add <user>
+sudo env "PATH=$PATH" uv run muscat-db htpasswd add <user> --group muscatjp
 uv run muscat-db htpasswd delete <user>
 uv run muscat-db htpasswd list
 # Make an existing user admin without touching their password
 uv run muscat-db htpasswd promote <user>
 
 # Restrict an LCO proposal's observations and grant users access (issues #144, #228)
-uv run muscat-db access restrict <proposal_id>     # revokes the proposal's `everyone` grant
+# One-time (#354): make access explicit group membership. Dry run first; it
+# compares every user's and the anonymous viewer's visible rows before and
+# after, and writes nothing if any would change. Restart the server after.
+uv run muscat-db access explicit-groups
+uv run muscat-db access explicit-groups --apply
+
+uv run muscat-db access restrict <proposal_id>     # revokes the proposal's team (`everyone`, after #354 `muscatjp` + `public`) grant
 uv run muscat-db access unrestrict <proposal_id>   # also shares a newly ingested proposal (groups are allow-only)
 uv run muscat-db access grant <user> <proposal_id>
 uv run muscat-db access revoke <user> <proposal_id>
@@ -420,6 +426,73 @@ the tunnel's token in the dashboard, replace it in
 registered at スタードメイン, nameservers on Cloudflare), Zero Trust team
 `green-mouse-b7d3.cloudflareaccess.com`, tunnel route to `:8010`,
 cloudflared 2026.10.4 from apt.
+
+### Chat assistant model store on ut4
+
+The chat assistant (`src/muscat_db/chat_agent.py`) calls ollama on muscat-ut4
+through `scripts/ollama_tunnel.sh`. The systemd `ollama` service there runs as
+user `ollama`, listens on `127.0.0.1:11434`, and by default reads its models from
+`/usr/share/ollama/.ollama/models`. That path is a root-owned symlink, created
+2026-10-28, to `/mnt_ut2/raid_ut2/services/ollama/models` on ut2. The NFS mount
+goes over ut4's 1 GbE `eno1`, so loading a model ran at line rate. The 10 GbE
+X550T port (`enp25s0`) has no cable in it. ollama unloads a model after 5 idle
+minutes, so the first chat after a quiet spell paid the full load. For
+gemma4:latest that came close to `MUSCAT_OLLAMA_TIMEOUT_S` (120 s).
+
+**Change (2026-11-08).** `scripts/ollama_models_local.sh` copies the chat model's
+blobs to `/var/lib/ollama/models` on ut4's local SSD and verifies each one
+against its sha256. It copies every manifest and symlinks every other blob back
+to NFS, so `ollama list` is unchanged. Then it points the service at the new
+directory with a drop-in:
+
+```ini
+# /etc/systemd/system/ollama.service.d/models-local.conf
+[Service]
+Environment=OLLAMA_MODELS=/var/lib/ollama/models
+```
+
+The NFS store and the 2026-10-28 symlink are untouched. The script restarts
+ollama and compares the model list before and after. If ollama does not answer,
+or the list changed, it removes the drop-in again on its own. Only gemma4:latest
+(8.9 GiB) is local, which put ut4's `/` at 76% (104 GB free).
+
+| | Before (NFS, 1 GbE) | After (local SSD) |
+|---|---|---|
+| Read throughput, gemma4 blob (O_DIRECT) | 116 MB/s | **537 MB/s** |
+| gemma4:latest load (`load_duration`) | 97 s | **7.8 s** |
+| Load when the blob is not in page cache | — | ~18 s worst case (9.6 GB ÷ 537 MB/s) |
+| Generation | 85 tok/s | 97 tok/s |
+
+The 7.8 s load was served from page cache, because the copy had just been
+written. After a reboot, or once the cache evicts the blob, expect up to ~18 s.
+A model still on NFS loads at the old speed: qwen3:8b (5.2 GB) took 50 s. The
+tunnel and all 8 models were reachable from ut2 after the switch.
+
+Usage, run on ut4:
+
+```bash
+sudo bash scripts/ollama_models_local.sh                                # gemma4:latest
+sudo bash scripts/ollama_models_local.sh gemma4:latest qwen3.6:latest   # several models
+sudo bash scripts/ollama_models_local.sh --rollback                     # NFS only again
+```
+
+Rollback keeps `/var/lib/ollama`. Delete it with `sudo rm -rf /var/lib/ollama`.
+Side effects:
+- `ollama pull` now writes to the local SSD.
+- A model whose blob is deleted from NFS breaks its symlink here.
+- When you change the chat model (`MUSCAT_OLLAMA_MODEL`), rerun the script with
+  the new tag, or that model loads from NFS.
+
+**Engines considered and rejected (2026-11-08).**
+- [oLLM](https://github.com/Mega4alik/ollm) streams bf16 weights and the KV
+  cache from SSD to fit large contexts into about 8 GB of VRAM. It targets
+  offline batch work. It has no HTTP server and does not support gemma4. ut4's
+  two 24 GB TITAN RTX cards already hold every installed model.
+- [colibri](https://github.com/JustVugg/colibri) v2.1.0 does not support the
+  `gemma4` architecture. On qwen3.6 (36B MoE, Q4_K_M), reading ollama's own GGUF
+  in place on one TITAN RTX, it decoded at 107–117 tok/s against ollama's 82–86,
+  with a shorter time to first token. It serves OpenAI `/v1` only, not
+  `/api/chat`. Revisit it only if the chat moves to a Qwen MoE model.
 
 ---
 
@@ -911,6 +984,13 @@ cannot be recovered at all if this host is lost.
 The state observed at any given time is tracked in the issue that covers it rather
 than here, so this section does not go stale: see #77.
 
+Record, 2026-10-22: prose2 `github.com/jpdeleon/prose2` @ `main` `8c3b0aa7`
+(no tracked changes; one untracked planning note, `INSTRUMENT_DECISION_TABLE_PLAN.md`).
+It adds jpdeleon/prose2#22: `SequenceParallel` serializes its blocks once per run
+instead of once per image, which lifts photometry from ~4 to ~20 frames/s on this
+host with bit-identical fluxes. Local `main` now tracks `origin/main`; before this
+it had no upstream, so a bare `git pull` failed.
+
 Record, 2026-10-13: prose2 `github.com/jpdeleon/prose2` @ `main` `eb8e8183`
 (clean). It includes jpdeleon/prose2#11 (`ep60` SOPHIA camera name; `up`/`Y`/`w`
 sinistro saturation limits) and #12 (opt-in `keyword_gain`/`keyword_read_noise`
@@ -1318,6 +1398,213 @@ The §12 shared-path precondition is **already satisfied for ut2/ut3/ut4/ut6**: 
 ## Recommended worker role assignment (§12 durable queue)
 
 Under §12 every worker runs the same `muscatdb worker --pipeline <name>` loop, pulling jobs from the durable queue (SKIP-LOCKED claim + lease). **No broker.** The **control plane** (PostgreSQL, `[cluster]`) lives on ut2.
+
+### LCO archive worker queue (#389)
+
+With `MUSCAT_LCO_FLEET_DOWNLOADS=1`, PostgreSQL deployments enqueue archive
+downloads as `lco_archive_download` jobs in the existing jobs table, and the web
+process never launches their transfers. Without it, downloads stay on the local
+threads. `deploy/workers.toml` includes a separate systemd pipeline unit on each
+of ut3–ut7. Applying this configuration is a separate deployment step; the change
+does not itself install/restart units or provision directories.
+
+**Rollout order.** A merge to `test` reaches staging, and a release to `main`
+reaches production, within about 5 minutes, and neither provisions anything.
+
+1. Before merging to `test`: create the limiter database and put
+   `MUSCAT_LCO_RATE_DSN` in the staging web environment, `pg.env`, and the
+   deploy checkout's `.env` (cron jobs such as `lco-sync` do not inherit the web
+   service's environment, but read that `.env`). Without it, every archive
+   request returns 503 as soon as the code deploys.
+2. Before the release PR: do the same for the production web environment.
+3. Apply the worker units and provision the spool for the profile.
+4. Set `MUSCAT_LCO_FLEET_DOWNLOADS=1` for that web process and restart it. Run the
+   small staging download and worker restart/cancellation checks below first.
+
+The web process prints a `[startup] WARNING` for each setting that will block
+archive access. To roll back, unset the flag so new downloads return to the local
+threads; existing durable rows stay readable and cancellable while they drain.
+
+**Decisions and bounds.** Transactional claims use a PostgreSQL advisory lock
+and per-attempt lease tokens. Capacity is a hard ceiling of two download jobs
+across the configured fleet database, one per host, with four concurrent frame
+operations per job: at most eight transfers/URL refreshes, equal to the previous
+single web job's default frame concurrency. Unpacking is serial within each
+job. Neither downloads nor registration consume `MUSCAT_MAX_FULL_JOBS` or
+`MUSCAT_WORKER_MAX_SLOTS`; the science pipelines keep their existing scheduling.
+The existing one-profile-at-a-time fleet rule still applies: independently
+running fleets against different databases would have independent caps and
+must not be used to multiply download concurrency. The local SQLite downloader's
+worker settings do not increase these fleet ceilings.
+
+**Shared request limits (required before enabling archive access).** Every
+application process that uses the archive, including SQLite/local web instances,
+must install the `cluster` extra and set `MUSCAT_LCO_RATE_DSN` to the **same
+PostgreSQL database**, independently of `MUSCAT_POSTGRES_DSN`. Provision one
+dedicated database (for example `muscatdb_lco_limits`) on the existing PostgreSQL
+server. Give its service role schema/table creation and read/write access;
+tables initialize on first use. Use the same database and schema/search path on
+ut2–ut7 and in dev/prod. A profile-specific limiter database would multiply
+allowances and is unsupported. Do not reset/restore an older ledger while
+requests are running; a lost ledger requires a 24-hour archive pause before
+resuming, since its spent allowance cannot be reconstructed.
+
+Store the DSN in the existing service-owned mode-0600 `pg.env`, using a host
+reachable from all workers (not `localhost`). `worker-run.sh` exports it unchanged
+when changing the queue's profile/database. Export that same secret into each
+web service environment as well. The generated `web-env` output and systemd
+units intentionally contain no DSN. `MUSCAT_LCO_RATE_DSN` does not fall back to
+the queue DSN: absent credentials, missing dependencies, unreachable PostgreSQL
+or a malformed stored policy fail closed with a safe HTTP 503, immediately and
+without a `Retry-After`: these are configuration faults or outages, not rate
+limits, so no caller sleeps on them. Science workers and
+Observation Portal scheduling remain usable; archive searches/downloads require
+this configuration. No production database or credentials were provisioned as
+part of this change.
+
+The fixed fleet policy is one archive API request start per second and 4,000
+requests in a rolling 24 hours, aggregated across every app identity/profile.
+Anonymous API requests also have a 500-request rolling allowance. These leave
+headroom below both conflicting LCO publications: the [archive guide lists
+5,000 authenticated / 3,500 anonymous requests per day](https://lco.global/documentation/archive-documentation/),
+while the [developer reference lists 50,000 / 1,000 per 24 hours](https://developers.lco.global/#archive)
+(checked 2026-11-05). We use the lower limit for each identity class, rather than
+assuming which upstream quota is enforced. Neither page says whether LCO counts
+the allowance per account, per API token or per IP address, nor whether the day
+is rolling or calendar (rechecked 2026-11-07); "all logged in users are limited
+to" suggests per user. One aggregate budget is the only choice that stays inside
+the limit under all three, so it is shared by every user, the monitor and the
+archive panel. If LCO confirms per-account counting, the budget can be split per
+identity. All archive metadata searches,
+pagination, monitor queries and worker URL refreshes use this ledger; every
+redirect hop is charged according to its destination. Failed HTTP requests and
+abandoned permits still count. A transaction/advisory lock and PostgreSQL clock
+serialize admissions; no midnight reset or process restart replenishes the
+budget. Only fixed scope names, timestamps, policy numbers and an anonymous
+flag are stored, never tokens, token hashes, users, URLs or signed query strings.
+Staging and production run different releases between a merge and a release, so
+each process records its policy in `lco_rate_policies` with a last-seen time, and
+every process enforces the strictest policy seen within the last hour
+(`POLICY_TTL_S`), never laxer than its own. Lowering a limit in code therefore
+takes effect everywhere as soon as one release runs it, and lasts only while that
+release keeps running: a branch, dev server or laptop with lower limits stops
+tightening production an hour after its last archive request. Raising a limit
+takes effect an hour after the last process running the old code stops. No
+manual update is needed in either direction. The `policy` column of
+`lco_rate_state` only shows the policy last applied.
+
+S3/object GETs have a separate shared four-starts-per-second pace and do not
+consume the archive API daily allowance. Existing job/frame concurrency ceilings
+still apply. API and storage scopes each propagate HTTP 429 cooldowns; storage
+503s also trigger cooldowns. `Retry-After` delta seconds and HTTP dates are
+honored using database time, with a 60-second fallback for missing/malformed
+values and a one-second minimum. A shared cooldown lasts at most 15 minutes
+(`MAX_SHARED_COOLDOWN_S`) whatever the header says, because it stops dev,
+staging, production and every worker at once: peers re-probe after it, and a
+throttle that is still real publishes a new cooldown. A longer stored cooldown,
+left by an older release or set by hand, is shortened to 15 minutes from the next
+admission. Otherwise a later, shorter `Retry-After` never shortens an existing
+cooldown. To clear one by hand, run
+`UPDATE lco_rate_state SET cooldown_until = 0 WHERE scope = 'archive'` (or
+`'storage'`) in the limiter database.
+Peers recheck admission after the wait, so recovery is paced. Already-started
+requests cannot be recalled. Frames have at most three attempts (the existing
+retry environment setting is clamped to 1–3), with exponential jittered delay
+(first retries 1–2 and 2–4 seconds, helper capped at 30 seconds); no nested
+metadata retry loop multiplies that budget.
+
+Interactive searches/monitor calls wait at most two seconds for admission,
+then return HTTP 429 with `Retry-After` and JSON `retry_after`. The monitor
+persists at least that delay before its next poll. Durable workers wait without
+holding DB connections, check cancellation/lease ownership every 250ms, and
+continue renewing their job lease independently. The transfer deadline begins
+after admission. A daily wait remains a durable running job and occupies its
+download slot, but no science slot. Unavailable coordination permits no new
+outbound requests. External scripts, direct LCO use and Observation Portal
+requests are outside this archive allowance; the headroom cannot guarantee a
+token's upstream quota if those clients consume it. This is request pacing and
+budgeting, not a bandwidth limit.
+
+Leases last 300 seconds and renew every 15 seconds. PostgreSQL statement and
+lock waits are bounded to 10 and 5 seconds in archive transactions. A failed
+renewal stops new work; a monotonic 150-second safety deadline fences a paused
+executor before its next operation or publish. Socket reads have a 10-second
+timeout, transfers a total deadline of `MUSCAT_LCO_ARCHIVE_TRANSFER_DEADLINE_S`
+(default 120 seconds, longer when the response declares more than 256 KiB/s can
+deliver in that time; frame metadata publishes no size), and funpack its existing
+300-second timeout. Frame transfers reuse kept-alive HTTPS connections (one pool
+per process, `lco_transport`); a fresh TLS connection per frame cost about half
+of each transfer over the round trip to the archive's S3 bucket. Request counts
+are unchanged: every hop, redirects included, is still validated and admitted by
+the shared limiter. Each frame is funpacked as soon as it is on disk, by
+`MUSCAT_LCO_ARCHIVE_FUNPACK_WORKERS` (default 2) workers per job, while later
+frames transfer; a lost lease cancels queued unpacks. Files are written to attempt-specific sibling temporary
+paths and renamed only while ownership remains valid. A hard NFS stall can
+delay a thread's exit; it cannot authorize an old attempt to publish after it
+resumes. Failed transient transfers retain the existing per-frame retry budget;
+jobs have three download attempts, separate from three registration attempts,
+with 30/60-second retry delays. Expired leases are reclaimed by the next queue
+pass, including after cancellation. Permanent errors and exhausted attempts
+remain visible as errors. Terminal job history is durable until explicitly
+deleted; the old in-memory job TTL does not expire fleet history. Seven days after
+a job ends, its per-frame results leave the row and its summary stays. Page and
+poll listings read at most 200 rows without per-frame payloads, and progress is
+saved at most every 10 seconds, so cost does not grow with history or frame count.
+
+**Paths and credentials.** `archive_root` and `archive_spool` in each fleet
+profile are rendered into both the worker environment and `web-env` output.
+Production uses `/data` and
+`/ut2/jerome/.config/muscatdb/archive-downloads-prod`. Development uses
+`/ut2/jerome/deploy/test/lco` and a separate `archive-downloads-dev` spool; the
+development data root must be provisioned before use. The root must already
+exist. Keep the common path spelling (`/data`) even though its resolved path
+differs on the storage server; result paths are converted back to that shared
+alias before persistence. Worker and web data-root settings must match.
+
+The control plane resolves the submitting user's archive token using the
+existing per-user/global fallback rules. A private per-job JSON file contains
+that token and signed frame URLs, following the existing `pg.env` service-user
+file-permission model: spool directory mode 0700, credential file mode 0600,
+matching service UID across hosts, no symlink files. Insecure permissions fail
+closed. Only a random job ID, public summaries, and sanitized progress enter
+Postgres; tokens and signed URLs never enter rows, command lines, units, or
+logs. Workers do not read user settings or `muscat.db`. A worker refreshes an
+expired URL with the same saved token using the documented
+[`basename_exact` archive filter](https://developers.lco.global/#list-frames)
+and checks the returned filename before downloading. Network/command exception
+text is replaced with safe status messages. Terminal jobs lose their private
+file; the control plane also removes abandoned submission files after one day.
+Spool backups must receive the same protections as other credentials.
+
+**Registration, resume, and monitoring.** Downloads and funpack finish before
+the job transitions to `pending` / `awaiting_ingest`. A control-plane thread
+claims registration separately, with one registration active across the queue,
+so a long scan does not block the normal reconciliation loop. Scanning and
+`ingest_date` can be replayed after a control-plane restart. Completed frame
+files are skipped on a retried attempt, including when the initial submission
+requested overwrite; partial attempt files never count as complete. Existing
+unpacked files are reused. Cancellation fences new operations/publication and
+leaves completed products in place. `lco_monitor` retains its submit/poll API
+and dedicated admission bucket while handing off the original user's token;
+it waits through pending/running/cancelling states and accounts for terminal
+frame failures in its existing bounded retry policy. Monitor registration stays
+on ut2. Completion hooks remain best-effort, claimed once in the durable row.
+
+**Read-only host verification, 2026-11-05.** `id`, `readlink`, `stat`, `test -w`,
+and `findmnt` showed UID 1003 / GID 1000 on ut2–ut7. `/data` is ut3's
+`/raid_ut3/data` locally and the same ut3 NFS export mounted at
+`/mnt_ut3/raid_ut3/data` on the other hosts. `/data/MuSCAT3` is group-writable
+and writable to this service identity on all workers. The shared configuration
+parent `/ut2/jerome/.config/muscatdb` is visible on all workers. No production
+file writes, real downloads, unit changes, or catalog mutations were performed.
+These checks do not prove write/rename/fsync behavior, permissions in every
+existing night directory, funpack availability on each host, or NFS behavior
+during a host/network failure. Verify those with a small staging download and
+worker restart/cancellation before promotion. Provision the private spool and
+development root, apply the matching web environment, and start the archive
+units through the normal deployment procedure; old workers do not claim this
+new job kind. On rollback, drain/cancel durable archive jobs before removing
+their units; keep their credential spool until jobs are terminal.
 
 ### PostgreSQL control plane → **ut2**
 - Always-on gateway co-located with the FastAPI web app (minimizes web↔DB latency).

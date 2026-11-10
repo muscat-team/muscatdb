@@ -43,6 +43,7 @@ from muscat_db.database import (
     user_lco_token_configured,
 )
 from muscat_db.instruments import INSTRUMENTS
+from muscat_db import lco_rate, lco_transport
 
 logger = logging.getLogger(__name__)
 
@@ -106,14 +107,19 @@ def _validated_defocus(params: dict, limit_mm: float) -> float:
 class LcoError(Exception):
     """Structured LCO API error."""
 
-    def __init__(self, message: str, status: int = 500, detail: str | None = None):
+    def __init__(self, message: str, status: int = 500, detail: str | None = None,
+                 retry_after: int | None = None):
         self.message = message
         self.status = status
         self.detail = detail
+        self.retry_after = retry_after
         super().__init__(f"[{status}] {message}" + (f" - {detail}" if detail else ""))
 
     def to_dict(self) -> dict:
-        return {"ok": False, "error": self.message, "detail": self.detail, "status": self.status}
+        result = {"ok": False, "error": self.message, "detail": self.detail, "status": self.status}
+        if self.retry_after is not None:
+            result["retry_after"] = self.retry_after
+        return result
 
 
 class WindowNotObservable(LcoError):
@@ -228,9 +234,9 @@ class _ValidatedApiRedirectHandler(urllib.request.HTTPRedirectHandler):
 
     urllib replays request headers on every hop, so a redirect issued by (or
     injected into) an API response would hand ``Authorization: Token <secret>``
-    to the destination. The archive-download path already validates each hop via
-    :class:`_ValidatedArchiveRedirectHandler`; this closes the same gap for the
-    portal/archive API calls.
+    to the destination. The archive-download path already validates each hop
+    (``lco_transport.open_url``); this closes the same gap for the portal/archive
+    API calls.
     """
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -244,7 +250,7 @@ class _ValidatedApiRedirectHandler(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-_API_OPENER = urllib.request.build_opener(_ValidatedApiRedirectHandler)
+_API_OPENER = urllib.request.build_opener(_ValidatedApiRedirectHandler, lco_rate.ArchiveRateHandler)
 
 
 def _friendly_lco_error_detail(raw_body: str, status: int) -> str:
@@ -289,6 +295,7 @@ def _lco_api_request(
     user_name: str | None = None,
     token: str | None = None,
     require_own_token: bool = False,
+    check=None,
 ) -> dict:
     """Make an authenticated request to the LCO API.
 
@@ -307,7 +314,7 @@ def _lco_api_request(
     req = urllib.request.Request(url, data=body, headers=headers, method=method)
 
     try:
-        with _API_OPENER.open(req, timeout=15) as response:
+        with lco_rate.request_context(check), _API_OPENER.open(req, timeout=15) as response:
             if 200 <= response.status < 300:
                 return json.loads(response.read().decode())
             raw = response.read().decode()
@@ -317,6 +324,10 @@ def _lco_api_request(
                 detail=_friendly_lco_error_detail(raw, response.status),
             )
     except urllib.error.HTTPError as e:
+        if e.code == 429:
+            retry_after = math.ceil(lco_rate.retry_after_seconds((e.headers or {}).get("Retry-After"), time.time()))
+            e.close()
+            raise LcoError("LCO API throttled requests", status=429, retry_after=retry_after) from None
         try:
             raw = e.read().decode()
         except Exception:
@@ -326,6 +337,8 @@ def _lco_api_request(
     except LcoError:
         raise
     except Exception as e:
+        if check:
+            check()
         raise LcoError("LCO API request failed", detail=str(e))
 
 
@@ -1078,8 +1091,8 @@ def _validate_download_url(url: str) -> str:
 
     Hostname allowlisting prevents arbitrary destinations, while resolving and
     checking every address prevents an allowed hostname from reaching a local or
-    private service.  Redirects pass through the same function via
-    :class:`_ValidatedArchiveRedirectHandler`.
+    private service.  Every redirect hop passes through the same function
+    (see ``lco_transport.open_url``).
     """
     parsed = urllib.parse.urlparse(url or "")
     host = (parsed.hostname or "").lower()
@@ -1119,19 +1132,14 @@ def _validate_download_url(url: str) -> str:
     return url
 
 
-class _ValidatedArchiveRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Reapply the archive URL policy before urllib follows each redirect."""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        _validate_download_url(newurl)
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
-
-
 def _open_download_url(url: str, timeout: float):
-    """Open an archive URL with redirect validation enabled for every hop."""
-    _validate_download_url(url)
-    opener = urllib.request.build_opener(_ValidatedArchiveRedirectHandler())
-    return opener.open(url, timeout=timeout)
+    """Open an archive URL on a kept-alive connection, validating every hop.
+
+    Each hop, the first included, passes ``_validate_download_url`` and the
+    shared limiter before any request is sent (see ``lco_transport``).
+    """
+    return lco_transport.open_url(url, timeout=timeout, validate=_validate_download_url,
+                                  chunk=_DOWNLOAD_CHUNK)
 
 
 # Per-frame download timeout (seconds), applied to each socket read. A stalled
@@ -1141,9 +1149,26 @@ def _open_download_url(url: str, timeout: float):
 _DOWNLOAD_TIMEOUT_S = float(os.environ.get("MUSCAT_LCO_DOWNLOAD_TIMEOUT_S", "120"))
 _DOWNLOAD_CHUNK = 1 << 20  # 1 MiB
 _FUNPACK_TIMEOUT_S = float(os.environ.get("MUSCAT_LCO_FUNPACK_TIMEOUT_S", "300"))
+# The slowest rate a declared transfer may run at before it counts as stalled.
+# Frame metadata publishes no size, so this applies to the response's own length.
+_MIN_TRANSFER_BYTES_PER_S = 256 * 1024
 
 
-def _download_to_file(url: str, dest: Path, timeout: float = _DOWNLOAD_TIMEOUT_S) -> None:
+def _content_length(response) -> int | None:
+    headers = getattr(response, "headers", None)
+    try:
+        return int(headers.get("Content-Length"))
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def _transfer_deadline(base_s: float, expected: int | None) -> float:
+    """Allow *base_s*, or longer when the response declares a large body."""
+    return max(base_s, (expected or 0) / _MIN_TRANSFER_BYTES_PER_S)
+
+
+def _download_to_file(url: str, dest: Path, timeout: float = _DOWNLOAD_TIMEOUT_S,
+                      *, check=None, temp_suffix: str = "", deadline_s: float | None = None) -> None:
     """Stream *url* to *dest* atomically, with a per-read socket timeout.
 
     Writes to a sibling ``.part`` file and atomically renames on success so an
@@ -1152,11 +1177,32 @@ def _download_to_file(url: str, dest: Path, timeout: float = _DOWNLOAD_TIMEOUT_S
     ``TimeoutError`` instead of blocking forever (the bug that wedged the server
     when a bare ``urlretrieve`` stalled mid-dataset).
     """
-    tmp = dest.with_name(dest.name + ".part")
+    tmp = dest.with_name(dest.name + ".part" + temp_suffix)
     try:
-        with _open_download_url(url, timeout=timeout) as response:
+        if check:
+            check()
+        with lco_rate.request_context(check), _open_download_url(url, timeout=timeout) as response:
+            expected = _content_length(response)
+            # Rate/cooldown waiting does not consume the transfer deadline.
+            deadline = time.monotonic() + _transfer_deadline(deadline_s, expected) if deadline_s else None
             with open(tmp, "wb") as fh:
-                shutil.copyfileobj(response, fh, _DOWNLOAD_CHUNK)
+                if check:
+                    received = 0
+                    while True:
+                        check()
+                        if deadline and time.monotonic() >= deadline:
+                            raise TimeoutError("Archive frame transfer deadline exceeded")
+                        chunk = response.read(_DOWNLOAD_CHUNK)
+                        if not chunk:
+                            break
+                        received += len(chunk)
+                        fh.write(chunk)
+                    if not received or (expected is not None and received != expected):
+                        raise OSError("Archive transfer was empty or incomplete")
+                else:
+                    shutil.copyfileobj(response, fh, _DOWNLOAD_CHUNK)
+        if check:
+            check()
         tmp.replace(dest)
     except (urllib.error.URLError, socket.timeout, TimeoutError, OSError):
         # Drop the partial file so a retry starts clean; re-raise for the caller
@@ -1198,6 +1244,8 @@ def _download_frame(frame: dict, overwrite: bool = False) -> dict:
     except LcoError as e:
         status["status"] = "error"
         status["error"] = e.message
+        if e.retry_after is not None:
+            status["retry_after"] = e.retry_after
     except Exception as e:
         status["status"] = "error"
         status["error"] = str(e)
@@ -1217,7 +1265,8 @@ def _funpack_dest(path: Path) -> Path | None:
     return None
 
 
-def _funpack_file(path: Path, timeout: float = _FUNPACK_TIMEOUT_S) -> dict:
+def _funpack_file(path: Path, timeout: float = _FUNPACK_TIMEOUT_S,
+                  *, check=None, temp_suffix: str = "") -> dict:
     out = _funpack_dest(path)
     status = {
         "filename": path.name,
@@ -1241,9 +1290,11 @@ def _funpack_file(path: Path, timeout: float = _FUNPACK_TIMEOUT_S) -> dict:
     # does: `out.exists()` above is the "already unpacked" signal, so a funpack
     # killed or timed out mid-write must never leave a truncated .fits there.
     # cfitsio will not overwrite, so clear a .part left by an earlier crash.
-    tmp = out.with_name(out.name + ".part")
+    tmp = out.with_name(out.name + ".part" + temp_suffix)
     tmp.unlink(missing_ok=True)
     try:
+        if check:
+            check()
         proc = subprocess.run(
             [funpack, "-O", str(tmp), str(path)],
             check=False,
@@ -1255,6 +1306,8 @@ def _funpack_file(path: Path, timeout: float = _FUNPACK_TIMEOUT_S) -> dict:
             status["status"] = "error"
             status["error"] = (proc.stderr or proc.stdout or f"funpack exited {proc.returncode}").strip()
             return status
+        if check:
+            check()
         tmp.replace(out)
     except OSError as exc:
         status["status"] = "error"
@@ -1300,7 +1353,7 @@ _ARCHIVE_DOWNLOAD_MAX_JOBS = max(10, int(os.environ.get("MUSCAT_LCO_ARCHIVE_DOWN
 _ARCHIVE_DOWNLOAD_MAX_FRAMES = int(os.environ.get("MUSCAT_LCO_ARCHIVE_MAX_FRAMES", "0"))
 _ARCHIVE_DOWNLOAD_MAX_PAYLOAD_BYTES = max(1024, int(os.environ.get("MUSCAT_LCO_ARCHIVE_MAX_PAYLOAD_BYTES", "16777216")))
 _ARCHIVE_DOWNLOAD_MAX_PER_USER = max(1, int(os.environ.get("MUSCAT_LCO_ARCHIVE_MAX_ACTIVE_PER_USER", "2")))
-_ARCHIVE_DOWNLOAD_FRAME_RETRIES = max(1, int(os.environ.get("MUSCAT_LCO_ARCHIVE_FRAME_RETRIES", "3")))
+_ARCHIVE_DOWNLOAD_FRAME_RETRIES = min(3, max(1, int(os.environ.get("MUSCAT_LCO_ARCHIVE_FRAME_RETRIES", "3"))))
 _ARCHIVE_DOWNLOAD_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=_ARCHIVE_DOWNLOAD_WORKERS,
     thread_name_prefix="lco-archive-download",
@@ -1468,25 +1521,38 @@ _TRANSIENT_DOWNLOAD_RE = re.compile(
 )
 
 
+# How long a local download thread sits out shared limiter refusals per frame.
+_ARCHIVE_ADMISSION_WAIT_S = 300.0
+
+
 def _is_transient_download_error(error: str) -> bool:
     return bool(_TRANSIENT_DOWNLOAD_RE.search(error))
 
 
 def _download_frame_with_retry(frame: dict, overwrite: bool = False) -> dict:
-    """Download a frame with retry + exponential backoff for transient errors."""
-    max_attempts = _ARCHIVE_DOWNLOAD_FRAME_RETRIES
-    last_result: dict | None = None
-    for attempt in range(max_attempts):
+    """Download a frame with retry + exponential backoff for transient errors.
+
+    A refusal from the shared limiter never reached LCO, so waiting it out spends
+    no attempt. A wait past the limit returns, with ``retry_after`` for the caller.
+    """
+    max_attempts = min(3, max(1, _ARCHIVE_DOWNLOAD_FRAME_RETRIES))
+    attempt = 0
+    waited = 0.0
+    while True:
         result = _download_frame(frame, overwrite=overwrite)
         if result.get("status") != "error":
             return result
-        last_result = result
-        error_msg = result.get("error", "")
-        if not _is_transient_download_error(error_msg):
+        retry_after = result.get("retry_after")
+        if retry_after:
+            if waited + retry_after > _ARCHIVE_ADMISSION_WAIT_S:
+                return result
+            time.sleep(retry_after)
+            waited += retry_after
+            continue
+        if not _is_transient_download_error(result.get("error", "")) or attempt + 1 >= max_attempts:
             return result
-        if attempt < max_attempts - 1:
-            time.sleep(min(2 ** attempt, 30))
-    return last_result
+        time.sleep(lco_rate.backoff(attempt))
+        attempt += 1
 
 
 def _notify_archive_download_finished(job: dict) -> None:
@@ -1531,6 +1597,12 @@ def cancel_archive_download(job_id: str) -> dict:
     finish, skips funpack/ingest and then settles on ``cancelled``. Files
     already downloaded are left in place.
     """
+    from muscat_db import lco_download, lco_queue
+
+    if lco_queue.enabled():
+        job = lco_queue.ArchiveQueue().cancel(job_id)
+        if job is not None:
+            return lco_download.public(job)
     with _ARCHIVE_DOWNLOAD_LOCK:
         job = _ARCHIVE_DOWNLOAD_JOBS.get(job_id)
         if job is None:
@@ -1552,6 +1624,12 @@ def delete_archive_download(job_id: str) -> None:
     Only terminal jobs may go: a pending/running one still has a worker.
     Absent jobs are a no-op (e.g. after a restart only the DB row remains).
     """
+    from muscat_db import lco_download, lco_queue
+
+    if lco_queue.enabled() and lco_queue.ArchiveQueue().get(job_id):
+        lco_queue.ArchiveQueue().delete(job_id)
+        lco_download._path(job_id).unlink(missing_ok=True)
+        return
     with _ARCHIVE_DOWNLOAD_LOCK:
         job = _ARCHIVE_DOWNLOAD_JOBS.get(job_id)
         if job is None:
@@ -1727,6 +1805,7 @@ def start_archive_download(
     user_name: str | None = None,
     server_side: bool = False,
     request_id: str | None = None,
+    credential_user: str | None = None,
 ) -> dict:
     """Queue an LCO archive download in a dedicated worker and return its state.
 
@@ -1777,6 +1856,10 @@ def start_archive_download(
         "finished_at": None,
         "error": None,
     }
+    from muscat_db import lco_download, lco_queue
+
+    if lco_queue.accepting():
+        return lco_download.submit(job, credential_user=credential_user if credential_user is not None else user_name)
     with _ARCHIVE_DOWNLOAD_LOCK:
         _prune_archive_download_jobs(now, reserve_slots=1)
         active_jobs = [
@@ -1809,6 +1892,12 @@ def start_archive_download(
 
 def archive_download_status(job_id: str) -> dict:
     """Return the current state for a queued archive-download job."""
+    from muscat_db import lco_download, lco_queue
+
+    if lco_queue.enabled():
+        job = lco_queue.ArchiveQueue().get(job_id)
+        if job is not None:
+            return lco_download.public(job)
     with _ARCHIVE_DOWNLOAD_LOCK:
         _prune_archive_download_jobs()
         job = _ARCHIVE_DOWNLOAD_JOBS.get(job_id)
@@ -1819,9 +1908,13 @@ def archive_download_status(job_id: str) -> dict:
 
 def archive_download_jobs() -> list[dict]:
     """Return LCO archive-download jobs known to this server process."""
+    from muscat_db import lco_download, lco_queue
+
     with _ARCHIVE_DOWNLOAD_LOCK:
         _prune_archive_download_jobs()
         jobs = [_archive_download_snapshot(job) for job in _ARCHIVE_DOWNLOAD_JOBS.values()]
+    if lco_queue.enabled():
+        jobs.extend(lco_download.public(job) for job in lco_queue.ArchiveQueue().all())
     jobs.sort(key=lambda job: job.get("started_at") or 0, reverse=True)
     return jobs
 

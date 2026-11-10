@@ -24,6 +24,7 @@ dependencies = [
     "nh3>=0.3.7",
     "pyjwt[crypto]>=2.8",
     "pydantic>=2",
+    "pillow>=12",
 ]
 
 [project.optional-dependencies]

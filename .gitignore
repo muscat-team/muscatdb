@@ -49,6 +49,12 @@ __*.array
 .ipynb_checkpoints/
 */.ipynb_checkpoints/
 
+# Per-target notebook outputs (local analysis, not tracked)
+notebooks/toi1355/
+
+# Pipeline slides: a separate git repo synced with Overleaf
+notes/slides/
+
 # Local IDE/agent environments
 .claude/
 temp.txt
@@ -56,6 +62,8 @@ temp.txt
 # Local environment config (keep .env.example tracked)
 .env
 !.env.example
+# control-plane env written by `deploy/workers.py web-env` (Postgres DSN, CF Access)
+.web-env
 
 # uv Python version pin (local preference)
 .python-version
@@ -63,3 +71,6 @@ temp.txt
 # Generated static documentation snapshot output directory. Built during CI
 # or locally with `muscat-db build-static-site`, deliberately NOT tracked.
 /site/
+browser-artifacts/
+# Written by `ci_pytest.py run --cov` (CI uploads it as an artifact).
+/coverage.xml

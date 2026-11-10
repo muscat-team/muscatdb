@@ -67,7 +67,7 @@ systemctl reload nginx || systemctl restart nginx
 echo ""
 echo "==> nginx is ready on port 8000 (127.0.0.1 only)."
 echo "    Next steps:"
-echo "      1. Add users:  uv run muscat-db htpasswd add <username>"
+echo "      1. Add users:  uv run muscat-db htpasswd add <username> --group <group>"
 echo "      2. Restart the muscat-db server with --nginx:"
 echo "         uv run muscat-db restart --nginx"
 echo ""

@@ -21,7 +21,7 @@ import logging
 import sqlite3
 
 from muscat_db import product_record
-from muscat_db.access_groups import ADMIN, EVERYONE, USER_PREFIX
+from muscat_db.access_groups import ADMIN, EVERYONE, PUBLIC, TEAM_GROUP, USER_PREFIX
 from muscat_db.database import get_conn
 from muscat_db.product_visibility import default_job_owner, default_run_dir
 
@@ -66,7 +66,10 @@ def _explicit_groups(db_path: str, user: str) -> frozenset[str]:
             return frozenset()
         raise
     names = {r[0].casefold() for r in rows}
-    return frozenset(n for n in names if n not in (EVERYONE, ADMIN) and not n.startswith(USER_PREFIX))
+    # The team group replaced the built-in everyone (#354) but is an ordinary
+    # group; sharing it must not let every team member modify every run.
+    shared_by_all = (EVERYONE, ADMIN, PUBLIC, TEAM_GROUP)
+    return frozenset(n for n in names if n not in shared_by_all and not n.startswith(USER_PREFIX))
 
 
 def viewer_groups(db_path: str, viewer: str | None) -> frozenset[str]:

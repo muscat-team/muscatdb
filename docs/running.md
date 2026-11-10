@@ -7,6 +7,16 @@ Host inventory and nginx: [notes/DEPLOYMENT.md](https://github.com/muscat-team/m
 
 This section will grow. It is not a dump of `guide.html`.
 
+## Image previews
+
+The photometry page serves display-sized PNG previews of its plots. They are
+cached under `$MUSCAT_TMPDIR/image-previews` (`~/temp/image-previews` by
+default) with a 256 MiB disk budget, keyed by the source file's metadata and
+the requested width, and generated one at a time across processes sharing the
+cache. Responses are `private, no-cache` with an ETag, so a browser
+revalidates on each visit and an overwritten product or changed permission
+takes effect on the next request. Original products are never modified.
+
 ## Photometry HTTP API
 
 The running app's `/docs` and `/openapi.json` describe the photometry request

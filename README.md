@@ -62,6 +62,22 @@ numbers at fault.
 for non-empty malformed values. Negative integers retain the disabled (`0`)
 behavior.
 
+LCO archive downloads use the PostgreSQL worker queue when
+`MUSCAT_CONTROL_PLANE=postgres` and `MUSCAT_LCO_FLEET_DOWNLOADS=1`. Run the `lco_archive_download` worker pipeline
+and configure the same absolute `MUSCAT_LCO_DIR` and
+`MUSCAT_LCO_DOWNLOAD_SPOOL` paths on the web host and workers. The fleet admits
+two datasets at once, with four frame transfers each and one dataset per host;
+these slots are independent of the science pipeline limits. Progress survives
+web restarts and remains visible on Jobs. Downloads and unpacking run on workers;
+catalog scanning/registration stays on the control plane. SQLite installations
+retain the local downloader. All archive clients also require the `cluster`
+extra and `MUSCAT_LCO_RATE_DSN` pointing to one shared limiter database across
+web, monitor, workers, dev and prod. Missing coordination blocks archive HTTP
+requests. The shared policy allows one API start/second and 4,000 requests per
+rolling 24 hours; S3 downloads have separate pacing and shared cooldowns. See the
+[archive worker deployment notes](notes/DEPLOYMENT.md#lco-archive-worker-queue-389)
+for credentials, leases, resume behavior, and rollout checks.
+
 ## Requirements
 
 - Python ≥ 3.12
@@ -313,6 +329,10 @@ outage cannot block the rebuild:
 ```
 30 17 * * * cd $MUSCATDB_ROOT && uv run muscat-db lco-sync KEY2026B-001 --user <name> --no-ingest >> $MUSCATDB_ROOT/logs/lco-sync.log 2>&1; bash deploy/nightly.sh run
 ```
+
+Cron does not inherit the web service's environment. `lco-sync` reads
+`MUSCAT_LCO_RATE_DSN` from the checkout's `.env` (found from the `cd` above), so
+put it there as well; without it the archive request fails at once with 503.
 
 - **Whole nights.** The unit of work is a dataset: one instrument night (the
   `<Instrument>/<DAY-OBS>` directory). A night is selected when any of its
@@ -637,6 +657,49 @@ makes its ephemerides available beyond the owner's group; do not put data
 that must remain owner-only in that shared source. Other users' sheet
 configurations remain private within the app. Google permissions are separate:
 the importer requires a published or link-readable sheet.
+
+### External light curves (uploads)
+
+Collaborators' light curves from pipelines muscat-db does not run can be fitted
+too. Open **Upload an External Light Curve** on `/transit-fit`, name the target,
+night (yymmdd), facility and band, and pick the file. Every column gets a role
+chosen by hand (time, flux, error, covariate or ignore), so a file's column
+names are never interpreted. Covariates may come from a second file, joined on
+one key column per file (often the time column in both).
+
+Saving writes a normalized CSV (`BJD_TDB`, `Flux`, `Err`, then the covariates
+under their original names) and a `_product.json` record (input kind `upload`,
+with each file's name and SHA-256, the mapping, facility and band) to
+`$MUSCAT_PROSE_DIR/external/<yymmdd>/_runs/<target>/upload-<sha8>/`. The
+transit fit lists it under the pseudo-instrument **external** and passes the
+mapped covariates to timer unchanged.
+
+An upload is refused, with nothing written, when:
+
+* the time column is not full BJD_TDB (JD_UTC needs the observatory's location
+  to convert, and offset times such as BTJD cannot be told apart);
+* the first timestamp is more than 1.5 days from the named night;
+* the second file does not join exactly: a key repeated in either file, or a
+  row of either file with no match in the other;
+* a covariate has no numeric value in any row (timer's `bin_df` would drop
+  every row). A covariate missing in only some rows is kept with a warning;
+* the same file (same checksum) was uploaded before. The message names the
+  existing product when you may see it, and does not otherwise;
+* you may not see the target. An upload is filed under a target and visible to
+  its uploader and to anyone who may see that target (the same target grants
+  as for observed data), so only such a viewer can upload under it. A target
+  never observed by MuSCAT is available to team members and scoped viewers with
+  a target-only grant for that name. Other scoped viewers cannot upload or see
+  it. A grant limited by proposal, instrument or date does not grant access to
+  an unobserved target. Generated filenames must fit in 255 UTF-8 bytes,
+  including the temporary writing suffix.
+
+A mistaken upload (wrong mapping, band, night or target) is removed with the
+**Delete** button under *Upload an External Light Curve* on the same night and
+target, by its uploader, a member of a group they share, or an admin; the same
+file can then be uploaded again. Existing fits retain their pinned input record
+when an upload is deleted, so deletion does not change those fits' visibility.
+Saved column-mapping presets for recurring formats are not implemented yet.
 
 
 ### Target LCO archive inventory

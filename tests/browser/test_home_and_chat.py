@@ -163,16 +163,66 @@ def bot_identity(page, request):
         """)
 
     def ready():
-        # Transport creation follows registration of onUserResolved. Awaiting
-        # the same promise here runs after its synchronous history restoration.
-        page.wait_for_function('Boolean(window.__chatTransport && window.MuscatWhoami)')
-        user = page.evaluate("""async () => {
-          if (window.releaseIdentity) window.releaseIdentity();
-          return await window.MuscatWhoami;
-        }""")
-        assert user == 'admin'
+        _await_chat_ready(page, release='window.releaseIdentity && window.releaseIdentity()')
 
     return ready
+
+
+def _await_chat_ready(page, release='', expected_user='admin'):
+    """Wait for chat.js's own readiness promise: identity handled, @bot log restored.
+
+    Asserting the identity as well keeps a failed /whoami from passing as an
+    empty, but correctly restored, history.
+    """
+    page.wait_for_function('Boolean(window.__chatTransport && window.MuscatChatReady)')
+    user = page.evaluate(f"""async () => {{
+      {release};
+      return await window.MuscatChatReady;
+    }}""")
+    assert user == expected_user
+
+
+_SAVED_BOT_ENTRY = {'user': 'admin', 'text': 'left behind', 'kind': 'user',
+                    'ts': 1791000500, 'private': True}
+
+
+def _chat_ready_state(page):
+    """'ready' or 'pending' for MuscatChatReady, observed without awaiting it."""
+    return page.evaluate("""() => {
+      let state = 'pending';
+      window.MuscatChatReady.then(() => { state = 'ready'; });
+      return new Promise(resolve => setTimeout(() => resolve(state), 50));
+    }""")
+
+
+def test_chat_ready_waits_for_identity_before_restoring_the_bot_log(page):
+    # The ordering behind #393: after a reload the private @bot log is only
+    # restored once /whoami names the user. An immediate snapshot taken before
+    # that is empty, which is the CI failure and also lets an "all deleted"
+    # check pass on a page that has not restored anything yet.
+    page.goto('/targets')
+    page.evaluate('([key, log]) => localStorage.setItem(key, JSON.stringify(log))',
+                  ['muscat-bot-chat:admin', [_SAVED_BOT_ENTRY]])
+    page.evaluate("localStorage.setItem('muscat-chat-min', '0')")
+    held = []
+    page.route('**/whoami', lambda route: held.append(route))
+    page.reload()
+    page.wait_for_function('Boolean(window.__chatTransport && window.MuscatChatReady)')
+    assert held, '/whoami should still be pending'
+    assert _chat_ready_state(page) == 'pending'
+    assert _bot_texts(page) == []  # what an unsynchronised assertion would see
+
+    held.pop().continue_()
+    _await_chat_ready(page)
+    assert _bot_texts(page) == ['left behind']
+
+
+def test_chat_ready_resolves_anonymous_when_whoami_fails(page):
+    page.problems.allowed += ['HTTP 503: GET /whoami', 'status of 503']
+    page.route('**/whoami', lambda route: route.fulfill(status=503, json={'error': 'down'}))
+    page.goto('/targets')
+    _await_chat_ready(page, expected_user='')
+    assert _bot_texts(page) == []
 
 
 def test_bot_exchange_survives_reload_in_time_order(page, bot_identity):
@@ -219,7 +269,9 @@ def test_bot_message_can_be_deleted_and_stays_deleted(page, bot_identity):
     assert page.evaluate("JSON.parse(localStorage.getItem('muscat-bot-chat:admin'))") == []
     page.reload()  # the chat stays expanded across the reload
     bot_identity()
-    expect(page.locator('#chat-messages .message.private')).to_have_count(0)
+    # Restoration has run (bot_identity awaited MuscatChatReady), so an empty
+    # list here means the deletion persisted, not that nothing was restored yet.
+    assert _bot_texts(page) == []
 
 
 def test_bot_history_is_kept_per_user(page, bot_identity):

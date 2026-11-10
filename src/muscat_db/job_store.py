@@ -31,6 +31,7 @@ shape ``get_persisted_jobs`` already produces, so callers keep reading
 
 from __future__ import annotations
 
+import atexit
 import logging
 import os
 import socket
@@ -1402,11 +1403,24 @@ def _make_default_store() -> JobStore:
     )
 
 
+def _close_at_exit(store: PostgresJobStore) -> None:
+    # psycopg_pool's finalizer otherwise stops the pool's threads during
+    # interpreter shutdown, when they can no longer run: each join times out,
+    # adding about 20 s and "couldn't stop thread" warnings to every exit,
+    # including a worker's SIGTERM. atexit runs while the threads still can.
+    try:
+        store.close()
+    except Exception as exc:
+        logger.warning("job store did not close cleanly at exit: %s", type(exc).__name__)
+
+
 def get_job_store() -> JobStore:
     """Return the process-wide job store (the C2 seam)."""
     global _STORE
     if _STORE is None:
         _STORE = _make_default_store()
+        if isinstance(_STORE, PostgresJobStore):
+            atexit.register(_close_at_exit, _STORE)
     return _STORE
 
 

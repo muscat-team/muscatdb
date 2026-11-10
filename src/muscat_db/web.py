@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import copy
 import datetime
 import contextvars
@@ -64,6 +66,7 @@ from fastapi.exception_handlers import (
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.middleware.gzip import GZipMiddleware
+from muscat_db import image_delivery
 from fastapi.responses import (
     FileResponse,
     HTMLResponse,
@@ -78,6 +81,7 @@ from jinja2 import Environment, FileSystemLoader
 
 from muscat_db import photometry as phot
 from muscat_db import photometry_api as phot_api
+from muscat_db import ttv_fit_api as ttv_api
 from muscat_db import ref_time as ref_time_lib
 from muscat_db import postprocess as postproc
 from muscat_db import exposure as exp_calc
@@ -109,6 +113,8 @@ from muscat_db.auth import (
     csrf_error as _csrf_error,
 )
 from muscat_db import transit_fit as fit
+from muscat_db import lc_upload
+from muscat_db.instruments import EXTERNAL_INSTRUMENT
 from muscat_db import ttv_fit as ttv
 from muscat_db import ttv_selection
 from muscat_db import lco
@@ -268,6 +274,14 @@ def _reconcile_all_jobs() -> None:
     # Workers on a shared control plane leave target status to this process
     # (#298); on SQLite they refresh it themselves.
     if uses_shared_control_plane():
+        from muscat_db import lco_download
+
+        # Isolated like the worker's run_pass: an archive problem must not stop
+        # target status for finished science jobs.
+        try:
+            lco_download.sync_jobs()
+        except Exception as exc:
+            logger.warning("archive download sync failed: %s", type(exc).__name__)
         refresh_worker_finished_targets(_FINISHED_JOB_WATCHER, get_job_store())
 
 
@@ -360,6 +374,10 @@ async def _lifespan(app: FastAPI):
             "muscat/muscat2 calibration with --wcs_method astrometry.net will fail; "
             "use --wcs_method twirl (no API key) or export the key."
         )
+    from muscat_db import lco_download
+
+    for warning in lco_download.config_warnings():
+        print(f"[startup] WARNING: {warning}")
 
     from muscat_db import proxy, http_client
     await proxy.startup()
@@ -420,6 +438,7 @@ from muscat_db.cf_access import AUTH_PATH as _CF_AUTH_PATH, router as cf_access_
 
 photometry_router = APIRouter(prefix="/api/photometry", tags=["photometry"])
 transit_fit_router = APIRouter(prefix="/api/transit-fit", tags=["transit-fit"])
+lc_upload_router = APIRouter(prefix="/api/lc-upload", tags=["lc-upload"])
 ttv_fit_router = APIRouter(prefix="/api/ttv-fit", tags=["ttv-fit"])
 exposure_router = APIRouter(prefix="/api/exposure", tags=["exposure"])
 # Upper bound accepted for the exposure calculator's seeing input (arcsec).
@@ -2850,6 +2869,21 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
                 nb_headers, nb_rows = phot.csv_preview(rdir / nearby_info["file"], n=100)
                 nearby_preview = {"headers": nb_headers, "rows": nb_rows}
 
+    # Presentation metadata is separate from the photometry product contract.
+    image_info = {}
+    if outputs:
+        rdir = phot.run_output_dir(inst, date, target, sel_run or None)
+        for item in outputs.get("summary_items", []):
+            image_info[item["file"]] = image_delivery.metadata(rdir / item["file"])
+        for prods in outputs.get("bands", {}).values():
+            for key in ("ref", "apertures", "cutouts", "alignment", "gif"):
+                if key in prods:
+                    name = prods[key]["file"]
+                    image_info[name] = image_delivery.metadata(rdir / name)
+        for name in outputs.get("masters", []):
+            path = phot.safe_artifact_path(inst, date, name)
+            image_info[name] = image_delivery.metadata(path) if path else {}
+
     # Merge URL parameter overrides with defaults
     # Sinistro's site/telescope/mode selectors double as page view filters and
     # reduction options.  Seed the option controls from the validated URL so a
@@ -2881,7 +2915,7 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
         sel_run=sel_run or "",
         can_modify_run=_viewer_may_modify_run("photometry", inst, date, route_target, sel_run or ""),
         dates=dates, targets=targets,
-        outputs=outputs, previews=previews,
+        outputs=outputs, previews=previews, image_info=image_info,
         nearby_preview=nearby_preview,
         command=command, raw_missing=raw_missing,
         default_bands=phot.DEFAULT_BANDS,
@@ -2910,7 +2944,7 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
 @app.get("/transit-fit", response_class=HTMLResponse)
 def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str = "", telescope: str = "", mode: str = "", run: str = ""):
     db = _db_path()
-    inst = inst if inst in INSTRUMENTS else ""
+    inst = inst if inst in fit.FIT_INSTRUMENTS else ""
     date = date if phot.valid_date(date) else ""
     target = (target or "").strip()
     # Multi-site-instrument-only view filters (which site / physical
@@ -2965,7 +2999,11 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
 
     denied = _viewer_denied()
     nights = _night_visibility(denied)
-    if inst:
+    if inst == EXTERNAL_INSTRUMENT:
+        # Uploads have no obslog nights: the nights are the ones holding an
+        # upload (#382); each upload is gated by its own record below.
+        dates = phot.output_dates(inst)
+    elif inst:
         dates = _visible_obsdates(db, inst, denied)
     if inst and date:
         obj_set = set(_get_objects(db, inst, date, denied=denied))
@@ -2973,6 +3011,17 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
         targets = sorted({
             name.replace(" ", "") for name in obj_set if not nights.hidden(inst, date, name)
         })
+        if inst == EXTERNAL_INSTRUMENT and denied:
+            # An upload has no obslog night to gate it: list a target only
+            # when one of its uploads on this date is visible.
+            products = _product_visibility(denied)
+            targets = [
+                t for t in targets
+                if any(
+                    not products.hidden("photometry", inst, date, t, _photometry_run_of_csv(c))
+                    for c in fit.get_csv_lightcurves(inst, date, t)
+                )
+            ]
     # Issue #144: a hidden target renders like a never-observed name, which
     # has no lightcurves and no runs.
     if inst and date and target and not nights.hidden(inst, date, target):
@@ -3068,13 +3117,20 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
     all_runs_products = _product_visibility(denied)
     if target:
         import yaml as _yaml
-        for inst_name in INSTRUMENTS:
-            inst_dates = {d["obsdate"] for d in _get_dates(db, inst_name)}
+        for inst_name in fit.FIT_INSTRUMENTS:
+            candidate_dates = fit.target_fit_dates(inst_name, target)
+            if not candidate_dates:
+                continue
+            # Keep obslog/prose date eligibility without querying unrelated nights.
+            inst_dates = set() if inst_name == EXTERNAL_INSTRUMENT else {d["obsdate"] for d in _get_dates(db, inst_name)}
             inst_dates.update(phot.output_dates(inst_name))
-            for d in sorted(inst_dates, reverse=True):
-                if nights.hidden(inst_name, d, target):
+            for d in candidate_dates:
+                if d not in inst_dates:
                     continue
-                for r in fit.list_fit_runs(inst_name, d, target):
+                previous_runs = fit.list_fit_runs(inst_name, d, target)
+                if not previous_runs or nights.hidden(inst_name, d, target):
+                    continue
+                for r in previous_runs:
                     if all_runs_products.hidden("transit_fit", inst_name, d, target, r.run_id):
                         continue
                     key = (inst_name, d, r.run_id)
@@ -3110,7 +3166,10 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
     target_norm_name = _normalize_target_name(target, _get_norm_name_overrides(db)) if target else ""
     return _render(
         "transit_fit.html",
-        instruments=list(INSTRUMENTS),
+        instruments=list(fit.FIT_INSTRUMENTS),
+        upload_bands=list(lc_upload.BANDS),
+        upload_time_systems=list(lc_upload.TIME_SYSTEMS),
+        upload_max_bytes=lc_upload.MAX_UPLOAD_BYTES,
         sel_inst=inst, sel_date=date, sel_target=target,
         target_norm_name=target_norm_name,
         sel_site=sel_site, sel_telescope=sel_telescope, sel_mode=sel_mode,
@@ -3790,6 +3849,173 @@ async def transit_fit_query_archive(target: str, source: str = "nasa", inst: str
         return JSONResponse({"ok": True, "params": params, "pl_name": pl_name})
 
 
+def _upload_file(payload: dict, key: str, *, required: bool) -> tuple[str, bytes] | None:
+    """``(name, bytes)`` of one uploaded file sent as ``{name, content_b64}``."""
+    entry = payload.get(key)
+    if entry is None and not required:
+        return None
+    if not isinstance(entry, dict) or not isinstance(entry.get("content_b64"), str):
+        raise lc_upload.UploadError(f"{key}: send the file as {{name, content_b64}}")
+    encoded = entry["content_b64"]
+    # base64 is 4/3 the size of the file: refuse before decoding a huge body.
+    if len(encoded) > (lc_upload.MAX_UPLOAD_BYTES * 4) // 3 + 4:
+        raise lc_upload.UploadError(
+            f"{key}: file is larger than {lc_upload.MAX_UPLOAD_BYTES // (1024 * 1024)} MB"
+        )
+    try:
+        data = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError):
+        raise lc_upload.UploadError(f"{key}: content is not valid base64") from None
+    return str(entry.get("name") or ""), data
+
+
+def _upload_refused(exc: lc_upload.UploadError, status: int = 400) -> JSONResponse:
+    return JSONResponse({"ok": False, "error": str(exc)}, status_code=status)
+
+
+class _UploadTooLarge(lc_upload.UploadError):
+    pass
+
+
+async def _upload_payload(request: Request) -> dict:
+    """The JSON body of an upload request, read with a size cap.
+
+    The cap is checked before anything is parsed: against the declared
+    ``Content-Length``, then while streaming, so a body without one cannot
+    get past it either. nginx caps bodies too, but a dev server has no nginx.
+    """
+    limit = lc_upload.MAX_REQUEST_BYTES
+    too_large = _UploadTooLarge(
+        f"the upload is larger than {lc_upload.MAX_UPLOAD_BYTES // (1024 * 1024)} MB per file"
+    )
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > limit:
+        raise too_large
+    chunks, size = [], 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > limit:
+            raise too_large
+        chunks.append(chunk)
+    try:
+        payload = json.loads(b"".join(chunks))
+    except ValueError:
+        raise lc_upload.UploadError("the request body is not JSON") from None
+    if not isinstance(payload, dict):
+        raise lc_upload.UploadError("the request body must be a JSON object")
+    return payload
+
+
+@lc_upload_router.post("/inspect")
+async def lc_upload_inspect(request: Request):
+    """The columns of an uploaded table, for the mapping form (#382).
+    Nothing is stored."""
+    try:
+        payload = await _upload_payload(request)
+    except _UploadTooLarge as exc:
+        return _upload_refused(exc, 413)
+    except lc_upload.UploadError as exc:
+        return _upload_refused(exc)
+    return await asyncio.to_thread(_lc_upload_inspect, payload)
+
+
+def _lc_upload_inspect(payload: dict) -> JSONResponse:
+    try:
+        name, data = _upload_file(payload, "file", required=True)
+        table = lc_upload.parse_table(name or "upload", data)
+    except lc_upload.UploadError as exc:
+        return _upload_refused(exc)
+    return JSONResponse({"ok": True, **lc_upload.describe(table)})
+
+
+@lc_upload_router.post("/save")
+async def lc_upload_save(request: Request):
+    """Store an uploaded light curve as an ``external`` product (#382).
+
+    Every refusal is a 400 (413 for an oversized body) naming the reason;
+    nothing is written then.
+    """
+    try:
+        payload = await _upload_payload(request)
+    except _UploadTooLarge as exc:
+        return _upload_refused(exc, 413)
+    except lc_upload.UploadError as exc:
+        return _upload_refused(exc)
+    # Parsing and writing are blocking: keep them off the event loop.
+    return await asyncio.to_thread(_lc_upload_save, request, payload)
+
+
+def _lc_upload_save(request: Request, payload: dict) -> JSONResponse:
+    target = str(payload.get("target") or "").strip()
+    # An upload is filed under a target and seen by whoever may see that target
+    # (#382), so only such a viewer may add one. Unobserved targets use team
+    # membership or an explicit target grant, without bypassing observed data.
+    if not _night_visibility().target_visible(target, request.state.user):
+        return _upload_refused(
+            lc_upload.UploadError(f"you may not upload under target {target!r}"), 403
+        )
+    products = _product_visibility()
+    try:
+        primary_name, primary_data = _upload_file(payload, "primary", required=True)
+        ancillary = _upload_file(payload, "ancillary", required=False)
+        result = lc_upload.save_upload(
+            target=target,
+            date=str(payload.get("date") or "").strip(),
+            band=str(payload.get("band") or "").strip(),
+            facility=payload.get("facility"),
+            mapping=lc_upload.Mapping.from_payload(payload.get("mapping")),
+            primary_name=primary_name,
+            primary_data=primary_data,
+            ancillary_name=ancillary[0] if ancillary else None,
+            ancillary_data=ancillary[1] if ancillary else None,
+            author=request.state.user,
+            can_see=lambda date, tgt, run: not products.hidden(
+                "photometry", EXTERNAL_INSTRUMENT, date, tgt, run
+            ),
+        )
+    except lc_upload.UploadError as exc:
+        return _upload_refused(exc)
+    logger.info(
+        "light curve uploaded by %s: %s/%s/%s/%s",
+        request.state.user or "-", result["inst"], result["date"], result["target"], result["run_id"],
+    )
+    return JSONResponse({"ok": True, **result})
+
+
+@lc_upload_router.post("/delete")
+def lc_upload_delete(request: Request, payload: dict = Body(...)):
+    """Remove an uploaded light curve so a mistaken one (wrong mapping, band,
+    night or target) can be uploaded again (#382). Only uploads are deletable
+    here, by their uploader, a group-mate or an admin, like any other run."""
+    date = str(payload.get("date") or "").strip()
+    target = str(payload.get("target") or "").strip()
+    run_id = str(payload.get("run_id") or "").strip()
+    try:
+        lc_upload.validate_component_bytes(target, "target")
+        lc_upload.validate_component_bytes(run_id, "run id")
+    except lc_upload.UploadError as exc:
+        return _upload_refused(exc)
+    if not run_id.startswith(lc_upload.RUN_PREFIX):
+        return _upload_refused(lc_upload.UploadError("only an uploaded light curve can be deleted here"))
+    if not phot.valid_date(date) or not target:
+        return _upload_refused(lc_upload.UploadError("date and target are required"))
+    _require_visible_run("photometry", EXTERNAL_INSTRUMENT, date, target, run_id)
+    try:
+        exists = phot.run_output_dir(EXTERNAL_INSTRUMENT, date, target, run_id).is_dir()
+    except ValueError:
+        exists = False
+    if not exists:
+        raise HTTPException(404, f"upload {run_id!r} not found")
+    owner = _require_may_modify_run(
+        "photometry", EXTERNAL_INSTRUMENT, date, target, run_id, action="delete"
+    )
+    result = phot.delete_reduction(EXTERNAL_INSTRUMENT, date, target, run_id=run_id)
+    if not result.get("ok"):
+        return JSONResponse(result, status_code=400)
+    _record_run_change("delete", "photometry", EXTERNAL_INSTRUMENT, date, target, run_id, owner)
+    return JSONResponse(result)
+
+
 @transit_fit_router.get("/status")
 def transit_fit_status(inst: str, date: str, target: str, run: str = ""):
     fit.sync_jobs()
@@ -3873,7 +4099,7 @@ def transit_fit_delete(payload: dict = Body(...)):
     date = (payload.get("date") or "").strip()
     target = (payload.get("target") or "").strip()
     run_id = (payload.get("run_id") or "").strip()
-    if inst not in INSTRUMENTS:
+    if inst not in fit.FIT_INSTRUMENTS:
         return JSONResponse({"ok": False, "error": "unknown instrument"}, status_code=400)
     if not phot.valid_date(date):
         return JSONResponse({"ok": False, "error": "invalid date"}, status_code=400)
@@ -3914,7 +4140,7 @@ def _transit_file_media(path: pathlib.Path) -> tuple[str, bool]:
 
 
 def _serve_transit_file(inst: str, date: str, target: str, name: str, run_id: str | None):
-    if inst not in INSTRUMENTS or not phot.valid_date(date):
+    if inst not in fit.FIT_INSTRUMENTS or not phot.valid_date(date):
         raise HTTPException(404, "invalid parameters")
     if ".." in name or "/" in name:
         raise HTTPException(400, "invalid filename")
@@ -4042,7 +4268,7 @@ def _create_zip_response(files_to_zip: list[tuple[pathlib.Path, str]], archive_n
 
 
 def _transit_fit_download_all(inst: str, date: str, target: str, run_id: str | None):
-    if inst not in INSTRUMENTS or not phot.valid_date(date):
+    if inst not in fit.FIT_INSTRUMENTS or not phot.valid_date(date):
         raise HTTPException(400, "invalid parameters")
     if run_id and (".." in run_id or "/" in run_id):
         raise HTTPException(400, "invalid run id")
@@ -4702,7 +4928,8 @@ def api_ephemeris_view_get(slug: str):
 
 
 def _lco_error_response(e: "lco.LcoError") -> JSONResponse:
-    return JSONResponse(e.to_dict(), status_code=e.status)
+    headers = {"Retry-After": str(e.retry_after)} if e.retry_after is not None else None
+    return JSONResponse(e.to_dict(), status_code=e.status, headers=headers)
 
 
 @app.get("/settings", response_class=HTMLResponse)
@@ -6941,11 +7168,30 @@ def _shared_ephem_sheet_owner() -> str:
     return "" if owner.lower() == "none" else owner
 
 
+def _on_shared_sheet_team(request) -> bool:
+    """Whether the requester may read the team's shared ephemeris sheet:
+    a signed-in user on the team (admins always are). Fails closed."""
+    viewer = _request_user(request) if request else None
+    if not viewer:
+        return False
+    try:
+        from muscat_db import access
+        return not access.is_scoped(_db_path(), viewer)
+    except Exception:
+        logger.exception("team lookup failed for %s; withholding the shared sheet", viewer)
+        return False
+
+
 def _user_ephem_sheet_cfg(request, *, shared: bool = False) -> dict | None:
     """Load the personal or designated shared source, with tab defaults.
 
-    Never accept an arbitrary source owner from a request.
+    Never accept an arbitrary source owner from a request. The shared sheet
+    is the team's planning list, so only team members get it (#354): a scoped
+    viewer or an anonymous request gets None, the same answer as having no
+    sheet configured, and uses their own sheet from Settings instead.
     """
+    if shared and not _on_shared_sheet_team(request):
+        return None
     user = _shared_ephem_sheet_owner() if shared else (_request_user(request) if request else None)
     if not user:
         return None
@@ -7082,6 +7328,25 @@ def _target_coordinates(target: str) -> dict | None:
     unresolved. The epoch matters: the catalogs are Gaia DR2 at 2015.5, so a
     high proper-motion star is arcseconds away from its catalog position."""
     return resolve_target_astrometry(target)
+
+
+def _linear_fit_seed(*candidates: dict | None) -> dict | None:
+    """Provenance of the seed the schedule page's linear fit anchors on.
+
+    The page seeds from the reference ephemeris, then NASA, then TOI (the first
+    with both t0 and period); this mirrors that order and returns
+    ``{"source", "t0", "period", "refs"}`` with ``source`` one of NASA / TOI /
+    local CSV and ``refs`` the per-parameter papers ({} when not recorded).
+    """
+    for entry in candidates:
+        if entry and entry.get("t0") is not None and entry.get("period") is not None:
+            return {
+                "source": entry.get("source") or "catalog",
+                "t0": entry["t0"],
+                "period": entry["period"],
+                "refs": dict(entry.get("refs") or {}),
+            }
+    return None
 
 
 @ephemeris_router.get("/target-info", response_class=JSONResponse)
@@ -7262,6 +7527,10 @@ def api_ephemeris_target_info(target: str, request: Request):
         sheet_fit_ephem.setdefault(pl, {})
 
     planets_sorted = sorted(list(seen_planets))
+    linear_fit_seed = {
+        pl: seed for pl in planets_sorted
+        if (seed := _linear_fit_seed(ref_ephem.get(pl), nasa_ephem.get(pl), toi_ephem.get(pl)))
+    }
 
     products = _product_visibility()
     return JSONResponse({
@@ -7272,6 +7541,9 @@ def api_ephemeris_target_info(target: str, request: Request):
         "reference_ephemeris": ref_ephem,
         "nasa_ephemeris": nasa_ephem,
         "toi_ephemeris": toi_ephem,
+        # The ephemeris the "linear fit" source anchors its epoch assignment on,
+        # with its catalog and papers, so the page can say what seeded the fit.
+        "linear_fit_seed": linear_fit_seed,
         "shared_sheet_configured": shared_cfg is not None,
         "shared_sheet_owner": _shared_ephem_sheet_owner(),
         "shared_sheet_is_mine": _request_user(request) == _shared_ephem_sheet_owner(),
@@ -7609,7 +7881,7 @@ def _lco_archive_download_row(job: dict) -> dict:
         run_name = f"{frames_done}/{frames_total} frames"
     details = "; ".join(dest_dirs) if dest_dirs else "Destination pending"
     if phase and phase not in {"done", state}:
-        details = f"{phase}: {details}"
+        details = f"{phase.replace('_', ' ')}: {details}"
     single_dataset = state == "done" and len(instruments) == 1 and len(obsdates) == 1
     obslog_url = _lco_obslog_url(instruments[0], obsdates[0]) if single_dataset else ""
     photometry_url = str(job.get("photometry_url") or "")
@@ -7623,6 +7895,7 @@ def _lco_archive_download_row(job: dict) -> dict:
     return {
         "key": f"lco_archive_download:{job_id}",
         "type": "lco_archive_download",
+        "durable": bool(job.get("durable")),
         "inst": ",".join(instruments) if instruments else "lco",
         "date": ",".join(obsdates) if obsdates else "mixed",
         "target": ", ".join(objects) if objects else "LCO archive",
@@ -7649,6 +7922,8 @@ _LCO_PERSIST_LOCK = threading.Lock()
 
 
 def _persist_lco_archive_download_row(row: dict) -> None:
+    if row.get("durable"):
+        return  # The queue owns both state and progress; never overwrite its payload.
     params = {
         "job_id": row.get("run_id") or "",
         "details": row.get("details") or "",
@@ -7696,6 +7971,8 @@ def _adapt_persisted_lco_archive_row(job: dict) -> dict:
         params = json.loads(row.get("params") or "{}")
     except (TypeError, json.JSONDecodeError):
         params = {}
+    if params.get("durable"):
+        return _lco_archive_download_row(params)
     job_id = str(params.get("job_id") or row.get("run_id") or "").strip()
     if job_id:
         row["key"] = f"lco_archive_download:{job_id}"
@@ -7748,7 +8025,8 @@ def _jobs_with_lco_archive_rows() -> list[dict]:
             merged[job["key"]] = job
             continue
         row = _adapt_persisted_lco_archive_row(job)
-        if row.get("state") in ("running", "pending", "cancelling") and row["key"] not in live_keys:
+        if (not row.get("durable") and row.get("state") in ("running", "pending", "cancelling")
+                and row["key"] not in live_keys):
             row = _orphaned_lco_archive_row(row)
             _persist_lco_archive_download_row(row)
         merged[row["key"]] = row
@@ -8166,11 +8444,11 @@ def photometry_ref_time_preview(inst: str, date: str, target: str, jd: float):
 
 @photometry_router.get("/file/{inst}/{date}/{target}/run/{run_id}/{name}", response_class=FileResponse,
                        responses={200: {"content": {"application/octet-stream": {"schema": {"type": "string", "format": "binary"}}}}})
-def photometry_file_run(inst: str, date: str, target: str, run_id: str, name: str):
+def photometry_file_run(request: Request, inst: str, date: str, target: str, run_id: str, name: str, preview_width: int | None = None):
     path = phot.safe_run_artifact_path(inst, date, target, run_id, name)
     if path is None or _run_hidden("photometry", inst, date, target, run_id):
         raise HTTPException(404, "artifact not found")
-    return FileResponse(str(path), headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"})
+    return image_delivery.image_response(path, request, preview_width)
 
 
 def _legacy_artifact_hidden(inst: str, date: str, name: str) -> bool:
@@ -8187,11 +8465,11 @@ def _legacy_artifact_hidden(inst: str, date: str, name: str) -> bool:
 
 @photometry_router.get("/file/{inst}/{date}/{name}", response_class=FileResponse,
                        responses={200: {"content": {"application/octet-stream": {"schema": {"type": "string", "format": "binary"}}}}})
-def photometry_file(inst: str, date: str, name: str):
+def photometry_file(request: Request, inst: str, date: str, name: str, preview_width: int | None = None):
     path = phot.safe_artifact_path(inst, date, name)
     if path is None or _legacy_artifact_hidden(inst, date, name):
         raise HTTPException(404, "artifact not found")
-    return FileResponse(str(path), headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"})
+    return image_delivery.image_response(path, request, preview_width)
 
 
 def _photometry_download_all(inst: str, date: str, target: str, run_id: str | None):
@@ -8891,61 +9169,68 @@ def _resolve_ttv_options(options: dict) -> tuple[dict | None, str | None]:
     return {**cleaned, "csv_content": resolved.csv_content, "inputs": resolved.inputs}, None
 
 
-@ttv_fit_router.post("/start", response_class=JSONResponse)
-def api_start_ttv_fit(request: Request, payload: dict = Body(...)):
+@ttv_fit_router.post("/start", response_model=ttv_api.TtvActionResponse,
+                     responses={400: {"model": ttv_api.TtvActionResponse},
+                                429: {"model": ttv_api.TtvActionResponse}})
+def api_start_ttv_fit(request: Request, payload: ttv_api.TtvStartRequest):
+    payload = payload.model_dump(exclude_unset=True)
     target = (payload.get("target") or "").strip()
     options = payload.get("options") or {}
     if not target:
-        return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
+        return phot_api.response(ttv_api.TtvActionResponse, {"ok": False, "error": "target is required"}, status_code=400)
     # A fit starts only on a target the viewer can see something of; the inputs
     # it may use are checked one by one in _resolve_ttv_options.
     _require_visible_object(_db_path(), target)
     options, err = _resolve_ttv_options(options)
     if err:
-        return JSONResponse({"ok": False, "error": err}, status_code=400)
+        return phot_api.response(ttv_api.TtvActionResponse, {"ok": False, "error": err}, status_code=400)
     guard = _ReplaceGuard("ttv_fit", "", "", target, _confirm_of(payload))
     result = guard.after(ttv.start_ttv_fit(target, options, request.state.user, authorize_run=guard))
-    if result.get("limit_exceeded"):
-        return _launch_response(result)
-    return JSONResponse(result)
+    status = 429 if result.get("limit_exceeded") else 200
+    return phot_api.response(ttv_api.TtvActionResponse, result, status_code=status)
 
 
-@ttv_fit_router.post("/cancel", response_class=JSONResponse)
-def api_cancel_ttv_fit(payload: dict = Body(...)):
+@ttv_fit_router.post("/cancel", response_model=ttv_api.TtvActionResponse,
+                     responses={400: {"model": ttv_api.TtvActionResponse}})
+def api_cancel_ttv_fit(payload: ttv_api.TtvRunRequest):
+    payload = payload.model_dump(exclude_unset=True)
     target = (payload.get("target") or "").strip()
     run_name = (payload.get("run_name") or "").strip()
     if not target:
-        return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
+        return phot_api.response(ttv_api.TtvActionResponse, {"ok": False, "error": "target is required"}, status_code=400)
     _require_visible_ttv_run(target, run_name)
     owner = _require_may_modify_run("ttv_fit", "", "", target, run_name, action="cancel")
     res = ttv.cancel_ttv_fit(target, run_name)
     if res.get("ok"):
         _record_run_change("cancel", "ttv_fit", "", "", target, run_name, owner)
-    return JSONResponse(res)
+    return phot_api.response(ttv_api.TtvActionResponse, res)
 
 
-@ttv_fit_router.post("/delete", response_class=JSONResponse)
-def api_delete_ttv_fit(payload: dict = Body(...)):
+@ttv_fit_router.post("/delete", response_model=ttv_api.TtvActionResponse,
+                     responses={400: {"model": ttv_api.TtvActionResponse},
+                                500: {"model": ttv_api.TtvActionResponse}})
+def api_delete_ttv_fit(payload: ttv_api.TtvRunRequest):
+    payload = payload.model_dump(exclude_unset=True)
     target = (payload.get("target") or "").strip()
     run_name = (payload.get("run_name") or "").strip()
     if not target:
-        return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
+        return phot_api.response(ttv_api.TtvActionResponse, {"ok": False, "error": "target is required"}, status_code=400)
     _require_visible_ttv_run(target, run_name)
     owner = _require_may_modify_run("ttv_fit", "", "", target, run_name, action="delete")
     res = ttv.delete_ttv_fit(target, run_name)
     if res.get("ok"):
         _record_run_change("delete", "ttv_fit", "", "", target, run_name, owner)
-    return JSONResponse(res, status_code=500 if res.get("delete_failed") else 200)
+    return phot_api.response(ttv_api.TtvActionResponse, res, status_code=500 if res.get("delete_failed") else 200)
 
 
-@ttv_fit_router.get("/status", response_class=JSONResponse)
+@ttv_fit_router.get("/status", response_model=ttv_api.TtvJobStatus,
+                    responses={400: {"model": ttv_api.TtvActionResponse}})
 def ttv_fit_status(target: str = "", run_name: str = ""):
     if not target:
         return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
     if _ttv_run_hidden(target, run_name):
-        return JSONResponse(dict(_NO_JOB_STATUS))
-    status = ttv.job_status(target.strip(), run_name)
-    return JSONResponse(status)
+        return phot_api.response(ttv_api.TtvJobStatus, dict(_NO_JOB_STATUS))
+    return phot_api.response(ttv_api.TtvJobStatus, ttv.job_status(target.strip(), run_name))
 
 
 @ttv_fit_router.get("/log-stream")
@@ -9021,18 +9306,21 @@ def ttv_fit_download_all(target: str = "", run_name: str = ""):
     )
 
 
-@ttv_fit_router.post("/command", response_class=JSONResponse)
-def api_ttv_fit_command(payload: dict = Body(...)):
+@ttv_fit_router.post("/command", response_model=ttv_api.TtvCommandResponse,
+                     responses={400: {"model": ttv_api.TtvActionResponse}})
+def api_ttv_fit_command(payload: ttv_api.TtvCommandRequest):
+    payload = payload.model_dump(exclude_unset=True)
     target = (payload.get("target") or "").strip()
     options = payload.get("options") or {}
     if not target:
-        return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
+        return phot_api.response(ttv_api.TtvActionResponse, {"ok": False, "error": "target is required"}, status_code=400)
     cmd_str = ttv.get_ttv_command(target, options)
-    return JSONResponse({"ok": True, "command": cmd_str})
+    return phot_api.response(ttv_api.TtvCommandResponse, {"ok": True, "command": cmd_str})
 
 
 app.include_router(photometry_router)
 app.include_router(transit_fit_router)
+app.include_router(lc_upload_router)
 app.include_router(exposure_router)
 app.include_router(jobs_router)
 app.include_router(target_router)
