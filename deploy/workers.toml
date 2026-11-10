@@ -58,13 +58,17 @@ pipelines = ["transit_fit", "ttv_fit", "photometry", "lco_archive_download"]
 ssh       = "muscat-ut4"
 pipelines = ["transit_fit", "ttv_fit", "photometry", "lco_archive_download"]
 
+# No lco_archive_download on ut5/ut6 (157.82.29.x): every frame is written to
+# ut3's NFS export across subnets and unpacked there, which made 100-frame
+# downloads take 103-117 s against 45-50 s on ut3/ut7 and 302 s for 456 frames
+# on ut4 (canary, 2026-11-10; notes/DEPLOYMENT.md "Fleet download canary").
 [hosts.ut5]
 ssh       = "muscat-ut5"
-pipelines = ["transit_fit", "ttv_fit", "photometry", "lco_archive_download"]
+pipelines = ["transit_fit", "ttv_fit", "photometry"]
 
 [hosts.ut6]
 ssh       = "muscat-ut6"
-pipelines = ["transit_fit", "ttv_fit", "photometry", "lco_archive_download"]
+pipelines = ["transit_fit", "ttv_fit", "photometry"]
 
 [hosts.ut7]
 ssh       = "muscat-ut7"

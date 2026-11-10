@@ -28,6 +28,14 @@ _CHECKPOINT_INTERVAL_S = 10.0
 _CLEANUP_INTERVAL_S = 30.0
 _COMPACT_INTERVAL_S = 3600.0
 _TOKEN_RE = re.compile(r"[0-9a-f]{32}")
+# How long a stopping process waits for its archive job to unwind and hand the
+# job back. Socket reads are bounded at 10 s and rate-limit waits poll every
+# 250 ms, so a transfer normally stops well inside this; one that does not is
+# reclaimed when its lease expires, as before. Below systemd's 90 s stop limit.
+_SHUTDOWN_GRACE_S = 20.0
+# Set once by shutdown(): the running job stops at its next lease check and no
+# new job is claimed.
+_STOPPING = threading.Event()
 
 
 def _describe(exc: BaseException) -> str:
@@ -129,6 +137,10 @@ class LeaseLost(RuntimeError):
     pass
 
 
+class Stopping(LeaseLost):
+    """This process is shutting down; the job goes back to the queue."""
+
+
 class Lease:
     """Fail closed on lost ownership, cancellation, or unavailable Postgres.
 
@@ -158,12 +170,16 @@ class Lease:
         while not self.closed.wait(15):
             try:
                 self.checkpoint({})
+            except Stopping:
+                return  # the executor releases the job; the lease is still ours
             except Exception as exc:
                 logger.info("archive job %s lease renewal stopped: %s", self.job["job_id"], _describe(exc))
                 self.stop.set()
                 return
 
     def check(self):
+        if _STOPPING.is_set():
+            raise Stopping("Archive execution stopped: this process is shutting down")
         if self.stop.is_set() or time.monotonic() - self.ack >= lco_queue.LEASE_S / 2:
             raise LeaseLost("Archive execution stopped: lease unavailable or cancellation requested")
 
@@ -329,8 +345,11 @@ def _download(manifest: dict, lease: Lease):
                 results.extend(finished)
                 unpacker.submit(finished)
                 unpacker.collect()
+                # funpack_total travels with every save: a job cancelled before
+                # its last transfer would otherwise report "n/0" unpacked.
                 save({"results": results, "frames_done": len(results),
-                      "funpack_results": unpacker.results, "funpack_done": len(unpacker.results)})
+                      "funpack_results": unpacker.results, "funpack_done": len(unpacker.results),
+                      "funpack_total": len(unpacker.seen)})
                 for _ in done:
                     frame = next(frames, None)
                     if frame is not None:
@@ -384,6 +403,15 @@ def _execute(queue, job) -> None:
                 error, retryable = _download(manifest, lease)
             else:
                 _ingest(manifest, lease)
+    except Stopping:
+        # Hand the job straight back rather than leave its lease to expire.
+        # The release is fenced like finish: a lease already lost releases nothing.
+        try:
+            queue.release(job["job_id"], job["lease_token"])
+        except Exception as exc:
+            logger.warning("archive job %s could not be released; its lease will expire: %s",
+                           job["job_id"], _describe(exc))
+        return
     except LeaseLost:
         # finish is fenced too: it acknowledges a cancellation when still owned,
         # but cannot overwrite a newly claimed attempt after a lost lease.
@@ -412,11 +440,15 @@ def sync_jobs() -> None:
     cannot delay other pipelines' heartbeats. Its lease still lives in Postgres.
     """
     global _LAST_CLEANUP
-    if not lco_queue.enabled():
+    if not lco_queue.enabled() or _STOPPING.is_set():
         return
     queue = lco_queue.ArchiveQueue()
     stage = "download" if job_store.current_owner() == "worker" else "ingest"
     with _EXECUTION_LOCK:
+        # Checked again under the lock shutdown() takes to set the flag: a claim
+        # either registers its thread before shutdown looks, or never happens.
+        if _STOPPING.is_set():
+            return
         thread = _EXECUTION_THREADS.get(stage)
         if thread is not None and thread.is_alive():
             return
@@ -434,6 +466,25 @@ def sync_jobs() -> None:
                                       name=f"archive-{stage}", daemon=True)
             _EXECUTION_THREADS[stage] = thread
             thread.start()
+
+
+def shutdown(timeout: float = _SHUTDOWN_GRACE_S) -> None:
+    """Stop claiming, and hand any running archive job back before exit.
+
+    Execution threads are daemons, so without this a stopped worker (every
+    ``workers.py up`` and deploy) took its job down with it and the job sat
+    claimed until its lease expired (canary 2026-11-10: 300 s idle). The job
+    stops at its next lease check and ``_execute`` releases it.
+    """
+    with _EXECUTION_LOCK:
+        _STOPPING.set()
+        threads = [t for t in _EXECUTION_THREADS.values() if t.is_alive()]
+    deadline = time.monotonic() + timeout
+    for thread in threads:
+        thread.join(max(0.0, deadline - time.monotonic()))
+        if thread.is_alive():
+            logger.warning("archive %s did not stop within %.0f s; its lease will expire",
+                           thread.name, timeout)
 
 
 def cleanup() -> None:

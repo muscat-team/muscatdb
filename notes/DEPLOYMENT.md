@@ -1404,9 +1404,11 @@ Under §12 every worker runs the same `muscatdb worker --pipeline <name>` loop, 
 With `MUSCAT_LCO_FLEET_DOWNLOADS=1`, PostgreSQL deployments enqueue archive
 downloads as `lco_archive_download` jobs in the existing jobs table, and the web
 process never launches their transfers. Without it, downloads stay on the local
-threads. `deploy/workers.toml` includes a separate systemd pipeline unit on each
-of ut3–ut7. Applying this configuration is a separate deployment step; the change
-does not itself install/restart units or provision directories.
+threads. `deploy/workers.toml` includes a separate systemd pipeline unit on ut3,
+ut4 and ut7 only; ut5 and ut6 (157.82.29.x) were dropped after the canary below
+measured them at about half the speed. Applying this configuration is a separate
+deployment step; the change does not itself install/restart units or provision
+directories.
 
 **Rollout order.** A merge to `test` reaches staging, and a release to `main`
 reaches production, within about 5 minutes, and neither provisions anything.
@@ -1544,7 +1546,15 @@ delay a thread's exit; it cannot authorize an old attempt to publish after it
 resumes. Failed transient transfers retain the existing per-frame retry budget;
 jobs have three download attempts, separate from three registration attempts,
 with 30/60-second retry delays. Expired leases are reclaimed by the next queue
-pass, including after cancellation. Permanent errors and exhausted attempts
+pass, including after cancellation. A worker that stops cleanly (SIGTERM from
+`systemctl restart`, `workers.py up`, a deploy) hands its running job back
+instead: `worker.run` calls `lco_download.shutdown()` on exit, the job stops at
+its next lease check, and `ArchiveQueue.release` makes it pending at once,
+refunds the attempt, sets no retry delay and wakes the other workers. The wait is
+bounded at 20 seconds (`_SHUTDOWN_GRACE_S`, below systemd's 90-second stop limit);
+a job that does not stop in time, or a worker that is killed, still waits for its
+lease to expire. The web process does the same for a registration job on a
+graceful shutdown. Permanent errors and exhausted attempts
 remain visible as errors. Terminal job history is durable until explicitly
 deleted; the old in-memory job TTL does not expire fleet history. Seven days after
 a job ends, its per-frame results leave the row and its summary stays. Page and
@@ -1605,6 +1615,68 @@ development root, apply the matching web environment, and start the archive
 units through the normal deployment procedure; old workers do not claim this
 new job kind. On rollback, drain/cancel durable archive jobs before removing
 their units; keep their credential spool until jobs are terminal.
+
+**Production rollout, 2026-11-10.** Staging cannot exercise this path (its
+control plane is SQLite, and the fleet serves one profile at a time), so the
+checks ran as a canary on production.
+
+- Limiter access from the workers: `pg_hba.conf` on ut2 gained one line per
+  archive host, `host muscatdb_lco_limits muscatdb <ip>/32 scram-sha-256`, for
+  ut3 (157.82.46.17), ut4 (.46.41), ut5 (.29.73), ut6 (.29.74) and ut7 (.46.82)
+  (backup `pg_hba.conf.bak-20261110b`, then `systemctl reload postgresql@18-main`).
+  No `ufw` change: the refusal was `no pg_hba.conf entry`, so 5432 was reachable.
+  The ut5/ut6 lines can go once nothing there needs the limiter.
+- `funpack`: ut3 and ut5 have `/usr/local/bin/funpack`; ut4, ut6 and ut7 had it
+  only in a conda env, which the worker unit's PATH does not include, so every
+  frame there would have failed with "funpack is not installed". Installed
+  `libcfitsio-bin` (`/usr/bin/funpack`; cfitsio 4.0.0 on 22.04, 4.6.3 on ut7's 26.04).
+- Spool `/ut2/jerome/.config/muscatdb/archive-downloads-prod`, mode 0700; write,
+  rename and delete checked from every worker as UID 1003.
+- Production `.web-env` gained `MUSCAT_LCO_DOWNLOAD_SPOOL` (rendered by
+  `workers.py web-env` but never copied in) and `MUSCAT_LCO_FLEET_DOWNLOADS=1`.
+  `MUSCAT_LCO_DIR=/data` was already in `.env`. Units started with
+  `workers.py --profile prod up`; ut5/ut6 archive units later stopped and disabled.
+
+**Fleet download canary, 2026-11-10.** MuSCAT3 KEY2026B-001 frames from the night
+of 261109 that were not on disk yet, so nothing was fetched that the 17:30
+`lco-sync` would not fetch anyway. `auto_ingest` was off; the nightly scan
+registers them. Local runs used the same `start_archive_download` path in a
+process with the production environment (one local job at a time,
+`MUSCAT_LCO_ARCHIVE_DOWNLOAD_WORKERS=1`, 8 transfers per job); fleet jobs run 4
+transfers per job and unpack while later frames transfer.
+
+| Run | Frames | Local (ut2) | Fleet |
+|---|---|---|---|
+| single job | 20 | 12.8 s | 9.6 s (ut3) |
+| single job | 60 | 30.3 s, 30.8 s | 30.2 s (ut7), 27.3 s (ut7) |
+| single job | 100 (~956 MB) | 49.5 s, 48.7 s, 46.5 s | 44.9 s (ut3), 102.6 s (ut6), 116.7 s (ut5) |
+| two jobs submitted together | 2 × 75 | 78.1 s (second waits) | 50.3 s (ut7 + ut3 in parallel) |
+| single job | 456 (4.37 GB) | | 302 s (ut4) |
+
+- Fleet speed depends on the host. On ut5 and ut6 the transfers alone took 71 s for
+  100 frames (41–50 s elsewhere), and unpacking still had 32–45 s to go after the
+  last transfer (0.5 s on ut3, ut4, ut7). Load does not explain it (ut6 was at 13
+  on 128 cores, ut7 at 97 on 64 and fast). Both are the 157.82.29.x hosts writing
+  to ut3's export across subnets, and unpacking crosses that link twice. They no
+  longer run the archive role. ut3, the NFS server, is fastest.
+- One local job and one fleet job on a good host take about the same time. The
+  fleet wins when downloads overlap, and keeps transfers out of the web process.
+- A worker restart mid-download left the job claimed until its 300 s lease
+  expired (354.6 s for 60 frames, 325.5 s for 80; completed frames were reused and
+  no partial files were left). Fixed by the release on stop described above.
+- Cancellation stopped within about 3.5 s and kept completed frames. Fleet jobs
+  checkpoint at most every 10 s, so the reported results can lag the disk.
+  `funpack_total` was written only after the last transfer, so a cancelled job
+  showed "21/0"; it now travels with every progress save.
+- NFS visibility on ut2: after a lookup of a file that did not exist yet, ut2
+  answered "not found" for 29.2 s (three of three trials) once ut4 created it,
+  while `os.listdir` saw it at once. ut2 mounts the export with NFS 4.2 and the
+  default attribute caching. Registration is unaffected (`scan_date` lists
+  directories). The archive page's "saved locally" flag stat'ed each frame and
+  could show frames a worker had just written as missing; it now answers from one
+  listing per night directory. Other code that tests a worker-written path by name
+  on ut2 should list its directory instead. Mounting with `lookupcache=positive`
+  on ut2 would remove the effect for everything, at the cost of more lookups.
 
 ### PostgreSQL control plane → **ut2**
 - Always-on gateway co-located with the FastAPI web app (minimizes web↔DB latency).

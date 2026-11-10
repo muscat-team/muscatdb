@@ -20,6 +20,10 @@ TYPE = "lco_archive_download"
 OWNER = "archive_queue"
 LEASE_S = 300
 MAX_ATTEMPTS = 3
+# Releases (a worker stopping mid-job) refund the attempt only this many times,
+# so a job that is always interrupted early still ends within MAX_ATTEMPTS
+# and its attempt_tokens list stays bounded.
+MAX_REFUNDED_RELEASES = 10
 # Hard fleet ceilings, independent of the older per-web-process settings.
 MAX_JOBS = 2
 FRAME_WORKERS = 4
@@ -253,6 +257,43 @@ class ArchiveQueue:
                 job["finished_at"] = now
             self._write(conn, job, now)
             return job
+
+    def release(self, job_id: str, token: str) -> dict | None:
+        """Hand a job back from a stopping process, ready for another at once.
+
+        A worker restart is not the job's fault, so the attempt is refunded
+        and no retry delay applies; otherwise every deploy would wait out the
+        lease (300 s) and spend one of three attempts. The refund stops after
+        ``MAX_REFUNDED_RELEASES`` releases; later ones count as attempts. The
+        released token stays in ``attempt_tokens`` so the next attempt removes
+        its partial files. A cancellation requested meanwhile still wins.
+        """
+        with self._connection() as conn:
+            job = self._read(conn, job_id, lock=True)
+            now = self._now(conn)
+            if not job or job.get("lease_token") != token or job["lease_until"] <= now:
+                return None
+            if job.get("cancel_requested"):
+                job.update(state="cancelled", phase="cancelled", error=None, finished_at=now)
+            else:
+                attempts = job["stage"] + "_attempts"
+                releases = job.get("releases", 0) + 1
+                refund = releases <= MAX_REFUNDED_RELEASES
+                if not refund and job[attempts] >= MAX_ATTEMPTS:
+                    job.update(state="error", phase="error", finished_at=now,
+                               error="Archive job interrupted too often; retry limit reached")
+                else:
+                    job.update(state="pending", phase="retrying", retry_after=0,
+                               **{attempts: max(0, job[attempts] - 1) if refund else job[attempts]})
+                job["releases"] = releases
+            job.update(lease_token="", lease_until=0)
+            self._write(conn, job, now)
+        if job["state"] == "pending":
+            try:
+                self.store._signal_work(TYPE)
+            except Exception:
+                pass  # Polling is authoritative; notification is only a wake-up.
+        return job
 
     def cancel(self, job_id: str) -> dict | None:
         from muscat_db.lco import LcoError
