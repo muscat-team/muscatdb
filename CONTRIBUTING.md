@@ -20,13 +20,14 @@ that (the Scope section of `AGENTS.md` has the full rules):
 - Open an issue before adding new infrastructure: a service, database, queue,
   worker type, cache layer or runtime dependency. It needs a maintainer's
   agreement in a comment on the issue and names the measured problem it
-  solves. Existing infrastructure stays as it is unless an agreed issue says
-  otherwise.
+  solves. Existing infrastructure changes only through an agreed issue,
+  and proposals to simplify it are welcome.
 - A performance change says which user-facing symptom it fixes and shows a
   before/after measurement.
-- Fix a data problem at its source, for example by correcting FITS headers
-  where the data originates, rather than with a permanent code path here.
-  Record each such correction in `notes/DATA_CORRECTIONS.md`.
+- Fix a data problem in the data, not with a permanent code path here: either
+  at its source, or on our copy with the sync excluded for those files so a
+  later sync cannot undo it. Keep the original values, and record each
+  correction in `notes/DATA_CORRECTIONS.md`.
 - Keep a PR to one concern and under about 500 changed lines. Tests,
   lockfiles, generated files and pure moves that change no behavior do not
   count. Split larger work into steps that each stand on their own.
