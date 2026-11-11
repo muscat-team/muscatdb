@@ -10,6 +10,34 @@ uv run pre-commit install   # runs `ruff check` before each commit
 Copy `.env.example` to `.env` only if you need to override a default (see
 [Configuration](README.md#configuration)).
 
+## Scope
+
+muscat-db serves a small team and a few collaborators. Keep changes sized for
+that (the Scope section of `AGENTS.md` has the full rules):
+
+- Make the smallest change that fixes the problem. Skip options, settings and
+  abstractions for cases nobody has hit yet.
+- Open an issue before adding new infrastructure: a service, database, queue,
+  worker type or cache layer. It needs a maintainer's
+  agreement in a comment on the issue and names the measured problem it
+  solves. Existing infrastructure changes only through an agreed issue,
+  and proposals to simplify it are welcome.
+- A new Python package is justified in the PR body: why it is needed and
+  what it replaces. It needs an agreed issue only if it brings a service or
+  a data store with it.
+- A performance change says which user-facing symptom it fixes and shows a
+  before/after measurement.
+- Fix a data problem in the data, not with a permanent code path here: either
+  at its source, or on our copy with the sync excluded for those files so a
+  later sync cannot undo it. Keep the original values, and record each
+  correction in `notes/DATA_CORRECTIONS.md`.
+- Keep a PR to one concern and under about 500 changed lines. Tests,
+  lockfiles, generated files and pure moves that change no behavior do not
+  count. Split larger work into steps that each stand on their own.
+- The open issues labeled `priority` are the current priorities. When none
+  applies, small fixes and requested work are fine; ask before starting larger
+  work nobody asked for.
+
 ## Before opening a PR
 
 ```bash

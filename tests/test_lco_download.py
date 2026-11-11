@@ -202,6 +202,69 @@ def test_lease_loss_cancels_queued_unpacks(monkeypatch, tmp_path):
     assert len(started) == 2
 
 
+def test_progress_reports_the_unpack_total_before_downloads_finish(monkeypatch, tmp_path):
+    # A cancelled fleet job showed funpack "21/0": the total was only written
+    # after the last transfer, so a job that ended earlier never got one.
+    lease = Mock()
+    lease.job = {"lease_token": "attempt"}
+    monkeypatch.setattr(lco_download, "_CHECKPOINT_INTERVAL_S", 0)
+    def frame(data, manifest, lease):
+        if data == "20":
+            raise lco_download.LeaseLost("cancelled")
+        return {"filename": data, "dest": str(tmp_path / f"{data}.fits.fz"), "status": "downloaded"}
+    def funpack(path, **kwargs):
+        return {"filename": path.name, "src": str(path), "dest": str(path)[:-3], "status": "unpacked"}
+    monkeypatch.setattr(lco_download, "_frame", frame)
+    monkeypatch.setattr(lco, "_funpack_file", funpack)
+    with pytest.raises(lco_download.LeaseLost):
+        lco_download._download({"frames": list(map(str, range(30))), "root": str(tmp_path)}, lease)
+    saves = [c.args[0] for c in lease.checkpoint.call_args_list if "funpack_done" in c.args[0]]
+    assert saves, "no progress was saved"
+    assert all(s.get("funpack_total", 0) >= s["funpack_done"] for s in saves)
+
+
+@pytest.fixture
+def stopping(monkeypatch):
+    monkeypatch.setattr(lco_download, "_STOPPING", threading.Event())
+    monkeypatch.setattr(lco_download, "_EXECUTION_THREADS", {})
+
+
+def test_worker_stop_hands_the_running_job_back(monkeypatch, tmp_path, stopping):
+    # Canary 2026-11-10: a restarted worker left its job claimed until the
+    # 300 s lease expired. shutdown() must release it while the process lives.
+    queue = Mock()
+    queue.update.return_value = {"cancel_requested": False}
+    job = {"job_id": "b" * 16, "lease_token": "t1", "download_attempts": 1, "stage": "download"}
+    monkeypatch.setattr(lco_download, "_read_manifest", lambda job_id: {
+        "root": str(tmp_path), "auto_ingest": False, "frames": ["0"], "overwrite": False, "token": "x"})
+    monkeypatch.setattr(lco, "download_root", lambda: tmp_path)
+    started = threading.Event()
+    def frame(data, manifest, lease):
+        started.set()
+        while True:
+            lease.check()
+            time.sleep(0.01)
+    monkeypatch.setattr(lco_download, "_frame", frame)
+    thread = threading.Thread(target=lco_download._execute, args=(queue, job), daemon=True)
+    lco_download._EXECUTION_THREADS["download"] = thread
+    thread.start()
+    assert started.wait(5)
+    lco_download.shutdown(timeout=5)
+    assert not thread.is_alive()
+    queue.release.assert_called_once_with(job["job_id"], "t1")
+    queue.finish.assert_not_called()
+
+
+def test_a_stopping_process_claims_no_new_job(monkeypatch, stopping):
+    queue = Mock()
+    monkeypatch.setattr(lco_queue, "enabled", lambda: True)
+    monkeypatch.setattr(lco_queue, "ArchiveQueue", lambda: queue)
+    monkeypatch.setattr(lco_download.job_store, "current_owner", lambda: "worker")
+    lco_download.shutdown(timeout=0)
+    lco_download.sync_jobs()
+    queue.claim.assert_not_called()
+
+
 def test_retry_count_is_clamped_and_backoff_checks_lease(monkeypatch, tmp_path, lease):
     monkeypatch.setattr(lco, "_ARCHIVE_DOWNLOAD_FRAME_RETRIES", 999)
     monkeypatch.setattr(lco, "frame_destination", lambda frame: ("muscat3", "date", tmp_path / "frame.fits"))
