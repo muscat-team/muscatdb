@@ -44,8 +44,45 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Sync dependencies
         run: uv sync --dev
+      # The catalogs come from IPAC (ExoFOP and the NASA Exoplanet Archive). If
+      # every download fails, fall back to the last fully fresh set saved below,
+      # so an IPAC outage does not block CI. Without a saved set it still fails.
+      - name: Restore catalog CSVs from the last fresh download
+        id: catalog-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/TOIs.csv
+            data/nexsci_pscomppars.csv
+            data/nexsci_pubdates.csv
+            data/jwst_targets.csv
+            data/spectra_targets.csv
+          key: catalogs-${{ github.run_id }}
+          restore-keys: catalogs-
       - name: Download catalog CSVs
-        run: bash scripts/download_catalogs.sh
+        id: catalogs
+        env:
+          CACHED_KEY: ${{ steps.catalog-cache.outputs.cache-matched-key }}
+        run: |
+          if bash scripts/download_catalogs.sh; then
+            echo "fresh=true" >> "$GITHUB_OUTPUT"
+          elif [ -n "$CACHED_KEY" ]; then
+            echo "::warning::Catalog download failed; using the cached catalogs from $CACHED_KEY"
+          else
+            exit 1
+          fi
+      - name: Save catalog CSVs
+        if: steps.catalogs.outputs.fresh == 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            data/TOIs.csv
+            data/nexsci_pscomppars.csv
+            data/nexsci_pubdates.csv
+            data/jwst_targets.csv
+            data/spectra_targets.csv
+          key: catalogs-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ strategy.job-index }}
       # Headless Chromium for the browser tests (tests/browser/ and tests/*_browser.py). They skip
       # without it locally; MUSCAT_REQUIRE_BROWSER=1 below makes a missing or
       # broken install fail here instead of silently dropping that coverage.
@@ -115,8 +152,45 @@ jobs:
           enable-cache: true
       - name: Sync dependencies
         run: uv sync --dev
+      # The catalogs come from IPAC (ExoFOP and the NASA Exoplanet Archive). If
+      # every download fails, fall back to the last fully fresh set saved below,
+      # so an IPAC outage does not block CI. Without a saved set it still fails.
+      - name: Restore catalog CSVs from the last fresh download
+        id: catalog-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/TOIs.csv
+            data/nexsci_pscomppars.csv
+            data/nexsci_pubdates.csv
+            data/jwst_targets.csv
+            data/spectra_targets.csv
+          key: catalogs-${{ github.run_id }}
+          restore-keys: catalogs-
       - name: Download catalog CSVs
-        run: bash scripts/download_catalogs.sh
+        id: catalogs
+        env:
+          CACHED_KEY: ${{ steps.catalog-cache.outputs.cache-matched-key }}
+        run: |
+          if bash scripts/download_catalogs.sh; then
+            echo "fresh=true" >> "$GITHUB_OUTPUT"
+          elif [ -n "$CACHED_KEY" ]; then
+            echo "::warning::Catalog download failed; using the cached catalogs from $CACHED_KEY"
+          else
+            exit 1
+          fi
+      - name: Save catalog CSVs
+        if: steps.catalogs.outputs.fresh == 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            data/TOIs.csv
+            data/nexsci_pscomppars.csv
+            data/nexsci_pubdates.csv
+            data/jwst_targets.csv
+            data/spectra_targets.csv
+          key: catalogs-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ strategy.job-index }}
       # Headless Chromium for the browser tests (tests/browser/ and tests/*_browser.py). They skip
       # without it locally; MUSCAT_REQUIRE_BROWSER=1 below makes a missing or
       # broken install fail here instead of silently dropping that coverage.
