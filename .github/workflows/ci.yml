@@ -45,8 +45,9 @@ jobs:
       - name: Sync dependencies
         run: uv sync --dev
       # The catalogs come from IPAC (ExoFOP and the NASA Exoplanet Archive). If
-      # every download fails, fall back to the last fully fresh set saved below,
-      # so an IPAC outage does not block CI. Without a saved set it still fails.
+      # any download fails, fall back to the last fully fresh set saved below
+      # (catalogs that did download are kept fresh), so an IPAC outage does not
+      # block CI. Without a saved set it still fails.
       - name: Restore catalog CSVs from the last fresh download
         id: catalog-cache
         uses: actions/cache/restore@v4
@@ -64,6 +65,9 @@ jobs:
         env:
           CACHED_KEY: ${{ steps.catalog-cache.outputs.cache-matched-key }}
         run: |
+          # With a cached set to fall back on, do not wait out the full retry
+          # schedule (about 10 minutes per job during an outage).
+          if [ -n "$CACHED_KEY" ]; then export CATALOG_RETRIES=1 CATALOG_RETRY_DELAY_S=5; fi
           if bash scripts/download_catalogs.sh; then
             echo "fresh=true" >> "$GITHUB_OUTPUT"
           elif [ -n "$CACHED_KEY" ]; then
@@ -153,8 +157,9 @@ jobs:
       - name: Sync dependencies
         run: uv sync --dev
       # The catalogs come from IPAC (ExoFOP and the NASA Exoplanet Archive). If
-      # every download fails, fall back to the last fully fresh set saved below,
-      # so an IPAC outage does not block CI. Without a saved set it still fails.
+      # any download fails, fall back to the last fully fresh set saved below
+      # (catalogs that did download are kept fresh), so an IPAC outage does not
+      # block CI. Without a saved set it still fails.
       - name: Restore catalog CSVs from the last fresh download
         id: catalog-cache
         uses: actions/cache/restore@v4
@@ -172,6 +177,9 @@ jobs:
         env:
           CACHED_KEY: ${{ steps.catalog-cache.outputs.cache-matched-key }}
         run: |
+          # With a cached set to fall back on, do not wait out the full retry
+          # schedule (about 10 minutes per job during an outage).
+          if [ -n "$CACHED_KEY" ]; then export CATALOG_RETRIES=1 CATALOG_RETRY_DELAY_S=5; fi
           if bash scripts/download_catalogs.sh; then
             echo "fresh=true" >> "$GITHUB_OUTPUT"
           elif [ -n "$CACHED_KEY" ]; then
