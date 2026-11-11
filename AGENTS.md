@@ -6,7 +6,8 @@
 ## Scope
 * muscat-db serves the MuSCAT team and a few collaborators (about 20 users). design for that, not for scale we do not have
 * prefer the smallest change that fixes the problem. no speculative options, settings, abstractions or code paths for cases nobody has hit
-* new infrastructure (a service, database, queue, worker type, cache layer or runtime dependency) needs an agreed issue first, naming the measured problem it solves. agreed means a maintainer (currently john-livingston or jpdeleon) says so in a comment on the issue. a bug fix needs this only if it adds infrastructure
+* new infrastructure (a service, database, queue, worker type or cache layer) needs an agreed issue first, naming the measured problem it solves. agreed means a maintainer (currently john-livingston or jpdeleon) says so in a comment on the issue. a bug fix needs this only if it adds infrastructure
+* a new python package is justified in the PR body: why it is needed and what it replaces. it needs an agreed issue only if it brings a service or a data store with it
 * existing infrastructure (the worker fleet, the PostgreSQL control plane and LCO request coordinator) is not frozen and not endorsed: it stays as it is until an agreed issue changes it, and proposals to simplify or remove parts of it are welcome as issues. do not remove or rework it as a side effect of other work
 * performance work states the user-facing symptom and a before/after measurement. optimize only what profiling shows users feel
 * fix data problems at their source, not with permanent code paths in muscat-db. see the fits rule under Data

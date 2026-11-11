@@ -4,7 +4,7 @@
 
 ## Why in muscat-db
 
-<!-- Why the fix belongs here rather than at the source (data, an engine, the host). Name the agreed issue if this adds infrastructure: a service, database, queue, worker type, cache layer or runtime dependency. -->
+<!-- Why the fix belongs here rather than at the source (data, an engine, the host). Name the agreed issue if this adds infrastructure: a service, database, queue, worker type or cache layer. For a new Python package, say why it is needed and what it replaces. -->
 
 ## Tests
 
