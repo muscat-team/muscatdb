@@ -86,6 +86,23 @@ def _pipeline_registry() -> dict[str, Callable[[], None]]:
     }
 
 
+def _shutdown_selected(fns: list[tuple[str, Callable[[], None]]]) -> None:
+    """Let pipelines with in-process execution hand their work back on exit.
+
+    Only the archive queue needs this: its job runs on a daemon thread of this
+    process, so exiting without a release leaves the job claimed until its
+    lease expires. Science pipelines run their jobs as separate processes.
+    """
+    if not any(name == "lco_archive_download" for name, _ in fns):
+        return
+    from muscat_db import lco_download
+
+    try:
+        lco_download.shutdown()
+    except Exception:
+        logger.exception("worker: archive shutdown failed; a running job waits for its lease")
+
+
 def resolve_pipelines(pipeline: str) -> list[tuple[str, Callable[[], None]]]:
     """Resolve ``--pipeline`` -- a name, a comma-separated list of names, or
     ``"all"`` -- to an ordered list of ``(name, sync_jobs)`` pairs.
@@ -209,6 +226,9 @@ def run(pipeline: str, *, interval: float = 2.0, once: bool = False) -> None:
             signal.signal(signal.SIGINT, _handle_signal)
         _loop(fns, interval=interval, once=once, stop_requested=lambda: stop)
     finally:
+        # Before anything else is torn down, while the control plane is still
+        # reachable: a running archive job is handed back, not abandoned.
+        _shutdown_selected(fns)
         # Owner restoration goes first and unconditionally: signal.signal()
         # below can itself raise ValueError off the main thread (the same
         # condition that can land us in this finally to begin with -- see

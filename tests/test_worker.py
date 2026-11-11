@@ -137,6 +137,21 @@ class TestRun:
         worker.run("all", once=True)
         assert counts == {"photometry": 1, "transit_fit": 1, "ttv_fit": 1}
 
+    def test_stopping_hands_archive_jobs_back(self, monkeypatch):
+        """A stopped archive worker releases its job (canary 2026-11-10)."""
+        stopped = []
+        monkeypatch.setattr("muscat_db.lco_download.sync_jobs", lambda: None)
+        monkeypatch.setattr("muscat_db.lco_download.shutdown", lambda: stopped.append(1))
+        worker.run("lco_archive_download", once=True)
+        assert stopped == [1]
+
+    def test_science_pipelines_have_no_archive_shutdown(self, monkeypatch):
+        stopped = []
+        monkeypatch.setattr("muscat_db.photometry.sync_jobs", lambda: None)
+        monkeypatch.setattr("muscat_db.lco_download.shutdown", lambda: stopped.append(1))
+        worker.run("photometry", once=True)
+        assert stopped == []
+
     def test_once_does_not_install_signal_handlers(self, monkeypatch):
         installed = []
         monkeypatch.setattr(worker.signal, "signal", lambda *a: installed.append(a))

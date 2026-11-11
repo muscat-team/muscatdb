@@ -138,6 +138,46 @@ def test_retry_backoff_resume_budget_and_cancel(queue):
     assert queue.get(second["job_id"])["state"] == "cancelled"
 
 
+def test_release_requeues_at_once_and_refunds_the_attempt(queue):
+    # A stopping worker hands its job back instead of leaving the lease to run
+    # out (canary 2026-11-10: a restart left a job idle for 300 s).
+    submitted = enqueue(queue)
+    first = queue.claim("download", "h1")
+    released = queue.release(first["job_id"], first["lease_token"])
+    assert released["state"] == "pending" and released["lease_token"] == ""
+    assert released["download_attempts"] == 0
+    second = queue.claim("download", "h2")
+    assert second is not None and second["job_id"] == submitted["job_id"]
+    assert second["download_attempts"] == 1
+    # The released attempt is fenced like any other lost lease.
+    assert queue.update(first["job_id"], first["lease_token"], {}) is None
+    assert queue.release(first["job_id"], first["lease_token"]) is None
+    # Its token stays listed so the next attempt removes its partial files.
+    assert first["lease_token"] in second["attempt_tokens"]
+
+
+def test_releases_stop_refunding_so_an_always_interrupted_job_ends(queue):
+    submitted = enqueue(queue)
+    for _ in range(lco_queue.MAX_REFUNDED_RELEASES):
+        job = queue.claim("download", "h1")
+        assert queue.release(job["job_id"], job["lease_token"])["download_attempts"] == 0
+    for n in range(1, lco_queue.MAX_ATTEMPTS + 1):
+        job = queue.claim("download", "h1")
+        released = queue.release(job["job_id"], job["lease_token"])
+    assert released["state"] == "error"
+    assert queue.claim("download", "h1") is None
+    assert queue.get(submitted["job_id"])["releases"] == lco_queue.MAX_REFUNDED_RELEASES + lco_queue.MAX_ATTEMPTS
+
+
+def test_release_of_a_cancelled_job_ends_it(queue):
+    enqueue(queue)
+    job = queue.claim("download", "h1")
+    queue.cancel(job["job_id"])
+    released = queue.release(job["job_id"], job["lease_token"])
+    assert released["state"] == "cancelled"
+    assert queue.claim("download", "h2") is None
+
+
 def test_restart_jobs_page_cannot_clobber_queue_or_expose_secrets(queue, monkeypatch):
     from muscat_db import web
 

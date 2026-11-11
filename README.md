@@ -68,7 +68,10 @@ and configure the same absolute `MUSCAT_LCO_DIR` and
 `MUSCAT_LCO_DOWNLOAD_SPOOL` paths on the web host and workers. The fleet admits
 two datasets at once, with four frame transfers each and one dataset per host;
 these slots are independent of the science pipeline limits. Progress survives
-web restarts and remains visible on Jobs. Downloads and unpacking run on workers;
+web restarts and remains visible on Jobs; a worker that is stopped or restarted
+hands its download back for another worker to resume at once. Run the archive
+role on hosts with fast access to the data root's NFS server (ut3, ut4 and ut7;
+see the canary in `notes/DEPLOYMENT.md`). Downloads and unpacking run on workers;
 catalog scanning/registration stays on the control plane. SQLite installations
 retain the local downloader. All archive clients also require the `cluster`
 extra and `MUSCAT_LCO_RATE_DSN` pointing to one shared limiter database across

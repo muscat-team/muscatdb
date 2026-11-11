@@ -420,6 +420,15 @@ async def _lifespan(app: FastAPI):
                 pass
         if observation_monitor is not None:
             observation_monitor.stop()
+        if uses_shared_control_plane():
+            from muscat_db import lco_download
+
+            # Hand back a registration job this process is running, so a
+            # graceful restart does not leave it claimed until its lease ends.
+            try:
+                await asyncio.to_thread(lco_download.shutdown)
+            except Exception as exc:
+                logger.warning("archive shutdown failed: %s", type(exc).__name__)
         await http_client.shutdown()
         await proxy.shutdown()
 

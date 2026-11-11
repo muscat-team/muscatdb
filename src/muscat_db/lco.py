@@ -925,6 +925,7 @@ def _annotate_lco_archive_results(
                 meta["archive_dec_deg"] = dec_deg
 
     local_cache: dict[tuple[str, str, str], list[dict]] = {}
+    saved_locally = _saved_locally_checker()
     for meta in dataset_meta.values():
         inst_name = str(meta.get("instrument") or "")
         obsdate = (meta.get("dataset_date") or "").replace("-", "")[2:8]
@@ -984,13 +985,41 @@ def _annotate_lco_archive_results(
         row["saved_locally"] = False
         if inferred_inst and obsdate and fname:
             try:
-                dest = frame_dest(inferred_inst, obsdate, fname)
-                if dest.exists() and dest.stat().st_size > 0:
-                    row["saved_locally"] = True
+                row["saved_locally"] = saved_locally(frame_dest(inferred_inst, obsdate, fname))
             except Exception:
                 logger.debug("failed local saved-frame check for %s/%s/%s", inferred_inst, obsdate, fname, exc_info=True)
         out.append(row)
     return out, len(dataset_meta)
+
+
+def _saved_locally_checker():
+    """Return ``saved(dest)``, answering from one listing per night directory.
+
+    ut2 reads frames that fleet workers on other hosts write over NFS. After a
+    lookup of a frame that did not exist yet, the client keeps answering "not
+    found" for about 30 s once another host writes it (default negative lookup
+    caching; measured on ut2, 2026-11-10), while a directory listing sees the
+    file at once. Listing also replaces one NFS lookup per frame with one per
+    night. Only names present in the listing are stat'ed, to reject empty files.
+    """
+    listings: dict[Path, frozenset[str]] = {}
+
+    def saved(dest: Path) -> bool:
+        names = listings.get(dest.parent)
+        if names is None:
+            try:
+                names = frozenset(os.listdir(dest.parent))
+            except FileNotFoundError:
+                names = frozenset()
+            listings[dest.parent] = names
+        if dest.name not in names:
+            return False
+        try:
+            return dest.stat().st_size > 0
+        except FileNotFoundError:
+            return False  # removed since the listing
+
+    return saved
 
 
 def _safe_segment(value: str, kind: str) -> str:

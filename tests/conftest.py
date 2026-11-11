@@ -145,6 +145,19 @@ def _isolate_db_backup_dir(monkeypatch, tmp_path_factory):
 
 
 @pytest.fixture(autouse=True)
+def _reset_archive_shutdown():
+    """worker.run() and the web lifespan call lco_download.shutdown() on exit.
+
+    In production the process ends right after; in a test session it would
+    leave every later archive test refusing to claim or run a job.
+    """
+    yield
+    from muscat_db import lco_download
+
+    lco_download._STOPPING.clear()
+
+
+@pytest.fixture(autouse=True)
 def _isolate_gaia_disk_cache(monkeypatch, tmp_path_factory):
     """Keep the persistent Gaia cone-search cache out of the real cache dir."""
     monkeypatch.setenv("MUSCAT_GAIA_CACHE_DIR", str(tmp_path_factory.mktemp("gaia-cache")))

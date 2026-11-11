@@ -103,8 +103,11 @@ def test_archive_profiles_keep_shared_paths_separate_and_supply_all_workers():
     assert dev.archive_root != prod.archive_root
     assert dev.archive_spool != prod.archive_spool
     for cfg in (prod, dev):
+        # Only hosts with fast access to ut3's export run downloads (canary
+        # 2026-11-10: ut5/ut6 on 157.82.29.x took about twice as long).
+        archive = {k for k, h in cfg.hosts.items() if "lco_archive_download" in h.pipelines}
+        assert archive == {"ut3", "ut4", "ut7"}
         for host in cfg.hosts.values():
-            assert "lco_archive_download" in host.pipelines
             env = w.render_env(cfg, host, "muscat-" + host.key)
             assert f"MUSCAT_LCO_DIR={cfg.archive_root}" in env
             assert f"MUSCAT_LCO_DOWNLOAD_SPOOL={cfg.archive_spool}" in env
