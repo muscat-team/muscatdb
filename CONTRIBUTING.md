@@ -18,10 +18,13 @@ that (the Scope section of `AGENTS.md` has the full rules):
 - Make the smallest change that fixes the problem. Skip options, settings and
   abstractions for cases nobody has hit yet.
 - Open an issue before adding new infrastructure: a service, database, queue,
-  worker type, cache layer or runtime dependency. It needs a maintainer's
+  worker type or cache layer. It needs a maintainer's
   agreement in a comment on the issue and names the measured problem it
   solves. Existing infrastructure changes only through an agreed issue,
   and proposals to simplify it are welcome.
+- A new Python package is justified in the PR body: why it is needed and
+  what it replaces. It needs an agreed issue only if it brings a service or
+  a data store with it.
 - A performance change says which user-facing symptom it fixes and shows a
   before/after measurement.
 - Fix a data problem in the data, not with a permanent code path here: either

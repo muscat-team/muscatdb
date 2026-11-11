@@ -199,14 +199,11 @@ Both are invoked via `subprocess.Popen` with stdout/stderr logged to per-job fil
 
 ---
 
-## Planned / Future
+## Multi-host jobs
 
-| Technology | Status | Purpose |
-|---|---|---|
-| **Celery** | Planned | Distributed task queue |
-| **Redis** | Planned | Celery broker + result backend |
-| **flower** | Optional | Celery monitoring |
-| **Multi-server** | Planned | 48/120/120-core workers |
+Heavy jobs run on the worker fleet (`deploy/workers.py`, hosts in
+`deploy/workers.toml`), coordinated through the PostgreSQL control plane. An
+earlier plan to move the pipeline to Celery and Redis was dropped (#424).
 
 ---
 
