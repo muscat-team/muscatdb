@@ -1796,7 +1796,7 @@ def _query_target_planets_nasa(target: str) -> dict:
             host = host[:-2].strip()
 
         cols = [
-            "pl_name", "pl_tranmid", "pl_tranmiderr1", "pl_tranmiderr2",
+            "hostname", "pl_name", "pl_tranmid", "pl_tranmiderr1", "pl_tranmiderr2",
             "pl_orbper", "pl_orbpererr1", "pl_orbpererr2",
             "pl_trandur", "pl_trandurerr1", "pl_trandurerr2",
             *_NASA_REFLINK_COLUMNS.values(),
@@ -1807,6 +1807,11 @@ def _query_target_planets_nasa(target: str) -> dict:
         try:
             data = _sync_get(url, headers={'User-Agent': 'Mozilla/5.0'}).json()
             for row in data:
+                # The LIKE prefix also returns other hosts whose name starts
+                # with this one ("HIP 6752" -> HIP 67522, "WASP-1" -> WASP-12),
+                # so keep only rows for this host.
+                if _normalize_target_name(row.get("hostname") or "") != target_norm:
+                    continue
                 pl_name = row.get("pl_name", "")
                 if pl_name and len(pl_name) > 2 and pl_name[-2] == " ":
                     letter = pl_name[-1].lower()

@@ -175,3 +175,17 @@ def test_target_info_reports_the_linear_fit_seed(mock_db, monkeypatch):
     assert body["ok"]
     assert body["linear_fit_seed"]["b"] == {
         "source": "NASA", "t0": 1.0, "period": 2.0, "refs": {"t0": LEONARDI_REF}}
+
+
+def test_online_nasa_query_ignores_hosts_that_only_share_a_prefix(data_dir, monkeypatch):
+    # The archive query matches hostname LIKE 'HIP 6752%', which also returns
+    # HIP 67522. A mistyped name must not borrow that planet's ephemeris.
+    hip67522 = {**WASP12, "hostname": "HIP 67522", "pl_name": "HIP 67522 b"}
+
+    class Resp:
+        def json(self):
+            return [hip67522]
+
+    monkeypatch.setattr(catalog, "_sync_get", lambda url, **kwargs: Resp())
+    assert catalog._query_target_planets_nasa("HIP 6752") == {}
+    assert catalog._query_target_planets_nasa("HIP 67522")["b"]["period"] == pytest.approx(1.0914189)

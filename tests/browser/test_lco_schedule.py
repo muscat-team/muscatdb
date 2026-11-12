@@ -821,6 +821,10 @@ def test_local_csv_values_say_the_reference_is_not_recorded(page):
     expect(prov).to_contain_text('t0 / period: local CSV — reference not recorded')
     # Duration is borrowed from TOI, so the panel says so.
     expect(prov).to_contain_text('Duration: TOI — reference not recorded (local CSV has no duration for b)')
+    # The t0 / period and Duration lines share one row when there is room.
+    lines = prov.locator('.prov-line')
+    expect(lines).to_have_count(2)
+    assert abs(lines.nth(0).bounding_box()['y'] - lines.nth(1).bounding_box()['y']) < 2
 
 
 def test_help_icons_are_keyboard_focusable_and_described(page):

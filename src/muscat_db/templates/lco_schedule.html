@@ -61,9 +61,9 @@
   }
   /* Where the current t0 / period / duration came from (catalog, seed of a
      linear fit, per-parameter papers). Spans the whole grid row. */
-  #ephem-provenance { grid-column: 1 / -1; font-size: 0.78rem; color: var(--text-dim); line-height: 1.5; }
+  #ephem-provenance { grid-column: 1 / -1; display: flex; flex-wrap: wrap; column-gap: 0.6rem; font-size: 0.78rem; color: var(--text-dim); line-height: 1.5; }
   #ephem-provenance:empty { display: none; }
-  #ephem-provenance .prov-line { display: block; }
+  #ephem-provenance .prov-line + .prov-line::before { content: "·"; margin-right: 0.6rem; }
   #ephem-provenance .prov-key { color: var(--text); font-weight: 600; }
   /* t0/period are greyed while a TTV model is the ephemeris source: the server
      ignores them (scheduling follows the model's predicted mid-times), so they
