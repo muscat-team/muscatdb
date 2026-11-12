@@ -948,6 +948,17 @@ block is now the record of what the host actually runs, kept alongside the
 other deliberately-recorded host state in this file. Update it here, not in a
 tracked `cronjob.txt`, the next time the crontab changes.
 
+The nightly run downloads catalogs into production's checkout only. Staging's
+five nightly catalogs (`TOIs.csv`, `nexsci_pscomppars.csv`,
+`nexsci_pubdates.csv`, `jwst_targets.csv`, `spectra_targets.csv`) are
+therefore symlinks into `$HOME/deploy/main/app/data/` (2026-11-12); its own
+copies had stopped at 2026-10-24, before the NASA paper-link columns, so the
+schedule page showed "reference not recorded" for every NASA ephemeris. The
+replaced files are in `$HOME/temp/staging-catalogs-20261024/`.
+`deploy/dev-server.sh` links the same five files from production into each
+worktree. The app reads them as reference data and only downloads one that is
+missing, so neither can write to production's copies.
+
 **Rule:** pin `MUSCAT_OBSLOG_DIR` explicitly in `.env`, on a single host or
 many — never rely on its `$HOME`-relative in-code default in production.
 `MUSCAT_DATA_DIR`'s in-code default (`/data`) is not `$HOME`-relative and

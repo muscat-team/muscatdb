@@ -249,3 +249,40 @@ def test_tmux_environment_cannot_override_staging_settings(host):
     assert effective["MUSCAT_PROSE_DIR"] == str(host.staging / "prose")
     assert effective["MUSCAT_LCO_ALLOW_SUBMIT"] == "0"
     assert "MUSCAT_POSTGRES_DSN" not in effective
+
+
+def _ignored_data_file(host, name, text):
+    (host.dev_checkout / ".gitignore").write_text("data/\n")
+    (host.dev_checkout / "data").mkdir(exist_ok=True)
+    (host.dev_checkout / "data" / name).write_text(text)
+
+
+def test_nightly_catalogs_are_linked_from_production(host):
+    """The dev checkout's catalog copies go stale; production's are refreshed
+    nightly. Other data files still come from the dev checkout."""
+    _ignored_data_file(host, "nexsci_pscomppars.csv", "stale\n")
+    _ignored_data_file(host, "FOV_MuSCAT.vot.xml", "fov\n")
+    prod_data = host.prod_root / "app" / "data"
+    prod_data.mkdir(parents=True)
+    (prod_data / "nexsci_pscomppars.csv").write_text("fresh\n")
+    # A worktree linked by an older version of the script is repointed.
+    (host.worktree / "data").mkdir()
+    (host.worktree / "data" / "nexsci_pscomppars.csv").symlink_to(
+        host.dev_checkout / "data" / "nexsci_pscomppars.csv")
+
+    host.run()
+    data = host.worktree / "data"
+    assert (data / "nexsci_pscomppars.csv").read_text() == "fresh\n"
+    assert (data / "FOV_MuSCAT.vot.xml").resolve() == host.dev_checkout / "data" / "FOV_MuSCAT.vot.xml"
+
+
+def test_a_real_catalog_file_in_the_worktree_is_kept(host):
+    prod_data = host.prod_root / "app" / "data"
+    prod_data.mkdir(parents=True)
+    (prod_data / "TOIs.csv").write_text("fresh\n")
+    (host.worktree / "data").mkdir()
+    (host.worktree / "data" / "TOIs.csv").write_text("mine\n")
+
+    host.run()
+    assert not (host.worktree / "data" / "TOIs.csv").is_symlink()
+    assert (host.worktree / "data" / "TOIs.csv").read_text() == "mine\n"
