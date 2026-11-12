@@ -875,6 +875,33 @@ def test_explain_target_reports_target_grant_rows_as_visible(db):
     assert mixed == {"260101": True, "260102": False}
 
 
+def test_cli_explain_counts_rows_visible_through_a_target_grant(db):
+    """A row visible through a proposal grant, a target grant, or both is
+    counted once, and the count equals the rows the viewer can see."""
+    with sqlite3.connect(db) as conn:
+        conn.create_aggregate("coord_repr", 2, CoordRepr)
+        _insert_frames(conn, [("sinistro", "260301", "SIN_2603010001", "PROPONLYTGT", 8.0, _OPEN)])
+        conn.execute("DELETE FROM summaries")
+        _insert_summary_rows(conn, _summary_rows(conn))
+    _scope(db, "andrew", _OPEN)
+    # MIXEDTGT 260101: proposal and target. MIXEDTGT 260102: target only.
+    # PROPONLYTGT 260301: proposal only.
+    _grant_target(db, "andrew", "MIXEDTGT")
+    from muscat_db import access_groups
+
+    with sqlite3.connect(db) as conn:
+        clause, params = access_groups.load_access_conn(conn, "andrew").sql_visible("s")
+        seen = conn.execute(
+            "SELECT COUNT(*) FROM (SELECT DISTINCT s.instrument, s.obsdate, s.object "
+            f"FROM summaries s WHERE {clause})",
+            params,
+        ).fetchone()[0]
+    assert seen == 3
+    result = CliRunner().invoke(cli_app, ["access", "explain", "andrew"])
+    assert result.exit_code == 0, result.output
+    assert f"{seen} of 5 target-nights visible, 2 hidden" in result.output
+
+
 def test_cli_grant_target_roundtrip(db, monkeypatch):
     monkeypatch.setenv("MUSCAT_DB_PATH", db)
     runner = CliRunner()
