@@ -1578,7 +1578,8 @@ def _lco_key_project_candidates(raw: str) -> list[str]:
     out: list[str] = []
     for part in parts:
         for name in (part, re.sub(r"\.\d+$", "", part)):
-            if name and name not in out:
+            # A bare ".02" (from "TOI-6109 b (.02)") is not a designation.
+            if name and not re.fullmatch(r"[.\d]+", name) and name not in out:
                 out.append(name)
     return out
 

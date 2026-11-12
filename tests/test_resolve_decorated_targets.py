@@ -26,6 +26,16 @@ def test_candidates_alias_then_primary_with_and_without_candidate_suffix():
     ]
 
 
+def test_candidates_drop_bare_candidate_suffix():
+    assert catalog._lco_key_project_candidates("TOI-6109 b (.02)") == ["TOI-6109 b"]
+
+
+def test_candidates_keep_every_planet_letter():
+    assert catalog._lco_key_project_candidates("TOI-700 b (TOI-700 c)") == [
+        "TOI-700 c", "TOI-700 b",
+    ]
+
+
 def test_candidates_of_plain_name_is_just_the_name():
     assert catalog._lco_key_project_candidates("WASP-12") == ["WASP-12"]
 
