@@ -1996,18 +1996,22 @@ def resolve_target_astrometry(target: str, *, allow_remote: bool = True) -> dict
     return {"ra": ra, "dec": dec, "source": source, "epoch": SIMBAD_EPOCH, "pmra": None, "pmdec": None}
 
 
+_TOI_CANDIDATE_RE = re.compile(r"TOI[ -]?\d+\.\d+", re.IGNORECASE)
+
+
 def _simbad_coords(target: str, candidates: list[str]) -> tuple[float, float, str] | None:
     # Sesame/SIMBAD rejects an LCO-decorated compound name outright -- parens
     # aren't valid identifier syntax -- and unlike a bare TIC ID, a TOI
     # candidate suffix (".NN") also fails resolution (verified empirically:
     # "TOI-5012.01" 404s, "TOI-5012" resolves). resolve_lco_key_project_name
-    # is a no-op for an already-plain name, so the extra ".NN" strip below
-    # only ever fires for a name it actually rewrote.
-    # SIMBAD rejects a ".NN" candidate suffix (see above), so a decorated name
-    # is asked for only in its suffix-stripped forms; a plain name goes as is.
-    simbad_names = candidates
-    if resolve_lco_key_project_name(target) != target.strip():
-        simbad_names = list(dict.fromkeys(re.sub(r"\.\d+$", "", c) for c in candidates))
+    # is a no-op for an already-plain name. The ".NN" strip below fires for a
+    # name it rewrote and for any TOI candidate, such as a directly entered
+    # "TOI-5012.01". Other names ending in a dotted number are left alone.
+    decorated = resolve_lco_key_project_name(target) != target.strip()
+    simbad_names = list(dict.fromkeys(
+        re.sub(r"\.\d+$", "", c) if decorated or _TOI_CANDIDATE_RE.fullmatch(c) else c
+        for c in candidates
+    ))
     radec = None
     for simbad_name in simbad_names:
         radec = exp_calc.resolve_target_coords(simbad_name)
