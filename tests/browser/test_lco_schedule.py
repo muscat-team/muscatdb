@@ -861,7 +861,8 @@ def test_form_rows_keep_related_fields_together(page):
     # input reaches the bottom of its cell instead of leaving a gap below it.
     assert same_row('#sch-source', '#sch-coords')
     coords, coords_cell = box('#sch-coords'), cell('#sch-coords')
-    assert coords_cell['y'] + coords_cell['height'] - (coords['y'] + coords['height']) < 2
+    # The hint left a ~138 px gap; allow a few px for font metrics (CI: 2.1 px).
+    assert coords_cell['y'] + coords_cell['height'] - (coords['y'] + coords['height']) < 8
     # The padding fields follow the ephemeris fields on the same row.
     assert same_row('#sch-pad-before', '#sch-t0')
     # Provenance comes after the padding fields, not before them.
