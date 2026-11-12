@@ -2138,9 +2138,9 @@ def access_explain(
             str(p["objects"]),
         )
     console.print(table)
-    hidden = sum(p["target_nights"] for p in info["proposals"] if not p["visible"])
     total = sum(p["target_nights"] for p in info["proposals"])
-    console.print(f"{total - hidden} of {total} target-nights visible, {hidden} hidden")
+    visible = info["visible_target_nights"]
+    console.print(f"{visible} of {total} target-nights visible, {total - visible} hidden")
     for g in info["target_grants"]:
         console.print(f"Target grant: {g['target']} (by {g['granted_by'] or '-'}, {g['granted_at']})")
     for pid in info["unmatched_grants"]:
