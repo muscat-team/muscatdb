@@ -74,3 +74,19 @@ def test_unresolvable_decorated_name_is_none(monkeypatch):
     monkeypatch.setattr(catalog, "_query_target_coordinates", lambda n: None)
     monkeypatch.setattr(catalog.exp_calc, "resolve_target_coords", lambda n: None)
     assert catalog._resolve_archive_coords("TIC 1.01 (TOI 2.01)") is None
+
+
+@pytest.mark.parametrize("name", ["TOI-5012.01", "TOI5012.01", "toi 5012.01"])
+def test_plain_toi_candidate_suffix_is_stripped_before_simbad(monkeypatch, name):
+    monkeypatch.setattr(catalog, "_query_target_coordinates", lambda n: None)
+    asked = []
+    monkeypatch.setattr(catalog.exp_calc, "resolve_target_coords", lambda n: asked.append(n))
+    catalog._simbad_coords(name, [name])
+    assert asked == [name.rsplit(".", 1)[0]]
+
+
+def test_non_toi_name_with_dotted_number_is_sent_to_simbad_unchanged(monkeypatch):
+    asked = []
+    monkeypatch.setattr(catalog.exp_calc, "resolve_target_coords", lambda n: asked.append(n))
+    catalog._simbad_coords("HD 1234.5", ["HD 1234.5"])
+    assert asked == ["HD 1234.5"]
