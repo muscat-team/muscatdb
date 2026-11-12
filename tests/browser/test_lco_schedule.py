@@ -809,22 +809,36 @@ def test_linear_fit_falls_back_to_the_page_pick_for_an_older_server(page):
 def test_auto_names_the_catalog_it_resolved_to(page):
     _load_target(page, _provenance_info(NASA_B, nasa=NASA_B))
     expect(page.locator('#src-t0')).to_have_text('AUTO → NASA')
-    expect(page.locator('#ephem-provenance')).to_contain_text('t0 / period: NASA — t0: Leonardi et al. 2024')
+    prov = page.locator('#ephem-provenance')
+    expect(prov).to_contain_text('t0 / period: NASA — t0: Leonardi et al. 2024')
+    # The t0 / period and Duration lines share one row when there is room.
+    lines = prov.locator('.prov-line')
+    expect(lines).to_have_count(2)
+    assert abs(lines.nth(0).bounding_box()['y'] - lines.nth(1).bounding_box()['y']) < 2
+    # The fields already show the values; the status line only names the source.
+    expect(page.locator('#msg-windows')).to_have_text('AUTO → NASA ephemeris loaded')
 
 
-def test_local_csv_values_say_the_reference_is_not_recorded(page):
+def test_a_catalog_without_references_adds_no_provenance_line(page):
+    # The field badges already name the catalog, so a line that could only say
+    # "NASA — reference not recorded" would repeat them.
+    nasa = {"t0": T0, "period": PERIOD, "duration": 2.5, "source": "NASA"}
+    _load_target(page, _provenance_info(nasa, nasa=nasa))
+    expect(page.locator('#src-t0')).to_have_text('AUTO → NASA')
+    expect(page.locator('#src-duration')).to_have_text('NASA')
+    expect(page.locator('#ephem-provenance')).to_have_text('')
+
+
+def test_borrowed_duration_is_explained_without_a_reference(page):
     local = {"t0": T0, "period": PERIOD, "source": "local CSV"}
     toi = {"t0": T0, "period": PERIOD, "duration": 2.0, "source": "TOI"}
     _load_target(page, _provenance_info(local, toi=toi))
     expect(page.locator('#src-t0')).to_have_text('AUTO → local CSV')
     prov = page.locator('#ephem-provenance')
-    expect(prov).to_contain_text('t0 / period: local CSV — reference not recorded')
-    # Duration is borrowed from TOI, so the panel says so.
-    expect(prov).to_contain_text('Duration: TOI — reference not recorded (local CSV has no duration for b)')
-    # The t0 / period and Duration lines share one row when there is room.
-    lines = prov.locator('.prov-line')
-    expect(lines).to_have_count(2)
-    assert abs(lines.nth(0).bounding_box()['y'] - lines.nth(1).bounding_box()['y']) < 2
+    # Duration is borrowed from TOI, so the panel says so; the t0 / period line
+    # has no reference to add and is left to the field badges.
+    expect(prov.locator('.prov-line')).to_have_count(1)
+    expect(prov).to_have_text('Duration: TOI (local CSV has no duration for b)')
 
 
 def test_help_icons_are_keyboard_focusable_and_described(page):
