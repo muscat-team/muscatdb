@@ -913,7 +913,7 @@ def validate_fit_options(options: dict | None, time_range: tuple[float, float] |
     if err:
         return err
 
-    return None
+    return _validate_covariates(o)
 
 
 class _SysDumper(yaml.SafeDumper):
@@ -1041,10 +1041,51 @@ _TIMER_RESERVED_COLUMNS: tuple[str, ...] = ("BJD_TDB", "Flux", "Err")
 # for a pixel-aperture reduction and a fixed multiple of FWHM otherwise.
 # prose2 names Bkg/Peak by the frame's unit: ADU for MuSCAT/MuSCAT2, electrons
 # for BANZAI-reduced MuSCAT3/4, Sinistro and QHY600.
-_TIMER_COVARIATE_COLUMNS: tuple[str, ...] = (
-    "Bkg(ADU)", "Bkg(e-)", "Airmass", "Dx(pix)", "Dy(pix)",
-    "Peak(ADU)", "Peak(e-)", "FWHM(pix)",
+#
+# The transit-fit form chooses among these by name (the ``covariates`` option).
+# It can only narrow this set: a name outside it is rejected before launch, so
+# no prose2 column, present or future, reaches timer unless it is listed here.
+_TIMER_COVARIATE_CHOICES: dict[str, tuple[str, ...]] = {
+    "Bkg": ("Bkg(ADU)", "Bkg(e-)"),
+    "Peak": ("Peak(ADU)", "Peak(e-)"),
+    "Airmass": ("Airmass",),
+    "Dx": ("Dx(pix)",),
+    "Dy": ("Dy(pix)",),
+    "FWHM": ("FWHM(pix)",),
+}
+_TIMER_COVARIATE_COLUMNS: tuple[str, ...] = tuple(
+    col for cols in _TIMER_COVARIATE_CHOICES.values() for col in cols
 )
+
+
+def _covariate_tokens(options: dict) -> list[str] | None:
+    raw = options.get("covariates")
+    if raw is None:
+        return None
+    return [t.strip() for t in str(raw).split(",") if t.strip()]
+
+
+def selected_covariates(options: dict) -> tuple[str, ...]:
+    """The covariate choices a fit asked for, in canonical order.
+
+    An omitted option means every choice, so fits launched before the option
+    existed (and API callers that do not send it) keep the full set. Unknown
+    names are left to :func:`validate_fit_options`, which rejects them.
+    """
+    tokens = _covariate_tokens(options)
+    if tokens is None:
+        return tuple(_TIMER_COVARIATE_CHOICES)
+    return tuple(name for name in _TIMER_COVARIATE_CHOICES if name in tokens)
+
+
+def _validate_covariates(options: dict) -> str | None:
+    unknown = [t for t in _covariate_tokens(options) or [] if t not in _TIMER_COVARIATE_CHOICES]
+    if unknown:
+        return (
+            f"covariates must be chosen from {', '.join(_TIMER_COVARIATE_CHOICES)}; "
+            f"got {', '.join(unknown)}"
+        )
+    return None
 
 _MISSING_CELL = {"", "nan", "-nan", "none", "null", "na"}
 
@@ -1089,12 +1130,18 @@ def _is_linear_copy(a: list[float | None], b: list[float | None]) -> bool:
 
 
 def _copy_lightcurve_for_timer(
-    src: pathlib.Path, dst: pathlib.Path, extra_covariates: tuple[str, ...] = ()
+    src: pathlib.Path,
+    dst: pathlib.Path,
+    extra_covariates: tuple[str, ...] = (),
+    allowed: tuple[str, ...] = _TIMER_COVARIATE_COLUMNS,
 ) -> None:
     """Copy one light-curve CSV, keeping only the columns timer should model.
 
-    *extra_covariates* are kept as well: an uploaded light curve's covariates
-    (issue #382) carry the uploader's column names, chosen deliberately.
+    *allowed* is the set of prose2 covariate columns to keep, by default all of
+    :data:`_TIMER_COVARIATE_COLUMNS`; a fit narrows it with the form's
+    ``covariates`` option. *extra_covariates* are kept as well: an uploaded
+    light curve's covariates (issue #382) carry the uploader's column names,
+    chosen deliberately.
     Anything outside the reserved and covariate lists is dropped, as is any
     covariate that is empty for every row: timer's ``bin_df`` ends with
     ``dropna()``, so a single all-NaN column would otherwise delete every binned
@@ -1123,7 +1170,7 @@ def _copy_lightcurve_for_timer(
         if name in _TIMER_RESERVED_COLUMNS:
             keep.append(idx)
             continue
-        if name not in _TIMER_COVARIATE_COLUMNS and name not in extra_covariates:
+        if name not in allowed and name not in extra_covariates:
             continue
         values = _column_floats(body, idx)
         if all(v is None for v in values):
@@ -1175,8 +1222,10 @@ def _write_fit_inputs(
     """
     from muscat_db.lc_upload import upload_covariates
 
+    covariates = selected_covariates(options)
+    allowed = tuple(col for name in covariates for col in _TIMER_COVARIATE_CHOICES[name])
     for c in csvs:
-        _copy_lightcurve_for_timer(c, rdir / c.name, upload_covariates(c))
+        _copy_lightcurve_for_timer(c, rdir / c.name, upload_covariates(c), allowed)
 
     # fit.yaml
     trend_val = 1 if options.get("trend", "true") == "true" else 0
@@ -1583,6 +1632,7 @@ def _write_fit_inputs(
         "run_name": run_name or "",
         "run_id": run_id or "",
         "run_type": run_type or "",
+        "covariates": list(covariates),
     }
     with open(rdir / "meta.yaml", "w") as f:
         yaml.safe_dump(meta_data, f, default_flow_style=False, sort_keys=False)

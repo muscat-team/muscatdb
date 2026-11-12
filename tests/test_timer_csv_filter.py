@@ -151,3 +151,83 @@ def test_row_values_track_the_kept_columns(tmp_path):
     _copy_lightcurve_for_timer(_write(tmp_path, _HEADER, [_ROW, _ROW2]), dst)
     header, row, _ = dst.read_text().splitlines()
     assert dict(zip(header.split(","), row.split(",")))["Airmass"] == "1.21"
+
+
+# --- user-selected covariates (transit-fit form "covariates" option) ---------
+
+import yaml  # noqa: E402
+
+from muscat_db.transit_fit import (  # noqa: E402
+    _TIMER_COVARIATE_CHOICES,
+    _write_fit_inputs,
+    selected_covariates,
+    validate_fit_options,
+)
+
+
+def test_omitted_covariates_option_selects_every_choice():
+    assert selected_covariates({}) == tuple(_TIMER_COVARIATE_CHOICES)
+
+
+def test_covariates_option_is_parsed_in_canonical_order():
+    assert selected_covariates({"covariates": " FWHM ,Airmass,FWHM"}) == ("Airmass", "FWHM")
+
+
+def test_empty_covariates_option_selects_none():
+    """Unticking every box fits with trend/GP/spline terms only."""
+    assert selected_covariates({"covariates": ""}) == ()
+
+
+def test_choices_cover_exactly_the_allowed_columns():
+    cols = {c for group in _TIMER_COVARIATE_CHOICES.values() for c in group}
+    assert cols == set(_TIMER_COVARIATE_COLUMNS)
+    assert "PeakRadius(pix)" not in cols and "GJD_UTC" not in cols
+
+
+def test_unknown_covariate_is_rejected_before_launch():
+    """The form may only narrow the fixed set: a raw CSV column name such as
+    PeakRadius(pix) or GJD_UTC can never be requested."""
+    for bad in ("PeakRadius(pix)", "GJD_UTC", "Peak(e-)", "Airmass,Seeing"):
+        err = validate_fit_options({"covariates": bad})
+        assert err and "covariates" in err, bad
+
+
+def test_known_covariates_pass_validation():
+    assert validate_fit_options({"covariates": "Bkg,Peak,FWHM"}) is None
+    assert validate_fit_options({"covariates": ""}) is None
+
+
+def _fit_inputs(tmp_path, options):
+    src = tmp_path / "V1298Tau_muscat3_rp_230730.csv"
+    src.write_text(_REAL_M3_CSV)
+    rdir = tmp_path / "run"
+    rdir.mkdir()
+    _write_fit_inputs(rdir, "muscat3", "230730", "V1298Tau", [src], options)
+    meta = yaml.safe_load((rdir / "meta.yaml").read_text())
+    return _read_header(rdir / src.name), meta
+
+
+def test_selected_covariates_limit_the_timer_csv_and_are_recorded(tmp_path):
+    cols, meta = _fit_inputs(tmp_path, {"covariates": "Peak,FWHM"})
+    assert cols == ["BJD_TDB", "Flux", "Err", "Peak(e-)", "FWHM(pix)"]
+    assert meta["covariates"] == ["Peak", "FWHM"]
+
+
+def test_default_fit_inputs_keep_every_allowed_covariate(tmp_path):
+    cols, meta = _fit_inputs(tmp_path, {})
+    assert cols == [
+        "BJD_TDB", "Flux", "Err",
+        "Bkg(e-)", "Airmass", "Dx(pix)", "Dy(pix)", "Peak(e-)", "FWHM(pix)",
+    ]
+    assert meta["covariates"] == list(_TIMER_COVARIATE_CHOICES)
+
+
+def test_form_offers_exactly_the_server_choices():
+    """The transit-fit form's checkboxes and the server allow-list must agree,
+    or a ticked box would be rejected (or a choice could never be made)."""
+    import re
+
+    html = (pathlib.Path(__file__).parents[1] / "src/muscat_db/templates/transit_fit.html").read_text()
+    m = re.search(r'{% for cov in \[([^\]]*)\] %}', html)
+    assert m, "covariate checkbox loop not found"
+    assert tuple(re.findall(r'"([^"]+)"', m.group(1))) == tuple(_TIMER_COVARIATE_CHOICES)

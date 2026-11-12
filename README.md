@@ -681,7 +681,11 @@ For prose2 light curves the transit fit hands timer a fixed set of covariates,
 whatever else the CSV holds: `Bkg`, `Peak` (ADU or e-), `Airmass`, `Dx(pix)`,
 `Dy(pix)` and `FWHM(pix)`. Other columns, such as `GJD_UTC` and
 `PeakRadius(pix)`, are left out, because timer turns every column it reads into
-a detrending vector. For both prose2 and uploaded light curves, a covariate is
+a detrending vector. The **Covariates** checkboxes under Detrending Options
+narrow this set for one fit (all six are ticked by default; the API option is
+`covariates`, a comma-separated list such as `Bkg,Airmass,FWHM`). A name outside
+the six is refused before launch, and the chosen set is recorded in the run's
+`meta.yaml`. For both prose2 and uploaded light curves, a covariate is
 also left out when it is empty, constant, or a linear copy of one already kept,
 since timer's standardization turns it into NaN or a singular design matrix.
 The muscat-db server log names each covariate left out and why.
