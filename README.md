@@ -675,7 +675,16 @@ under their original names) and a `_product.json` record (input kind `upload`,
 with each file's name and SHA-256, the mapping, facility and band) to
 `$MUSCAT_PROSE_DIR/external/<yymmdd>/_runs/<target>/upload-<sha8>/`. The
 transit fit lists it under the pseudo-instrument **external** and passes the
-mapped covariates to timer unchanged.
+mapped covariates to timer under their own names.
+
+For prose2 light curves the transit fit hands timer a fixed set of covariates,
+whatever else the CSV holds: `Bkg`, `Peak` (ADU or e-), `Airmass`, `Dx(pix)`,
+`Dy(pix)` and `FWHM(pix)`. Other columns, such as `GJD_UTC` and
+`PeakRadius(pix)`, are left out, because timer turns every column it reads into
+a detrending vector. For both prose2 and uploaded light curves, a covariate is
+also left out when it is empty, constant, or a linear copy of one already kept,
+since timer's standardization turns it into NaN or a singular design matrix.
+The muscat-db server log names each covariate left out and why.
 
 An upload is refused, with nothing written, when:
 

@@ -15,6 +15,7 @@ import re
 import shlex
 import shutil
 import signal
+import statistics
 import subprocess
 import tempfile
 import threading
@@ -1036,12 +1037,55 @@ _TIMER_RESERVED_COLUMNS: tuple[str, ...] = ("BJD_TDB", "Flux", "Err")
 # silently join the design matrix. The one this excludes today is ``GJD_UTC``,
 # a second time axis that is very nearly collinear with the ``trend`` block
 # (``np.vander`` of centred time), which leaves the fit degenerate along that
-# direction.
+# direction. ``PeakRadius(pix)`` (prose2 PR #54) is excluded too: it is constant
+# for a pixel-aperture reduction and a fixed multiple of FWHM otherwise.
+# prose2 names Bkg/Peak by the frame's unit: ADU for MuSCAT/MuSCAT2, electrons
+# for BANZAI-reduced MuSCAT3/4, Sinistro and QHY600.
 _TIMER_COVARIATE_COLUMNS: tuple[str, ...] = (
-    "Bkg(ADU)", "Airmass", "Dx(pix)", "Dy(pix)", "Peak(ADU)", "FWHM(pix)",
+    "Bkg(ADU)", "Bkg(e-)", "Airmass", "Dx(pix)", "Dy(pix)",
+    "Peak(ADU)", "Peak(e-)", "FWHM(pix)",
 )
 
 _MISSING_CELL = {"", "nan", "-nan", "none", "null", "na"}
+
+# timer standardizes each covariate by its std. A column whose spread is within
+# rounding of zero becomes 0/0 = NaN or a copy of the mean term, and one that is
+# a linear copy of another (|r| = 1) makes the design matrix singular.
+_CONSTANT_RTOL = 1e-9
+_DUPLICATE_ABS_R = 1.0 - 1e-9
+
+
+def _column_floats(body: list[list[str]], idx: int) -> list[float | None]:
+    """One CSV column as floats, ``None`` where the cell is missing,
+    unparsable or not finite."""
+    out: list[float | None] = []
+    for r in body:
+        cell = r[idx].strip() if idx < len(r) else ""
+        try:
+            v = float(cell) if cell.lower() not in _MISSING_CELL else None
+        except ValueError:
+            v = None
+        out.append(v if v is not None and math.isfinite(v) else None)
+    return out
+
+
+def _is_constant(values: list[float | None]) -> bool:
+    finite = [v for v in values if v is not None]
+    if len(finite) < 2:
+        return False
+    lo, hi = min(finite), max(finite)
+    return hi - lo <= _CONSTANT_RTOL * max(abs(lo), abs(hi))
+
+
+def _is_linear_copy(a: list[float | None], b: list[float | None]) -> bool:
+    pairs = [(x, y) for x, y in zip(a, b) if x is not None and y is not None]
+    if len(pairs) < 3:
+        return False
+    xs, ys = zip(*pairs)
+    try:
+        return abs(statistics.correlation(xs, ys)) >= _DUPLICATE_ABS_R
+    except statistics.StatisticsError:
+        return False
 
 
 def _copy_lightcurve_for_timer(
@@ -1054,7 +1098,8 @@ def _copy_lightcurve_for_timer(
     Anything outside the reserved and covariate lists is dropped, as is any
     covariate that is empty for every row: timer's ``bin_df`` ends with
     ``dropna()``, so a single all-NaN column would otherwise delete every binned
-    row and yield an empty fit.
+    row and yield an empty fit. A covariate that is constant, or a linear copy
+    of one already kept, is dropped as well (see :data:`_CONSTANT_RTOL`).
 
     Falls back to a verbatim copy when the header cannot be read or does not
     look like an afphot light curve, so an unexpected format fails inside timer
@@ -1073,14 +1118,25 @@ def _copy_lightcurve_for_timer(
 
     header, body = rows[0], rows[1:]
     keep = []
+    kept_values: list[list[float | None]] = []
     for idx, name in enumerate(header):
         if name in _TIMER_RESERVED_COLUMNS:
             keep.append(idx)
-        elif (name in _TIMER_COVARIATE_COLUMNS or name in extra_covariates) and any(
-            (r[idx].strip().lower() if idx < len(r) else "") not in _MISSING_CELL
-            for r in body
-        ):
+            continue
+        if name not in _TIMER_COVARIATE_COLUMNS and name not in extra_covariates:
+            continue
+        values = _column_floats(body, idx)
+        if all(v is None for v in values):
+            reason = "empty"
+        elif _is_constant(values):
+            reason = "constant"
+        elif any(_is_linear_copy(values, k) for k in kept_values):
+            reason = "a linear copy of another covariate"
+        else:
             keep.append(idx)
+            kept_values.append(values)
+            continue
+        logger.info("timer input %s: dropping covariate %s (%s)", src.name, name, reason)
 
     with open(dst, "w", newline="") as fh:
         writer = csv.writer(fh)
