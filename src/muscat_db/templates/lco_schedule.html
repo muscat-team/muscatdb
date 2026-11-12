@@ -756,7 +756,6 @@
   var lastTargetInfo = null;
   var lastInfoTarget = '';
   var pendingSource = null;
-  var targetRefreshTimer = null;
   var lastWindows = [];
 
   function setDot(id, ok) { var e = el(id); if (e) e.className = 'dot ' + (ok ? 'ok' : 'no'); }
@@ -1623,6 +1622,9 @@
     ephemTarget = target;
     if (!opts.silent) msg('msg-windows', 'Fetching target info…');
     return fetchTargetInfo(target).then(function (info) {
+      // The target was edited while this lookup was in flight; its answer
+      // describes a target the form no longer holds.
+      if (val('sch-target') !== target) return;
       if (!info.ok) {
         msg('msg-windows', info.error || 'lookup failed', 'err');
         return;
@@ -1637,6 +1639,7 @@
       applySource(info, opts);
       if (coordErr) msg('msg-windows', coordErr, 'err');
     }).catch(function (e) {
+      if (val('sch-target') !== target) return;
       msg('msg-windows', errText(e), 'err');
     });
   }
@@ -2913,15 +2916,17 @@
     refreshTargetFields();
   });
 
-  function scheduleTargetRefresh() {
-    if (targetRefreshTimer) window.clearTimeout(targetRefreshTimer);
-    targetRefreshTimer = window.setTimeout(function () {
-      refreshTargetFields({ silent: true });
-    }, 250);
-  }
-  el('sch-target').addEventListener('input', scheduleTargetRefresh);
+  // Look the target up once its name is committed (Enter, leaving the field,
+  // or picking a suggestion), never per keystroke: a half-typed name such as
+  // "HI" or "HIP 6" is a different target, and looking it up fills the form
+  // with that target's ephemeris and errors.
+  el('sch-target').addEventListener('input', function (e) {
+    // Picking a datalist suggestion fires input (inputType
+    // insertReplacementText in Chromium, no inputType in Firefox) and only
+    // fires change later, on blur.
+    if (!e.inputType || e.inputType === 'insertReplacementText') refreshTargetFields({ silent: true });
+  });
   el('sch-target').addEventListener('change', function () { refreshTargetFields({ silent: true }); });
-  el('sch-target').addEventListener('blur', function () { refreshTargetFields({ silent: true }); });
   function syncMidtimesBlock() {
     setEphemIgnored(isMidtimeSource(val('sch-source')));
     el('sch-rank').disabled = String(val('sch-source')).indexOf('ttv:') !== 0;

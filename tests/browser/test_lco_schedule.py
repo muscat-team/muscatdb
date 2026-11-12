@@ -875,3 +875,67 @@ def test_form_rows_keep_related_fields_together(page):
     assert all(same_row(i, ids[0]) for i in ids)
     section = box('#single-submit-section')
     assert box('#sch-strategy-count')['width'] < section['width'] / 3
+
+
+def _target_info_stub(page, seen, held=None):
+    """Answer target-info lookups, recording each target asked for.
+
+    A target listed in ``held`` gets no answer until the test fulfils it.
+    """
+    def handle(route):
+        target = re.search(r"target=([^&]*)", route.request.url).group(1).replace("%20", " ")
+        seen.append(target)
+        if held is not None and target in held:
+            held[target] = route
+            return
+        route.fulfill(json={
+            'ok': True, 'target': target, 'planets': ['b'], 'datasets': [], 'ttv_runs': [],
+            'coordinates': {'ra': 201.0, 'dec': -50.0, 'source': 'nasa'},
+            'nasa_ephemeris': {'b': {'t0': 2461314.5, 'period': 6.96, 'source': 'NASA'}},
+        })
+    page.route('**/api/ephemeris/target-info?*', handle)
+
+
+def test_target_is_looked_up_once_committed_not_per_keystroke(page):
+    page.problems.allowed.extend(NO_TOKEN)
+    seen = []
+    _target_info_stub(page, seen)
+    page.goto('/lco/schedule')
+    # Slower than any debounce, so a per-keystroke lookup would fire mid-name.
+    page.locator('#sch-target').press_sequentially('HIP 67522', delay=400)
+    assert seen == []
+    expect(page.locator('#ephem-provenance')).to_have_text('')
+    with page.expect_response('**/api/ephemeris/target-info?*'):
+        page.locator('#sch-target').press('Enter')
+    expect(page.locator('#sch-period')).to_have_value('6.96')
+    assert seen == ['HIP 67522']
+
+    # Picking a datalist suggestion commits the name without a blur.
+    with page.expect_response('**/api/ephemeris/target-info?*'):
+        page.evaluate("""() => {
+            const t = document.getElementById('sch-target');
+            t.value = 'TOI-1000';
+            t.dispatchEvent(new InputEvent('input', {inputType: 'insertReplacementText', bubbles: true}));
+        }""")
+    assert seen == ['HIP 67522', 'TOI-1000']
+
+
+def test_late_answer_for_a_previous_target_is_ignored(page):
+    page.problems.allowed.extend(NO_TOKEN)
+    seen, held = [], {'HI': None}
+    _target_info_stub(page, seen, held)
+    page.goto('/lco/schedule')
+    page.fill('#sch-target', 'HI')
+    with page.expect_request('**/api/ephemeris/target-info?*'):
+        page.locator('#sch-target').press('Enter')
+    with page.expect_response('**/api/ephemeris/target-info?*'):
+        page.fill('#sch-target', 'HIP 67522')
+        page.locator('#sch-target').press('Enter')
+    expect(page.locator('#sch-period')).to_have_value('6.96')
+    assert held['HI'] is not None
+    with page.expect_response('**/api/ephemeris/target-info?*'):
+        held['HI'].fulfill(json={'ok': True, 'target': 'HI', 'planets': [], 'datasets': [], 'ttv_runs': []})
+    page.wait_for_timeout(200)  # let the late answer's handler run
+    expect(page.locator('#msg-windows')).not_to_contain_text('Coordinates not found')
+    expect(page.locator('#sch-period')).to_have_value('6.96')
+    expect(page.locator('#sch-coords')).to_have_value('201.00000, -50.00000')
