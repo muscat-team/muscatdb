@@ -9,6 +9,7 @@ refused before anything is sent to LCO.
 from __future__ import annotations
 
 import datetime
+import re
 
 from playwright.sync_api import expect
 import pytest
@@ -184,7 +185,7 @@ def test_shared_and_private_sheet_dropdown_selects_distinct_values(page):
 
 
 @pytest.mark.parametrize("shared", [False, True])
-def test_unconfigured_sheet_sources_remain_visible_with_settings_link(page, shared):
+def test_unconfigured_sheet_sources_remain_visible_with_settings_hint(page, shared):
     page.problems.allowed.extend(NO_TOKEN)
     page.route('**/api/ephemeris/target-info?*', lambda route: route.fulfill(json={
         'ok': True, 'planets': ['b'], 'datasets': [], 'ttv_runs': [],
@@ -201,10 +202,10 @@ def test_unconfigured_sheet_sources_remain_visible_with_settings_link(page, shar
             expect(option).to_be_enabled()
         else:
             expect(option).to_be_disabled()
-    link = page.locator('#sheet-source-hint a')
-    expect(link).to_be_visible()
-    link.click()
-    expect(page).to_have_url('/settings')
+    # The setup hint lives in the source field's help tooltip, not between fields.
+    expect(page.locator('#sheet-source-hint')).to_have_count(0)
+    tip = page.locator('label[for="sch-source"] .help-tooltip')
+    expect(tip).to_have_attribute('data-tip', re.compile(r'personal Google Sheet source in Settings'))
 
 
 # HIP 67522 from coj, April 2027, 3 h transit: one full, one partial and one
@@ -759,8 +760,10 @@ def test_linear_fit_names_its_seed_and_links_to_it(page):
         'aria-label', 'LINEAR: Linear fit seeded from NASA (Leonardi et al. 2024)')
     prov = page.locator('#ephem-provenance')
     expect(prov).to_contain_text('Linear fit seeded from NASA')
-    expect(prov.get_by_role('link', name='Leonardi et al. 2024 ↗').first).to_have_attribute('href', LEONARDI['url'])
-    expect(prov.get_by_role('link', name='Ivshina & Winn 2022 ↗')).to_have_attribute('href', IVSHINA['url'])
+    expect(prov.get_by_role('link', name='Leonardi et al. 2024').first).to_have_attribute('href', LEONARDI['url'])
+    expect(prov.get_by_role('link', name='Ivshina & Winn 2022')).to_have_attribute('href', IVSHINA['url'])
+    # styles.css draws the ↗ for target=_blank links; the text must not repeat it.
+    expect(prov.get_by_role('link', name='Ivshina & Winn 2022')).to_have_text('Ivshina & Winn 2022')
     expect(prov.get_by_role('link', name='check on the Ephemeris page')).to_have_attribute(
         'href', '/ephemeris?targets=TOI-1000')
     expect(prov).to_contain_text('Duration: NASA')
@@ -833,3 +836,42 @@ def test_help_icons_are_keyboard_focusable_and_described(page):
     expect(icon).to_be_focused()
     # The help text stays out of the select's accessible name.
     expect(page.get_by_role('combobox', name='Ephemeris source Help')).to_be_visible()
+
+
+def test_form_rows_keep_related_fields_together(page):
+    """Ephemeris and padding share the grid; provenance and hints sit below,
+    and the strategy fields form one row instead of full-width blocks."""
+    page.problems.allowed.extend(NO_TOKEN)
+    page.goto('/lco/schedule')
+
+    def box(sel):
+        return page.locator(sel).bounding_box()
+
+    def cell(sel):
+        return page.locator(sel).locator('xpath=ancestor::div[contains(@class,"lco-field")][1]').bounding_box()
+
+    def same_row(a, b):
+        return abs(cell(a)['y'] - cell(b)['y']) < 2
+
+    # No hint under the source select stretches its grid row: the neighbouring
+    # input reaches the bottom of its cell instead of leaving a gap below it.
+    assert same_row('#sch-source', '#sch-coords')
+    coords, coords_cell = box('#sch-coords'), cell('#sch-coords')
+    assert coords_cell['y'] + coords_cell['height'] - (coords['y'] + coords['height']) < 2
+    # The padding fields follow the ephemeris fields on the same row.
+    assert same_row('#sch-pad-before', '#sch-t0')
+    # Provenance comes after the padding fields, not before them.
+    order = page.evaluate("""() => {
+        const grid = document.getElementById('ephem-provenance').parentElement;
+        const kids = Array.from(grid.children);
+        return [kids.indexOf(document.getElementById('ephem-provenance')),
+                kids.indexOf(document.getElementById('sch-include-padding').closest('.lco-field'))];
+    }""")
+    assert order[0] > order[1]
+    # Strategy fields are laid out side by side at grid width, not full width.
+    page.click('.lco-tab[data-tab="science"]')
+    ids = ['#sch-strategy', '#sch-strategy-count', '#sch-strategy-offset',
+           '#sch-strategy-before', '#sch-strategy-after']
+    assert all(same_row(i, ids[0]) for i in ids)
+    section = box('#single-submit-section')
+    assert box('#sch-strategy-count')['width'] < section['width'] / 3
