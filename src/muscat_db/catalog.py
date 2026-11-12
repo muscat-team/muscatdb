@@ -1641,6 +1641,10 @@ _NASA_REFLINK_COLUMNS = {
 }
 _REFLINK_HREF_RE = re.compile(r"""href\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))""", re.IGNORECASE)
 _HTML_TAG_RE = re.compile(r"<[^>]*>")
+# A primary-component suffix on an archive hostname ("DS Tuc A", "HIP 79098 AB",
+# "TIC 172900988 Aa"). B-H need no entry: _normalize_target_name already drops
+# a trailing one.
+_HOST_PRIMARY_SUFFIX_RE = re.compile(r"\s+A[Ba]?$")
 
 
 def parse_nasa_reflink(value) -> dict | None:
@@ -1809,8 +1813,13 @@ def _query_target_planets_nasa(target: str) -> dict:
             for row in data:
                 # The LIKE prefix also returns other hosts whose name starts
                 # with this one ("HIP 6752" -> HIP 67522, "WASP-1" -> WASP-12),
-                # so keep only rows for this host.
-                if _normalize_target_name(row.get("hostname") or "") != target_norm:
+                # so keep only rows for this host. A primary's component suffix
+                # ("DS Tuc A") is allowed, since users type the host without it.
+                hostname = row.get("hostname") or ""
+                if target_norm not in {
+                    _normalize_target_name(hostname),
+                    _normalize_target_name(_HOST_PRIMARY_SUFFIX_RE.sub("", hostname)),
+                }:
                     continue
                 pl_name = row.get("pl_name", "")
                 if pl_name and len(pl_name) > 2 and pl_name[-2] == " ":
