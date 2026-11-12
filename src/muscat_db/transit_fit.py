@@ -82,6 +82,7 @@ def _write_log_banner(
     cmd: list[str],
     options: dict | None = None,
     narrowband_aliases: list[tuple[str, str]] | None = None,
+    covariate_drops: dict[str, dict[str, str]] | None = None,
 ) -> None:
     """Write a versioned startup header then the command line and parsed args to *logf*.
 
@@ -93,6 +94,10 @@ def _write_log_banner(
     borrows limb darkening from). Surfaced here so the caveat is visible on
     the transit-fit page's live log for every narrow-band run, not just
     buried in fit.yaml.
+
+    ``covariate_drops`` maps each light curve to the covariates
+    :func:`_copy_lightcurve_for_timer` left out of the fit and why (see
+    :func:`covariate_drops`), so the fitted model is stated on the live log.
     """
     separator = "=" * 60
     now_utc = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -126,6 +131,17 @@ def _write_log_banner(
         )
         for narrow, broad in narrowband_aliases:
             logf.write(f"  {narrow} -> using '{broad}' broadband limb darkening\n")
+        logf.write("\n")
+
+    if covariate_drops:
+        logf.write("--- covariates dropped ---\n")
+        logf.write(
+            "NOTE: these requested covariates are not in the fit, because timer "
+            "cannot use an empty, constant or duplicate column:\n"
+        )
+        for lc, drops in covariate_drops.items():
+            for col, reason in drops.items():
+                logf.write(f"  {lc}: {col} ({reason})\n")
         logf.write("\n")
 
 
@@ -1134,7 +1150,7 @@ def _copy_lightcurve_for_timer(
     dst: pathlib.Path,
     extra_covariates: tuple[str, ...] = (),
     allowed: tuple[str, ...] = _TIMER_COVARIATE_COLUMNS,
-) -> None:
+) -> tuple[list[str], dict[str, str]] | None:
     """Copy one light-curve CSV, keeping only the columns timer should model.
 
     *allowed* is the set of prose2 covariate columns to keep, by default all of
@@ -1148,24 +1164,29 @@ def _copy_lightcurve_for_timer(
     row and yield an empty fit. A covariate that is constant, or a linear copy
     of one already kept, is dropped as well (see :data:`_CONSTANT_RTOL`).
 
+    Returns the covariate columns kept and ``{column: reason}`` for those
+    dropped, so the fit record can state the model timer actually fitted.
+
     Falls back to a verbatim copy when the header cannot be read or does not
     look like an afphot light curve, so an unexpected format fails inside timer
-    with its own error rather than here.
+    with its own error rather than here. Nothing is returned then, since the
+    columns timer will use are not known.
     """
     try:
         with open(src, newline="") as fh:
             rows = list(csv.reader(fh))
     except (OSError, csv.Error):
         shutil.copy2(src, dst)
-        return
+        return None
 
     if not rows or not all(c in rows[0] for c in _TIMER_RESERVED_COLUMNS):
         shutil.copy2(src, dst)
-        return
+        return None
 
     header, body = rows[0], rows[1:]
     keep = []
     kept_values: list[list[float | None]] = []
+    dropped: dict[str, str] = {}
     for idx, name in enumerate(header):
         if name in _TIMER_RESERVED_COLUMNS:
             keep.append(idx)
@@ -1183,6 +1204,7 @@ def _copy_lightcurve_for_timer(
             keep.append(idx)
             kept_values.append(values)
             continue
+        dropped[name] = reason
         logger.info("timer input %s: dropping covariate %s (%s)", src.name, name, reason)
 
     with open(dst, "w", newline="") as fh:
@@ -1190,6 +1212,8 @@ def _copy_lightcurve_for_timer(
         writer.writerow([header[i] for i in keep])
         for r in body:
             writer.writerow([r[i] if i < len(r) else "" for i in keep])
+    kept = [header[i] for i in keep if header[i] not in _TIMER_RESERVED_COLUMNS]
+    return kept, dropped
 
 
 def _write_fit_inputs(
@@ -1224,8 +1248,14 @@ def _write_fit_inputs(
 
     covariates = selected_covariates(options)
     allowed = tuple(col for name in covariates for col in _TIMER_COVARIATE_CHOICES[name])
+    covariates_fitted: dict[str, list[str]] = {}
+    covariates_dropped: dict[str, dict[str, str]] = {}
     for c in csvs:
-        _copy_lightcurve_for_timer(c, rdir / c.name, upload_covariates(c), allowed)
+        copied = _copy_lightcurve_for_timer(c, rdir / c.name, upload_covariates(c), allowed)
+        if copied is not None:
+            covariates_fitted[c.name], drops = copied
+            if drops:
+                covariates_dropped[c.name] = drops
 
     # fit.yaml
     trend_val = 1 if options.get("trend", "true") == "true" else 0
@@ -1633,11 +1663,24 @@ def _write_fit_inputs(
         "run_id": run_id or "",
         "run_type": run_type or "",
         "covariates": list(covariates),
+        "covariates_fitted": covariates_fitted,
+        "covariates_dropped": covariates_dropped,
     }
     with open(rdir / "meta.yaml", "w") as f:
         yaml.safe_dump(meta_data, f, default_flow_style=False, sort_keys=False)
 
     return narrowband_aliases
+
+
+def covariate_drops(rdir: pathlib.Path) -> dict[str, dict[str, str]]:
+    """The covariates :func:`_write_fit_inputs` dropped, per light curve, as
+    recorded in ``rdir/meta.yaml``; empty if none or no record."""
+    try:
+        meta = yaml.safe_load((rdir / "meta.yaml").read_text()) or {}
+    except (OSError, yaml.YAMLError):
+        logger.warning("could not read covariate drops from %s/meta.yaml", rdir, exc_info=True)
+        return {}
+    return meta.get("covariates_dropped") or {}
 
 
 # Path to the standalone helper run inside the `timer` conda env.
@@ -1955,7 +1998,7 @@ def start_fit(
         cmd = _fit_command(rdir, run_type)
         log_path = rdir / "timer-fit.log"
         logf = open(log_path, "w")
-        _write_log_banner(logf, cmd, options, narrowband_aliases)
+        _write_log_banner(logf, cmd, options, narrowband_aliases, covariate_drops(rdir))
         logf.flush()
 
         try:
@@ -3150,7 +3193,7 @@ def sync_jobs() -> None:
                 log_path = rdir / "timer-fit.log"
                 try:
                     logf = open(log_path, "w")
-                    _write_log_banner(logf, cmd, opts, narrowband_aliases)
+                    _write_log_banner(logf, cmd, opts, narrowband_aliases, covariate_drops(rdir))
                     logf.flush()
                     proc = subprocess.Popen(cmd, cwd=str(rdir), stdout=logf, stderr=subprocess.STDOUT, text=True, start_new_session=True, env={**os.environ, **jobs.core_pinning_env()})
                     try:

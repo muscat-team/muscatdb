@@ -231,3 +231,100 @@ def test_form_offers_exactly_the_server_choices():
     m = re.search(r'{% for cov in \[([^\]]*)\] %}', html)
     assert m, "covariate checkbox loop not found"
     assert tuple(re.findall(r'"([^"]+)"', m.group(1))) == tuple(_TIMER_COVARIATE_CHOICES)
+
+
+def _constant_peak(csv_text: str) -> str:
+    """The real MuSCAT3 rows with Peak(e-) held at one value, as on the
+    production nights where every row has the same peak."""
+    lines = csv_text.splitlines()
+    i = lines[0].split(",").index("Peak(e-)")
+    out = [lines[0]]
+    for line in lines[1:]:
+        cells = line.split(",")
+        cells[i] = "16704.56640625"
+        out.append(",".join(cells))
+    return "\n".join(out) + "\n"
+
+
+def test_meta_records_the_covariates_actually_fitted(tmp_path):
+    """Six requested, five fitted: the record must say five, per light curve,
+    and why the sixth was dropped (review on PR #436)."""
+    src = tmp_path / "V1298Tau_muscat3_rp_230730.csv"
+    src.write_text(_constant_peak(_REAL_M3_CSV))
+    rdir = tmp_path / "run"
+    rdir.mkdir()
+    _write_fit_inputs(rdir, "muscat3", "230730", "V1298Tau", [src], {})
+    meta = yaml.safe_load((rdir / "meta.yaml").read_text())
+
+    assert meta["covariates"] == list(_TIMER_COVARIATE_CHOICES)
+    assert meta["covariates_fitted"] == {
+        src.name: ["Bkg(e-)", "Airmass", "Dx(pix)", "Dy(pix)", "FWHM(pix)"],
+    }
+    assert meta["covariates_dropped"] == {src.name: {"Peak(e-)": "constant"}}
+
+
+def test_meta_records_no_drops_when_every_covariate_is_fitted(tmp_path):
+    _, meta = _fit_inputs(tmp_path, {"covariates": "Peak,FWHM"})
+    assert meta["covariates_fitted"] == {
+        "V1298Tau_muscat3_rp_230730.csv": ["Peak(e-)", "FWHM(pix)"],
+    }
+    assert meta["covariates_dropped"] == {}
+
+
+def test_dropped_covariates_reach_the_run_log(tmp_path):
+    """The page streams timer-fit.log, so a drop must be stated there too."""
+    import io
+
+    from muscat_db.transit_fit import _write_log_banner, covariate_drops
+
+    src = tmp_path / "V1298Tau_muscat3_rp_230730.csv"
+    src.write_text(_constant_peak(_REAL_M3_CSV))
+    rdir = tmp_path / "run"
+    rdir.mkdir()
+    _write_fit_inputs(rdir, "muscat3", "230730", "V1298Tau", [src], {})
+
+    logf = io.StringIO()
+    _write_log_banner(logf, ["cmd"], {}, covariate_drops=covariate_drops(rdir))
+    text = logf.getvalue()
+    assert "--- covariates dropped ---" in text
+    assert f"{src.name}: Peak(e-) (constant)" in text
+
+
+def test_run_log_has_no_drop_section_when_nothing_was_dropped():
+    import io
+
+    from muscat_db.transit_fit import _write_log_banner
+
+    logf = io.StringIO()
+    _write_log_banner(logf, ["cmd"], {}, covariate_drops={})
+    assert "covariates dropped" not in logf.getvalue()
+
+
+def test_start_fit_states_dropped_covariates_in_the_live_log(tmp_path, monkeypatch):
+    from muscat_db import transit_fit as fit
+
+    class _Running:
+        pid = 12345
+
+        def poll(self):
+            return None
+
+    src = tmp_path / "V1298Tau_muscat3_rp_230730.csv"
+    src.write_text(_constant_peak(_REAL_M3_CSV))
+    rdir = tmp_path / "run"
+    monkeypatch.setattr(fit, "fit_output_dir", lambda *a, **k: rdir)
+    monkeypatch.setattr(fit, "get_csv_lightcurves", lambda *a, **k: [src])
+    monkeypatch.setattr(fit, "_timer_prefix", lambda: ["timer-fit"])
+    monkeypatch.setattr(fit.subprocess, "Popen", lambda *a, **k: _Running())
+    monkeypatch.setattr(fit, "_FIT_JOBS", {})
+    monkeypatch.setattr("muscat_db.database.save_job", lambda **k: None)
+
+    result = fit.start_fit("muscat3", "230730", "V1298Tau", {}, test_run=True)
+    try:
+        assert result["ok"] is True
+        for job in fit._FIT_JOBS.values():
+            job.logf.flush()
+        assert f"{src.name}: Peak(e-) (constant)" in (rdir / "timer-fit.log").read_text()
+    finally:
+        for job in fit._FIT_JOBS.values():
+            job.logf.close()
