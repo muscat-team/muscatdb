@@ -67,3 +67,26 @@ for one hour and failures for 30 seconds. MAST requests have 20-second timeouts
 and cache failures as well as successes. MAST uses bounded, hourly caches and the existing shared catalog
 concurrency limit. No MAST name resolver (and thus no hidden CDS name lookup)
 is used. A failed Sesame lookup skips the subsequent VizieR attempt.
+
+## Time-series noise model
+
+`muscat_db.precision` predicts the precision a star reaches at given settings
+(#344). It is a library only for now: the optimizer, API and page panel that
+use it come in later steps.
+
+One frame's fractional noise is the quadrature sum of target photon noise,
+sky, read noise and dark current inside the aperture, the comparison
+ensemble's own noise, and scintillation. The star's count rate and the image
+FWHM come from the archive-calibrated exposure model, at the median zeropoint
+and median seeing. The aperture radius is 1.5 FWHM, so its area and the sky
+and read noise inside it grow with defocus. Scintillation follows Osborn et
+al. (2015, MNRAS 452, 1707, eq. 7), which is Young's relation times an
+empirical factor (1.5 by default), and is treated as uncorrelated between the
+target and each comparison star.
+
+The figure of merit is that noise averaged over a 10-minute bin, where a bin
+holds `bin / (exposure + readout overhead)` frames. Readout overheads per mode
+are LCO's published values, in `exposure_model_defaults.READOUT_OVERHEAD_S`.
+Read noise, sky rate, telescope diameter and site altitude are arguments, not
+built-in constants. The prediction is not yet calibrated against achieved
+light curves.
