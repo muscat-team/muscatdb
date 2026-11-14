@@ -557,6 +557,15 @@
         </details>
         <details class="opt-collapse">
         <summary>Detrending Options <span class="help-tooltip" title="Systematics/detrending settings applied to every light curve (written per-dataset in fit.yaml).">?</span></summary>
+        <div id="opt-covariates" style="grid-column: 1 / -1; display: flex; gap: 1.25rem; flex-wrap: wrap; align-items: flex-end; padding-bottom: 0.45rem;">
+          <span style="font-size: 0.85rem; color: var(--text);">Covariates <span class="help-tooltip" title="Photometry columns timer uses as linear detrending vectors. Untick one to leave it out of the fit. Only these columns can be used; any other CSV column (e.g. GJD_UTC, PeakRadius) is never passed to timer, and an empty, constant or duplicate column is dropped automatically. Uploaded light curves keep the covariates chosen at upload.">?</span></span>
+          {% for cov in ["Bkg", "Peak", "Airmass", "Dx", "Dy", "FWHM"] %}
+          <div class="opt check" style="margin-top: 0; white-space: nowrap;">
+            <input type="checkbox" class="opt-covariate" id="opt-cov-{{ cov }}" data-cov="{{ cov }}" checked>
+            <label for="opt-cov-{{ cov }}">{{ cov }}</label>
+          </div>
+          {% endfor %}
+        </div>
         <div style="grid-column: 1 / -1; display: flex; gap: 1.25rem; flex-wrap: wrap; align-items: flex-end; padding-bottom: 0.45rem;">
           <div class="opt check" style="margin-top: 0; white-space: nowrap;">
             <input type="checkbox" id="opt-trend" checked>
@@ -948,6 +957,20 @@
   // have never been trimmed here. See static/js/dom.js.
   var val = MuscatDom.valRaw, chk = MuscatDom.chk;
 
+  // Covariate checkboxes travel as one comma-separated "covariates" option.
+  // An undefined value (settings saved before the option existed) ticks all.
+  function getCovariates() {
+    return Array.prototype.map.call(
+      document.querySelectorAll('.opt-covariate:checked'),
+      function (el) { return el.dataset.cov; }).join(',');
+  }
+  function setCovariates(value) {
+    var chosen = value === undefined ? null : String(value).split(',');
+    document.querySelectorAll('.opt-covariate').forEach(function (el) {
+      el.checked = chosen === null || chosen.indexOf(el.dataset.cov) !== -1;
+    });
+  }
+
   // Round a numeric value (or numeric string) to `sf` significant figures for
   // display, returning a clean string. Blanks and non-numeric values pass
   // through unchanged so partially-typed input is never clobbered.
@@ -1095,6 +1118,7 @@
       chromatic: chk('opt-chromatic') ? 'true' : 'false',
       fit_basis: val('opt-fit_basis'),
       trend: chk('opt-trend') ? 'true' : 'false',
+      covariates: getCovariates(),
       run_mode: document.getElementById('run-mode-select')?.value || 'new',
       plot_midtransit: chk('opt-plot_midtransit') ? 'true' : 'false',
       plot_ingress_egress: chk('opt-plot_ingress_egress') ? 'true' : 'false',
@@ -1820,6 +1844,7 @@
 
     var trEl = document.getElementById('opt-trend');
     if (trEl && saved.trend !== undefined) trEl.checked = saved.trend === 'true';
+    setCovariates(saved.covariates);
 
     var selectEl = document.getElementById('run-mode-select');
     if (selectEl) {
@@ -1896,6 +1921,7 @@
                            'opt-include_flare':false,'opt-chromatic_flare':false,
                            'opt-plot_midtransit':true,'opt-plot_ingress_egress':true};
       Object.keys(checkDefaults).forEach(function (id) { var el = document.getElementById(id); if (el) el.checked = checkDefaults[id]; });
+      setCovariates(undefined);
       refreshGpPriorControls();
       refreshBumpPriorControls();
       // Back to a single flare row with the default priors (tpeak at the
@@ -1968,6 +1994,7 @@
 
         var trEl = document.getElementById('opt-trend');
         if (trEl && backup.trend !== undefined) trEl.checked = backup.trend === 'true';
+        setCovariates(backup.covariates);
 
         var selectEl = document.getElementById('run-mode-select');
         if (selectEl) {

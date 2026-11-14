@@ -15,6 +15,7 @@ import re
 import shlex
 import shutil
 import signal
+import statistics
 import subprocess
 import tempfile
 import threading
@@ -81,6 +82,7 @@ def _write_log_banner(
     cmd: list[str],
     options: dict | None = None,
     narrowband_aliases: list[tuple[str, str]] | None = None,
+    covariate_drops: dict[str, dict[str, str]] | None = None,
 ) -> None:
     """Write a versioned startup header then the command line and parsed args to *logf*.
 
@@ -92,6 +94,10 @@ def _write_log_banner(
     borrows limb darkening from). Surfaced here so the caveat is visible on
     the transit-fit page's live log for every narrow-band run, not just
     buried in fit.yaml.
+
+    ``covariate_drops`` maps each light curve to the covariates
+    :func:`_copy_lightcurve_for_timer` left out of the fit and why (see
+    :func:`covariate_drops`), so the fitted model is stated on the live log.
     """
     separator = "=" * 60
     now_utc = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -125,6 +131,17 @@ def _write_log_banner(
         )
         for narrow, broad in narrowband_aliases:
             logf.write(f"  {narrow} -> using '{broad}' broadband limb darkening\n")
+        logf.write("\n")
+
+    if covariate_drops:
+        logf.write("--- covariates dropped ---\n")
+        logf.write(
+            "NOTE: these requested covariates are not in the fit, because timer "
+            "cannot use an empty, constant or duplicate column:\n"
+        )
+        for lc, drops in covariate_drops.items():
+            for col, reason in drops.items():
+                logf.write(f"  {lc}: {col} ({reason})\n")
         logf.write("\n")
 
 
@@ -912,7 +929,7 @@ def validate_fit_options(options: dict | None, time_range: tuple[float, float] |
     if err:
         return err
 
-    return None
+    return _validate_covariates(o)
 
 
 class _SysDumper(yaml.SafeDumper):
@@ -1036,57 +1053,167 @@ _TIMER_RESERVED_COLUMNS: tuple[str, ...] = ("BJD_TDB", "Flux", "Err")
 # silently join the design matrix. The one this excludes today is ``GJD_UTC``,
 # a second time axis that is very nearly collinear with the ``trend`` block
 # (``np.vander`` of centred time), which leaves the fit degenerate along that
-# direction.
-_TIMER_COVARIATE_COLUMNS: tuple[str, ...] = (
-    "Bkg(ADU)", "Airmass", "Dx(pix)", "Dy(pix)", "Peak(ADU)", "FWHM(pix)",
+# direction. ``PeakRadius(pix)`` (prose2 PR #54) is excluded too: it is constant
+# for a pixel-aperture reduction and a fixed multiple of FWHM otherwise.
+# prose2 names Bkg/Peak by the frame's unit: ADU for MuSCAT/MuSCAT2, electrons
+# for BANZAI-reduced MuSCAT3/4, Sinistro and QHY600.
+#
+# The transit-fit form chooses among these by name (the ``covariates`` option).
+# It can only narrow this set: a name outside it is rejected before launch, so
+# no prose2 column, present or future, reaches timer unless it is listed here.
+_TIMER_COVARIATE_CHOICES: dict[str, tuple[str, ...]] = {
+    "Bkg": ("Bkg(ADU)", "Bkg(e-)"),
+    "Peak": ("Peak(ADU)", "Peak(e-)"),
+    "Airmass": ("Airmass",),
+    "Dx": ("Dx(pix)",),
+    "Dy": ("Dy(pix)",),
+    "FWHM": ("FWHM(pix)",),
+}
+_TIMER_COVARIATE_COLUMNS: tuple[str, ...] = tuple(
+    col for cols in _TIMER_COVARIATE_CHOICES.values() for col in cols
 )
+
+
+def _covariate_tokens(options: dict) -> list[str] | None:
+    raw = options.get("covariates")
+    if raw is None:
+        return None
+    return [t.strip() for t in str(raw).split(",") if t.strip()]
+
+
+def selected_covariates(options: dict) -> tuple[str, ...]:
+    """The covariate choices a fit asked for, in canonical order.
+
+    An omitted option means every choice, so fits launched before the option
+    existed (and API callers that do not send it) keep the full set. Unknown
+    names are left to :func:`validate_fit_options`, which rejects them.
+    """
+    tokens = _covariate_tokens(options)
+    if tokens is None:
+        return tuple(_TIMER_COVARIATE_CHOICES)
+    return tuple(name for name in _TIMER_COVARIATE_CHOICES if name in tokens)
+
+
+def _validate_covariates(options: dict) -> str | None:
+    unknown = [t for t in _covariate_tokens(options) or [] if t not in _TIMER_COVARIATE_CHOICES]
+    if unknown:
+        return (
+            f"covariates must be chosen from {', '.join(_TIMER_COVARIATE_CHOICES)}; "
+            f"got {', '.join(unknown)}"
+        )
+    return None
 
 _MISSING_CELL = {"", "nan", "-nan", "none", "null", "na"}
 
+# timer standardizes each covariate by its std. A column whose spread is within
+# rounding of zero becomes 0/0 = NaN or a copy of the mean term, and one that is
+# a linear copy of another (|r| = 1) makes the design matrix singular.
+_CONSTANT_RTOL = 1e-9
+_DUPLICATE_ABS_R = 1.0 - 1e-9
+
+
+def _column_floats(body: list[list[str]], idx: int) -> list[float | None]:
+    """One CSV column as floats, ``None`` where the cell is missing,
+    unparsable or not finite."""
+    out: list[float | None] = []
+    for r in body:
+        cell = r[idx].strip() if idx < len(r) else ""
+        try:
+            v = float(cell) if cell.lower() not in _MISSING_CELL else None
+        except ValueError:
+            v = None
+        out.append(v if v is not None and math.isfinite(v) else None)
+    return out
+
+
+def _is_constant(values: list[float | None]) -> bool:
+    finite = [v for v in values if v is not None]
+    if len(finite) < 2:
+        return False
+    lo, hi = min(finite), max(finite)
+    return hi - lo <= _CONSTANT_RTOL * max(abs(lo), abs(hi))
+
+
+def _is_linear_copy(a: list[float | None], b: list[float | None]) -> bool:
+    pairs = [(x, y) for x, y in zip(a, b) if x is not None and y is not None]
+    if len(pairs) < 3:
+        return False
+    xs, ys = zip(*pairs)
+    try:
+        return abs(statistics.correlation(xs, ys)) >= _DUPLICATE_ABS_R
+    except statistics.StatisticsError:
+        return False
+
 
 def _copy_lightcurve_for_timer(
-    src: pathlib.Path, dst: pathlib.Path, extra_covariates: tuple[str, ...] = ()
-) -> None:
+    src: pathlib.Path,
+    dst: pathlib.Path,
+    extra_covariates: tuple[str, ...] = (),
+    allowed: tuple[str, ...] = _TIMER_COVARIATE_COLUMNS,
+) -> tuple[list[str], dict[str, str]] | None:
     """Copy one light-curve CSV, keeping only the columns timer should model.
 
-    *extra_covariates* are kept as well: an uploaded light curve's covariates
-    (issue #382) carry the uploader's column names, chosen deliberately.
+    *allowed* is the set of prose2 covariate columns to keep, by default all of
+    :data:`_TIMER_COVARIATE_COLUMNS`; a fit narrows it with the form's
+    ``covariates`` option. *extra_covariates* are kept as well: an uploaded
+    light curve's covariates (issue #382) carry the uploader's column names,
+    chosen deliberately.
     Anything outside the reserved and covariate lists is dropped, as is any
     covariate that is empty for every row: timer's ``bin_df`` ends with
     ``dropna()``, so a single all-NaN column would otherwise delete every binned
-    row and yield an empty fit.
+    row and yield an empty fit. A covariate that is constant, or a linear copy
+    of one already kept, is dropped as well (see :data:`_CONSTANT_RTOL`).
+
+    Returns the covariate columns kept and ``{column: reason}`` for those
+    dropped, so the fit record can state the model timer actually fitted.
 
     Falls back to a verbatim copy when the header cannot be read or does not
     look like an afphot light curve, so an unexpected format fails inside timer
-    with its own error rather than here.
+    with its own error rather than here. Nothing is returned then, since the
+    columns timer will use are not known.
     """
     try:
         with open(src, newline="") as fh:
             rows = list(csv.reader(fh))
     except (OSError, csv.Error):
         shutil.copy2(src, dst)
-        return
+        return None
 
     if not rows or not all(c in rows[0] for c in _TIMER_RESERVED_COLUMNS):
         shutil.copy2(src, dst)
-        return
+        return None
 
     header, body = rows[0], rows[1:]
     keep = []
+    kept_values: list[list[float | None]] = []
+    dropped: dict[str, str] = {}
     for idx, name in enumerate(header):
         if name in _TIMER_RESERVED_COLUMNS:
             keep.append(idx)
-        elif (name in _TIMER_COVARIATE_COLUMNS or name in extra_covariates) and any(
-            (r[idx].strip().lower() if idx < len(r) else "") not in _MISSING_CELL
-            for r in body
-        ):
+            continue
+        if name not in allowed and name not in extra_covariates:
+            continue
+        values = _column_floats(body, idx)
+        if all(v is None for v in values):
+            reason = "empty"
+        elif _is_constant(values):
+            reason = "constant"
+        elif any(_is_linear_copy(values, k) for k in kept_values):
+            reason = "a linear copy of another covariate"
+        else:
             keep.append(idx)
+            kept_values.append(values)
+            continue
+        dropped[name] = reason
+        logger.info("timer input %s: dropping covariate %s (%s)", src.name, name, reason)
 
     with open(dst, "w", newline="") as fh:
         writer = csv.writer(fh)
         writer.writerow([header[i] for i in keep])
         for r in body:
             writer.writerow([r[i] if i < len(r) else "" for i in keep])
+    kept = [header[i] for i in keep if header[i] not in _TIMER_RESERVED_COLUMNS]
+    return kept, dropped
 
 
 def _write_fit_inputs(
@@ -1119,8 +1246,16 @@ def _write_fit_inputs(
     """
     from muscat_db.lc_upload import upload_covariates
 
+    covariates = selected_covariates(options)
+    allowed = tuple(col for name in covariates for col in _TIMER_COVARIATE_CHOICES[name])
+    covariates_fitted: dict[str, list[str]] = {}
+    covariates_dropped: dict[str, dict[str, str]] = {}
     for c in csvs:
-        _copy_lightcurve_for_timer(c, rdir / c.name, upload_covariates(c))
+        copied = _copy_lightcurve_for_timer(c, rdir / c.name, upload_covariates(c), allowed)
+        if copied is not None:
+            covariates_fitted[c.name], drops = copied
+            if drops:
+                covariates_dropped[c.name] = drops
 
     # fit.yaml
     trend_val = 1 if options.get("trend", "true") == "true" else 0
@@ -1527,11 +1662,25 @@ def _write_fit_inputs(
         "run_name": run_name or "",
         "run_id": run_id or "",
         "run_type": run_type or "",
+        "covariates": list(covariates),
+        "covariates_fitted": covariates_fitted,
+        "covariates_dropped": covariates_dropped,
     }
     with open(rdir / "meta.yaml", "w") as f:
         yaml.safe_dump(meta_data, f, default_flow_style=False, sort_keys=False)
 
     return narrowband_aliases
+
+
+def covariate_drops(rdir: pathlib.Path) -> dict[str, dict[str, str]]:
+    """The covariates :func:`_write_fit_inputs` dropped, per light curve, as
+    recorded in ``rdir/meta.yaml``; empty if none or no record."""
+    try:
+        meta = yaml.safe_load((rdir / "meta.yaml").read_text()) or {}
+    except (OSError, yaml.YAMLError):
+        logger.warning("could not read covariate drops from %s/meta.yaml", rdir, exc_info=True)
+        return {}
+    return meta.get("covariates_dropped") or {}
 
 
 # Path to the standalone helper run inside the `timer` conda env.
@@ -1849,7 +1998,7 @@ def start_fit(
         cmd = _fit_command(rdir, run_type)
         log_path = rdir / "timer-fit.log"
         logf = open(log_path, "w")
-        _write_log_banner(logf, cmd, options, narrowband_aliases)
+        _write_log_banner(logf, cmd, options, narrowband_aliases, covariate_drops(rdir))
         logf.flush()
 
         try:
@@ -3044,7 +3193,7 @@ def sync_jobs() -> None:
                 log_path = rdir / "timer-fit.log"
                 try:
                     logf = open(log_path, "w")
-                    _write_log_banner(logf, cmd, opts, narrowband_aliases)
+                    _write_log_banner(logf, cmd, opts, narrowband_aliases, covariate_drops(rdir))
                     logf.flush()
                     proc = subprocess.Popen(cmd, cwd=str(rdir), stdout=logf, stderr=subprocess.STDOUT, text=True, start_new_session=True, env={**os.environ, **jobs.core_pinning_env()})
                     try:

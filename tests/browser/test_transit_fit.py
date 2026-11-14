@@ -360,6 +360,23 @@ def test_sampler_and_detrending_options_persist_and_reach_the_fitter(page, fitte
     assert {key: options[key] for key in flags} == {key: str(value).lower() for key, value in flags.items()}
 
 
+def test_covariate_choices_persist_and_reach_the_fitter(page, fitter):
+    _ready_to_fit(page)
+    boxes = page.locator('.opt-covariate')
+    assert [boxes.nth(i).get_attribute('data-cov') for i in range(boxes.count())] == [
+        'Bkg', 'Peak', 'Airmass', 'Dx', 'Dy', 'FWHM']
+    assert all(boxes.nth(i).is_checked() for i in range(boxes.count())), 'all ticked by default'
+    for cov in ('Dx', 'Dy', 'Peak'):
+        reveal(page, '#opt-cov-' + cov)
+        page.locator('#opt-cov-' + cov).uncheck()
+    page.goto('/jobs')
+    page.goto(URL)
+    assert not page.is_checked('#opt-cov-Dx') and page.is_checked('#opt-cov-FWHM')
+    with page.expect_response('**/api/transit-fit/run'):
+        page.click('#run-test-btn')
+    assert fitter['start'][-1]['options']['covariates'] == 'Bkg,Airmass,FWHM'
+
+
 @pytest.fixture
 def extra_fit_run(page, live_server):
     """A second fit run of the seeded target, removed only once the page is closed.
