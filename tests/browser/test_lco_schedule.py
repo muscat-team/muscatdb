@@ -9,6 +9,7 @@ refused before anything is sent to LCO.
 from __future__ import annotations
 
 import datetime
+import re
 
 from playwright.sync_api import expect
 import pytest
@@ -184,7 +185,7 @@ def test_shared_and_private_sheet_dropdown_selects_distinct_values(page):
 
 
 @pytest.mark.parametrize("shared", [False, True])
-def test_unconfigured_sheet_sources_remain_visible_with_settings_link(page, shared):
+def test_unconfigured_sheet_sources_remain_visible_with_settings_hint(page, shared):
     page.problems.allowed.extend(NO_TOKEN)
     page.route('**/api/ephemeris/target-info?*', lambda route: route.fulfill(json={
         'ok': True, 'planets': ['b'], 'datasets': [], 'ttv_runs': [],
@@ -201,10 +202,10 @@ def test_unconfigured_sheet_sources_remain_visible_with_settings_link(page, shar
             expect(option).to_be_enabled()
         else:
             expect(option).to_be_disabled()
-    link = page.locator('#sheet-source-hint a')
-    expect(link).to_be_visible()
-    link.click()
-    expect(page).to_have_url('/settings')
+    # The setup hint lives in the source field's help tooltip, not between fields.
+    expect(page.locator('#sheet-source-hint')).to_have_count(0)
+    tip = page.locator('label[for="sch-source"] .help-tooltip')
+    expect(tip).to_have_attribute('data-tip', re.compile(r'personal Google Sheet source in Settings'))
 
 
 # HIP 67522 from coj, April 2027, 3 h transit: one full, one partial and one
@@ -759,8 +760,10 @@ def test_linear_fit_names_its_seed_and_links_to_it(page):
         'aria-label', 'LINEAR: Linear fit seeded from NASA (Leonardi et al. 2024)')
     prov = page.locator('#ephem-provenance')
     expect(prov).to_contain_text('Linear fit seeded from NASA')
-    expect(prov.get_by_role('link', name='Leonardi et al. 2024 ↗').first).to_have_attribute('href', LEONARDI['url'])
-    expect(prov.get_by_role('link', name='Ivshina & Winn 2022 ↗')).to_have_attribute('href', IVSHINA['url'])
+    expect(prov.get_by_role('link', name='Leonardi et al. 2024').first).to_have_attribute('href', LEONARDI['url'])
+    expect(prov.get_by_role('link', name='Ivshina & Winn 2022')).to_have_attribute('href', IVSHINA['url'])
+    # styles.css draws the ↗ for target=_blank links; the text must not repeat it.
+    expect(prov.get_by_role('link', name='Ivshina & Winn 2022')).to_have_text('Ivshina & Winn 2022')
     expect(prov.get_by_role('link', name='check on the Ephemeris page')).to_have_attribute(
         'href', '/ephemeris?targets=TOI-1000')
     expect(prov).to_contain_text('Duration: NASA')
@@ -806,18 +809,36 @@ def test_linear_fit_falls_back_to_the_page_pick_for_an_older_server(page):
 def test_auto_names_the_catalog_it_resolved_to(page):
     _load_target(page, _provenance_info(NASA_B, nasa=NASA_B))
     expect(page.locator('#src-t0')).to_have_text('AUTO → NASA')
-    expect(page.locator('#ephem-provenance')).to_contain_text('t0 / period: NASA — t0: Leonardi et al. 2024')
+    prov = page.locator('#ephem-provenance')
+    expect(prov).to_contain_text('t0 / period: NASA — t0: Leonardi et al. 2024')
+    # The t0 / period and Duration lines share one row when there is room.
+    lines = prov.locator('.prov-line')
+    expect(lines).to_have_count(2)
+    assert abs(lines.nth(0).bounding_box()['y'] - lines.nth(1).bounding_box()['y']) < 2
+    # The fields already show the values; the status line only names the source.
+    expect(page.locator('#msg-windows')).to_have_text('AUTO → NASA ephemeris loaded')
 
 
-def test_local_csv_values_say_the_reference_is_not_recorded(page):
+def test_a_catalog_without_references_adds_no_provenance_line(page):
+    # The field badges already name the catalog, so a line that could only say
+    # "NASA — reference not recorded" would repeat them.
+    nasa = {"t0": T0, "period": PERIOD, "duration": 2.5, "source": "NASA"}
+    _load_target(page, _provenance_info(nasa, nasa=nasa))
+    expect(page.locator('#src-t0')).to_have_text('AUTO → NASA')
+    expect(page.locator('#src-duration')).to_have_text('NASA')
+    expect(page.locator('#ephem-provenance')).to_have_text('')
+
+
+def test_borrowed_duration_is_explained_without_a_reference(page):
     local = {"t0": T0, "period": PERIOD, "source": "local CSV"}
     toi = {"t0": T0, "period": PERIOD, "duration": 2.0, "source": "TOI"}
     _load_target(page, _provenance_info(local, toi=toi))
     expect(page.locator('#src-t0')).to_have_text('AUTO → local CSV')
     prov = page.locator('#ephem-provenance')
-    expect(prov).to_contain_text('t0 / period: local CSV — reference not recorded')
-    # Duration is borrowed from TOI, so the panel says so.
-    expect(prov).to_contain_text('Duration: TOI — reference not recorded (local CSV has no duration for b)')
+    # Duration is borrowed from TOI, so the panel says so; the t0 / period line
+    # has no reference to add and is left to the field badges.
+    expect(prov.locator('.prov-line')).to_have_count(1)
+    expect(prov).to_have_text('Duration: TOI (local CSV has no duration for b)')
 
 
 def test_help_icons_are_keyboard_focusable_and_described(page):
@@ -833,3 +854,107 @@ def test_help_icons_are_keyboard_focusable_and_described(page):
     expect(icon).to_be_focused()
     # The help text stays out of the select's accessible name.
     expect(page.get_by_role('combobox', name='Ephemeris source Help')).to_be_visible()
+
+
+def test_form_rows_keep_related_fields_together(page):
+    """Ephemeris and padding share the grid; provenance and hints sit below,
+    and the strategy fields form one row instead of full-width blocks."""
+    page.problems.allowed.extend(NO_TOKEN)
+    page.goto('/lco/schedule')
+
+    def box(sel):
+        return page.locator(sel).bounding_box()
+
+    def cell(sel):
+        return page.locator(sel).locator('xpath=ancestor::div[contains(@class,"lco-field")][1]').bounding_box()
+
+    def same_row(a, b):
+        return abs(cell(a)['y'] - cell(b)['y']) < 2
+
+    # No hint under the source select stretches its grid row: the neighbouring
+    # input reaches the bottom of its cell instead of leaving a gap below it.
+    assert same_row('#sch-source', '#sch-coords')
+    coords, coords_cell = box('#sch-coords'), cell('#sch-coords')
+    # The hint left a ~138 px gap; allow a few px for font metrics (CI: 2.1 px).
+    assert coords_cell['y'] + coords_cell['height'] - (coords['y'] + coords['height']) < 8
+    # The padding fields follow the ephemeris fields on the same row.
+    assert same_row('#sch-pad-before', '#sch-t0')
+    # Provenance comes after the padding fields, not before them.
+    order = page.evaluate("""() => {
+        const grid = document.getElementById('ephem-provenance').parentElement;
+        const kids = Array.from(grid.children);
+        return [kids.indexOf(document.getElementById('ephem-provenance')),
+                kids.indexOf(document.getElementById('sch-include-padding').closest('.lco-field'))];
+    }""")
+    assert order[0] > order[1]
+    # Strategy fields are laid out side by side at grid width, not full width.
+    page.click('.lco-tab[data-tab="science"]')
+    ids = ['#sch-strategy', '#sch-strategy-count', '#sch-strategy-offset',
+           '#sch-strategy-before', '#sch-strategy-after']
+    assert all(same_row(i, ids[0]) for i in ids)
+    section = box('#single-submit-section')
+    assert box('#sch-strategy-count')['width'] < section['width'] / 3
+
+
+def _target_info_stub(page, seen, held=None):
+    """Answer target-info lookups, recording each target asked for.
+
+    A target listed in ``held`` gets no answer until the test fulfils it.
+    """
+    def handle(route):
+        target = re.search(r"target=([^&]*)", route.request.url).group(1).replace("%20", " ")
+        seen.append(target)
+        if held is not None and target in held:
+            held[target] = route
+            return
+        route.fulfill(json={
+            'ok': True, 'target': target, 'planets': ['b'], 'datasets': [], 'ttv_runs': [],
+            'coordinates': {'ra': 201.0, 'dec': -50.0, 'source': 'nasa'},
+            'nasa_ephemeris': {'b': {'t0': 2461314.5, 'period': 6.96, 'source': 'NASA'}},
+        })
+    page.route('**/api/ephemeris/target-info?*', handle)
+
+
+def test_target_is_looked_up_once_committed_not_per_keystroke(page):
+    page.problems.allowed.extend(NO_TOKEN)
+    seen = []
+    _target_info_stub(page, seen)
+    page.goto('/lco/schedule')
+    # Slower than any debounce, so a per-keystroke lookup would fire mid-name.
+    page.locator('#sch-target').press_sequentially('HIP 67522', delay=400)
+    assert seen == []
+    expect(page.locator('#ephem-provenance')).to_have_text('')
+    with page.expect_response('**/api/ephemeris/target-info?*'):
+        page.locator('#sch-target').press('Enter')
+    expect(page.locator('#sch-period')).to_have_value('6.96')
+    assert seen == ['HIP 67522']
+
+    # Picking a datalist suggestion commits the name without a blur.
+    with page.expect_response('**/api/ephemeris/target-info?*'):
+        page.evaluate("""() => {
+            const t = document.getElementById('sch-target');
+            t.value = 'TOI-1000';
+            t.dispatchEvent(new InputEvent('input', {inputType: 'insertReplacementText', bubbles: true}));
+        }""")
+    assert seen == ['HIP 67522', 'TOI-1000']
+
+
+def test_late_answer_for_a_previous_target_is_ignored(page):
+    page.problems.allowed.extend(NO_TOKEN)
+    seen, held = [], {'HI': None}
+    _target_info_stub(page, seen, held)
+    page.goto('/lco/schedule')
+    page.fill('#sch-target', 'HI')
+    with page.expect_request('**/api/ephemeris/target-info?*'):
+        page.locator('#sch-target').press('Enter')
+    with page.expect_response('**/api/ephemeris/target-info?*'):
+        page.fill('#sch-target', 'HIP 67522')
+        page.locator('#sch-target').press('Enter')
+    expect(page.locator('#sch-period')).to_have_value('6.96')
+    assert held['HI'] is not None
+    with page.expect_response('**/api/ephemeris/target-info?*'):
+        held['HI'].fulfill(json={'ok': True, 'target': 'HI', 'planets': [], 'datasets': [], 'ttv_runs': []})
+    page.wait_for_timeout(200)  # let the late answer's handler run
+    expect(page.locator('#msg-windows')).not_to_contain_text('Coordinates not found')
+    expect(page.locator('#sch-period')).to_have_value('6.96')
+    expect(page.locator('#sch-coords')).to_have_value('201.00000, -50.00000')
