@@ -3152,7 +3152,55 @@ class TestRoutes:
         assert res["ok"] is True
         assert isinstance(res["targets"], list)
 
-    def test_api_ephemeris_target_info(self, client, catalog, monkeypatch):
+    @pytest.fixture
+    def ephemeris_catalog(self, monkeypatch, tmp_path):
+        """A small NASA + TOI catalog under a temp data dir, so the target-info
+        test does not depend on the downloaded CSVs in ``data/``.
+
+        Holds the planets the test checks: TOI-1136 b, c, g (NASA only) and
+        LP 791-18 b, c, d (NASA, with TIC 181804752), whose TOI candidates
+        736.01 and 736.02 are the TOI-only rows. Values are copied from the
+        real catalogs.
+        """
+        from muscat_db import catalog
+
+        data_dir = tmp_path / "data"
+        data_dir.mkdir(exist_ok=True)
+        (data_dir / "nexsci_pscomppars.csv").write_text(
+            "pl_name,hostname,tic_id,ra_x,dec_x,pl_tranmid,pl_orbper,pl_trandur\n"
+            "LP 791-18 b,LP 791-18,TIC 181804752,165.690484,-16.4064445,"
+            "2458774.86973,0.9479981,0.6195\n"
+            "LP 791-18 c,LP 791-18,TIC 181804752,165.690484,-16.4064445,"
+            "2458546.50923,4.98991,1.167\n"
+            "LP 791-18 d,LP 791-18,TIC 181804752,165.690484,-16.4064445,"
+            "2458546.37888,2.75485,0.9152\n"
+            "TOI-1136 b,TOI-1136,TIC 142276270,192.184898,64.8552755,"
+            "2458684.7,4.1727,2.07\n"
+            "TOI-1136 c,TOI-1136,TIC 142276270,192.184898,64.8552755,"
+            "2460366.026514,6.2574,3.488\n"
+            "TOI-1136 g,TOI-1136,TIC 142276270,192.184898,64.8552755,"
+            "2459423.6705,39.545,5.8\n"
+        )
+        (data_dir / "TOIs.csv").write_text(
+            "tic id,toi,planet name,epoch (bjd),period (days),duration (hours),"
+            "ra_deg,dec_deg,pm ra (mas/yr),pm dec (mas/yr),epoch (bjd) err,"
+            "period (days) err,duration (hours) err\n"
+            '181804752,"736.01","TOI-736.01",2458546.508066,4.9899175,1.38,'
+            "165.6905,-16.40644444,-221.078,-58.999,0.00066,0.0000056,0.094\n"
+            '181804752,"736.02","TOI-736.02",2458543.558006,0.9479945,0.56,'
+            "165.6905,-16.40644444,-221.078,-58.999,0.00070,0.000014,0.26\n"
+        )
+        monkeypatch.setattr(catalog, "HERE", tmp_path / "src" / "muscat_db")
+
+        # A name the local CSVs do not list (TOI-736) falls through to the
+        # online NASA query; fail it fast instead of reaching the network.
+        def _no_network(*args, **kwargs):
+            raise RuntimeError("network disabled in test")
+
+        monkeypatch.setattr(catalog, "_sync_get", _no_network)
+        return data_dir
+
+    def test_api_ephemeris_target_info(self, client, ephemeris_catalog, monkeypatch):
         r = client.get("/api/ephemeris/target-info")
         assert r.status_code == 422
 
@@ -3220,8 +3268,8 @@ class TestRoutes:
         assert "b" in nasa_ephem5
         assert abs(nasa_ephem5["b"]["t0"] - 2458774.86973) < 1e-3
         assert abs(nasa_ephem5["b"]["period"] - 0.9479981) < 1e-3
-        assert abs(nasa_ephem5["c"]["t0"] - 2458546.50923) < 1e-3 or abs(nasa_ephem5["c"]["t0"] - 2458771.055182) < 1e-3
-        assert abs(nasa_ephem5["c"]["period"] - 4.98991) < 1e-3 or abs(nasa_ephem5["c"]["period"] - 4.9899) < 1e-3
+        assert abs(nasa_ephem5["c"]["t0"] - 2458546.50923) < 1e-3
+        assert abs(nasa_ephem5["c"]["period"] - 4.98991) < 1e-3
 
     def test_api_ephemeris_calculate(self, client):
         r = client.post("/api/ephemeris/calculate", json={})

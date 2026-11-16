@@ -61,9 +61,9 @@
   }
   /* Where the current t0 / period / duration came from (catalog, seed of a
      linear fit, per-parameter papers). Spans the whole grid row. */
-  #ephem-provenance { grid-column: 1 / -1; font-size: 0.78rem; color: var(--text-dim); line-height: 1.5; }
+  #ephem-provenance { grid-column: 1 / -1; display: flex; flex-wrap: wrap; column-gap: 0.6rem; font-size: 0.78rem; color: var(--text-dim); line-height: 1.5; }
   #ephem-provenance:empty { display: none; }
-  #ephem-provenance .prov-line { display: block; }
+  #ephem-provenance .prov-line + .prov-line::before { content: "·"; margin-right: 0.6rem; }
   #ephem-provenance .prov-key { color: var(--text); font-weight: 600; }
   /* t0/period are greyed while a TTV model is the ephemeris source: the server
      ignores them (scheduling follows the model's predicted mid-times), so they
@@ -105,7 +105,7 @@
   <div class="lco-grid">
     <div class="lco-field"><label for="sch-target">Target <span class="help-tooltip" title="Target star name. Matches normalized names from muscat-db (e.g. HIP 67522, TOI-1234).">?</span></label><input id="sch-target" type="text" placeholder="e.g. WASP-12" list="target-datalist" autocomplete="off"><datalist id="target-datalist"></datalist></div>
     <div class="lco-field"><label for="sch-planet">Planet <span class="help-tooltip" title="Planet letter identifier (e.g. b, c). Used to look up the ephemeris for this planet.">?</span></label><input id="sch-planet" type="text" placeholder="e.g. b" style="max-width: 90px;"></div>
-    <div class="lco-field"><label for="sch-source">Ephemeris source <span class="help-tooltip" title="Where t0 / period come from. Auto uses the reference ephemeris (NASA, else TOI, else the local CSV) and names the one it picked. 'linear fit' refines the ephemeris across all of this target's completed transit fits, seeded from that reference ephemeris; individual datasets use that fit's t0/period directly (same as the Planetary Reference Ephemerides on the Ephemeris page). Sources load as soon as a target is entered; 'Fetch ephemeris' re-pulls the catalogs and picks up newly completed fits.">?</span></label>
+    <div class="lco-field"><label for="sch-source">Ephemeris source <span class="help-tooltip" title="Where t0 / period come from. Auto uses the reference ephemeris (NASA, else TOI, else the local CSV) and names the one it picked. 'linear fit' refines the ephemeris across all of this target's completed transit fits, seeded from that reference ephemeris; individual datasets use that fit's t0/period directly (same as the Planetary Reference Ephemerides on the Ephemeris page). Sources load as soon as a target is entered; 'Fetch ephemeris' re-pulls the catalogs and picks up newly completed fits.&#10;&#10;Configure your personal Google Sheet source in Settings. Shared sources require a configured team sheet.">?</span></label>
       <select id="sch-source">
         <option value="">Auto</option>
         <option value="nasa">NASA catalog</option>
@@ -117,7 +117,6 @@
         <option value="gsheet_tc" disabled>My Google Sheet (private) — transit-center fit (unavailable)</option>
         <option value="upload">Uploaded mid-times</option>
       </select>
-      <span class="hint" id="sheet-source-hint">Configure your personal source in <a href="/settings">Settings</a>. Shared sources require a configured team sheet.</span>
     </div>
     <div class="lco-field"><label for="sch-coords">RA, Dec (deg) <span class="ephem-src none" id="src-coords">—</span> <span class="help-tooltip" title="Target coordinates in decimal degrees (RA, Dec). Auto-filled by Fetch ephemeris from the catalog.">?</span></label><input id="sch-coords" type="text" placeholder="e.g. 97.64, 29.67"></div>
     <div class="lco-field"><label for="sch-range-start">Range start (UTC) <span class="help-tooltip" title="Start of the scheduling search window in UTC. Only transits with mid-point inside this range are considered.">?</span></label><input id="sch-range-start" type="date"></div>
@@ -125,11 +124,11 @@
     <div class="lco-field"><label for="sch-t0">t0 (BJD) <span class="ephem-src none" id="src-t0">—</span> <span class="help-tooltip" title="BJD_TDB. Enter mean,uncertainty. Populated by Fetch ephemeris; editable.">?</span></label><input id="sch-t0" type="text" inputmode="decimal" placeholder="e.g. 2459000.5,0.0003"></div>
     <div class="lco-field"><label for="sch-period">Period (d) <span class="ephem-src none" id="src-period">—</span> <span class="help-tooltip" title="Orbital period in days. Auto-filled by Fetch ephemeris. Enter mean,uncertainty (e.g. 1.0914,0.00001).">?</span></label><input id="sch-period" type="text" inputmode="decimal" placeholder="e.g. 1.0914,0.00001"></div>
     <div class="lco-field"><label for="sch-duration">Duration (hr) <span class="ephem-src none" id="src-duration">—</span> <span class="help-tooltip" title="From the catalog when available; override here. Enter mean,uncertainty.">?</span></label><input id="sch-duration" type="text" inputmode="decimal" placeholder="e.g. 2.5,0.1"></div>
-    <div id="ephem-provenance" aria-live="polite"></div>
     <div class="lco-field"><label for="sch-pad-before">Pre-ingress (min) <span class="help-tooltip" title="Minutes to add before ingress (start of transit). Extends the scheduling window earlier to ensure baseline coverage.">?</span></label><input id="sch-pad-before" type="number" step="any" value="60"></div>
     <div class="lco-field"><label for="sch-pad-after">Post-egress (min) <span class="help-tooltip" title="Minutes to add after egress (end of transit). Extends the scheduling window later to ensure baseline coverage.">?</span></label><input id="sch-pad-after" type="number" step="any" value="60"></div>
     <div class="lco-field"><label for="sch-include-padding" style="margin: 0;">Include padding in obs check <span class="help-tooltip" title="When on, the padded baseline (start→end) must also be observable for a transit to rate 'full'. When off, padding is used only for the displayed span and the observability check spans just the transit (mid ± duration/2).">?</span></label>
       <input id="sch-include-padding" type="checkbox" checked></div>
+    <div id="ephem-provenance" aria-live="polite"></div>
   </div>
   <div class="lco-field" id="midtimes-block" style="display: none; margin-top: 0.6rem;">
     <label for="sch-midtimes">Mid-transit times <span class="help-tooltip" title="One transit per line: tc, then optionally tc_err (days, the same unit as numeric tc), separated by commas, tabs or spaces. tc is a full BJD_TDB (e.g. 2461000.51234) or an ISO UTC time (e.g. 2026-11-03T04:12:00Z). A header line may name the columns in any order: tc, tc_err (days). Lines starting with # are ignored. Up to 1000 times; the duration and padding fields above apply to every row.">?</span></label>
@@ -380,19 +379,19 @@
   </div>
 
   <div class="lco-tab-panel" data-panel="science">
-    <div class="lco-row">
-      <div class="lco-field"><label for="sch-strategy">Strategy</label><select id="sch-strategy"><option value="single">Single</option><option value="overlapping">Overlapping</option><option value="chunked">Chunked</option></select></div>
-      <div class="lco-field"><label for="sch-strategy-count">Requests per window</label><input id="sch-strategy-count" type="number" min="2" max="10" step="1" value="2"></div>
-      <div class="lco-field"><label for="sch-strategy-offset">Overlap shift (min)</label><input id="sch-strategy-offset" type="number" min="0.01" step="any" value="5"></div>
-      <div class="lco-field"><label for="sch-strategy-before">Chunk padding before (min)</label><input id="sch-strategy-before" type="number" min="0" step="any" value="10"></div>
-      <div class="lco-field"><label for="sch-strategy-after">Chunk padding after (min)</label><input id="sch-strategy-after" type="number" min="0" step="any" value="10"></div>
+    <div class="lco-grid" style="grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));">
+      <div class="lco-field"><label for="sch-strategy">Strategy <span class="help-tooltip" title="Single books one request per window. Overlapping and Chunked book several independent requests per window (see the note below).">?</span></label><select id="sch-strategy"><option value="single">Single</option><option value="overlapping">Overlapping</option><option value="chunked">Chunked</option></select></div>
+      <div class="lco-field"><label for="sch-strategy-count">Requests per window <span class="help-tooltip" title="How many requests each window is booked as (2-10). Not used by Single.">?</span></label><input id="sch-strategy-count" type="number" min="2" max="10" step="1" value="2"></div>
+      <div class="lco-field"><label for="sch-strategy-offset">Overlap shift (min) <span class="help-tooltip" title="Overlapping only: how much later each successive request starts. Every request keeps the full duration.">?</span></label><input id="sch-strategy-offset" type="number" min="0.01" step="any" value="5"></div>
+      <div class="lco-field"><label for="sch-strategy-before">Chunk pad before (min) <span class="help-tooltip" title="Chunked only: minutes added before each equal piece of the window. Adjacent padded requests can overlap.">?</span></label><input id="sch-strategy-before" type="number" min="0" step="any" value="10"></div>
+      <div class="lco-field"><label for="sch-strategy-after">Chunk pad after (min) <span class="help-tooltip" title="Chunked only: minutes added after each equal piece of the window. Adjacent padded requests can overlap.">?</span></label><input id="sch-strategy-after" type="number" min="0" step="any" value="10"></div>
     </div>
     <p class="lco-note">Overlapping keeps the full duration and shifts each request later. Chunked divides the selected window into equal pieces, then pads each piece; adjacent padded requests can overlap. All are independent bookings.</p>
     <p class="lco-note" id="strategy-summary" aria-live="polite"></p>
-    <div class="lco-row">
-      <div class="lco-field"><label><input id="sch-auto-resubmit" type="checkbox"> Auto-resubmit dropped observations</label></div>
-      <div class="lco-field"><label for="sch-rescue-min-fraction">Minimum original-window fraction</label><input id="sch-rescue-min-fraction" type="number" min="0" max="1" step="0.05" value="0.5"></div>
-      <div class="lco-field"><label for="sch-rescue-min-minutes">Minimum remainder (min)</label><input id="sch-rescue-min-minutes" type="number" min="0" step="any" value="30"></div>
+    <div class="lco-grid" style="margin-top: 0.6rem; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));">
+      <div class="lco-field"><label for="sch-auto-resubmit">Auto-resubmit <span class="help-tooltip" title="Resubmit a request LCO dropped, once, into what is left of its window. Every positive threshold to the right must be met; both zero disables it (see the note below).">?</span></label><input id="sch-auto-resubmit" type="checkbox"></div>
+      <div class="lco-field"><label for="sch-rescue-min-fraction">Min window fraction <span class="help-tooltip" title="Minimum fraction (0-1) of the original window that must remain for a replacement to be submitted.">?</span></label><input id="sch-rescue-min-fraction" type="number" min="0" max="1" step="0.05" value="0.5"></div>
+      <div class="lco-field"><label for="sch-rescue-min-minutes">Min remainder (min) <span class="help-tooltip" title="Minimum minutes of the original window that must remain for a replacement to be submitted.">?</span></label><input id="sch-rescue-min-minutes" type="number" min="0" step="any" value="30"></div>
     </div>
     <p class="lco-note">Applied to each newly drafted request. Every positive threshold must be met; both zero disables recovery. At most one replacement, using your saved token and a server-configured proposal rescue budget. Canceled request groups are never revived. The replacement is submitted first; the original is canceled afterwards only if it is still unscheduled, and a scheduled or running original is kept. Requires a pinned site and one REPEAT_EXPOSE configuration.</p>
 
@@ -757,7 +756,6 @@
   var lastTargetInfo = null;
   var lastInfoTarget = '';
   var pendingSource = null;
-  var targetRefreshTimer = null;
   var lastWindows = [];
 
   function setDot(id, ok) { var e = el(id); if (e) e.className = 'dot ' + (ok ? 'ok' : 'no'); }
@@ -1339,7 +1337,7 @@
     a.href = ref.url;
     a.target = '_blank';
     a.rel = 'noopener noreferrer';
-    a.textContent = ref.label + ' ↗';
+    a.textContent = ref.label;  // styles.css adds the ↗ to target=_blank links
     return a;
   }
   function sameRef(a, b) {
@@ -1347,7 +1345,14 @@
   }
   // "NASA — Leonardi et al. 2024 ↗" when every field shares a paper, else
   // "NASA — t0: A ↗; period: B ↗" (the archive picks a paper per parameter).
+  function hasRef(entry, fields) {
+    var refs = (entry && entry.refs) || {};
+    return fields.some(function (f) { return !!refs[f]; });
+  }
+  // With no paper at all it is the bare catalog name, which the field badges
+  // already show: callers add it only alongside something else.
   function catalogNodes(sourceName, entry, fields) {
+    if (!hasRef(entry, fields)) return [document.createTextNode(sourceName)];
     var nodes = [document.createTextNode(sourceName + ' — ')];
     var refs = (entry && entry.refs) || {};
     var shared = fields.every(function (f) { return sameRef(refs[f], refs[fields[0]]); });
@@ -1375,9 +1380,15 @@
       box.appendChild(row);
     });
   }
+  // t0 / period line, or none when it could only repeat the field badges.
+  function ephemLine(sourceName, entry) {
+    var fields = ['t0', 'period'];
+    return hasRef(entry, fields) ? ['t0 / period:', catalogNodes(sourceName, entry, fields)] : null;
+  }
   // Duration line; `note` says why it is borrowed from another catalog.
   function durationLine(durSrc, durEntry, note) {
     if (!durSrc) return null;
+    if (!note && !hasRef(durEntry, ['duration'])) return null;
     var nodes = durEntry ? catalogNodes(durSrc, durEntry, ['duration']) : [document.createTextNode(durSrc)];
     if (note) nodes.push(document.createTextNode(' (' + note + ')'));
     return ['Duration:', nodes];
@@ -1475,11 +1486,11 @@
       setFieldSource('sch-t0', auto.label, 'Auto resolved to the ' + auto.source + ' ephemeris');
       setFieldSource('sch-period', auto.label, 'Auto resolved to the ' + auto.source + ' ephemeris');
       renderProvenance([
-        ['t0 / period:', catalogNodes(auto.source, auto.data, ['t0', 'period'])],
+        ephemLine(auto.source, auto.data),
         durationLine(durSrc, durEntry, durNote(auto.source, auto.source + ' has no duration for ' + planet)),
       ]);
       saveOptions();
-      msg('msg-windows', auto.label + ': t0=' + auto.data.t0 + ', P=' + auto.data.period + ' d' + (dur != null ? ', dur=' + dur + ' h' : ''), 'ok');
+      msg('msg-windows', auto.label + ' ephemeris loaded', 'ok');
       return;
     }
 
@@ -1499,11 +1510,11 @@
       setFieldSource('sch-t0', source.toUpperCase());
       setFieldSource('sch-period', source.toUpperCase());
       renderProvenance([
-        ['t0 / period:', catalogNodes(source.toUpperCase(), ephem, ['t0', 'period'])],
+        ephemLine(source.toUpperCase(), ephem),
         durationLine(durSrc, durEntry, durNote(source.toUpperCase(), source.toUpperCase() + ' has no duration for ' + planet)),
       ]);
       saveOptions();
-      msg('msg-windows', source.toUpperCase() + ': t0=' + ephem.t0 + ', P=' + ephem.period + ' d' + (dur != null ? ', dur=' + dur + ' h' : ''), 'ok');
+      msg('msg-windows', source.toUpperCase() + ' ephemeris loaded', 'ok');
       return;
     }
 
@@ -1525,7 +1536,7 @@
       if (g.duration != null) { dur = g.duration; setVal('sch-duration', tupleString(g.duration, g.duration_unc)); setFieldSource('sch-duration', sheetBadge); }
       else renderProvenance([durationLine(durSrc, durEntry, 'the sheet has no duration for ' + planet)]);
       saveOptions();
-      msg('msg-windows', sheetLabel + ': t0=' + g.t0 + ', P=' + g.period + ' d' + (dur != null ? ', dur=' + dur + ' h' : ''), 'ok');
+      msg('msg-windows', sheetLabel + ' ephemeris loaded', 'ok');
       return;
     }
 
@@ -1543,7 +1554,7 @@
       setFieldSource('sch-t0', sheetBadge); setFieldSource('sch-period', sheetBadge);
       renderProvenance([durationLine(durSrc, durEntry, 'a transit-center fit has no duration of its own')]);
       saveOptions();
-      msg('msg-windows', sheetLabel + ' linear fit: t0=' + gt.t0 + ', P=' + gt.period + ' d' + (dur != null ? ', dur=' + dur + ' h' : ''), 'ok');
+      msg('msg-windows', sheetLabel + ' linear fit loaded', 'ok');
       return;
     }
 
@@ -1561,7 +1572,7 @@
       if (pe.duration != null) { dur = pe.duration; setVal('sch-duration', tupleString(pe.duration, pe.duration_unc)); setFieldSource('sch-duration', 'FIT'); }
       else renderProvenance([durationLine(durSrc, durEntry, 'this fit has no duration')]);
       saveOptions();
-      msg('msg-windows', datasetLabel(ds) + ': t0=' + pe.t0 + ', P=' + pe.period + ' d' + (dur != null ? ', dur=' + dur + ' h' : ''), 'ok');
+      msg('msg-windows', datasetLabel(ds) + ' ephemeris loaded', 'ok');
       return;
     }
 
@@ -1624,6 +1635,9 @@
     ephemTarget = target;
     if (!opts.silent) msg('msg-windows', 'Fetching target info…');
     return fetchTargetInfo(target).then(function (info) {
+      // The target was edited while this lookup was in flight; its answer
+      // describes a target the form no longer holds.
+      if (val('sch-target') !== target) return;
       if (!info.ok) {
         msg('msg-windows', info.error || 'lookup failed', 'err');
         return;
@@ -1638,6 +1652,7 @@
       applySource(info, opts);
       if (coordErr) msg('msg-windows', coordErr, 'err');
     }).catch(function (e) {
+      if (val('sch-target') !== target) return;
       msg('msg-windows', errText(e), 'err');
     });
   }
@@ -2914,15 +2929,17 @@
     refreshTargetFields();
   });
 
-  function scheduleTargetRefresh() {
-    if (targetRefreshTimer) window.clearTimeout(targetRefreshTimer);
-    targetRefreshTimer = window.setTimeout(function () {
-      refreshTargetFields({ silent: true });
-    }, 250);
-  }
-  el('sch-target').addEventListener('input', scheduleTargetRefresh);
+  // Look the target up once its name is committed (Enter, leaving the field,
+  // or picking a suggestion), never per keystroke: a half-typed name such as
+  // "HI" or "HIP 6" is a different target, and looking it up fills the form
+  // with that target's ephemeris and errors.
+  el('sch-target').addEventListener('input', function (e) {
+    // Picking a datalist suggestion fires input (inputType
+    // insertReplacementText in Chromium, no inputType in Firefox) and only
+    // fires change later, on blur.
+    if (!e.inputType || e.inputType === 'insertReplacementText') refreshTargetFields({ silent: true });
+  });
   el('sch-target').addEventListener('change', function () { refreshTargetFields({ silent: true }); });
-  el('sch-target').addEventListener('blur', function () { refreshTargetFields({ silent: true }); });
   function syncMidtimesBlock() {
     setEphemIgnored(isMidtimeSource(val('sch-source')));
     el('sch-rank').disabled = String(val('sch-source')).indexOf('ttv:') !== 0;

@@ -55,3 +55,15 @@ DEFAULT_MODELS: dict[str, list[tuple]] = {
 
 # Instruments whose defaults are not fitted from the archive.
 DEFAULT_SOURCE = {"sbig": "lco-etc"}
+
+# Seconds between exposures per readout mode: each mode's `overhead` in LCO's
+# instrument API (observe.lco.global/api/instruments/, read 2026-11-13).
+# muscat3 and muscat4 are the one LCO instrument class 2M0-SCICAM-MUSCAT. sbig
+# is archival-only and absent from that API, so it has no entry.
+_MUSCAT_READOUT_OVERHEAD_S = {"MUSCAT_FAST": 6.0, "MUSCAT_SLOW": 46.0}
+READOUT_OVERHEAD_S: dict[str, dict[str, float]] = {
+    "muscat3": _MUSCAT_READOUT_OVERHEAD_S,
+    "muscat4": _MUSCAT_READOUT_OVERHEAD_S,
+    "sinistro": {"central_2k_2x2": 9.0, "full_frame": 28.0},
+    "qhy600": {"central30x30": 4.0, "full_frame": 9.0},
+}

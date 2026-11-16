@@ -780,6 +780,14 @@ def explain_user(db_path: str, username: str) -> dict:
             "COUNT(DISTINCT instrument || '|' || obsdate || '|' || COALESCE(object, '')), "
             "COUNT(DISTINCT object) FROM summaries GROUP BY 1 ORDER BY 1"
         ).fetchall()
+        # Count with the clause the web applies, so rows a target grant makes
+        # visible are included and a row visible both ways is counted once.
+        clause, params = sql_not_denied(denied)
+        (visible_nights,) = conn.execute(
+            "SELECT COUNT(*) FROM (SELECT DISTINCT COALESCE(proposal_id, ''), instrument, "
+            f"obsdate, COALESCE(object, '') FROM summaries WHERE {clause})",
+            params,
+        ).fetchone()
     proposals = []
     observed: set[str] = set()
     for pid, target_nights, objects in rows:
@@ -799,6 +807,7 @@ def explain_user(db_path: str, username: str) -> dict:
         "username": username,
         "admin": admin,
         "proposals": proposals,
+        "visible_target_nights": visible_nights,
         # a grant on a proposal no summary carries gives the user nothing
         "target_grants": list_target_grants(db_path, username),
         "unmatched_grants": sorted(granted - observed),

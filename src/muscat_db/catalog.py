@@ -1578,7 +1578,8 @@ def _lco_key_project_candidates(raw: str) -> list[str]:
     out: list[str] = []
     for part in parts:
         for name in (part, re.sub(r"\.\d+$", "", part)):
-            if name and name not in out:
+            # A bare ".02" (from "TOI-6109 b (.02)") is not a designation.
+            if name and not re.fullmatch(r"[.\d]+", name) and name not in out:
                 out.append(name)
     return out
 
@@ -1640,6 +1641,10 @@ _NASA_REFLINK_COLUMNS = {
 }
 _REFLINK_HREF_RE = re.compile(r"""href\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))""", re.IGNORECASE)
 _HTML_TAG_RE = re.compile(r"<[^>]*>")
+# A primary-component suffix on an archive hostname ("DS Tuc A", "HIP 79098 AB",
+# "TIC 172900988 Aa"). B-H need no entry: _normalize_target_name already drops
+# a trailing one.
+_HOST_PRIMARY_SUFFIX_RE = re.compile(r"\s+A[Ba]?$")
 
 
 def parse_nasa_reflink(value) -> dict | None:
@@ -1795,7 +1800,7 @@ def _query_target_planets_nasa(target: str) -> dict:
             host = host[:-2].strip()
 
         cols = [
-            "pl_name", "pl_tranmid", "pl_tranmiderr1", "pl_tranmiderr2",
+            "hostname", "pl_name", "pl_tranmid", "pl_tranmiderr1", "pl_tranmiderr2",
             "pl_orbper", "pl_orbpererr1", "pl_orbpererr2",
             "pl_trandur", "pl_trandurerr1", "pl_trandurerr2",
             *_NASA_REFLINK_COLUMNS.values(),
@@ -1806,6 +1811,16 @@ def _query_target_planets_nasa(target: str) -> dict:
         try:
             data = _sync_get(url, headers={'User-Agent': 'Mozilla/5.0'}).json()
             for row in data:
+                # The LIKE prefix also returns other hosts whose name starts
+                # with this one ("HIP 6752" -> HIP 67522, "WASP-1" -> WASP-12),
+                # so keep only rows for this host. A primary's component suffix
+                # ("DS Tuc A") is allowed, since users type the host without it.
+                hostname = row.get("hostname") or ""
+                if target_norm not in {
+                    _normalize_target_name(hostname),
+                    _normalize_target_name(_HOST_PRIMARY_SUFFIX_RE.sub("", hostname)),
+                }:
+                    continue
                 pl_name = row.get("pl_name", "")
                 if pl_name and len(pl_name) > 2 and pl_name[-2] == " ":
                     letter = pl_name[-1].lower()
@@ -1996,18 +2011,22 @@ def resolve_target_astrometry(target: str, *, allow_remote: bool = True) -> dict
     return {"ra": ra, "dec": dec, "source": source, "epoch": SIMBAD_EPOCH, "pmra": None, "pmdec": None}
 
 
+_TOI_CANDIDATE_RE = re.compile(r"TOI[ -]?\d+\.\d+", re.IGNORECASE)
+
+
 def _simbad_coords(target: str, candidates: list[str]) -> tuple[float, float, str] | None:
     # Sesame/SIMBAD rejects an LCO-decorated compound name outright -- parens
     # aren't valid identifier syntax -- and unlike a bare TIC ID, a TOI
     # candidate suffix (".NN") also fails resolution (verified empirically:
     # "TOI-5012.01" 404s, "TOI-5012" resolves). resolve_lco_key_project_name
-    # is a no-op for an already-plain name, so the extra ".NN" strip below
-    # only ever fires for a name it actually rewrote.
-    # SIMBAD rejects a ".NN" candidate suffix (see above), so a decorated name
-    # is asked for only in its suffix-stripped forms; a plain name goes as is.
-    simbad_names = candidates
-    if resolve_lco_key_project_name(target) != target.strip():
-        simbad_names = list(dict.fromkeys(re.sub(r"\.\d+$", "", c) for c in candidates))
+    # is a no-op for an already-plain name. The ".NN" strip below fires for a
+    # name it rewrote and for any TOI candidate, such as a directly entered
+    # "TOI-5012.01". Other names ending in a dotted number are left alone.
+    decorated = resolve_lco_key_project_name(target) != target.strip()
+    simbad_names = list(dict.fromkeys(
+        re.sub(r"\.\d+$", "", c) if decorated or _TOI_CANDIDATE_RE.fullmatch(c) else c
+        for c in candidates
+    ))
     radec = None
     for simbad_name in simbad_names:
         radec = exp_calc.resolve_target_coords(simbad_name)
