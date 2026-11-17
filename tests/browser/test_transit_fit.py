@@ -519,3 +519,77 @@ def test_flare_prior_shape_converts_every_row(page):
     page.select_option("#opt-flare_tpeak_prior", "uniform")
     expect(_flare_cell(page, 0, "tpeak", "val")).to_have_value("2461314.55900")
     expect(_flare_cell(page, 0, "tpeak", "unc")).to_have_value("2461315.15900")
+
+
+def test_deleted_fit_run_shows_not_found_with_links_to_remaining_runs(page):
+    page.problems.allowed.append("HTTP 404: GET /transit-fit?")
+    page.problems.allowed.append("status of 404")
+    response = page.goto(f"{URL}&run=gone")
+    assert response.status == 404
+    notice = page.locator("#run-not-found")
+    expect(notice).to_contain_text("Run not found")
+    expect(notice).to_contain_text("gone")
+    # The page must not quietly show another run's results in its place.
+    expect(page.locator("#delete-btn")).to_have_count(0)
+    notice.get_by_role("link", name=FIT_RUN_ID).click()
+    page.wait_for_url(f"**run={FIT_RUN_ID}")
+    expect(page.locator("#run-not-found")).to_have_count(0)
+    expect(page.locator("#delete-btn")).to_be_visible()
+
+
+def test_running_fit_without_outputs_is_not_reported_missing(page, live_server):
+    # A fit still running has its run directory but no out/ yet; the /jobs
+    # row links to it, so it must not be shown as deleted.
+    running = live_server.root / "timer" / "muscat3" / "261001" / "TOI-1000" / "fit-running"
+    running.mkdir(parents=True)
+    try:
+        response = page.goto(f"{URL}&run=fit-running")
+        assert response.status == 200
+        expect(page.locator("#run-not-found")).to_have_count(0)
+    finally:
+        page.context.close()
+        running.rmdir()
+
+
+def test_delete_confirmation_names_the_selected_fit_run(page, live_server, fitter):
+    import shutil
+
+    parent = live_server.root / "timer" / "muscat3" / "261001" / "TOI-1000"
+    second = parent / "fit-extra"
+    shutil.copytree(parent / FIT_RUN_ID, second)
+    (second / "meta.yaml").write_text("run_id: fit-extra\nrun_name: another fit\n")
+    try:
+        page.goto(f"{URL}&run=fit-extra")
+        page.wait_for_load_state("networkidle")
+        page.click("#delete-btn")
+        expect(page.locator("#delete-confirm-overlay")).to_contain_text("run another fit")
+        page.click("#delete-cancel-btn")
+        assert fitter["delete"] == []
+    finally:
+        page.wait_for_load_state("networkidle")
+        page.context.close()
+        shutil.rmtree(second)
+
+
+def test_successful_fit_delete_drops_the_deleted_run_from_the_url(page, fitter):
+    page.goto(f"{URL}&run={FIT_RUN_ID}")
+    page.wait_for_load_state("networkidle")
+    page.click("#delete-btn")
+    page.click("#delete-confirm-btn")
+    page.wait_for_url(lambda url: "run=" not in url)
+    assert page.url.endswith(URL)
+
+
+def test_fit_run_hidden_from_the_viewer_shows_not_found(page, monkeypatch):
+    from muscat_db import web
+
+    class HideFit:
+        def hidden(self, level, inst, date, target, run_id=""):
+            return level == "transit_fit" and run_id == FIT_RUN_ID
+
+    monkeypatch.setattr(web, "_product_visibility", lambda denied=None: HideFit())
+    page.problems.allowed.append("HTTP 404: GET /transit-fit?")
+    page.problems.allowed.append("status of 404")
+    response = page.goto(f"{URL}&run={FIT_RUN_ID}")
+    assert response.status == 404
+    expect(page.locator("#run-not-found")).to_contain_text("No runs remain")

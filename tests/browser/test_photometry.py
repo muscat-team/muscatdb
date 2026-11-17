@@ -288,6 +288,22 @@ def test_delete_confirmation_names_the_selected_run(page, live_server, pipeline)
         shutil.rmtree(second)
 
 
+def test_deleted_run_shows_not_found_with_links_to_remaining_runs(page):
+    page.problems.allowed.append('HTTP 404: GET /photometry?')
+    page.problems.allowed.append('status of 404')
+    response = page.goto(f'/photometry?{DATASET}&run=gone')
+    assert response.status == 404
+    notice = page.locator('#run-not-found')
+    expect(notice).to_contain_text('Run not found')
+    expect(notice).to_contain_text('gone')
+    # The page must not quietly show another run's products in its place.
+    expect(page.locator('#delete-btn')).to_have_count(0)
+    notice.get_by_role('link', name=RUN_ID).click()
+    page.wait_for_url(f'**run={RUN_ID}')
+    expect(page.locator('#run-not-found')).to_have_count(0)
+    expect(page.locator('#delete-btn')).to_be_visible()
+
+
 def test_missing_raw_data_disables_launches(page, live_server):
     raw = live_server.root / 'raw' / 'MuSCAT3' / '261001'
     renamed = raw.with_name('held-261001')
