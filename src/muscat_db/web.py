@@ -2886,7 +2886,7 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
         for item in outputs.get("summary_items", []):
             image_info[item["file"]] = image_delivery.metadata(rdir / item["file"])
         for prods in outputs.get("bands", {}).values():
-            for key in ("ref", "apertures", "cutouts", "alignment", "gif"):
+            for key in ("ref", "apertures", "cutouts", "alignment", "covariates", "gif"):
                 if key in prods:
                     name = prods[key]["file"]
                     image_info[name] = image_delivery.metadata(rdir / name)
