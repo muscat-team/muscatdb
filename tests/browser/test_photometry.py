@@ -193,6 +193,15 @@ def test_delete_reduction_after_confirmation(page, pipeline):
     assert len(pipeline["delete"]) == 1
 
 
+def test_successful_delete_drops_the_deleted_run_from_the_url(page, pipeline):
+    page.goto(URL)
+    page.wait_for_load_state("networkidle")
+    page.click("#delete-btn")
+    page.click("#delete-confirm-btn")
+    page.wait_for_url(lambda url: "run=" not in url)
+    assert page.url.endswith(f"/photometry?{DATASET}")
+
+
 def test_default_settings_reset_persists_after_navigation(page):
     page.goto(URL)
     page.wait_for_load_state('networkidle')
@@ -259,6 +268,24 @@ def test_delete_can_be_cancelled_without_a_request(page, pipeline):
     page.click('#delete-cancel-btn')
     expect(page.locator('#delete-confirm-overlay')).not_to_be_visible()
     assert pipeline['delete'] == []
+
+
+def test_delete_confirmation_names_the_selected_run(page, live_server, pipeline):
+    parent = live_server.root / 'prose/muscat3/261001/_runs/TOI-1000'
+    second = parent / 'r-extra'
+    shutil.copytree(parent / RUN_ID, second)
+    (second / '_webrun_meta.json').write_text('{"run_id":"r-extra","run_name":"another reduction"}')
+    try:
+        page.goto(f'/photometry?{DATASET}&run=r-extra')
+        page.wait_for_load_state('networkidle')
+        page.click('#delete-btn')
+        message = page.locator('#delete-confirm-overlay')
+        expect(message).to_contain_text('run another reduction')
+        page.click('#delete-cancel-btn')
+        assert pipeline['delete'] == []
+    finally:
+        page.context.close()
+        shutil.rmtree(second)
 
 
 def test_missing_raw_data_disables_launches(page, live_server):

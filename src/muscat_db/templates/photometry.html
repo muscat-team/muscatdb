@@ -743,7 +743,7 @@
   <div id="delete-confirm-overlay">
     <div class="modal-box">
       <p style="margin-bottom:0.75rem;font-size:0.95rem;font-weight:600;">Delete reduction files</p>
-      <p style="color:var(--text-dim);font-size:0.85rem;margin-bottom:1.5rem;line-height:1.5;">Delete all reduction products for <strong>{{ sel_target }}</strong> ({{ sel_inst }}/{{ sel_date }})? This cannot be undone.</p>
+      <p style="color:var(--text-dim);font-size:0.85rem;margin-bottom:1.5rem;line-height:1.5;">Delete all reduction products for <strong>{{ sel_target }}</strong> ({{ sel_inst }}/{{ sel_date }}){% if sel_run %} — run <strong>{{ run_labels.get(sel_run, sel_run) }}</strong>{% endif %}? This cannot be undone.</p>
       <div style="display:flex;gap:0.5rem;justify-content:flex-end;">
         <button class="btn" id="delete-cancel-btn">Cancel</button>
         <button class="btn" id="delete-confirm-btn" style="border-color:var(--red);color:var(--red);">Delete</button>
@@ -1962,7 +1962,11 @@
     }).then(function (r) { return r.json(); }).then(function (res) {
       if (res.ok) {
         if (typeof window.showLoading === 'function') window.showLoading('Reloading…');
-        setTimeout(function () { window.location.reload(); }, 800);
+        // The deleted run no longer exists: drop it from the URL so the page
+        // and its address agree on the run shown next (the newest left).
+        var reloadUrl = new URL(window.location.href);
+        reloadUrl.searchParams.delete('run');
+        setTimeout(function () { window.location.replace(reloadUrl.toString()); }, 800);
       } else {
         window.showMessageModal('Error', 'Delete failed: ' + (res.error || res.detail || 'unknown error'));
         deleteBtn.disabled = false;
