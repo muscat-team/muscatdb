@@ -48,6 +48,28 @@ def test_loading_bar_clears_after_load(page):
     assert "done" in page.get_attribute("#loading-bar", "class")
 
 
+def _tracked_while_in_flight(page, url: str) -> int:
+    """In-flight request count the loading bar sees right after ``fetch(url)``."""
+    return page.evaluate("url => { fetch(url); return window.MuscatFetchTracker.active; }", url)
+
+
+def test_archive_download_progress_poll_does_not_flash_the_status_bar(page):
+    """The LCO archive page polls a download's progress every 1.5 s. Counting
+    that poll as page activity raised the status bar and then showed "Ready"
+    on every tick for as long as the download ran."""
+    page.route("**/api/lco/archive/**", lambda route: route.fulfill(json={"ok": True}))
+    page.goto("/targets")
+    page.wait_for_load_state("networkidle")
+    page.wait_for_function("!document.getElementById('status-bar').classList.contains('visible')")
+
+    assert _tracked_while_in_flight(page, "/api/lco/archive/download/job-1") == 0
+    page.wait_for_load_state("networkidle")
+    assert not page.evaluate("document.getElementById('status-bar').classList.contains('visible')")
+
+    # A one-off query still counts, so the bar keeps reporting real loading.
+    assert _tracked_while_in_flight(page, "/api/lco/archive/frames?request_id=1") == 1
+
+
 @pytest.mark.parametrize(("section", "path"), [
     ("targets", "/targets"), ("obslog", "/obs"), ("projects", "/projects"),
     ("jobs", "/jobs"), ("settings", "/settings"), ("guide", "/guide"),

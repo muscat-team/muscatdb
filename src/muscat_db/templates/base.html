@@ -19,7 +19,9 @@
   // indicator while it queries data (FOV → Gaia, ephemeris datasets, LCO
   // schedule, …). It counts in-flight *same-origin* /api/ requests only, so the
   // background job/status pollers (which hit /jobs/status, not /api/) never
-  // flash the bar. The loading-bar controller below subscribes via onChange.
+  // flash the bar. Progress polls under /api/ are excluded by path below, since
+  // a poll every second or two would raise the bar and show "Ready" each time.
+  // The loading-bar controller below subscribes via onChange.
   (function () {
     var origFetch = window.fetch ? window.fetch.bind(window) : null;
     if (!origFetch) return;
@@ -39,7 +41,9 @@
                    : (input && input.url) ? input.url : String(input);
         var u = new URL(urlStr, window.location.href);
         var isStatus = u.pathname.endsWith('/status') || u.pathname.endsWith('/status-batch');
-        return u.origin === window.location.origin && u.pathname.indexOf('/api/') === 0 && !isStatus;
+        // GET /api/lco/archive/download/<job id>: the archive page's progress poll.
+        var isProgressPoll = /^\/api\/lco\/archive\/download\/[^\/]+$/.test(u.pathname);
+        return u.origin === window.location.origin && u.pathname.indexOf('/api/') === 0 && !isStatus && !isProgressPoll;
       } catch (e) { return false; }
     }
     window.fetch = function (input, init) {
