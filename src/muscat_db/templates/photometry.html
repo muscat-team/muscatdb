@@ -303,7 +303,7 @@
       {% for band, prods in outputs.bands.items() %}
       <div class="band-panel {% if loop.first %}active{% endif %}" data-band="{{ band }}">
         <div class="fig-grid col sortable" data-sort-key="band">
-          {% for key in ['ref', 'apertures', 'cutouts', 'alignment', 'gif'] %}
+          {% for key in ['ref', 'apertures', 'cutouts', 'alignment', 'covariates', 'gif'] %}
             {% if prods.get(key) %}
             <figure class="fig" data-fig-id="{{ key }}">
               <figcaption class="cap">

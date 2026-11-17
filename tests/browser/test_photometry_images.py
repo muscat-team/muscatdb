@@ -27,6 +27,7 @@ def image_products(live_server):
     for band in ('gp', 'rp'):
         for key in ('ref', 'apertures', 'cutouts', 'alignment'):
             plot(run / f'HAT-P-1_muscat2_{band}_261002_{key}.png', (1200, 900))
+        plot(run / f'HAT-P-1_muscat2_{band}_261002_band_covariates.png', (960, 1260))
         Image.new('RGB', (512, 512), 'red').save(run / f'HAT-P-1_muscat2_{band}_261002.gif',
             save_all=True, append_images=[Image.new('RGB', (512, 512), 'blue')], duration=100, loop=0)
     cal = night.with_name(night.name + '_calibrated')
@@ -70,6 +71,17 @@ def test_initial_loading_and_mobile_layout(page, width):
         page.locator('#minimize-chat').click()
         page.reload()
         expect(page.locator('#chat-window')).not_to_have_class(re.compile(r'\bminimized\b'))
+
+
+def test_band_tab_shows_its_covariate_figure(page):
+    page.goto(URL)
+    page.locator('button[data-band="rp"]').click()
+    figure = page.locator('.band-panel.active img[alt="rp covariates"]')
+    figure.scroll_into_view_if_needed()
+    expect(figure).to_be_visible()
+    page.wait_for_function('(i) => i.naturalWidth > 0', arg=figure.element_handle())
+    assert '_rp_261002_band_covariates.png' in figure.get_attribute('src')
+    expect(page.locator('img[alt="gp covariates"]')).to_be_hidden()
 
 
 def test_scroll_band_animation_and_calibration(page):
