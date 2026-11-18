@@ -693,6 +693,9 @@ def test_bump_center_uses_selected_curve_after_reload(page, fitter, live_server,
         for path, times in zip(paths, [(2460000.1, 2460000.2), (2460000.3, 2460000.4)]):
             path.write_text("BJD_TDB,Flux,Flux_err\n" + "".join(f"{t},1,0.001\n" for t in times))
         _ready_to_fit(page)
+        # Match the transit ephemeris to the shifted fixture light curves.
+        page.locator('.planet-t0').first.fill('2460000.15,0.01')
+        page.locator('.planet-t0').first.blur()
         page.click("#deselect-all-csvs")
         page.locator('.csv-card', has_text=CSVS[0]).locator('.csv-checkbox').check()
         reveal(page, "#opt-include_bump")
