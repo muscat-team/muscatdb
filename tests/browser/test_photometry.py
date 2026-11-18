@@ -405,3 +405,77 @@ def test_pipeline_controls_persist_after_navigation_and_are_sent_on_run(page, pi
         else:
             assert options[key] == pytest.approx(float(value))
     assert {key: options[key] for key in flags} == flags
+
+
+def test_precision_options_persist_submit_and_reset(page, pipeline):
+    page.goto(URL)
+    page.wait_for_load_state("networkidle")
+    values = dict(comp_ensemble="bright", comp_criterion="check", comp_min_flux_frac="0.4",
+                  clip_star_sigma="5", clip_star_window="13")
+    for key, value in values.items():
+        selector = "#opt-" + key
+        reveal(page, selector)
+        if key in ("comp_ensemble", "comp_criterion"):
+            page.select_option(selector, value)
+        else:
+            page.fill(selector, value)
+    reveal(page, "#opt-save_flux_datacube")
+    page.check("#opt-save_flux_datacube")
+    page.wait_for_function("""([key, values]) => {
+        const saved = JSON.parse(localStorage.getItem(key) || '{}');
+        return saved.save_flux_datacube === true &&
+            Object.entries(values).every(([k, v]) => saved[k] === v);
+    }""", arg=[OPT_KEY, values])
+    page.goto("/jobs")
+    page.goto(URL)
+    page.wait_for_load_state("networkidle")
+    for key, value in values.items():
+        expect(page.locator("#opt-" + key)).to_have_value(value)
+    expect(page.locator("#opt-save_flux_datacube")).to_be_checked()
+    with page.expect_response("**/api/photometry/run") as response:
+        page.click("#run-full-btn")
+    assert response.value.ok
+    options = pipeline["start"][-1]["options"]
+    assert options["comp_ensemble"] == "bright"
+    assert options["comp_criterion"] == "check"
+    for key in ("comp_min_flux_frac", "clip_star_sigma", "clip_star_window"):
+        assert options[key] == float(values[key])
+    assert options["save_flux_datacube"] is True
+    with page.expect_response("**/api/photometry/cancel"):
+        page.click("#cancel-btn")
+    reveal(page, "#defaults-btn")
+    page.click("#defaults-btn")
+    page.goto("/jobs")
+    page.goto(URL)
+    for key, value in dict(comp_ensemble="greedy", comp_criterion="target",
+                           comp_min_flux_frac="0.3", clip_star_sigma="", clip_star_window="11").items():
+        expect(page.locator("#opt-" + key)).to_have_value(value)
+    expect(page.locator("#opt-save_flux_datacube")).not_to_be_checked()
+
+
+def test_noise_budget_and_flux_cube_download(page, live_server):
+    import numpy as np
+    from muscat_db import photometry as phot
+
+    directory = phot.run_output_dir("muscat3", "261001", "TOI-1000", RUN_ID)
+    archive = directory / "TOI-1000_muscat3_261001.npz"
+    original = archive.read_bytes() if archive.exists() else None
+    cube = directory / "TOI-1000_muscat3_261001_flux_datacube.npz"
+    try:
+        np.savez(archive, gp__noise__expected_ppt=2.04, gp__noise__achieved_ptp_ppt=2.0,
+                 gp__noise__ratio=2/2.04)
+        np.savez(cube, flux=np.zeros((2, 3, 4)))
+        page.goto(URL)
+        table = page.locator("#noise-budget")
+        expect(table).to_contain_text("2.040")
+        expect(table).to_contain_text("0.980")
+        link = page.get_by_role("link", name="per-star flux cube (.npz)")
+        with page.expect_download() as download:
+            link.click()
+        assert download.value.suggested_filename == cube.name
+    finally:
+        cube.unlink(missing_ok=True)
+        if original is None:
+            archive.unlink(missing_ok=True)
+        else:
+            archive.write_bytes(original)

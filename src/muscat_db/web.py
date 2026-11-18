@@ -2943,6 +2943,7 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
         command=command, raw_missing=raw_missing,
         default_bands=phot.DEFAULT_BANDS,
         run_defaults=merged_defaults,
+        noise_columns=phot.NOISE_COLUMNS,
         postproc_defaults=phot.POSTPROCESS_DEFAULTS,
         cmap_choices=phot.CMAP_CHOICES,
         nan_imputation_methods=phot.NAN_IMPUTATION_METHODS,

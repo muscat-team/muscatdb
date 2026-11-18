@@ -1176,15 +1176,15 @@ Contract changes muscat-db already handles:
   looks at the return code, so job states are the same as before.
 - The light-curve CSV gains `PeakRadius(pix)`; `transit_fit.py` excludes it
   from covariates.
-- Each band writes `…_{band}_{date}_band_covariates.png`. `list_outputs`
-  does not recognise that suffix and skips it, so it does not replace the
-  multi-band `…_covariates.png` summary; the photometry page does not show it.
-- `--save_flux_datacube` is opt-in and muscat-db does not pass it.
-- v3.8.0's comparison-ensemble options (`--comp_ensemble`,
-  `--comp_criterion`, `--comp_min_flux_frac`, `--clip_star_sigma`,
-  `--clip_star_window`) default to the previous behaviour and muscat-db does
-  not pass them. The npz gains `{band}__noise__*` keys, which muscat-db does
-  not read.
+- Each band writes `…_{band}_{date}_band_covariates.png`, displayed under its
+  band tab separately from the multi-band covariate summary.
+- The photometry page exposes `--save_flux_datacube` as an opt-in and offers the
+  resulting `*_flux_datacube.npz` separately from the final light-curve archive.
+- The Precision controls forward `--comp_ensemble`, `--comp_criterion`,
+  `--comp_min_flux_frac`, `--clip_star_sigma`, and `--clip_star_window` when
+  non-default. Defaults preserve the previous behaviour. The page reads the
+  saved `{band}__noise__*` scalar diagnostics from the selected main NPZ archive;
+  numerical processing stays in prose2. See `docs/science.md`.
 
 The telescope definitions and declared dependencies in prose2 are unchanged
 between v3.5.3 and v3.8.0. The frozen settings, aliases, and source-file hashes
