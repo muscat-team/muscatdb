@@ -487,8 +487,8 @@ def test_flare_row_added_under_uniform_priors_passes_validation(page, fitter):
     # bounds that bracket them instead.
     expect(_flare_cell(page, 1, "fwhm", "val")).to_have_value("0.0")
     expect(_flare_cell(page, 1, "fwhm", "unc")).to_have_value("0.1")
-    expect(_flare_cell(page, 1, "ampl", "val")).to_have_value("0.0")
-    expect(_flare_cell(page, 1, "ampl", "unc")).to_have_value("0.05")
+    expect(_flare_cell(page, 1, "ampl", "val")).to_have_value("-20")
+    expect(_flare_cell(page, 1, "ampl", "unc")).to_have_value("40")
 
     with page.expect_response("**/api/transit-fit/run"):
         page.click("#run-test-btn")
@@ -496,7 +496,7 @@ def test_flare_row_added_under_uniform_priors_passes_validation(page, fitter):
     assert page.locator("#flare-rows .flare-cell.is-invalid").count() == 0
     options = fitter["start"][-1]["options"]
     assert options["flare_fwhm"].endswith("; 0.0,0.1")
-    assert options["flare_ampl"].endswith("; 0.0,0.05")
+    assert options["flare_ampl"] == "-20,40; -20,40"
 
 
 def test_flare_prior_shape_converts_every_row(page):

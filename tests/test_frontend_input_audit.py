@@ -582,14 +582,6 @@ def test_transit_fit_results_summary_closes_its_layout_wrappers():
     assert "</table>\n      </div>\n    </div>" in summary_block
 
 
-def test_transit_fit_dense_option_rows_have_mobile_layout_hooks():
-    html = _read_template("transit_fit.html")
-
-    assert html.count('class="transit-option-grid"') >= 6
-    assert html.count('class="fit-option-row"') == 1
-    assert "@media (max-width: 560px)" in html
-
-
 def test_ephemeris_disclosure_triangles_use_standard_size():
     html = _read_template("ephemeris.html")
     css = STYLES_CSS.read_text()

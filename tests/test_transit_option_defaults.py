@@ -34,3 +34,16 @@ def test_blank_bump_center_without_time_range_rejected_at_launch(tmp_path):
     csv.write_text('time,flux\n0.1,1\n')
     assert 'required' in fit.validate_flare_times({'include_bump': 'true'}, [csv])
     assert fit.validate_flare_times({'include_bump': 'true', 'bump_tcenter': '2460000.1,0.1'}, [csv]) is None
+
+
+@pytest.mark.parametrize('key', ['trim_beg', 'trim_end'])
+@pytest.mark.parametrize('value', ['nan', 'inf', '-inf', '-0.005', 'invalid'])
+def test_invalid_trim_days_rejected(key, value):
+    """Trim durations must be finite and nonnegative, in both directions."""
+    assert fit.validate_fit_options({key: value}) is not None
+
+
+@pytest.mark.parametrize('key', ['trim_beg', 'trim_end'])
+@pytest.mark.parametrize('value', ['', '0', '0.005'])
+def test_valid_trim_days_accepted(key, value):
+    assert fit.validate_fit_options({key: value}) is None

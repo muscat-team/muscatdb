@@ -574,6 +574,8 @@ _PLANET_TOKEN_RE = re.compile(r"^[A-Za-z]$")
 #   "num"    -> any finite number
 # An empty value is allowed for every field; it keeps the pipeline default.
 _FIT_NUMERIC_FIELDS: list[tuple[str, str, str]] = [
+    ("trim_beg",     "Trim begin (days)",    "nonneg"),
+    ("trim_end",     "Trim end (days)",      "nonneg"),
     ("tc_pred_unc", "tc_pred uncertainty",  "pos"),
     ("teff",        "Teff (K)",             "pos"),
     ("teff_unc",    "Teff uncertainty",     "pos"),
