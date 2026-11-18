@@ -71,3 +71,13 @@ def test_nonnegative_uniform_amplitude_serialization(model, tmp_path):
     block = yaml.safe_load((tmp_path / 'fit.yaml').read_text())[model]
     # timer stores Uniform bounds as midpoint and full width.
     assert (block['ampl'], block['ampl_unc'], block['ampl_prior']) == (5, 10, 'uniform')
+
+
+@pytest.mark.parametrize('model', ['bump', 'flare'])
+@pytest.mark.parametrize('value', [None, 0, False, [], {}])
+def test_nonstring_amplitudes_rejected(model, value):
+    options = {'include_' + model: 'true', model + '_ampl': value}
+    if model == 'flare':
+        options.update(flare_tpeak='2460000,0.1', flare_fwhm='0.02,0.01')
+    error = fit.validate_fit_options(options)
+    assert error is not None and 'ampl' in error

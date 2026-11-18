@@ -756,7 +756,8 @@ def test_bump_prior_conversion_preserves_bjd_precision(page, fitter, centers, un
 
 
 @pytest.mark.parametrize('custom', [False, True])
-def test_saved_gaussian_amplitudes_are_migrated_explicitly(page, custom):
+@pytest.mark.parametrize('backup', [False, True])
+def test_saved_gaussian_amplitudes_are_migrated_explicitly(page, custom, backup):
     _ready_to_fit(page)
     page.evaluate("""({key, custom}) => {
         const saved = JSON.parse(localStorage.getItem(key)) || {};
@@ -766,8 +767,13 @@ def test_saved_gaussian_amplitudes_are_migrated_explicitly(page, custom):
         saved.bump_ampl_prior = saved.flare_ampl_prior = 'gaussian';
         saved.gp_log_amp = '-3'; saved.gp_log_amp_unc = '2';
         localStorage.setItem(key, JSON.stringify(saved));
-    }""", {'key': OPT_KEY, 'custom': custom})
-    page.reload()
+    }""", {'key': 'muscat_fit_options_backup' if backup else OPT_KEY, 'custom': custom})
+    if backup:
+        reveal(page, '#restore-btn')
+        page.click('#restore-btn')
+        page.click('#message-modal-ok')
+    else:
+        page.reload()
     reveal(page, '#opt-include_flare')
     expect(page.locator('#amplitude-migration-notice')).to_be_visible()
     expect(page.locator('#opt-bump_ampl')).to_have_value(',' if custom else '0,10')
@@ -775,4 +781,9 @@ def test_saved_gaussian_amplitudes_are_migrated_explicitly(page, custom):
     expect(page.locator('#opt-flare_ampl_prior')).to_have_value('uniform')
     expect(_flare_cell(page, 0, 'ampl', 'val')).to_have_value('' if custom else '0')
     expect(_flare_cell(page, 0, 'ampl', 'unc')).to_have_value('' if custom else '10')
+    expect(page.locator('#opt-gp_log_amp')).to_have_value('0,2')
+
+    page.reload()
+    expect(page.locator('#amplitude-migration-notice')).to_have_count(0)
+    expect(page.locator('#opt-bump_ampl')).to_have_value(',' if custom else '0,10')
     expect(page.locator('#opt-gp_log_amp')).to_have_value('0,2')

@@ -970,7 +970,10 @@ def validate_fit_options(options: dict | None, time_range: tuple[float, float] |
         prior = str(o.get(f"{model}_ampl_prior") or "uniform").strip().lower()
         if prior != "uniform":
             return f"{model} ampl prior must be uniform with nonnegative bounds"
-        raw = str(o.get(f"{model}_ampl") or "0,10")
+        raw = o.get(f"{model}_ampl", "")
+        if not isinstance(raw, str):
+            return f"{model} ampl requires low,high bounds as text"
+        raw = raw.strip() or "0,10"
         for row, pair in enumerate(raw.split(";"), start=1):
             try:
                 low, high = map(float, pair.split(","))

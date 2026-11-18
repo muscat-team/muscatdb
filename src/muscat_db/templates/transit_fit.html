@@ -1768,8 +1768,7 @@
     }
   }
 
-  function restoreOptions() {
-    var saved = MuscatOptions.restore(OPT_KEY);
+  function migrateAmplitudeOptions(saved) {
     if (saved && saved.amplitude_defaults_version !== '1') {
       var changed = false;
       ['bump', 'flare'].forEach(function (model) {
@@ -1794,12 +1793,19 @@
       }
       saved.amplitude_defaults_version = '1';
       if (changed) {
-        var notice = document.createElement('p');
+        var notice = document.getElementById('amplitude-migration-notice') || document.createElement('p');
         notice.id = 'amplitude-migration-notice';
         notice.textContent = 'Saved amplitude settings updated: bump and flare amplitudes now require nonnegative Uniform bounds in ppt (default 0–10). Custom Gaussian amplitudes were cleared; enter new bounds before fitting. The old GP amplitude default is now 0,2.';
         document.getElementById('flare-rows-wrap').before(notice);
       }
     }
+
+    return saved;
+  }
+
+  function restoreOptions() {
+    var saved = migrateAmplitudeOptions(MuscatOptions.restore(OPT_KEY));
+    if (saved) MuscatStorage.setJSON(OPT_KEY, saved);
 
     var container = document.getElementById('planet-cards-container');
     if (container) container.innerHTML = '';
@@ -1977,12 +1983,17 @@
       var backup;
       backup = MuscatStorage.getJSON(BACKUP_KEY, null);
       if (backup) {
+        migrateAmplitudeOptions(backup);
+        MuscatStorage.setJSON(BACKUP_KEY, backup);
         ['teff','teff_unc','logg','logg_unc','feh','feh_unc',
          'tune','draws','chains','cores','spline_knots','clip_nsig','chunk_thresh','trim_beg','trim_end',
+         'bump_tcenter','bump_tcenter_prior','bump_width','bump_width_prior','bump_ampl','bump_ampl_prior',
+         'flare_tpeak_prior','flare_fwhm_prior','flare_ampl_prior',
          'gp_log_amp_prior','gp_log_scale_prior'].forEach(function (id) {
           var el = document.getElementById('opt-'+id);
           if (el && backup[id] !== undefined) el.value = backup[id];
         });
+        setFlareRowsFromStrings(backup);
         [['gp_log_amp', 'gp_log_amp_unc'], ['gp_log_scale', 'gp_log_scale_unc']].forEach(function (keys) {
           var el = document.getElementById('opt-' + keys[0]);
           if (el && (backup[keys[0]] !== undefined || backup[keys[1]] !== undefined)) {
@@ -1991,6 +2002,7 @@
         });
 
         ['include_mean','use_custom_optimizer','spline','add_bias','quadratic','clip','chunk_offset',
+         'include_bump','chromatic_bump','include_flare','chromatic_flare',
          'use_gp','gp_per_dataset_log_amp','gp_per_dataset_log_scale'].forEach(function (id) {
           var el = document.getElementById('opt-'+id);
           if (el && backup[id] !== undefined) el.checked = backup[id] === 'true';
