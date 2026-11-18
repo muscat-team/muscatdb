@@ -113,6 +113,12 @@ RUN_DEFAULTS: dict = {
     "bin_size_minutes": 10.0,
     "nan_imputation_method": "linear",
     "target_id": "",           # "" -> auto
+    "comp_ensemble": "greedy",
+    "comp_criterion": "target",
+    "comp_min_flux_frac": 0.3,
+    "clip_star_sigma": None,
+    "clip_star_window": 11,
+    "save_flux_datacube": False,
     "comparison_ids": "",      # "" -> auto, or "1,2,3"
     "avoid_comparison_ids": "",  # "" -> none; "1,2,3" -> --avoid_cids (requires --ref_band)
     "avoid_nearby_star_mode": "auto",  # off | auto | custom
@@ -828,6 +834,8 @@ def empty_outputs() -> dict:
         "summary_items": [],
         "bands": {},
         "npz": None,
+        "flux_datacube": None,
+        "noise_budget": {},
         "log": None,
         "has_any": False,
         "masters": [],
@@ -860,7 +868,8 @@ def list_outputs(
     ``site``/``mode``/``telescope`` (the ones actually shown), ``ref_header``
     (the reference-frame header sidecar, site/telescope/mode-scoped), and
     ``ref_selection`` (the ``--ref_select quality`` audit report, if present).
-    Only filenames are returned; serve them via the file route.
+    Product filenames are served via the file route. ``noise_budget`` contains
+    the scalar diagnostics saved by prose2 in the selected NPZ archive.
 
     A single sinistro date+target can hold products from more than one LCO
     site, physical telescope (multiple 1m units can share a site), and readout
@@ -1045,6 +1054,12 @@ def list_outputs(
             if effective_mode is not None and _mode_of(ms) != effective_mode:
                 continue
             rest = ms.group("rest")
+            if rest == "_flux_datacube.npz":
+                if out["flux_datacube"] is None or mtime > out.get("_cube_mtime", 0):
+                    out["flux_datacube"] = name
+                    out["_cube_mtime"] = mtime
+                out["has_any"] = True
+                continue
             if rest == ".npz":
                 existing = out.get("npz")
                 if existing is None or mtime > out.get("_npz_mtime", 0):
@@ -1143,6 +1158,7 @@ def list_outputs(
     for band_d in out["bands"].values():
         for d in band_d.values():
             d.pop("_mtime", None)
+    out.pop("_cube_mtime", None)
     out.pop("_npz_mtime", None)
     out.pop("_ref_header_mtime", None)
     out.pop("_ref_selection_mtime", None)
@@ -1157,7 +1173,41 @@ def list_outputs(
     for b, v in out["bands"].items():
         ordered.setdefault(b, v)
     out["bands"] = ordered
+    if out["npz"]:
+        out["noise_budget"] = read_noise_budget(rdir / out["npz"])
     return out
+
+
+NOISE_COLUMNS = (
+    ("photon_ppt", "Photon"), ("sky_ppt", "Sky"), ("read_ppt", "Read"),
+    ("comparison_ppt", "Comparisons"), ("expected_ppt", "Expected total"),
+    ("achieved_ptp_ppt", "Achieved point-to-point"), ("ratio", "Achieved / expected"),
+)
+
+
+def read_noise_budget(path: Path) -> dict:
+    """Read only prose2's scalar diagnostics, never the star/flux arrays."""
+    import zipfile
+
+    import numpy as np
+
+    budget = {}
+    try:
+        with np.load(path, allow_pickle=False) as archive:
+            for name in archive.files:
+                band, sep, key = name.partition("__noise__")
+                if not sep or key not in dict(NOISE_COLUMNS) or not _BAND_RE.fullmatch(band):
+                    continue
+                value = archive[name]
+                if value.shape != ():
+                    continue
+                value = float(value)
+                budget.setdefault(band, {})[key] = value if math.isfinite(value) else None
+    except (OSError, ValueError, TypeError, EOFError, zipfile.BadZipFile):
+        # Old runs have no diagnostics; a run still writing its archive must
+        # not make its live page fail to render.
+        return {}
+    return budget
 
 
 def csv_preview(path: Path, n: int = 8) -> tuple[list[str], list[list[str]]]:
@@ -1595,6 +1645,22 @@ def forwarded_option_error(o: dict, inst: str | None = None) -> str | None:
     def compact(key):
         return str(o.get(key) or "").replace(" ", "")
 
+    for key, choices in (("comp_ensemble", ("greedy", "bright")),
+                         ("comp_criterion", ("target", "check"))):
+        if o.get(key, RUN_DEFAULTS[key]) not in choices:
+            return f"{key} must be one of {', '.join(choices)}"
+    for key, minimum in (("comp_min_flux_frac", 0), ("clip_star_sigma", 0),
+                         ("clip_star_window", 3)):
+        value = o.get(key, RUN_DEFAULTS[key])
+        if value is None and key == "clip_star_sigma":
+            continue
+        if not _finite_number(value) or float(value) < minimum:
+            return f"{key} must be a finite number >= {minimum}"
+        if key == "clip_star_sigma" and float(value) == 0:
+            return "clip_star_sigma must be positive (leave blank to disable)"
+        if key == "clip_star_window" and not float(value).is_integer():
+            return "clip_star_window must be an integer >= 3"
+
     checks = [("bands", str(b), _BAND_RE.fullmatch(str(b))) for b in o.get("bands") or []]
     checks += [
         ("ref_band", text("ref_band"), _BAND_RE.fullmatch(text("ref_band"))),
@@ -1684,7 +1750,23 @@ def normalize_run_options(raw: dict | None) -> dict:
             if fv is not None:
                 o[key] = fv
 
-    for key in ("make_gif", "plot_gaia_sources", "use_barycorrpy"):
+    for key in ("comp_ensemble", "comp_criterion", "comp_min_flux_frac",
+                "clip_star_sigma", "clip_star_window"):
+        value = raw.get(key)
+        if value is None or str(value).strip() == "":
+            continue
+        # Preserve invalid inputs for validation instead of silently reverting
+        # to a different scientific reduction policy.
+        value = str(value).strip()
+        if key in ("comp_min_flux_frac", "clip_star_sigma", "clip_star_window"):
+            number = _to_float(value)
+            if number is not None:
+                value = number
+                if key == "clip_star_window" and math.isfinite(number) and number.is_integer():
+                    value = int(number)
+        o[key] = value
+
+    for key in ("make_gif", "plot_gaia_sources", "use_barycorrpy", "save_flux_datacube"):
         if key in raw:
             o[key] = _to_bool(raw[key])
     # Overwrite requires special handling: explicitly False if present and falsy,
@@ -1976,6 +2058,12 @@ def build_command(
     if inst in ("muscat", "muscat2"):
         # Never taken from the options: prose2 writes calibration masters here.
         args += ["--calib_dir", str(results_dir(inst, date)) + "_calibrated"]
+    for key in ("comp_ensemble", "comp_criterion", "comp_min_flux_frac",
+                "clip_star_sigma", "clip_star_window"):
+        if o[key] != RUN_DEFAULTS[key]:
+            args += ["--" + key, str(o[key])]
+    if o["save_flux_datacube"]:
+        args.append("--save_flux_datacube")
     if o.get("make_gif", False):
         args.append("--gif")
     if o.get("plot_gaia_sources", True):
