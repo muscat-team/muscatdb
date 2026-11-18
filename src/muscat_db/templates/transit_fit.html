@@ -700,7 +700,6 @@
             <div style="display: flex; gap: 0.5rem; align-items: center;">
               <input type="text" id="opt-bump_ampl" value="0,10" placeholder="low,high" style="flex: 3; width: 100%; min-width: 0;" disabled>
               <select id="opt-bump_ampl_prior" title="Uniform: enter nonnegative low,high bounds in ppt." style="flex: 2; width: 100%; min-width: 0; background: var(--input-bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 0.35rem 0.5rem; font-size: 0.85rem;" disabled>
-                
                 <option value="uniform">Uniform</option>
               </select>
             </div>
@@ -739,7 +738,6 @@
                 </th>
                 <th>ampl <span class="help-tooltip" title="Amplitude of the flare (ppt). Uniform only: nonnegative low,high bounds.">?</span>
                   <select id="opt-flare_ampl_prior" title="Prior shape for every flare's ampl" disabled>
-                    
                     <option value="uniform">Uniform</option>
                   </select>
                 </th>
@@ -2175,9 +2173,8 @@
   // applies one shape per parameter across every flare.
   var FLARE_PARAMS = ['tpeak', 'fwhm', 'ampl'];
   var FLARE_ROW_DEFAULTS = { tpeak: ['', '0.1'], fwhm: ['0.02', '0.01'], ampl: ['0', '10'] };
-  // The same defaults read as low,high bounds under a Uniform prior. They
-  // bracket the Gaussian value, since the Gaussian pair would read as low >
-  // high there and block the run.
+  // Width needs separate Uniform bounds: its Gaussian mean,unc pair would
+  // read as low > high and block the run. Amplitude is always Uniform.
   var FLARE_ROW_UNIFORM_DEFAULTS = { fwhm: ['0.0', '0.1'], ampl: ['0', '10'] };
 
   function flarePriorMode(param) {
