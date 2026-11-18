@@ -678,3 +678,49 @@ def test_fractional_day_trim_reaches_fitter(page, fitter):
     with page.expect_response('**/api/transit-fit/run'):
         page.click('#run-test-btn')
     assert fitter['start'][-1]['options']['trim_beg'] == '0.005'
+
+
+@pytest.mark.parametrize("prior", ["gaussian", "uniform"])
+@pytest.mark.parametrize("stored_center", ["initialized", "blank", "explicit"])
+def test_bump_center_uses_selected_curve_after_reload(page, fitter, live_server, prior, stored_center):
+    """A selected .1–.2 BJD interval owns the center, not the unselected .3–.4."""
+    from tests.browser.seed import RUN_ID
+
+    run = live_server.root / "prose" / "muscat3" / "261001" / "_runs" / "TOI-1000" / RUN_ID
+    paths = [run / name for name in CSVS]
+    originals = [path.read_text() for path in paths]
+    try:
+        for path, times in zip(paths, [(2460000.1, 2460000.2), (2460000.3, 2460000.4)]):
+            path.write_text("BJD_TDB,Flux,Flux_err\n" + "".join(f"{t},1,0.001\n" for t in times))
+        _ready_to_fit(page)
+        page.click("#deselect-all-csvs")
+        page.locator('.csv-card', has_text=CSVS[0]).locator('.csv-checkbox').check()
+        reveal(page, "#opt-include_bump")
+        page.check("#opt-include_bump")
+        if prior == "uniform":
+            page.select_option("#opt-bump_tcenter_prior", prior)
+            page.fill("#opt-bump_tcenter", "")
+            page.uncheck("#opt-include_bump")
+            page.check("#opt-include_bump")
+        expected = "2460000.100000,2460000.200000" if prior == "uniform" else "2460000.150000,0.1"
+        expect(page.locator("#opt-bump_tcenter")).to_have_value(expected)
+        if stored_center == "blank":
+            page.evaluate("""key => {
+                const saved = JSON.parse(localStorage.getItem(key));
+                saved.bump_tcenter = '';
+                localStorage.setItem(key, JSON.stringify(saved));
+            }""", OPT_KEY)
+        elif stored_center == "explicit":
+            expected = "2460000.12,2460000.18" if prior == "uniform" else "2460000.12,0.02"
+            page.fill("#opt-bump_tcenter", expected)
+        else:
+            assert page.evaluate("key => JSON.parse(localStorage.getItem(key)).bump_tcenter", OPT_KEY) == expected
+        page.reload()
+        expect(page.locator("#csv-count")).to_have_text("1 / 2 selected")
+        expect(page.locator("#opt-bump_tcenter")).to_have_value(expected)
+        with page.expect_response("**/api/transit-fit/run"):
+            page.click("#run-test-btn")
+        assert fitter["start"][-1]["options"]["bump_tcenter"] == expected
+    finally:
+        for path, original in zip(paths, originals):
+            path.write_text(original)

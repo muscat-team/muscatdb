@@ -2409,9 +2409,12 @@
     var bumpCenter = document.getElementById('opt-bump_tcenter');
     if (chk('opt-include_bump') && bumpCenter && !bumpCenter.value.trim()) {
       var range = selectedTimeRange();
-      if (range) bumpCenter.value = val('opt-bump_tcenter_prior') === 'uniform'
-        ? range[0].toFixed(6) + ',' + range[1].toFixed(6)
-        : ((range[0] + range[1]) / 2).toFixed(6) + ',0.1';
+      if (range) {
+        bumpCenter.value = val('opt-bump_tcenter_prior') === 'uniform'
+          ? range[0].toFixed(6) + ',' + range[1].toFixed(6)
+          : ((range[0] + range[1]) / 2).toFixed(6) + ',0.1';
+        saveOptions();
+      }
     }
     CONTROL_DEPENDENCIES.forEach(function (dependency) {
       var enabled = chk(dependency.controller);
@@ -2427,6 +2430,8 @@
     refreshFlareRowsEnabled();
   }
 
+  var csvCards = document.querySelectorAll('.csv-card');
+  restoreCsvSelection();
   restoreOptions();
   setupGpPriorSelectors();
   setupBumpPriorSelectors();
@@ -2606,7 +2611,6 @@
   })();
 
   // ---- CSV selection ----
-  var csvCards = document.querySelectorAll('.csv-card');
   function saveCsvSelection() {
     MuscatStorage.setJSON(CSV_KEY, getSelectedCsvs());
   }
@@ -2663,8 +2667,6 @@
       card.classList.add(cb.checked ? 'selected' : 'deselected');
     }
   });
-  restoreCsvSelection();
-
   function extractBand(csvName) {
     var parts = csvName.split('_' + inst + '_');
     if (parts.length > 1) {
