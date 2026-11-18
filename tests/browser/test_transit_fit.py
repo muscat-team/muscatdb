@@ -787,3 +787,55 @@ def test_saved_gaussian_amplitudes_are_migrated_explicitly(page, custom, backup)
     expect(page.locator('#amplitude-migration-notice')).to_have_count(0)
     expect(page.locator('#opt-bump_ampl')).to_have_value(',' if custom else '0,10')
     expect(page.locator('#opt-gp_log_amp')).to_have_value('0,2')
+
+
+@pytest.mark.parametrize("model,param,gaussian,uniform", [
+    ("bump", "tcenter", ("2461314.850001", "0.001000"),
+     ("2461314.847001", "2461314.853001")),
+    ("bump", "width", ("0.02", "0.001"), ("0.017", "0.023")),
+    ("flare", "tpeak", ("2461314.85001", "0.00100"),
+     ("2461314.84701", "2461314.85301")),
+    ("flare", "fwhm", ("0.02", "0.001"), ("0.017", "0.023")),
+])
+@pytest.mark.parametrize("saved_mode", ["gaussian", "uniform"])
+def test_backup_restore_then_prior_switch_converts_values(
+    page, model, param, gaussian, uniform, saved_mode
+):
+    """Restored priors convert using three-sigma bounds and their inverse."""
+    _ready_to_fit(page)
+    reveal(page, f"#opt-include_{model}")
+    page.check(f"#opt-include_{model}")
+    selector = f"#opt-{model}_{param}_prior"
+    page.select_option(selector, saved_mode)
+    saved_pair = gaussian if saved_mode == "gaussian" else uniform
+    next_mode = "uniform" if saved_mode == "gaussian" else "gaussian"
+    expected_pair = uniform if next_mode == "uniform" else gaussian
+    if model == "bump":
+        fields = [page.locator(f"#opt-bump_{param}")]
+        fields[0].fill(",".join(saved_pair))
+        page.fill("#opt-bump_ampl", "2,8")
+    else:
+        fields = [_flare_cell(page, 0, param, which) for which in ("val", "unc")]
+        for field, value in zip(fields, saved_pair):
+            field.fill(value)
+        _flare_cell(page, 0, "ampl", "val").fill("2")
+        _flare_cell(page, 0, "ampl", "unc").fill("8")
+    reveal(page, "#save-btn")
+    page.click("#save-btn")
+    page.click("#message-modal-ok")
+    page.select_option(selector, next_mode)
+    page.click("#restore-btn")
+    page.click("#message-modal-ok")
+    expect(page.locator(selector)).to_have_value(saved_mode)
+    page.select_option(selector, next_mode)
+    actual = fields[0].input_value().split(",") if model == "bump" else [
+        field.input_value() for field in fields
+    ]
+    assert [float(value) for value in actual] == pytest.approx(
+        [float(value) for value in expected_pair], rel=0, abs=1e-8
+    )
+    if model == "bump":
+        expect(page.locator("#opt-bump_ampl")).to_have_value("2,8")
+    else:
+        expect(_flare_cell(page, 0, "ampl", "val")).to_have_value("2")
+        expect(_flare_cell(page, 0, "ampl", "unc")).to_have_value("8")

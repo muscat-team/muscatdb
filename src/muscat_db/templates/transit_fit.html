@@ -2008,6 +2008,8 @@
           if (el && backup[id] !== undefined) el.checked = backup[id] === 'true';
         });
         refreshGpPriorControls();
+        refreshBumpPriorControls();
+        refreshFlarePriorControls();
         updateDependentFields();
 
         var stellarRefEl = document.getElementById('stellar-ref-container');
