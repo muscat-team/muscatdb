@@ -839,3 +839,33 @@ def test_backup_restore_then_prior_switch_converts_values(
     else:
         expect(_flare_cell(page, 0, "ampl", "val")).to_have_value("2")
         expect(_flare_cell(page, 0, "ampl", "unc")).to_have_value("8")
+
+
+=======
+def test_archive_predicts_transit_center(page):
+    page.goto(URL)
+    _query_toi_catalog(page)
+    center = page.locator('.planet-tc_pred').first
+    assert float(center.input_value()) == pytest.approx(2461314.86, rel=0, abs=1e-6)
+    # Manual overrides survive subsequent ephemeris changes.
+    center.fill('2461314.87')
+    page.locator('.planet-period').first.fill('2.2,0.01')
+    page.locator('.planet-period').first.blur()
+    assert center.input_value() == '2461314.87'
+
+
+def test_outside_transit_warns_before_launch(page, fitter):
+    page.goto(URL)
+    _query_toi_catalog(page)
+    _complete_priors(page)
+    page.locator('.planet-t0').first.fill('2461315.5,0.01')
+    page.locator('.planet-t0').first.blur()
+    messages = []
+    def dismiss(dialog):
+        messages.append(dialog.message)
+        dialog.dismiss()
+    page.on('dialog', dismiss)
+    page.click('#run-test-btn')
+    assert len(messages) == 1 and 'No predicted transit center' in messages[0]
+    assert fitter['start'] == []
+>>>>>>> 1b58762 (fix: predict transit-center priors from the reference epoch)

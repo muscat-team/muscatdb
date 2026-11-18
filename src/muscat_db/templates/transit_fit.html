@@ -1046,6 +1046,7 @@
   }
 
   function collectOptions() {
+    updateTransitCenters();
     var fixed = [];
     document.querySelectorAll('input[name="fixed-params"]:checked').forEach(function (c) { fixed.push(c.value); });
 
@@ -1548,7 +1549,7 @@
           priorField('planet-period', cmb_period, val_period_prior) +
         '</div>' +
         '<div class="opt">' +
-          '<label for="planet-t0-' + uid + '">Epoch t0 (BJD) <span class="help-tooltip" title="Reference epoch entered as mean,uncertainty (BJD). timer fits the transit centre with a uniform prior centred on tc_pred (this value is the fallback when tc_pred is blank), full width tc_pred_unc (default 0.04 d).">?</span></label>' +
+          '<label for="planet-t0-' + uid + '">Epoch t0 (BJD) <span class="help-tooltip" title="Reference epoch entered as mean,uncertainty (BJD). timer fits the transit centre with a uniform prior centred on tc_pred (predicted from this reference epoch and the period at the middle of the selected data when no explicit center is entered), full width tc_pred_unc (default 0.04 d).">?</span></label>' +
           plainPairField('planet-t0', cmb_t0, 'mean,unc') +
         '</div>' +
         '<div class="opt">' +
@@ -1567,7 +1568,7 @@
         '<div class="opt">' +
           '<label for="planet-tc_pred-' + uid + '">Transit-center prior <span class="help-tooltip" tabindex="0" title="timer samples t0 from a Uniform prior. The first value is its predicted center (BJD); the second is its full width in days, not a Gaussian uncertainty. The bounds are center minus/plus half the full width.">?</span></label>' +
           '<div style="display: flex; gap: 0.5rem; align-items: center;">' +
-            '<input id="planet-tc_pred-' + uid + '" type="number" class="planet-tc_pred" value="' + val_tc_pred + '" aria-label="Predicted transit center in BJD" placeholder="center / auto" step="0.00001" style="flex: 3; width: 100%; min-width: 0;">' +
+            '<input id="planet-tc_pred-' + uid + '" type="number" class="planet-tc_pred" value="' + val_tc_pred + '" aria-label="Predicted transit center in BJD" placeholder="epoch + N × period" step="0.00001" style="flex: 3; width: 100%; min-width: 0;">' +
             '<span class="hint" aria-hidden="true" style="white-space: nowrap;">full width</span>' +
             '<input id="planet-tc_pred-width-' + uid + '" type="number" class="planet-tc_pred-unc" value="' + val_tc_pred_unc + '" aria-label="Uniform prior full width in days" placeholder="0.04 d" step="0.001" style="flex: 2; width: 100%; min-width: 0;">' +
           '</div>' +
@@ -2209,6 +2210,27 @@
     return (lo === null || hi === null) ? null : [lo, hi];
   }
 
+  // Keep an automatic center tied to the selected data and ephemeris. A user
+  // edit becomes an explicit override until cleared or the archive is queried.
+  function updateTransitCenters() {
+    var range = selectedTimeRange();
+    document.querySelectorAll('.planet-card').forEach(function (card) {
+      var el = card.querySelector('.planet-tc_pred');
+      if (el.value && el.value !== el.dataset.predicted) return;
+      var epoch = parseFloat(card.querySelector('.planet-t0').value);
+      var pair = splitPair(card.querySelector('.planet-period').value);
+      var period = parseFloat(pair[0]);
+      if (card.querySelector('.planet-period-prior').value === 'uniform') period = (period + parseFloat(pair[1])) / 2;
+      if (!range || !isFinite(epoch) || !isFinite(period) || period <= 0) {
+        el.value = ''; delete el.dataset.predicted; return;
+      }
+      var center = epoch + Math.floor(((range[0] + range[1]) / 2 - epoch) / period + 0.5) * period;
+      el.value = center.toFixed(6);
+      el.dataset.predicted = el.value;
+    });
+  }
+  document.addEventListener('change', updateTransitCenters);
+
   // A new flare starts at the middle of the data (Gaussian) or spanning it
   // (Uniform); without a known range the peak time is left for the user.
   function defaultFlareTpeak() {
@@ -2590,6 +2612,7 @@
   }
 
   function validateAllFields() {
+    updateTransitCenters();
     var ok = true, firstErr = null;
     FIELD_RULES.forEach(function (rule) {
       if (!validateField(rule.id, rule)) { ok = false; if (!firstErr) firstErr = document.getElementById(rule.id); }
@@ -2610,6 +2633,14 @@
     if (firstErr) {
       if (typeof firstErr.scrollIntoView === 'function') firstErr.scrollIntoView({ behavior: 'smooth', block: 'center' });
       firstErr.focus();
+    }
+    if (ok) {
+      var range = selectedTimeRange(), outside = [];
+      if (range) planetCards.forEach(function (card) {
+        var center = parseFloat(card.querySelector('.planet-tc_pred').value);
+        if (center < range[0] || center > range[1]) outside.push(card.querySelector('.planet-letter-input').value);
+      });
+      if (outside.length && !window.confirm('No predicted transit center falls inside the selected data for planet(s) ' + outside.join(', ') + '. Continue with this prior?')) return false;
     }
     return ok;
   }
@@ -3182,7 +3213,8 @@
           var fcard = document.querySelector('.planet-card');
           if (fcard) {
             var tcEl = fcard.querySelector('.planet-tc_pred');
-            if (tcEl) tcEl.value = '';
+            if (tcEl) { tcEl.value = ''; delete tcEl.dataset.predicted; }
+            updateTransitCenters();
             var tcuEl = fcard.querySelector('.planet-tc_pred-unc');
             if (tcuEl) tcuEl.value = '';
           }

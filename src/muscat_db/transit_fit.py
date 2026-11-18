@@ -83,6 +83,7 @@ def _write_log_banner(
     options: dict | None = None,
     narrowband_aliases: list[tuple[str, str]] | None = None,
     covariate_drops: dict[str, dict[str, str]] | None = None,
+    transit_center_priors: dict | None = None,
 ) -> None:
     """Write a versioned startup header then the command line and parsed args to *logf*.
 
@@ -120,6 +121,17 @@ def _write_log_banner(
                 logf.write(f"  {k}: {val!r}\n")
             else:
                 logf.write(f"  {k}: {v!r}\n")
+        logf.write("\n")
+
+    if transit_center_priors:
+        logf.write("--- transit-center priors (BJD) ---\n")
+        for planet, prior in transit_center_priors.items():
+            if prior["fixed"]:
+                logf.write(f"  {planet}: fixed at {prior['center_bjd']:.6f}\n")
+            else:
+                logf.write(f"  {planet}: Uniform [{prior['lower_bjd']:.6f}, "
+                           f"{prior['upper_bjd']:.6f}], center {prior['center_bjd']:.6f}, "
+                           f"full width {prior['full_width_days']:.6f} d\n")
         logf.write("\n")
 
     if narrowband_aliases:
@@ -1431,26 +1443,33 @@ def _write_fit_inputs(
     tc_vals = [_planet_float("tc_pred", p) for p in planet_list]
     unc_vals = [_planet_float("tc_pred_unc", p) for p in planet_list]
 
+    time_range = lightcurve_time_range(csvs)
+    for i, planet in enumerate(planet_list):
+        if tc_vals[i] is not None:
+            continue
+        epoch = _planet_float("t0", planet)
+        period = _planet_float("period", planet)
+        if options.get(f"period_prior_{planet}") == "uniform" and period is not None:
+            upper = _planet_float("period_unc", planet)
+            if upper is not None:
+                period = (period + upper) / 2
+        if epoch is not None and period is not None and period > 0 and time_range:
+            middle = sum(time_range) / 2
+            tc_vals[i] = epoch + math.floor((middle - epoch) / period + 0.5) * period
+        elif epoch is not None:
+            tc_vals[i] = epoch
+    uncs = [u if u is not None else DEFAULT_TC_UNC for u in unc_vals]
     if any(v is not None for v in tc_vals):
-        # Align the list 1:1 with planets: fill any planet missing a tc_pred with
-        # its own t0, then the mean of the provided centers.
-        provided = [v for v in tc_vals if v is not None]
-        fallback = sum(provided) / len(provided)
-        filled = [
-            v if v is not None else (_planet_float("t0", p) if _planet_float("t0", p) is not None else fallback)
-            for p, v in zip(planet_list, tc_vals)
-        ]
-        uncs = [u if u is not None else DEFAULT_TC_UNC for u in unc_vals]
-        if len(planet_list) == 1:
-            fit_data["tc_pred"] = filled[0]
-            fit_data["tc_pred_unc"] = uncs[0]
-        else:
-            fit_data["tc_pred"] = filled
-            fit_data["tc_pred_unc"] = uncs
-    else:
-        # No predicted centers given; keep a single t0-prior width.
-        provided_unc = [u for u in unc_vals if u is not None]
-        fit_data["tc_pred_unc"] = provided_unc[0] if provided_unc else DEFAULT_TC_UNC
+        if any(v is None for v in tc_vals):
+            raise ValueError("Every planet needs an epoch and period or an explicit transit center")
+        fit_data["tc_pred"] = tc_vals[0] if len(tc_vals) == 1 else tc_vals
+    fit_data["tc_pred_unc"] = uncs[0] if len(uncs) == 1 else uncs
+    transit_center_priors = {
+        p: {"center_bjd": v, "full_width_days": u,
+            "lower_bjd": v - u / 2, "upper_bjd": v + u / 2,
+            "fixed": "t0" in (options.get("fixed") or [])}
+        for p, v, u in zip(planet_list, tc_vals, uncs) if v is not None
+    }
 
     fit_data["chromatic"] = options.get("chromatic") != "false"
     # Run mode maps to timer's ``clobber``: "new" (start fresh) -> clobber=true,
@@ -1722,6 +1741,7 @@ def _write_fit_inputs(
         "run_name": run_name or "",
         "run_id": run_id or "",
         "run_type": run_type or "",
+        "transit_center_priors": transit_center_priors,
         "covariates": list(covariates),
         "covariates_fitted": covariates_fitted,
         "covariates_dropped": covariates_dropped,
@@ -2058,7 +2078,8 @@ def start_fit(
         cmd = _fit_command(rdir, run_type)
         log_path = rdir / "timer-fit.log"
         logf = open(log_path, "w")
-        _write_log_banner(logf, cmd, options, narrowband_aliases, covariate_drops(rdir))
+        _write_log_banner(logf, cmd, options, narrowband_aliases, covariate_drops(rdir),
+                          yaml.safe_load((rdir / "meta.yaml").read_text()).get("transit_center_priors"))
         logf.flush()
 
         try:
@@ -3253,7 +3274,8 @@ def sync_jobs() -> None:
                 log_path = rdir / "timer-fit.log"
                 try:
                     logf = open(log_path, "w")
-                    _write_log_banner(logf, cmd, opts, narrowband_aliases, covariate_drops(rdir))
+                    _write_log_banner(logf, cmd, opts, narrowband_aliases, covariate_drops(rdir),
+                          yaml.safe_load((rdir / "meta.yaml").read_text()).get("transit_center_priors"))
                     logf.flush()
                     proc = subprocess.Popen(cmd, cwd=str(rdir), stdout=logf, stderr=subprocess.STDOUT, text=True, start_new_session=True, env={**os.environ, **jobs.core_pinning_env()})
                     try:
