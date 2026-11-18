@@ -841,7 +841,6 @@ def test_backup_restore_then_prior_switch_converts_values(
         expect(_flare_cell(page, 0, "ampl", "unc")).to_have_value("8")
 
 
-=======
 def test_archive_predicts_transit_center(page):
     page.goto(URL)
     _query_toi_catalog(page)
@@ -854,18 +853,50 @@ def test_archive_predicts_transit_center(page):
     assert center.input_value() == '2461314.87'
 
 
+def _shift_epoch(page, days: float) -> None:
+    t0 = page.locator('.planet-t0').first
+    mean, unc = t0.input_value().split(',')
+    t0.fill(f'{float(mean) + days:.6f},{unc}')
+    t0.blur()
+
+
+def test_reloaded_automatic_center_follows_the_ephemeris(page):
+    page.goto(URL)
+    _query_toi_catalog(page)
+    center = page.locator('.planet-tc_pred').first
+    before = float(center.input_value())
+    page.reload()
+    # Moving the reference epoch by 0.01 d moves epoch + N x period by 0.01 d.
+    _shift_epoch(page, 0.01)
+    assert float(center.input_value()) == pytest.approx(before + 0.01, rel=0, abs=1e-6)
+
+
+def test_card_archive_query_replaces_a_stale_center(page):
+    page.goto(URL)
+    _query_toi_catalog(page)
+    center = page.locator('.planet-tc_pred').first
+    expected = center.input_value()
+    center.fill('2461300')
+    page.locator('.planet-query-target').first.fill('TOI-1000.01')
+    page.locator('.planet-source-select').first.select_option('toi')
+    with page.expect_response("**/api/transit-fit/query-archive**"):
+        page.locator('.planet-query-btn').first.click()
+    page.click('#message-modal-ok')
+    assert center.input_value() == expected
+
+
 def test_outside_transit_warns_before_launch(page, fitter):
     page.goto(URL)
     _query_toi_catalog(page)
     _complete_priors(page)
-    page.locator('.planet-t0').first.fill('2461315.5,0.01')
-    page.locator('.planet-t0').first.blur()
-    messages = []
-    def dismiss(dialog):
-        messages.append(dialog.message)
-        dialog.dismiss()
-    page.on('dialog', dismiss)
+    page.locator('.planet-tc_pred').first.fill('2461315.5')
     page.click('#run-test-btn')
-    assert len(messages) == 1 and 'No predicted transit center' in messages[0]
+    expect(page.locator('#message-modal-text')).to_contain_text('No predicted transit center')
+    page.click('#message-modal-cancel')
     assert fitter['start'] == []
->>>>>>> 1b58762 (fix: predict transit-center priors from the reference epoch)
+
+
+    page.click('#run-test-btn')
+    with page.expect_response("**/api/transit-fit/run"):
+        page.click('#message-modal-ok')
+    assert len(fitter['start']) == 1

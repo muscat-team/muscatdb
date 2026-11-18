@@ -93,7 +93,7 @@ def test_start_fit_never_passes_test_run_flag_to_timer(tmp_path, monkeypatch):
 
     try:
         result = fit.start_fit(
-            "muscat3", "250101", "Target", {"planets": "b"}, test_run=True,
+            "muscat3", "250101", "Target", {"planets": "b", "tc_pred": "2460000.5"}, test_run=True,
         )
         assert result["ok"] is True
         assert len(captured_cmds) == 1

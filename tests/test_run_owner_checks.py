@@ -284,7 +284,7 @@ LAUNCHES = {
         "/api/photometry/run",
     ),
     "transit-fit/run": (
-        {"inst": INST, "date": DATE, "target": TARGET, "options": {"run_name": RUN}},
+        {"inst": INST, "date": DATE, "target": TARGET, "options": {"run_name": RUN, "tc_pred": "2460000.5"}},
         lambda: fit.fit_output_dir(INST, DATE, TARGET, RUN),
         "/api/transit-fit/run",
     ),

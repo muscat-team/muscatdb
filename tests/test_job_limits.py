@@ -164,7 +164,7 @@ def _transit_fit_launch(monkeypatch, store, user, tmp_path):
     monkeypatch.setattr(transit_fit, "fit_output_dir", lambda *a, **k: tmp_path / "run")
     monkeypatch.setattr(transit_fit, "_fit_reduction_exists", lambda *a, **k: False)
     return transit_fit.start_fit(
-        "muscat3", "260720", "TOI-123", options={"run_mode": "new"}, test_run=False, user_name=user,
+        "muscat3", "260720", "TOI-123", options={"run_mode": "new", "tc_pred": "2460000.5"}, test_run=False, user_name=user,
     )
 
 

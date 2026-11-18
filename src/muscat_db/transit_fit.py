@@ -809,6 +809,48 @@ def validate_flare_times(options: dict | None, csvs) -> str | None:
     return _validate_flares(o, time_range) or _validate_bump_times(o, time_range)
 
 
+DEFAULT_TC_UNC = 0.04
+
+
+def predict_transit_centers(options: dict | None, csvs) -> tuple[dict[str, dict], str | None]:
+    """Return each planet's Uniform transit-center prior, or a user-facing error.
+
+    An explicit ``tc_pred`` wins. Otherwise the center is the transit of the
+    reference epoch plus an integer number of periods nearest the middle of
+    the selected light curves. A planet with neither is an error rather than a
+    silent fallback to the raw epoch or the data mean.
+    """
+    o = options or {}
+    planets = [p.strip() for p in (o.get("planets") or "b").split(",") if p.strip()] or ["b"]
+    first = planets[0]
+    fixed = "t0" in (o.get("fixed") or [])
+    time_range = None
+    priors: dict[str, dict] = {}
+    for p in planets:
+        center = _planet_value(o, "tc_pred", p, first)
+        if center is None:
+            epoch = _planet_value(o, "t0", p, first)
+            if _prior_choice(o, "period", p, first) == "uniform":
+                period = sum(_uniform_bounds(o, "period", p, first)) / 2
+            else:
+                period = _planet_value(o, "period", p, first)
+            if time_range is None:
+                time_range = lightcurve_time_range(csvs)
+            if epoch is None or period is None or not period > 0 or time_range is None:
+                return {}, (
+                    f"planet {p} needs a transit-center prior: enter one, or give an epoch t0 "
+                    "and period with light curves that have a BJD_TDB column"
+                )
+            middle = sum(time_range) / 2
+            center = epoch + math.floor((middle - epoch) / period + 0.5) * period
+        width = _planet_value(o, "tc_pred_unc", p, first)
+        width = DEFAULT_TC_UNC if width is None else width
+        priors[p] = {"center_bjd": center, "full_width_days": width,
+                     "lower_bjd": center - width / 2, "upper_bjd": center + width / 2,
+                     "fixed": fixed}
+    return priors, None
+
+
 def validate_fit_options(options: dict | None, time_range: tuple[float, float] | None = None) -> str | None:
     """Return a user-facing error string for invalid fitting options, else ``None``.
 
@@ -1434,42 +1476,14 @@ def _write_fit_inputs(
     # (shape = nplanets) seeded by tc_pred: a scalar broadcasts to all planets,
     # a list gives each planet its own center. Write a scalar for single-planet
     # fits (back-compatible) and a list when there are multiple planets.
-    def _planet_float(prefix: str, p: str):
-        raw = options.get(f"{prefix}_{p}")
-        try: return float(str(raw).strip())
-        except (TypeError, ValueError): return None
-
-    DEFAULT_TC_UNC = 0.04
-    tc_vals = [_planet_float("tc_pred", p) for p in planet_list]
-    unc_vals = [_planet_float("tc_pred_unc", p) for p in planet_list]
-
-    time_range = lightcurve_time_range(csvs)
-    for i, planet in enumerate(planet_list):
-        if tc_vals[i] is not None:
-            continue
-        epoch = _planet_float("t0", planet)
-        period = _planet_float("period", planet)
-        if options.get(f"period_prior_{planet}") == "uniform" and period is not None:
-            upper = _planet_float("period_unc", planet)
-            if upper is not None:
-                period = (period + upper) / 2
-        if epoch is not None and period is not None and period > 0 and time_range:
-            middle = sum(time_range) / 2
-            tc_vals[i] = epoch + math.floor((middle - epoch) / period + 0.5) * period
-        elif epoch is not None:
-            tc_vals[i] = epoch
-    uncs = [u if u is not None else DEFAULT_TC_UNC for u in unc_vals]
-    if any(v is not None for v in tc_vals):
-        if any(v is None for v in tc_vals):
-            raise ValueError("Every planet needs an epoch and period or an explicit transit center")
-        fit_data["tc_pred"] = tc_vals[0] if len(tc_vals) == 1 else tc_vals
-    fit_data["tc_pred_unc"] = uncs[0] if len(uncs) == 1 else uncs
-    transit_center_priors = {
-        p: {"center_bjd": v, "full_width_days": u,
-            "lower_bjd": v - u / 2, "upper_bjd": v + u / 2,
-            "fixed": "t0" in (options.get("fixed") or [])}
-        for p, v, u in zip(planet_list, tc_vals, uncs) if v is not None
-    }
+    # Launches refuse a planet without a computable center (see
+    # predict_transit_centers); this writer leaves tc_pred out in that case.
+    transit_center_priors, _ = predict_transit_centers(options, csvs)
+    centers = [prior["center_bjd"] for prior in transit_center_priors.values()]
+    widths = [prior["full_width_days"] for prior in transit_center_priors.values()] or [DEFAULT_TC_UNC]
+    if centers:
+        fit_data["tc_pred"] = centers[0] if len(centers) == 1 else centers
+    fit_data["tc_pred_unc"] = widths[0] if len(widths) == 1 else widths
 
     fit_data["chromatic"] = options.get("chromatic") != "false"
     # Run mode maps to timer's ``clobber``: "new" (start fresh) -> clobber=true,
@@ -1763,6 +1777,17 @@ def covariate_drops(rdir: pathlib.Path) -> dict[str, dict[str, str]]:
     return meta.get("covariates_dropped") or {}
 
 
+def recorded_transit_center_priors(rdir: pathlib.Path) -> dict:
+    """The transit-center priors :func:`_write_fit_inputs` recorded in
+    ``rdir/meta.yaml``; empty if no record."""
+    try:
+        meta = yaml.safe_load((rdir / "meta.yaml").read_text()) or {}
+    except (OSError, yaml.YAMLError):
+        logger.warning("could not read transit-center priors from %s/meta.yaml", rdir, exc_info=True)
+        return {}
+    return meta.get("transit_center_priors") or {}
+
+
 # Path to the standalone helper run inside the `timer` conda env.
 _LOGP_HELPER = pathlib.Path(__file__).parent / "_logp_helper.py"
 # Building + compiling the PyMC model can take ~1 minute; allow generous margin.
@@ -1806,6 +1831,10 @@ def compute_logp(inst: str, date: str, target: str, options: dict, selected_csvs
         return {"ok": False, "error": err}
 
     err = validate_flare_times(options, csvs)
+    if err:
+        return {"ok": False, "error": err}
+
+    _, err = predict_transit_centers(options, csvs)
     if err:
         return {"ok": False, "error": err}
 
@@ -1949,6 +1978,10 @@ def start_fit(
     if err:
         return {"ok": False, "error": err}
 
+    _, err = predict_transit_centers(options, csvs)
+    if err:
+        return {"ok": False, "error": err}
+
     # Identify this run: site/telescope/mode derived from the selected
     # lightcurves (mixing allowed -> "mixed"), plus the user's run-name label.
     # The run id isolates the working directory so distinct runs never
@@ -2079,7 +2112,7 @@ def start_fit(
         log_path = rdir / "timer-fit.log"
         logf = open(log_path, "w")
         _write_log_banner(logf, cmd, options, narrowband_aliases, covariate_drops(rdir),
-                          yaml.safe_load((rdir / "meta.yaml").read_text()).get("transit_center_priors"))
+                          recorded_transit_center_priors(rdir))
         logf.flush()
 
         try:
@@ -3256,6 +3289,9 @@ def sync_jobs() -> None:
                     if selected_csvs is not None:
                         selected = set(str(p) for p in selected_csvs)
                         csvs = [c for c in csvs if str(c) in selected]
+                    _, center_err = predict_transit_centers(opts, csvs)
+                    if center_err:
+                        raise ValueError(center_err)
                     narrowband_aliases = _write_fit_inputs(
                         rdir, inst, date, target, csvs, opts,
                         site=site, telescope=telescope, mode=mode, run_name=run_name, run_id=run_id,
@@ -3275,7 +3311,7 @@ def sync_jobs() -> None:
                 try:
                     logf = open(log_path, "w")
                     _write_log_banner(logf, cmd, opts, narrowband_aliases, covariate_drops(rdir),
-                          yaml.safe_load((rdir / "meta.yaml").read_text()).get("transit_center_priors"))
+                                      recorded_transit_center_priors(rdir))
                     logf.flush()
                     proc = subprocess.Popen(cmd, cwd=str(rdir), stdout=logf, stderr=subprocess.STDOUT, text=True, start_new_session=True, env={**os.environ, **jobs.core_pinning_env()})
                     try:

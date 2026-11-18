@@ -37,7 +37,7 @@ def test_start_fit_rejects_run_held_by_another_process(monkeypatch, tmp_path):
     monkeypatch.setattr(transit_fit, "validate_no_duplicate_datasets", lambda *a, **k: None)
 
     result = transit_fit.start_fit(
-        "muscat3", "260720", "TOI-123", options={"run_mode": "new"}, test_run=False,
+        "muscat3", "260720", "TOI-123", options={"run_mode": "new", "tc_pred": "2460000.5"}, test_run=False,
     )
 
     assert result["ok"] is True

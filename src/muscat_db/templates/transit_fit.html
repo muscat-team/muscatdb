@@ -1077,7 +1077,8 @@
       planetData['t0_unc_' + letter] = t0Pair[1];
       planetData['dur_' + letter] = hoursToDays(durPair[0]);
       planetData['dur_unc_' + letter] = hoursToDays(durPair[1]);
-      planetData['tc_pred_' + letter] = card.querySelector('.planet-tc_pred').value;
+      var tcPredEl = card.querySelector('.planet-tc_pred');
+      planetData['tc_pred_' + letter] = tcPredEl.value === tcPredEl.dataset.predicted ? '' : tcPredEl.value;
       planetData['tc_pred_unc_' + letter] = card.querySelector('.planet-tc_pred-unc').value;
       planetData['ror_' + letter] = rorPair[0];
       planetData['ror_unc_' + letter] = rorPair[1];
@@ -1664,6 +1665,9 @@
             return bs === '' ? as : as + ',' + bs;
           }
           resetAllPlanetPriorsToGaussian(card);
+          var cardTcEl = card.querySelector('.planet-tc_pred');
+          cardTcEl.value = '';
+          delete cardTcEl.dataset.predicted;
           card.querySelector('.planet-period').value = joinPair(params.period, params.period_unc, SIG_FIGS.period);
           card.querySelector('.planet-t0').value = joinDp(params.t0, params.t0_unc, T0_DECIMALS);
           card.querySelector('.planet-dur').value = joinPair(params.dur, params.dur_unc, SIG_FIGS.dur);
@@ -1693,6 +1697,7 @@
             syncPlanetsInput();
           }
 
+          updateTransitCenters();
           validatePlanetCard(card);
           saveOptions();
           window.showMessageModal('Success', 'Successfully loaded parameters for ' + data.pl_name + ' from ' + sourceLabel + '.', 'success');
@@ -2505,6 +2510,7 @@
   setupBumpPriorSelectors();
   setupFlarePriorSelectors();
   updateDependentFields();
+  updateTransitCenters();
 
   // ----- field validation -----
   var FIELD_RULES = [
@@ -2634,15 +2640,21 @@
       if (typeof firstErr.scrollIntoView === 'function') firstErr.scrollIntoView({ behavior: 'smooth', block: 'center' });
       firstErr.focus();
     }
-    if (ok) {
-      var range = selectedTimeRange(), outside = [];
-      if (range) planetCards.forEach(function (card) {
-        var center = parseFloat(card.querySelector('.planet-tc_pred').value);
-        if (center < range[0] || center > range[1]) outside.push(card.querySelector('.planet-letter-input').value);
-      });
-      if (outside.length && !window.confirm('No predicted transit center falls inside the selected data for planet(s) ' + outside.join(', ') + '. Continue with this prior?')) return false;
-    }
     return ok;
+  }
+
+  // Resolves true when every planet's center lies inside the selected data or
+  // the user chooses to launch anyway.
+  function confirmTransitsInsideData() {
+    var range = selectedTimeRange(), outside = [];
+    if (range) document.querySelectorAll('.planet-card').forEach(function (card) {
+      var center = parseFloat(card.querySelector('.planet-tc_pred').value);
+      if (center < range[0] || center > range[1]) outside.push(card.querySelector('.planet-letter-input').value);
+    });
+    if (!outside.length) return Promise.resolve(true);
+    return window.showConfirmModal('No transit in the selected data',
+      'No predicted transit center falls inside the selected data for planet(s) ' + outside.join(', ') + '. Continue with this prior?',
+      { confirmLabel: 'Launch anyway' });
   }
 
   // Blur validation for non-planet fields
@@ -2917,6 +2929,10 @@
       if (errEl) errEl.textContent = 'Please fill in all required fields marked in red above.';
       return;
     }
+    confirmTransitsInsideData().then(function (ok) { if (ok) launchValidated(testRun); });
+  }
+
+  function launchValidated(testRun) {
     // For full fits with existing results, validate that a run mode is selected
     if (!testRun && fitResultsExist) {
       var runModeSelected = document.getElementById('run-mode-select')?.value;

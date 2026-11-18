@@ -40,7 +40,7 @@ def _launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, test_run: bool) -> 
     monkeypatch.setattr(fit, "_MAX_FULL_JOBS", 1)
     monkeypatch.setattr(fit, "get_job_store", lambda: _Store())
     try:
-        result = fit.start_fit("muscat3", "250101", "Target", {"planets": "b"}, test_run=test_run)
+        result = fit.start_fit("muscat3", "250101", "Target", {"planets": "b", "tc_pred": "2460000.5"}, test_run=test_run)
         assert result["ok"] is True, result
     finally:
         for job in fit._FIT_JOBS.values():
