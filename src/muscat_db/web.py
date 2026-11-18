@@ -192,6 +192,7 @@ from muscat_db.database import (
     get_exposure_log_for_objects as _get_exposure_log_for_objects,
     get_instruments as _get_instruments,
     get_instruments_summary as _get_instruments_summary,
+    job_row_key,
     get_objects as _get_objects,
     get_summaries as _get_summaries,
     get_targets as _get_targets,
@@ -2778,6 +2779,12 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
             # Keep its id selected anyway so the page's live status/log/error
             # for THIS run is not silently swapped for a different one.
             sel_run = run
+        elif (_run_has_active_job("photometry", inst, date, target, run)
+              and not (denied and _product_visibility(denied).hidden(
+                  "photometry", inst, date, target, run))):
+            # Queued or not yet claimed: the job exists but has no run
+            # directory yet. Keep the old fallback rather than call it deleted.
+            sel_run = newest
         else:
             # No such run directory (deleted, or never existed): say so rather
             # than silently showing another run under this URL.
@@ -3117,9 +3124,11 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
             sel_run = "" if "" in run_ids else None
         elif run in run_ids:
             sel_run = run
-        elif (_fit_run_dir_exists(inst, date, target, run)
+        elif ((_fit_run_dir_exists(inst, date, target, run)
+               or _run_has_active_job("transit_fit", inst, date, target, run))
               and not products.hidden("transit_fit", inst, date, target, run)):
-            # Still running (no out/ yet, so not listed): keep the old fallback.
+            # Still running (no out/ yet, so not listed), or queued before its
+            # run directory exists: keep the old fallback.
             sel_run = newest
         else:
             # No such run directory (deleted, or never existed), or one this
@@ -3213,6 +3222,19 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
     if missing_run:
         resp.status_code = 404
     return resp
+
+
+_ACTIVE_JOB_STATES = frozenset({"pending", "running", "cancelling"})
+
+
+def _run_has_active_job(type_: str, inst: str, date: str, target: str, run_id: str) -> bool:
+    """Whether the job store holds a queued or running job for this run.
+
+    ``start_run`` and ``start_fit`` return ``queued`` before they create the run
+    directory, so a job waiting for a slot or a worker has a row but no files.
+    """
+    row = get_job_store().get(job_row_key(type_, inst, date, target, run_id))
+    return bool(row) and row.get("state") in _ACTIVE_JOB_STATES
 
 
 def _fit_run_dir_exists(inst: str, date: str, target: str, run_id: str) -> bool:

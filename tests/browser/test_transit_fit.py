@@ -11,7 +11,7 @@ from pathlib import Path
 from playwright.sync_api import expect
 import pytest
 
-from tests.browser.helpers import reveal
+from tests.browser.helpers import QueuedJobStore, reveal
 from tests.browser.seed import FIT_RUN_ID
 
 
@@ -549,6 +549,37 @@ def test_running_fit_without_outputs_is_not_reported_missing(page, live_server):
     finally:
         page.context.close()
         running.rmdir()
+
+
+@pytest.mark.parametrize("state", ["pending", "running"])
+def test_queued_fit_without_a_directory_is_not_reported_missing(page, monkeypatch, state):
+    # start_fit returns queued before it creates the run directory, so a fit
+    # queued at capacity has only its job row; the /jobs link must still open.
+    from muscat_db import web
+
+    store = QueuedJobStore("transit_fit:muscat3/261001/TOI-1000/fit-queued", state)
+    monkeypatch.setattr(web, "get_job_store", lambda: store)
+    response = page.goto(f"{URL}&run=fit-queued")
+    assert response.status == 200
+    expect(page.locator("#run-not-found")).to_have_count(0)
+
+
+def test_queued_fit_hidden_from_the_viewer_still_shows_not_found(page, monkeypatch):
+    # A queued job must not reveal a run this viewer may not see.
+    from muscat_db import web
+
+    class HideFit:
+        def hidden(self, level, inst, date, target, run_id=""):
+            return level == "transit_fit" and run_id == "fit-queued"
+
+    store = QueuedJobStore("transit_fit:muscat3/261001/TOI-1000/fit-queued")
+    monkeypatch.setattr(web, "get_job_store", lambda: store)
+    monkeypatch.setattr(web, "_product_visibility", lambda denied=None: HideFit())
+    page.problems.allowed.append("HTTP 404: GET /transit-fit?")
+    page.problems.allowed.append("status of 404")
+    response = page.goto(f"{URL}&run=fit-queued")
+    assert response.status == 404
+    expect(page.locator("#run-not-found")).to_contain_text("fit-queued")
 
 
 def test_delete_confirmation_names_the_selected_fit_run(page, live_server, fitter):

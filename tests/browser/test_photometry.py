@@ -14,7 +14,7 @@ import shutil
 from playwright.sync_api import expect
 import pytest
 
-from tests.browser.helpers import reveal
+from tests.browser.helpers import QueuedJobStore, reveal
 from tests.browser.seed import RUN_ID
 
 
@@ -302,6 +302,19 @@ def test_deleted_run_shows_not_found_with_links_to_remaining_runs(page):
     page.wait_for_url(f'**run={RUN_ID}')
     expect(page.locator('#run-not-found')).to_have_count(0)
     expect(page.locator('#delete-btn')).to_be_visible()
+
+
+@pytest.mark.parametrize('state', ['pending', 'running'])
+def test_queued_run_without_a_directory_is_not_reported_missing(page, monkeypatch, state):
+    # A full run queued at capacity, or not yet claimed by a worker, has a job
+    # row but no run directory; its /jobs link must not read as deleted.
+    from muscat_db import web
+
+    store = QueuedJobStore('photometry:muscat3/261001/TOI-1000/r-queued', state)
+    monkeypatch.setattr(web, 'get_job_store', lambda: store)
+    response = page.goto(f'/photometry?{DATASET}&run=r-queued')
+    assert response.status == 200
+    expect(page.locator('#run-not-found')).to_have_count(0)
 
 
 def test_missing_raw_data_disables_launches(page, live_server):
