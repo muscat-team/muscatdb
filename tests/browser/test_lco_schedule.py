@@ -958,3 +958,35 @@ def test_late_answer_for_a_previous_target_is_ignored(page):
     expect(page.locator('#msg-windows')).not_to_contain_text('Coordinates not found')
     expect(page.locator('#sch-period')).to_have_value('6.96')
     expect(page.locator('#sch-coords')).to_have_value('201.00000, -50.00000')
+
+
+def test_instrument_defaults_and_saved_guiding(page):
+    page.problems.allowed.extend(NO_TOKEN)
+    page.goto('/lco/schedule')
+    for kind, guiding, airmass, moon in [('sinistro', 'ON', '1.6', '30'), ('muscat', 'OFF', '2.5', '18'), ('qhy600', 'ON', '1.6', '30')]:
+        page.select_option('#sch-kind', kind)
+        assert page.input_value('#sch-guiding-config') == guiding
+        assert page.input_value('#sch-obs-airmass') == airmass
+        assert page.input_value('#sch-moon-sep') == moon
+    page.select_option('#sch-kind', 'muscat')
+    page.select_option('#sch-guiding-config', 'ON')
+    page.fill('#sch-obs-airmass', '1.8')
+    page.locator('#sch-obs-airmass').blur()
+    page.reload()
+    assert page.input_value('#sch-guiding-config') == 'ON'
+    assert page.input_value('#sch-obs-airmass') == '1.8'
+
+
+@pytest.mark.parametrize('site,instrument', [('ogg', 'muscat3'), ('coj', 'muscat4')])
+@pytest.mark.parametrize('button,path', [('btn-exp', '/exposure'), ('btn-fov', '/fov')])
+def test_preview_uses_site_camera(page, site, instrument, button, path):
+    page.problems.allowed.extend(NO_TOKEN)
+    page.goto('/lco/schedule')
+    page.select_option('#sch-kind', 'muscat')
+    page.select_option('#sch-sites', site)
+    page.fill('#sch-target', 'TOI-1000')
+    # Capture navigation without running external catalog queries on the destination.
+    page.route('**' + path + '?**', lambda route: route.fulfill(body='preview'))
+    page.click('#' + button)
+    page.wait_for_url('**' + path + '?**')
+    assert 'inst=' + instrument in page.url
