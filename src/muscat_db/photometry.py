@@ -9,6 +9,7 @@ per instrument/date under ``$MUSCAT_PROSE_DIR/<inst>/<date>/`` with filenames
     {target}_{inst}_{band}_{date}_apertures.png  # per-band aperture overlay
     {target}_{inst}_{band}_{date}_cutouts.png    # per-band star cutout montage
     {target}_{inst}_{band}_{date}_alignment.png  # per-band alignment diagnostic
+    {target}_{inst}_{band}_{date}_band_covariates.png  # per-band flux + covariates
     {target}_{inst}_{band}_{date}.gif            # per-band animation
     {target}_{inst}_{band}_{date}.csv            # per-band light curve
     {target}_{inst}_{date}_lightcurves.png       # multi-band summary
@@ -263,6 +264,9 @@ _BAND_SUFFIX = {
     "_apertures.png": "apertures",
     "_cutouts.png": "cutouts",
     "_alignment.png": "alignment",
+    # Not "_covariates.png": that is the multi-band summary suffix, and the
+    # band-set summary regex would read a one-band file as the summary.
+    "_band_covariates.png": "covariates",
     ".gif": "gif",
     ".csv": "csv",
 }

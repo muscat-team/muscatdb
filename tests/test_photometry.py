@@ -39,6 +39,7 @@ def _make_outputs(base: Path) -> Path:
         (rdir / (bstem + "_apertures.png")).write_bytes(b"\x89PNG\r\n")
         (rdir / (bstem + "_cutouts.png")).write_bytes(b"\x89PNG\r\n")
         (rdir / (bstem + "_alignment.png")).write_bytes(b"\x89PNG\r\n")
+        (rdir / (bstem + "_band_covariates.png")).write_bytes(b"\x89PNG\r\n")
         (rdir / (bstem + ".gif")).write_bytes(b"GIF89a")
         (rdir / (bstem + ".csv")).write_text(
             "BJD_TDB,Flux,Flux_Err\n2460807.84,1.0001,0.0019\n2460807.85,0.9998,0.0020\n"
@@ -200,8 +201,19 @@ class TestListOutputs:
         out = phot.list_outputs(INST, DATE, TARGET)
         assert list(out["bands"]) == BANDS  # canonical order gp, rp, ip, zs
         gp = out["bands"]["gp"]
-        assert set(gp) == {"ref", "apertures", "cutouts", "alignment", "gif", "csv"}
+        assert set(gp) == {"ref", "apertures", "cutouts", "alignment", "covariates", "gif", "csv"}
         assert gp["csv"]["file"] == f"{TARGET}_{INST}_gp_{DATE}.csv"
+
+    def test_band_covariates_stay_per_band(self, prose_dir):
+        # prose2 writes <target>_<inst>_<band>_<date>_band_covariates.png. The
+        # band-set summary regex also matches that stem, so the file must land
+        # in its band's products and never replace the multi-band summary.
+        out = phot.list_outputs(INST, DATE, TARGET)
+        for b in BANDS:
+            assert out["bands"][b]["covariates"]["file"] == (
+                f"{TARGET}_{INST}_{b}_{DATE}_band_covariates.png"
+            )
+        assert out["summary"]["covariates"]["file"] == f"{TARGET}_{INST}_{DATE}_systematics.png"
 
     def test_classifies_underscored_band_names(self, monkeypatch, tmp_path):
         # Narrow-band / Johnson filters embed underscores in the band token

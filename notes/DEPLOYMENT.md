@@ -1061,7 +1061,7 @@ The current pins are:
 
 | Engine | Repository | Commit | Candidate environment |
 |---|---|---|---|
-| prose2 | `jpdeleon/prose2` | `714b4071b8b329d113a6a3ae2d0aeb788ed5fc72` (v3.5.3) | `prose-prod-714b4071` |
+| prose2 | `jpdeleon/prose2` | `454b3df8b446d954de7937826762a264203eaea0` (v3.8.0) | `prose-prod-454b3df8` |
 | timer | `john-livingston/timer` | `b8428258c9b62266532173af4abd7fbafee6dcef` | `timer-prod-b8428258` |
 | harmonic | `john-livingston/harmonic` | `a32fb8e32ca776e0e6e7dc92ad4232cef1f12194` | `harmonic-prod-a32fb8e3` |
 
@@ -1150,6 +1150,60 @@ the candidate's scientific settings, then update the packaged YAML and both
 recorded SHA-256 values (`muscat_db/prose_config.py` and `engines.toml`) together.
 Never regenerate the production snapshot automatically at launch or by following
 live symlinks.
+
+### Prose2 3.8.0 candidate (2026-11-17)
+
+- Owner repository: `https://github.com/jpdeleon/prose2`.
+- Release/tag commit: `454b3df8b446d954de7937826762a264203eaea0` (`v3.8.0`).
+- Candidate environment: `prose-prod-454b3df8`; keep `prose-prod-714b4071`
+  available for rollback.
+- Frozen configuration SHA-256:
+  `71d3a5fc82523b32d51fb9377b808175c122c0a178f7f6a1206b3cb5d33e8d5c`.
+
+This incorporates aperture-based source-peak measurement (jpdeleon/prose2#53)
+and the jpdeleon/prose2#55 fixes: NaN-safe MAD clipping, capped
+comparison-star imputation with validated explicit cIDs, a frame that raises
+being discarded instead of aborting `SequenceParallel`, a dead worker raising
+instead of hanging, saturation screening of comparison stars in every frame,
+and target identification in Gaia at the observing epoch. A band whose target
+is not within 5 arcsec of any detected source, or whose saturation screen
+leaves no comparison star, now fails rather than reducing another source.
+
+Contract changes muscat-db already handles:
+
+- `run_photometry` exits `3` when only some bands were reduced. muscat-db maps
+  the unchanged `photometry PARTIAL FAILURE` log marker to `error` before it
+  looks at the return code, so job states are the same as before.
+- The light-curve CSV gains `PeakRadius(pix)`; `transit_fit.py` excludes it
+  from covariates.
+- Each band writes `…_{band}_{date}_band_covariates.png`. `list_outputs`
+  does not recognise that suffix and skips it, so it does not replace the
+  multi-band `…_covariates.png` summary; the photometry page does not show it.
+- `--save_flux_datacube` is opt-in and muscat-db does not pass it.
+- v3.8.0's comparison-ensemble options (`--comp_ensemble`,
+  `--comp_criterion`, `--comp_min_flux_frac`, `--clip_star_sigma`,
+  `--clip_star_window`) default to the previous behaviour and muscat-db does
+  not pass them. The npz gains `{band}__noise__*` keys, which muscat-db does
+  not read.
+
+The telescope definitions and declared dependencies in prose2 are unchanged
+between v3.5.3 and v3.8.0. The frozen settings, aliases, and source-file hashes
+are preserved; only the engine commit/version provenance and resulting digest
+change. The dependency record differs from `prose-prod-714b4071` only in prose
+itself. Provisioning, activation and rollback follow the 3.5.3 procedure below.
+Existing light curves remain unchanged; rerun under a new run name to compare.
+
+The light-curve comparison between prose2 releases moved out of muscat-db.
+`test_photometry_pinned_matches_production` (prose 3.4.0 with
+`tests/data/prose_340_telescopes.yaml`, automatic aperture selection) failed on
+intended prose2 changes and compared prose versions, which is prose2's concern.
+It is now prose2's release benchmark (jpdeleon/prose2#74,
+jpdeleon/prose2#75): a fixed-aperture, fixed-comparison check against the
+previous release on TOI-3884 and WASP-104b, plus an automatic-selection report
+on the nights compared for this pin. The 3.4.0 fixture was removed; it remains
+in git history.
+`tests/test_pinned_engines_slow.py` keeps the muscat-db contract checks: the
+pinned install produces timer inputs, and timer reproduces its baseline.
 
 ### Prose2 3.5.3 candidate (2026-11-06)
 

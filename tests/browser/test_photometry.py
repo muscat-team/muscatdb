@@ -14,7 +14,7 @@ import shutil
 from playwright.sync_api import expect
 import pytest
 
-from tests.browser.helpers import reveal
+from tests.browser.helpers import QueuedJobStore, reveal
 from tests.browser.seed import RUN_ID
 
 
@@ -193,6 +193,15 @@ def test_delete_reduction_after_confirmation(page, pipeline):
     assert len(pipeline["delete"]) == 1
 
 
+def test_successful_delete_drops_the_deleted_run_from_the_url(page, pipeline):
+    page.goto(URL)
+    page.wait_for_load_state("networkidle")
+    page.click("#delete-btn")
+    page.click("#delete-confirm-btn")
+    page.wait_for_url(lambda url: "run=" not in url)
+    assert page.url.endswith(f"/photometry?{DATASET}")
+
+
 def test_default_settings_reset_persists_after_navigation(page):
     page.goto(URL)
     page.wait_for_load_state('networkidle')
@@ -259,6 +268,53 @@ def test_delete_can_be_cancelled_without_a_request(page, pipeline):
     page.click('#delete-cancel-btn')
     expect(page.locator('#delete-confirm-overlay')).not_to_be_visible()
     assert pipeline['delete'] == []
+
+
+def test_delete_confirmation_names_the_selected_run(page, live_server, pipeline):
+    parent = live_server.root / 'prose/muscat3/261001/_runs/TOI-1000'
+    second = parent / 'r-extra'
+    shutil.copytree(parent / RUN_ID, second)
+    (second / '_webrun_meta.json').write_text('{"run_id":"r-extra","run_name":"another reduction"}')
+    try:
+        page.goto(f'/photometry?{DATASET}&run=r-extra')
+        page.wait_for_load_state('networkidle')
+        page.click('#delete-btn')
+        message = page.locator('#delete-confirm-overlay')
+        expect(message).to_contain_text('run another reduction')
+        page.click('#delete-cancel-btn')
+        assert pipeline['delete'] == []
+    finally:
+        page.context.close()
+        shutil.rmtree(second)
+
+
+def test_deleted_run_shows_not_found_with_links_to_remaining_runs(page):
+    page.problems.allowed.append('HTTP 404: GET /photometry?')
+    page.problems.allowed.append('status of 404')
+    response = page.goto(f'/photometry?{DATASET}&run=gone')
+    assert response.status == 404
+    notice = page.locator('#run-not-found')
+    expect(notice).to_contain_text('Run not found')
+    expect(notice).to_contain_text('gone')
+    # The page must not quietly show another run's products in its place.
+    expect(page.locator('#delete-btn')).to_have_count(0)
+    notice.get_by_role('link', name=RUN_ID).click()
+    page.wait_for_url(f'**run={RUN_ID}')
+    expect(page.locator('#run-not-found')).to_have_count(0)
+    expect(page.locator('#delete-btn')).to_be_visible()
+
+
+@pytest.mark.parametrize('state', ['pending', 'running'])
+def test_queued_run_without_a_directory_is_not_reported_missing(page, monkeypatch, state):
+    # A full run queued at capacity, or not yet claimed by a worker, has a job
+    # row but no run directory; its /jobs link must not read as deleted.
+    from muscat_db import web
+
+    store = QueuedJobStore('photometry:muscat3/261001/TOI-1000/r-queued', state)
+    monkeypatch.setattr(web, 'get_job_store', lambda: store)
+    response = page.goto(f'/photometry?{DATASET}&run=r-queued')
+    assert response.status == 200
+    expect(page.locator('#run-not-found')).to_have_count(0)
 
 
 def test_missing_raw_data_disables_launches(page, live_server):

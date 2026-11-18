@@ -1,0 +1,19 @@
+{# Shown when the URL's run= names a run whose directory no longer exists
+   (deleted, or never existed) on the photometry and transit-fit pages.
+   Expects missing_run, runs, run_labels and run_base (the page URL up to,
+   not including, '&run='). #}
+<div class="empty-state error" id="run-not-found">
+  <div class="empty-icon">⚠</div>
+  <h2>Run not found</h2>
+  <p>Run <strong>{{ missing_run }}</strong> does not exist for this dataset. It may have been deleted.</p>
+  {% if runs %}
+  <div class="site-chips" style="justify-content:center;margin-top:1rem;">
+    <span class="site-label">Remaining runs:</span>
+    {% for r in runs %}
+    <a class="site-chip" href="{{ run_base ~ '&run=' ~ (r.run_id or '__legacy__') }}">{{ run_labels[r.run_id] }}</a>
+    {% endfor %}
+  </div>
+  {% else %}
+  <p style="margin-top:0.75rem;color:var(--text-dim);">No runs remain for this dataset.</p>
+  {% endif %}
+</div>

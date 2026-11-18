@@ -18,3 +18,24 @@ def reveal(page, selector: str) -> None:
         page.locator(selector).locator(
             "xpath=ancestor::details[not(@open)][last()]/summary"
         ).click()
+
+
+class QueuedJobStore:
+    """A job store whose only row is one queued job, keyed like the real store.
+
+    Answers ``get`` for *key* only, so a page that builds the wrong key does not
+    find the job. Listing calls return nothing, as with an otherwise empty queue.
+    """
+
+    def __init__(self, key: str, state: str = "pending") -> None:
+        self.key = key
+        self.state = state
+
+    def get(self, key: str) -> dict | None:
+        return {"key": key, "state": self.state} if key == self.key else None
+
+    def all(self) -> list[dict]:
+        return []
+
+    def active(self) -> list[dict]:
+        return []

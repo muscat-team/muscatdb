@@ -192,6 +192,7 @@ from muscat_db.database import (
     get_exposure_log_for_objects as _get_exposure_log_for_objects,
     get_instruments as _get_instruments,
     get_instruments_summary as _get_instruments_summary,
+    job_row_key,
     get_objects as _get_objects,
     get_summaries as _get_summaries,
     get_targets as _get_targets,
@@ -2717,6 +2718,7 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
     outputs = None
     runs: list = []
     sel_run: str | None = None
+    missing_run = ""
     previews: dict[str, dict] = {}
     nearby_preview: dict | None = None
     post_jd_range: dict | None = None
@@ -2777,8 +2779,16 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
             # Keep its id selected anyway so the page's live status/log/error
             # for THIS run is not silently swapped for a different one.
             sel_run = run
-        else:
+        elif (_run_has_active_job("photometry", inst, date, target, run)
+              and not (denied and _product_visibility(denied).hidden(
+                  "photometry", inst, date, target, run))):
+            # Queued or not yet claimed: the job exists but has no run
+            # directory yet. Keep the old fallback rather than call it deleted.
             sel_run = newest
+        else:
+            # No such run directory (deleted, or never existed): say so rather
+            # than silently showing another run under this URL.
+            missing_run = run
 
         sel_run_desc = next((r for r in runs if r.run_id == (sel_run or "")), None)
         if sel_run_desc and sel_run_desc.run_type == "test":
@@ -2793,6 +2803,8 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
                 outputs = run_outputs[run_key]
             else:
                 outputs = phot.list_outputs(inst, date, target, site=site or None, telescope=telescope or None, mode=mode or None, run_id=sel_run or None)
+        elif missing_run:
+            outputs = phot.empty_outputs()
         else:
             outputs = phot.list_outputs(inst, date, target, site=site or None, telescope=telescope or None, mode=mode or None)
         command = phot.command_str(inst, date, target, test_run=False)
@@ -2886,7 +2898,7 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
         for item in outputs.get("summary_items", []):
             image_info[item["file"]] = image_delivery.metadata(rdir / item["file"])
         for prods in outputs.get("bands", {}).values():
-            for key in ("ref", "apertures", "cutouts", "alignment", "gif"):
+            for key in ("ref", "apertures", "cutouts", "alignment", "covariates", "gif"):
                 if key in prods:
                     name = prods[key]["file"]
                     image_info[name] = image_delivery.metadata(rdir / name)
@@ -2923,6 +2935,7 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
         runs=runs,
         run_labels=phot.run_chip_labels(runs),
         sel_run=sel_run or "",
+        missing_run=missing_run,
         can_modify_run=_viewer_may_modify_run("photometry", inst, date, route_target, sel_run or ""),
         dates=dates, targets=targets,
         outputs=outputs, previews=previews, image_info=image_info,
@@ -2948,6 +2961,8 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
     # them stuck disabled after a failed run, so never let the browser reuse a
     # stale copy of this page.
     resp.headers["Cache-Control"] = "no-store"
+    if missing_run:
+        resp.status_code = 404
     return resp
 
 
@@ -3006,6 +3021,7 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
     sel_mode = ""
     runs: list = []
     sel_run = ""
+    missing_run = ""
 
     denied = _viewer_denied()
     nights = _night_visibility(denied)
@@ -3108,8 +3124,18 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
             sel_run = "" if "" in run_ids else None
         elif run in run_ids:
             sel_run = run
-        else:
+        elif ((_fit_run_dir_exists(inst, date, target, run)
+               or _run_has_active_job("transit_fit", inst, date, target, run))
+              and not products.hidden("transit_fit", inst, date, target, run)):
+            # Still running (no out/ yet, so not listed), or queued before its
+            # run directory exists: keep the old fallback.
             sel_run = newest
+        else:
+            # No such run directory (deleted, or never existed), or one this
+            # viewer may not see (as on /photometry): say so rather than
+            # silently showing another run under this URL.
+            sel_run = None
+            missing_run = run
 
         if sel_run is not None:
             outputs = fit.get_fit_outputs(inst, date, target, run_id=sel_run or None)
@@ -3174,7 +3200,7 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
     # star, not a raw/decorated spelling like "TIC110795273.01(TOI7504.01)"
     # -- apply the same override-aware normalization used everywhere else.
     target_norm_name = _normalize_target_name(target, _get_norm_name_overrides(db)) if target else ""
-    return _render(
+    resp = _render(
         "transit_fit.html",
         instruments=list(fit.FIT_INSTRUMENTS),
         upload_bands=list(lc_upload.BANDS),
@@ -3185,6 +3211,7 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
         sel_site=sel_site, sel_telescope=sel_telescope, sel_mode=sel_mode,
         csv_sites=csv_sites, csv_telescopes=csv_telescopes, csv_modes=csv_modes,
         runs=runs, run_labels=phot.run_chip_labels(runs), sel_run=sel_run,
+        missing_run=missing_run,
         can_modify_run=_viewer_may_modify_run("transit_fit", inst, date, target, sel_run or ""),
         runs_json=runs_json,
         dates=dates, targets=targets,
@@ -3192,6 +3219,30 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
         target_params=target_params,
         wiki_url=_wiki_url(inst, target),
     )
+    if missing_run:
+        resp.status_code = 404
+    return resp
+
+
+_ACTIVE_JOB_STATES = frozenset({"pending", "running", "cancelling"})
+
+
+def _run_has_active_job(type_: str, inst: str, date: str, target: str, run_id: str) -> bool:
+    """Whether the job store holds a queued or running job for this run.
+
+    ``start_run`` and ``start_fit`` return ``queued`` before they create the run
+    directory, so a job waiting for a slot or a worker has a row but no files.
+    """
+    row = get_job_store().get(job_row_key(type_, inst, date, target, run_id))
+    return bool(row) and row.get("state") in _ACTIVE_JOB_STATES
+
+
+def _fit_run_dir_exists(inst: str, date: str, target: str, run_id: str) -> bool:
+    """Whether a named fit run's directory is on disk (an invalid id is not)."""
+    try:
+        return fit.fit_output_dir(inst, date, target, run_id).is_dir()
+    except ValueError:
+        return False
 
 
 @transit_fit_router.get("/query-archive")
