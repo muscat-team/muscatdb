@@ -990,3 +990,43 @@ def test_preview_uses_site_camera(page, site, instrument, button, path):
     page.click('#' + button)
     page.wait_for_url('**' + path + '?**')
     assert 'inst=' + instrument in page.url
+
+
+def test_manual_instrument_change_resets_constraints_and_stale_windows(page):
+    page.problems.allowed.extend(NO_TOKEN)
+    page.goto('/lco/schedule')
+    _generate_windows(page)
+    expect(page.locator('#windows-body tr')).to_have_count(4)
+
+    # QHY600 shares Sinistro's constraints, so the prediction stays current.
+    page.select_option('#sch-kind', 'qhy600')
+    expect(page.locator('#windows-body tr')).to_have_count(4)
+
+    page.select_option('#sch-kind', 'muscat')
+    assert page.input_value('#sch-obs-airmass') == '2.5'
+    assert page.input_value('#sch-moon-sep') == '18'
+    expect(page.locator('#windows-body tr')).to_have_count(0)
+    expect(page.locator('#msg-windows')).to_contain_text('Inputs changed')
+
+
+def test_automatic_instrument_change_keeps_constraints_and_selection(page):
+    page.problems.allowed.extend(NO_TOKEN)
+    page.goto('/lco/schedule')
+    # A stored kind that is no longer an option (older saved form) leaves the
+    # Instrument blank, so checking a window picks the instrument automatically.
+    page.evaluate("localStorage.setItem('lco:schedule:options', JSON.stringify({'sch-kind': 'muscat3'}))")
+    page.goto('/lco/schedule')
+    assert page.input_value('#sch-kind') == ''
+    page.fill('#sch-obs-airmass', '2')
+    page.fill('#sch-moon-sep', '25')
+    _generate_windows(page)
+    page.select_option('#sch-guiding-config', 'OFF')
+    row = page.locator('#windows-body tr', has_text='Full @ ELP')
+    row.locator('input[type=checkbox]').check()
+
+    assert page.input_value('#sch-kind') == 'sinistro'
+    assert page.input_value('#sch-guiding-config') == 'ON'
+    assert page.input_value('#sch-obs-airmass') == '2'
+    assert page.input_value('#sch-moon-sep') == '25'
+    expect(page.locator('#windows-body tr')).to_have_count(4)
+    expect(row.locator('input[type=checkbox]')).to_be_checked()

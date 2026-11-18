@@ -1115,10 +1115,7 @@
   function applyKind(restoring) {
     var k = val('sch-kind');
     if (!restoring && k !== lastScheduleKind) {
-      var muscat = k === 'muscat';
-      setSelectValue('sch-guiding-config', muscat ? 'OFF' : 'ON');
-      setVal('sch-obs-airmass', muscat ? 2.5 : 1.6);
-      setVal('sch-moon-sep', muscat ? 18 : 30);
+      setSelectValue('sch-guiding-config', k === 'muscat' ? 'OFF' : 'ON');
     }
     refreshInstrumentBlocks();
     // Each request's instrument choices start from the selected Instrument.
@@ -1128,11 +1125,21 @@
   // A manual instrument change keeps the checked window's site: re-run the
   // auto-config so the new instrument's site dropdown is filled too (applyAutoConfig
   // never reverts a manually chosen instrument).
+  function applyConstraintDefaults() {
+    var muscat = val('sch-kind') === 'muscat';
+    var airmass = muscat ? '2.5' : '1.6';
+    var moonSep = muscat ? '18' : '30';
+    if (val('sch-obs-airmass') === airmass && val('sch-moon-sep') === moonSep) return false;
+    setVal('sch-obs-airmass', airmass);
+    setVal('sch-moon-sep', moonSep);
+    return true;
+  }
   el('sch-kind').addEventListener('change', function () {
     applyKind();
     applyAutoConfig();
+    if (applyConstraintDefaults()) invalidateGeneratedWindows();
     // Either-site plans depend on the Instrument: refresh each row's options.
-    if (lastWindows.length) renderWindows(selectedWindowIndices());
+    else if (lastWindows.length) renderWindows(selectedWindowIndices());
   });
   ['sch-exp-g', 'sch-exp-r', 'sch-exp-i', 'sch-exp-z', 'sch-readout'].forEach(function (id) {
     var node = el(id);
