@@ -2711,7 +2711,7 @@
              </p>`
           : `<p style="margin-bottom: 0rem; font-size: 0.75rem; color: var(--text); font-weight: 500;">
                ${methodLabel} linear fit: reduced χ² ${Number.isFinite(res.reduced_chi2) ? res.reduced_chi2.toFixed(3) : 'unavailable'}; ${res.n_fit} points, ${res.dof} degrees of freedom.
-               ${res.reduced_chi2 > 2 ? '⚠ Scatter exceeds the quoted timing errors: a linear ephemeris may be inadequate; formal uncertainties may underestimate uncertainty.' : ''}
+               ${res.reduced_chi2 > 2 ? `⚠ Scatter exceeds the quoted timing errors: a linear ephemeris may be inadequate${res.fit_method === 'weighted' ? '; formal uncertainties may underestimate uncertainty' : ''}.` : ''}
              </p>`;
         fitSummaryHtml = `
           <div style="margin-top: 0.5rem; font-size: 0.85rem;">

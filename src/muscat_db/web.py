@@ -7663,7 +7663,7 @@ def api_ephemeris_calculate(payload: dict = Body(...)):
         return JSONResponse({"ok": False, "error": "Target is required"}, status_code=400)
         
     planets_ephem = payload.get("planets_ephem") or {}
-    if not isinstance(planets_ephem, dict) or not planets_ephem:
+    if not isinstance(planets_ephem, dict):
         return JSONResponse({"ok": False, "error": "A reference ephemeris is required for each planet"}, status_code=400)
     for planet, ephem in planets_ephem.items():
         try:
@@ -9241,11 +9241,9 @@ def _resolve_ttv_options(options: dict) -> tuple[dict | None, str | None]:
     selection = options.get("selection")
     if selection is None:
         return {**cleaned, "inputs": None}, None
-    cleaned["planet_letters"] = ttv._infer_planet_letters(
-        list(str(options.get("planet_letters") or "")), options.get("planets_ephem") or {})
     resolved, err = ttv_selection.resolve_selection(
         selection,
-        cleaned["planet_letters"],
+        str(options.get("planet_letters") or ""),
         options.get("planets_ephem") or {},
         fitted_params=_get_run_fitted_params,
         is_available=_transit_fit_available(),

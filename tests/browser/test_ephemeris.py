@@ -85,6 +85,7 @@ def test_linear_fit_reports_scatter_instead_of_convergence(page):
     expect(page.locator('#results-grid')).to_contain_text('reduced χ²')
     expect(page.locator('#results-grid')).to_contain_text('3 points')
     expect(page.locator('#results-grid')).to_contain_text('Scatter exceeds')
+    expect(page.locator('#results-grid')).not_to_contain_text('underestimate')
     expect(page.locator('#results-grid')).not_to_contain_text('converged successfully')
 
 
