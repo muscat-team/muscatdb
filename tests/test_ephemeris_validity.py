@@ -33,3 +33,14 @@ def test_supplied_period_order_reaches_csv_and_harmonic(monkeypatch):
     assert result['planet_letters'] == 'cdbe'
     assert [line.split(',')[:3] for line in result['csv_content'].splitlines()[1:]] == [
         ['0','0','2460001.0'], ['1','0','2460002.0'], ['2','0','2460000.0'], ['3','0','2460003.0']]
+
+
+@pytest.mark.parametrize('ephem', [{'t0': 2450000, 'period': 1}, {'t0': 2460000}, {'t0': 2460000, 'period': 0}])
+def test_ttv_start_refuses_missing_or_placeholder_reference(monkeypatch, ephem):
+    monkeypatch.setattr(web, '_transit_fit_available', lambda: lambda *a: True)
+    monkeypatch.setattr(web, '_get_run_fitted_params', lambda *a: {'b': {'tc': 2460100.5, 'unc': .001}})
+    monkeypatch.setattr(web, '_run_hidden', lambda *a: False)
+    selection = [{'kind': 'product', 'planet': 'b', 'instrument': 'muscat3', 'date': '20240101', 'target': 'star'}]
+    result, error = web._resolve_ttv_options({'planet_letters': 'b', 'planets_ephem': {'b': ephem}, 'selection': selection})
+    assert result is None
+    assert 'no valid ephemeris for planet b' in error

@@ -49,7 +49,7 @@ def _epoch_of(tc: float, ephem: Any) -> int | None:
     if not isinstance(ephem, dict):
         return None
     t0, period = _finite(ephem.get("t0")), _finite(ephem.get("period"))
-    if t0 is None or period is None or period <= 0:
+    if t0 is None or period is None or not ephemeris_math.is_valid_reference(t0, period):
         return None
     return ephemeris_math.assign_epoch(tc, t0, period)
 

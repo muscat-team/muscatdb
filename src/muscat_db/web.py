@@ -7667,9 +7667,7 @@ def api_ephemeris_calculate(payload: dict = Body(...)):
         return JSONResponse({"ok": False, "error": "A reference ephemeris is required for each planet"}, status_code=400)
     for planet, ephem in planets_ephem.items():
         try:
-            t0, period = float(ephem["t0"]), float(ephem["period"])
-            valid = math.isfinite(t0) and math.isfinite(period) and t0 > 0 and period > 0
-            valid = valid and (t0, period) != (2450000.0, 1.0)
+            valid = ephemeris_math.is_valid_reference(float(ephem["t0"]), float(ephem["period"]))
         except (KeyError, TypeError, ValueError):
             valid = False
         if not valid:

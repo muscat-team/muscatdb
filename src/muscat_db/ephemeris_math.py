@@ -53,6 +53,17 @@ class EphemerisFit(TypedDict):
     reduced_chi2: float | None
 
 
+PLACEHOLDER_EPHEMERIS = (2450000.0, 1.0)
+
+
+def is_valid_reference(t0: float, period: float) -> bool:
+    """True for a finite, positive reference ephemeris that is not the T0=2450000, P=1 placeholder."""
+    return (
+        math.isfinite(t0) and math.isfinite(period) and t0 > 0 and period > 0
+        and (t0, period) != PLACEHOLDER_EPHEMERIS
+    )
+
+
 def assign_epoch(tc: float, t0: float, period: float) -> int:
     """Nearest integer transit epoch for a transit center ``tc``.
 
@@ -111,8 +122,12 @@ def fit_linear_ephemeris(
       covariance.
     - ``"unweighted"`` (default): uniform weights; the T0/period uncertainties
       are derived from the residual variance (``sum((tc - fit)**2) / dof``)
-      propagated through the same covariance structure. ``uncs`` is unused in
-      this mode other than being accepted for a uniform call signature.
+      propagated through the same covariance structure. ``uncs`` does not
+      enter the fit in this mode.
+
+    In both modes ``reduced_chi2`` is the chi-squared of the residuals against
+    ``uncs`` divided by ``dof``; it is None when ``dof`` is 0 or any unc is
+    zero or non-finite.
 
     Epochs are centered at their mid-range value (``E_center``) before the
     regression -- this keeps the design matrix well-conditioned -- then the
