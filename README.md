@@ -24,11 +24,17 @@ commits installed in separate environments, selected by `deploy/engines.toml`
 and `deploy/workers.toml`. muscat-db stores their inputs, launches them as
 background jobs, and renders their outputs; the science lives in the packages.
 
-The photometry pin is prose2 3.5.3. It applies saturation limits in native
-pixel units (electrons for BANZAI data, ADU for MuSCAT/MuSCAT2) and screens
-shared-reference comparisons separately in each band. Screening uses one
-representative frame per band, not every exposure. It retains the 3.5.1
-exposure-midpoint, measurement-uncertainty, and invalid-target corrections.
+The photometry pin is prose2 3.8.0. It measures each source's peak inside its
+photometric aperture, screens comparison stars for saturation in every frame,
+identifies the target in Gaia at the observing epoch, discards a frame that
+raises instead of aborting the run, caps comparison-star imputation, and fails
+a band whose target it cannot locate rather than reducing the brightest source
+instead (pass `--tID` to choose it). A run that loses some bands exits with
+code 3 and is shown as an error. Its new comparison-ensemble options
+(`--comp_ensemble`, `--comp_criterion`, `--clip_star_sigma`) are off by default
+and not yet exposed in the web interface. It retains the 3.5.x native-unit saturation
+limits, per-band shared-reference screening, and the 3.5.1 exposure-midpoint,
+measurement-uncertainty, and invalid-target corrections.
 Existing reductions and transit fits keep their original results; rerun them
 under a new run name to obtain the corrections while preserving the comparison.
 CSV/NPZ formats and existing command options remain compatible. The new
