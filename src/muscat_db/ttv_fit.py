@@ -287,10 +287,16 @@ def _harmonic_prefix() -> list[str]:
     return ["harmonic"]
 
 
-def _infer_planet_letters(planets: list[str]) -> str:
-    """Sort planet letter designations and return as a contiguous string."""
-    sorted_pl = sorted(set(planets))
-    return "".join(sorted_pl)
+def _infer_planet_letters(planets: list[str], ephemerides: dict | None = None) -> str:
+    """Order known planets by reference period; keep unknown outer letters last."""
+    ephemerides = {str(k).lower(): v for k, v in (ephemerides or {}).items()}
+    def period(letter):
+        try:
+            value = float(ephemerides[letter]["period"])
+            return value if math.isfinite(value) and value > 0 else math.inf
+        except (KeyError, TypeError, ValueError):
+            return math.inf
+    return "".join(sorted(dict.fromkeys(planets), key=period))
 
 
 def _make_harmonic_csv(transit_data: list[dict], planet_letters: str) -> str:

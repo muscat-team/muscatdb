@@ -122,7 +122,7 @@ def resolve_selection(
         return None, "no transit times selected"
     if len(selection) > MAX_SELECTION:
         return None, f"too many inputs (max {MAX_SELECTION})"
-    letters = sorted(str(planet_letters or "").lower())
+    letters = list(str(planet_letters or "").lower())
     ephem = planets_ephem if isinstance(planets_ephem, dict) else {}
 
     rows: set[tuple[int, int, float, float]] = set()

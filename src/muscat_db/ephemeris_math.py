@@ -14,6 +14,7 @@ point results match the prior implementation bit-for-bit.
 
 from __future__ import annotations
 
+import math
 from typing import Sequence, TypedDict
 
 
@@ -49,6 +50,7 @@ class EphemerisFit(TypedDict):
     E_center: int
     n_fit: int
     dof: int
+    reduced_chi2: float | None
 
 
 def assign_epoch(tc: float, t0: float, period: float) -> int:
@@ -136,6 +138,7 @@ def fit_linear_ephemeris(
         "E_center": 0,
         "n_fit": n,
         "dof": dof,
+        "reduced_chi2": None,
     }
     if n < 2:
         return result
@@ -185,6 +188,13 @@ def fit_linear_ephemeris(
     else:
         t0_fit_unc = (sigma_sq * var_t0_factor / delta) ** 0.5
 
+    reduced_chi2 = None
+    if dof > 0 and all(math.isfinite(u) and u > 0 for u in uncs):
+        reduced_chi2 = sum(
+            ((tc - (t0_centered + (epoch - e_center) * period_fit)) / unc) ** 2
+            for epoch, tc, unc in zip(epochs, tcs, uncs)
+        ) / dof
+
     return {
         "was_fit": True,
         "fit_method": fit_method,
@@ -197,4 +207,5 @@ def fit_linear_ephemeris(
         "E_center": e_center,
         "n_fit": n,
         "dof": dof,
+        "reduced_chi2": reduced_chi2,
     }

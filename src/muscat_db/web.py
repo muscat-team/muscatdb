@@ -7663,6 +7663,17 @@ def api_ephemeris_calculate(payload: dict = Body(...)):
         return JSONResponse({"ok": False, "error": "Target is required"}, status_code=400)
         
     planets_ephem = payload.get("planets_ephem") or {}
+    if not isinstance(planets_ephem, dict) or not planets_ephem:
+        return JSONResponse({"ok": False, "error": "A reference ephemeris is required for each planet"}, status_code=400)
+    for planet, ephem in planets_ephem.items():
+        try:
+            t0, period = float(ephem["t0"]), float(ephem["period"])
+            valid = math.isfinite(t0) and math.isfinite(period) and t0 > 0 and period > 0
+            valid = valid and (t0, period) != (2450000.0, 1.0)
+        except (KeyError, TypeError, ValueError):
+            valid = False
+        if not valid:
+            return JSONResponse({"ok": False, "error": f"Planet {planet} needs a valid reference epoch and period; placeholder ephemerides cannot be used"}, status_code=400)
     req_datasets = payload.get("datasets") or []
 
     # Manually entered transit centers (Reading-2 feature): user-supplied
@@ -7764,8 +7775,8 @@ def api_ephemeris_calculate(payload: dict = Body(...)):
     results = {}
     
     for pl, ephem in planets_ephem.items():
-        T0 = float(ephem.get("t0", 2450000.0))
-        P = float(ephem.get("period", 1.0))
+        T0 = float(ephem["t0"])
+        P = float(ephem["period"])
         
         # Collect data points for this planet
         points = []
@@ -7904,6 +7915,7 @@ def api_ephemeris_calculate(payload: dict = Body(...)):
             "E_center": E_center,
             "n_fit": fit_result["n_fit"],
             "dof": fit_result["dof"],
+            "reduced_chi2": fit_result["reduced_chi2"],
             "points": points_data
         }
         
@@ -9229,9 +9241,11 @@ def _resolve_ttv_options(options: dict) -> tuple[dict | None, str | None]:
     selection = options.get("selection")
     if selection is None:
         return {**cleaned, "inputs": None}, None
+    cleaned["planet_letters"] = ttv._infer_planet_letters(
+        list(str(options.get("planet_letters") or "")), options.get("planets_ephem") or {})
     resolved, err = ttv_selection.resolve_selection(
         selection,
-        str(options.get("planet_letters") or ""),
+        cleaned["planet_letters"],
         options.get("planets_ephem") or {},
         fitted_params=_get_run_fitted_params,
         is_available=_transit_fit_available(),
