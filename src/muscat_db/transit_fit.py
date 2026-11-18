@@ -788,6 +788,8 @@ def validate_flare_times(options: dict | None, csvs) -> str | None:
         return None
     time_range = lightcurve_time_range(csvs)
     if time_range is None:
+        if o.get("include_bump") == "true" and not str(o.get("bump_tcenter") or "").strip():
+            return "bump tcenter is required when the light curves have no BJD_TDB range"
         return None
     return _validate_flares(o, time_range) or _validate_bump_times(o, time_range)
 
@@ -804,8 +806,8 @@ def validate_fit_options(options: dict | None, time_range: tuple[float, float] |
     o = options or {}
     if o.get("secondary_eclipse") == "true":
         return "Secondary eclipse is not supported by timer"
-    if str(o.get("fit_basis") or "duration").lower() not in ("duration", "mstar/rstar"):
-        return "fit_basis must be duration or mstar/rstar"
+    if str(o.get("fit_basis") or "duration").strip().lower() != "duration":
+        return "fit_basis must be duration"
     if o.get("chunk_offset") == "true":
         threshold = _to_float(o.get("chunk_thresh", 0.02))
         if threshold is None or not math.isfinite(threshold) or threshold <= 0:
@@ -1541,8 +1543,6 @@ def _write_fit_inputs(
             return vals_val, vals_unc, prior
 
         span = lightcurve_time_range(csvs)
-        if not str(options.get("bump_tcenter") or "").strip() and span is None:
-            raise ValueError("bump tcenter is required when the light-curve time range is unknown")
         center = sum(span) / 2 if span else 0.0
         tcenter, tcenter_unc, tcenter_prior = _bump_values("tcenter", center, 0.1)
         width, width_unc, width_prior = _bump_values("width", 0.02, 0.01)

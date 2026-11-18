@@ -1749,11 +1749,11 @@ erDiagram
 
       <div class="faq-item">
         <div class="faq-question" onclick="toggleFaq(this)">
-          <span>How do I fit a secondary eclipse instead of a primary transit?</span>
+          <span>Can I fit a secondary eclipse instead of a primary transit?</span>
           <span class="faq-icon">+</span>
         </div>
         <div class="faq-answer">
-          <p>Check the <strong>Secondary eclipse</strong> box in the Fitting Pipeline Options section before launching a fit. This sets <code>secondary_eclipse: true</code> in the <code>fit.yaml</code> configuration, which places the modeled event at orbital phase 0.5 rather than phase 0 (the primary transit). It is off by default and is independent of the New Fit / Continue Sampling run mode — combine it with a fresh set of lightcurves centered on the expected eclipse time.</p>
+          <p>You cannot. The timer fitting engine models primary transits only, so the page has no secondary eclipse option, and a launch request that sets <code>secondary_eclipse</code> is rejected rather than silently fitted as a primary transit.</p>
         </div>
       </div>
 

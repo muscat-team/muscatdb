@@ -27,3 +27,10 @@ def test_bump_range_checked_at_launch(tmp_path):
     csv = tmp_path / 'lc.csv'
     csv.write_text('BJD_TDB,Flux,Flux_err\n2460000.1,1,.001\n2460000.2,1,.001\n')
     assert 'outside' in fit.validate_flare_times({'include_bump': 'true', 'bump_tcenter': '0,0.1'}, [csv])
+
+
+def test_blank_bump_center_without_time_range_rejected_at_launch(tmp_path):
+    csv = tmp_path / 'lc.csv'
+    csv.write_text('time,flux\n0.1,1\n')
+    assert 'required' in fit.validate_flare_times({'include_bump': 'true'}, [csv])
+    assert fit.validate_flare_times({'include_bump': 'true', 'bump_tcenter': '2460000.1,0.1'}, [csv]) is None
