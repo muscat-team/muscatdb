@@ -853,13 +853,27 @@ def test_archive_predicts_transit_center(page):
     assert center.input_value() == '2461314.87'
 
 
-def test_transit_center_hint_explains_automatic_prediction(page):
+@pytest.mark.parametrize("added_planet", [False, True])
+def test_transit_center_hint_explains_automatic_prediction(page, added_planet):
     """Visible guidance must describe the ephemeris-based blank-center default."""
     page.goto(URL)
+    if added_planet:
+        reveal(page, '#add-planet-btn')
+        page.click('#add-planet-btn')
     reveal(page, '.planet-tc_pred')
-    field = page.locator('.planet-card').first.locator('.opt').filter(
+    field = page.locator('.planet-card').last.locator('.opt').filter(
         has=page.locator('.planet-tc_pred')
     )
+    # Timer's Uniform prior uses a full width, not a Gaussian uncertainty.
+    expect(field.get_by_role('spinbutton', name='Predicted transit center in BJD')).to_be_visible()
+    expect(field.get_by_role('spinbutton', name='Uniform prior full width in days')).to_be_visible()
+    expect(field.locator('label')).to_contain_text('Transit-center prior')
+    expect(field.get_by_role('button', name='Help')).to_have_accessible_description(
+        'timer samples t0 from a Uniform prior. The first value is its predicted center (BJD); '
+        'the second is its full width in days, not a Gaussian uncertainty. '
+        'The bounds are center minus/plus half the full width.',
+    )
+    expect(field.locator('.hint').first).to_have_text('full width')
     expect(field.locator('.hint').last).to_have_text(
         'Blank center: predicted from epoch and period. Blank full width: 0.04 d.'
     )

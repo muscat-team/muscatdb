@@ -305,7 +305,7 @@ class TestAttemptsSurviveRelaunch:
             type_="transit_fit", inst="qhy600", date="260101", target="TOI-1234",
             state="pending", returncode=None, elapsed=0, started_at=100.0,
             run_type="full", attempts=3,
-            params='{"test_run": false, "options": {}}',
+            params='{"test_run": false, "options": {"tc_pred_b": "2461041.5"}}',
         )
 
         fit.sync_jobs()

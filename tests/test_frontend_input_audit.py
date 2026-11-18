@@ -550,20 +550,6 @@ def test_transit_fit_archive_query_modal_uses_shared_style_variants():
     assert "', 'success')" in html
 
 
-def test_transit_center_prior_displays_timer_uniform_width_semantics():
-    """The UI must not present timer's full-width field as a +/- uncertainty."""
-    html = _read_template("transit_fit.html")
-    add_card = _function_body(html, "addPlanetCard")
-
-    assert "Transit-center prior" in add_card
-    assert "not a Gaussian uncertainty" in add_card
-    assert "Uniform prior: center, full width (days)" in add_card
-    assert 'aria-label="Predicted transit center in BJD"' in add_card
-    assert 'aria-label="Uniform prior full width in days"' in add_card
-    assert 'class="planet-tc-prior-bounds"' not in add_card
-    assert '<span style="color: var(--text-dim); font-size: 0.8rem;">±</span>' not in add_card
-
-
 def test_transit_fit_results_summary_closes_its_layout_wrappers():
     """The downloads row must not be swallowed by an unclosed summary div."""
     html = _read_template("transit_fit.html")
