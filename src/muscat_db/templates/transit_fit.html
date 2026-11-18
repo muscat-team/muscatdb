@@ -606,21 +606,21 @@
             <input type="number" id="opt-clip_nsig" value="7" min="1" step="0.5" style="width: 100%;" disabled>
           </div>
           <div class="opt">
-            <label for="opt-chunk_thresh">Chunk thresh <span class="help-tooltip" title="Time gap (days) that separates data into chunks for Chunk offset. Default 0.">?</span></label>
-            <input type="number" id="opt-chunk_thresh" value="0" min="0" step="0.01" style="width: 100%;" disabled>
+            <label for="opt-chunk_thresh">Chunk thresh <span class="help-tooltip" title="Time gap (days) that separates data into chunks for Chunk offset. Default 0.02 d.">?</span></label>
+            <input type="number" id="opt-chunk_thresh" value="0.02" min="0.000001" step="0.01" style="width: 100%;" disabled>
           </div>
           <div class="opt">
-            <label for="opt-trim_beg">Trim begin <span class="help-tooltip" title="Number of data points to trim from the start of each light curve. Empty = none.">?</span></label>
-            <input type="number" id="opt-trim_beg" placeholder="none" min="0" step="1" style="width: 100%;">
+            <label for="opt-trim_beg">Trim begin (days) <span class="help-tooltip" title="Time in days to trim from the start of each light curve. Empty = none.">?</span></label>
+            <input type="number" id="opt-trim_beg" placeholder="none" min="0" step="any" style="width: 100%;">
           </div>
           <div class="opt">
-            <label for="opt-trim_end">Trim end <span class="help-tooltip" title="Number of data points to trim from the end of each light curve. Empty = none.">?</span></label>
-            <input type="number" id="opt-trim_end" placeholder="none" min="0" step="1" style="width: 100%;">
+            <label for="opt-trim_end">Trim end (days) <span class="help-tooltip" title="Time in days to trim from the end of each light curve. Empty = none.">?</span></label>
+            <input type="number" id="opt-trim_end" placeholder="none" min="0" step="any" style="width: 100%;">
           </div>
         </div>
         </details>
         <details class="opt-collapse">
-        <summary>Gaussian Process (GP) <span class="help-tooltip" title="Model time-correlated (red) noise with a per-light-curve celerite2 Matern-3/2 kernel. Hyperparameters are in log10 space: amplitude sigma = 10^log_amp (flux units), timescale rho = 10^log_scale (days). The gp block is only written to fit.yaml when Use GP is on.">?</span></summary>
+        <summary>Gaussian Process (GP) <span class="help-tooltip" title="Model time-correlated (red) noise with a per-light-curve celerite2 Matern-3/2 kernel. Hyperparameters are in log10 space: amplitude sigma = 10^log_amp (ppt), timescale rho = 10^log_scale (days). The gp block is only written to fit.yaml when Use GP is on.">?</span></summary>
         <div style="grid-column: 1 / -1; display: flex; gap: 1.25rem; flex-wrap: wrap; align-items: flex-end; padding-bottom: 0.45rem;">
           <div class="opt check" style="margin-top: 0; white-space: nowrap;">
             <input type="checkbox" id="opt-use_gp">
@@ -637,9 +637,9 @@
         </div>
         <div class="transit-option-grid" style="grid-column: 1 / -1; display: grid; grid-template-columns: repeat(2, 1fr); gap: 1.25rem;">
           <div class="opt">
-            <label for="opt-gp_log_amp">log_amp prior <span class="help-tooltip" title="Prior on log10 of the GP amplitude sigma (flux units). Gaussian: enter mean,uncertainty. Uniform: enter low,high bounds. Default -3,2 Gaussian.">?</span></label>
+            <label for="opt-gp_log_amp">log_amp prior <span class="help-tooltip" title="Prior on log10 of the GP amplitude sigma (ppt). Gaussian: enter mean,uncertainty. Uniform: enter low,high bounds. Default 0,2 Gaussian (1 ppt amplitude).">?</span></label>
             <div style="display: flex; gap: 0.5rem; align-items: center;">
-              <input type="text" id="opt-gp_log_amp" value="-3,2" placeholder="mean,unc" style="flex: 3; width: 100%; min-width: 0;" disabled>
+              <input type="text" id="opt-gp_log_amp" value="0,2" placeholder="mean,unc" style="flex: 3; width: 100%; min-width: 0;" disabled>
               <select id="opt-gp_log_amp_prior" title="Prior shape — Gaussian: enter mean,uncertainty. Uniform: enter low,high bounds." style="flex: 2; width: 100%; min-width: 0; background: var(--input-bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 0.35rem 0.5rem; font-size: 0.85rem;" disabled>
                 <option value="gaussian">Gaussian</option>
                 <option value="uniform">Uniform</option>
@@ -675,7 +675,7 @@
           <div class="opt">
             <label for="opt-bump_tcenter">tcenter prior <span class="help-tooltip" title="Prior on center time of the bump (BJD_TDB). Gaussian: enter value,unc. Uniform: enter low,high bounds. Use ; to separate multiple bumps.">?</span></label>
             <div style="display: flex; gap: 0.5rem; align-items: center;">
-              <input type="text" id="opt-bump_tcenter" value="0.0,0.1" placeholder="value,unc" style="flex: 3; width: 100%; min-width: 0;" disabled>
+              <input type="text" id="opt-bump_tcenter" value="" placeholder="value,unc" style="flex: 3; width: 100%; min-width: 0;" disabled>
               <select id="opt-bump_tcenter_prior" title="Prior shape — Gaussian: enter value,unc. Uniform: enter low,high bounds." style="flex: 2; width: 100%; min-width: 0; background: var(--input-bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 0.35rem 0.5rem; font-size: 0.85rem;" disabled>
                 <option value="gaussian">Gaussian</option>
                 <option value="uniform">Uniform</option>
@@ -693,9 +693,9 @@
             </div>
           </div>
           <div class="opt">
-            <label for="opt-bump_ampl">ampl prior <span class="help-tooltip" title="Prior on amplitude of the bump (flux units). Gaussian: enter value,unc. Uniform: enter low,high bounds. Use ; to separate multiple bumps.">?</span></label>
+            <label for="opt-bump_ampl">ampl prior <span class="help-tooltip" title="Prior on amplitude of the bump (ppt). Gaussian: enter value,unc. Uniform: enter low,high bounds. Use ; to separate multiple bumps.">?</span></label>
             <div style="display: flex; gap: 0.5rem; align-items: center;">
-              <input type="text" id="opt-bump_ampl" value="0.01,0.01" placeholder="value,unc" style="flex: 3; width: 100%; min-width: 0;" disabled>
+              <input type="text" id="opt-bump_ampl" value="10,10" placeholder="value,unc" style="flex: 3; width: 100%; min-width: 0;" disabled>
               <select id="opt-bump_ampl_prior" title="Prior shape — Gaussian: enter value,unc. Uniform: enter low,high bounds." style="flex: 2; width: 100%; min-width: 0; background: var(--input-bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 0.35rem 0.5rem; font-size: 0.85rem;" disabled>
                 <option value="gaussian">Gaussian</option>
                 <option value="uniform">Uniform</option>
@@ -734,7 +734,7 @@
                     <option value="uniform">Uniform</option>
                   </select>
                 </th>
-                <th>ampl <span class="help-tooltip" title="Amplitude of the flare (relative flux). Gaussian: value,unc. Uniform: low,high bounds.">?</span>
+                <th>ampl <span class="help-tooltip" title="Amplitude of the flare (ppt). Gaussian: value,unc. Uniform: low,high bounds.">?</span>
                   <select id="opt-flare_ampl_prior" title="Prior shape for every flare's ampl" disabled>
                     <option value="gaussian">Gaussian</option>
                     <option value="uniform">Uniform</option>
@@ -778,18 +778,13 @@
             <input type="checkbox" id="opt-use_custom_optimizer" checked>
             <label for="opt-use_custom_optimizer">Custom optimizer <span class="help-tooltip" title="Use timer's custom MAP optimizer instead of PyMC's default for the initial solution. Default on.">?</span></label>
           </div>
-          <div class="opt check" style="margin-top: 0; white-space: nowrap;">
-            <input type="checkbox" id="opt-secondary_eclipse">
-            <label for="opt-secondary_eclipse">Secondary eclipse <span class="help-tooltip" title="Fit a secondary eclipse (at phase 0.5) instead of a primary transit. Default off.">?</span></label>
-          </div>
           <div style="margin-top: 0; display: inline-flex; align-items: center; gap: 0.45rem; white-space: nowrap;">
             <label for="opt-fit_basis" style="margin: 0; font-size: 0.85rem; color: var(--text); display: inline-flex; align-items: center; gap: 0.25rem;">
               Fit basis
-              <span class="help-tooltip" title="Basis parameterization for PyMC transit model: standard (semi-major axis scale a/R* etc.) or duration (transit duration).">?</span>
+              <span class="help-tooltip" title="Basis parameterization for PyMC transit model: duration (transit duration).">?</span>
             </label>
             <select id="opt-fit_basis" style="background: var(--input-bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 0.15rem 0.4rem; font-size: 0.8rem; margin: 0; height: 24px; box-sizing: border-box; line-height: 1; cursor: pointer;">
               <option value="duration" selected>duration</option>
-              <option value="standard">standard</option>
             </select>
           </div>
           <div style="margin-top: 0; display: inline-flex; align-items: center; gap: 0.45rem; white-space: nowrap;">
@@ -805,14 +800,6 @@
         </div>
 
         <div class="fit-option-row" style="grid-column: 1 / -1; display: flex; gap: 1.25rem; flex-wrap: nowrap; align-items: flex-end; padding-bottom: 0.45rem;">
-          <div class="opt check" style="margin-top: 0; white-space: nowrap;">
-            <input type="checkbox" id="opt-plot_midtransit" checked>
-            <label for="opt-plot_midtransit">Plot midtransit <span class="help-tooltip" title="Plot a solid vertical line at the nearest midtransit time on data.png.">?</span></label>
-          </div>
-          <div class="opt check" style="margin-top: 0; white-space: nowrap;">
-            <input type="checkbox" id="opt-plot_ingress_egress" checked>
-            <label for="opt-plot_ingress_egress">Plot ing/egr <span class="help-tooltip" title="Plot dashed vertical lines at ingress and egress times on data.png.">?</span></label>
-          </div>
         </div>
       </div>
     </details>
@@ -1120,15 +1107,12 @@
       trend: chk('opt-trend') ? 'true' : 'false',
       covariates: getCovariates(),
       run_mode: document.getElementById('run-mode-select')?.value || 'new',
-      plot_midtransit: chk('opt-plot_midtransit') ? 'true' : 'false',
-      plot_ingress_egress: chk('opt-plot_ingress_egress') ? 'true' : 'false',
       tune: val('opt-tune'),
       draws: val('opt-draws'),
       chains: val('opt-chains'),
       cores: val('opt-cores'),
       include_mean: chk('opt-include_mean') ? 'true' : 'false',
       use_custom_optimizer: chk('opt-use_custom_optimizer') ? 'true' : 'false',
-      secondary_eclipse: chk('opt-secondary_eclipse') ? 'true' : 'false',
       spline: chk('opt-spline') ? 'true' : 'false',
       spline_knots: val('opt-spline_knots'),
       add_bias: chk('opt-add_bias') ? 'true' : 'false',
@@ -1821,11 +1805,10 @@
       }
     });
 
-    ['include_mean','use_custom_optimizer','secondary_eclipse','spline','add_bias','quadratic','clip','chunk_offset',
+    ['include_mean','use_custom_optimizer','spline','add_bias','quadratic','clip','chunk_offset',
      'use_gp','gp_per_dataset_log_amp','gp_per_dataset_log_scale',
      'include_bump','chromatic_bump',
-     'include_flare','chromatic_flare',
-     'plot_midtransit','plot_ingress_egress'].forEach(function (id) {
+     'include_flare','chromatic_flare'].forEach(function (id) {
       var el = document.getElementById('opt-'+id);
       if (el && saved[id] !== undefined) el.checked = saved[id] === 'true';
     });
@@ -1902,24 +1885,23 @@
       if (selectEl) selectEl.value = 'new';
 
       var numDefaults = {'opt-tune':'2000','opt-draws':'2000','opt-chains':'4','opt-cores':'4',
-                         'opt-spline_knots':'5','opt-clip_nsig':'7','opt-chunk_thresh':'0','opt-trim_beg':'','opt-trim_end':'',
-                         'opt-gp_log_amp':'-3,2','opt-gp_log_amp_prior':'gaussian',
+                         'opt-spline_knots':'5','opt-clip_nsig':'7','opt-chunk_thresh':'0.02','opt-trim_beg':'','opt-trim_end':'',
+                         'opt-gp_log_amp':'0,2','opt-gp_log_amp_prior':'gaussian',
                          'opt-gp_log_scale':'-1,2','opt-gp_log_scale_prior':'gaussian',
-                         'opt-bump_tcenter':'0.0,0.1','opt-bump_tcenter_prior':'gaussian',
+                         'opt-bump_tcenter':'','opt-bump_tcenter_prior':'gaussian',
                          'opt-bump_width':'0.02,0.01','opt-bump_width_prior':'gaussian',
-                         'opt-bump_ampl':'0.01,0.01','opt-bump_ampl_prior':'gaussian',
+                         'opt-bump_ampl':'10,10','opt-bump_ampl_prior':'gaussian',
                          'opt-flare_tpeak_prior':'gaussian',
                          'opt-flare_fwhm_prior':'gaussian',
                          'opt-flare_ampl_prior':'gaussian',
                          'opt-fit_basis':'duration'};
       Object.keys(numDefaults).forEach(function (id) { var el = document.getElementById(id); if (el) el.value = numDefaults[id]; });
 
-      var checkDefaults = {'opt-include_mean':true,'opt-use_custom_optimizer':true,'opt-secondary_eclipse':false,'opt-spline':false,
+      var checkDefaults = {'opt-include_mean':true,'opt-use_custom_optimizer':true,'opt-spline':false,
                            'opt-add_bias':false,'opt-quadratic':false,'opt-clip':false,'opt-chunk_offset':false,
                            'opt-use_gp':false,'opt-gp_per_dataset_log_amp':false,'opt-gp_per_dataset_log_scale':false,
                            'opt-include_bump':false,'opt-chromatic_bump':false,
-                           'opt-include_flare':false,'opt-chromatic_flare':false,
-                           'opt-plot_midtransit':true,'opt-plot_ingress_egress':true};
+                           'opt-include_flare':false,'opt-chromatic_flare':false};
       Object.keys(checkDefaults).forEach(function (id) { var el = document.getElementById(id); if (el) el.checked = checkDefaults[id]; });
       setCovariates(undefined);
       refreshGpPriorControls();
@@ -1976,9 +1958,8 @@
           }
         });
 
-        ['include_mean','use_custom_optimizer','secondary_eclipse','spline','add_bias','quadratic','clip','chunk_offset',
-         'use_gp','gp_per_dataset_log_amp','gp_per_dataset_log_scale',
-         'plot_midtransit','plot_ingress_egress'].forEach(function (id) {
+        ['include_mean','use_custom_optimizer','spline','add_bias','quadratic','clip','chunk_offset',
+         'use_gp','gp_per_dataset_log_amp','gp_per_dataset_log_scale'].forEach(function (id) {
           var el = document.getElementById('opt-'+id);
           if (el && backup[id] !== undefined) el.checked = backup[id] === 'true';
         });
@@ -2144,7 +2125,7 @@
   // uncertainty). The prior shape lives in the column header because timer
   // applies one shape per parameter across every flare.
   var FLARE_PARAMS = ['tpeak', 'fwhm', 'ampl'];
-  var FLARE_ROW_DEFAULTS = { tpeak: ['', '0.1'], fwhm: ['0.02', '0.01'], ampl: ['0.01', '0.01'] };
+  var FLARE_ROW_DEFAULTS = { tpeak: ['', '0.1'], fwhm: ['0.02', '0.01'], ampl: ['10', '10'] };
   // The same defaults read as low,high bounds under a Uniform prior. They
   // bracket the Gaussian value, since the Gaussian pair would read as low >
   // high there and block the run.
@@ -2424,6 +2405,13 @@
   ];
 
   function updateDependentFields() {
+    var bumpCenter = document.getElementById('opt-bump_tcenter');
+    if (chk('opt-include_bump') && bumpCenter && !bumpCenter.value.trim()) {
+      var range = selectedTimeRange();
+      if (range) bumpCenter.value = val('opt-bump_tcenter_prior') === 'uniform'
+        ? range[0].toFixed(6) + ',' + range[1].toFixed(6)
+        : ((range[0] + range[1]) / 2).toFixed(6) + ',0.1';
+    }
     CONTROL_DEPENDENCIES.forEach(function (dependency) {
       var enabled = chk(dependency.controller);
       dependency.targets.forEach(function (id) {
@@ -2461,9 +2449,9 @@
     { id: 'opt-cores',       type: 'integer', min: 1 },
     { id: 'opt-spline_knots', type: 'integer', min: 1, dependsOn: 'opt-spline' },
     { id: 'opt-clip_nsig',    type: 'number', min: 0, exclusiveMin: true, dependsOn: 'opt-clip' },
-    { id: 'opt-chunk_thresh', type: 'number', min: 0, dependsOn: 'opt-chunk_offset' },
-    { id: 'opt-trim_beg',     type: 'integer', min: 0, optional: true },
-    { id: 'opt-trim_end',     type: 'integer', min: 0, optional: true },
+    { id: 'opt-chunk_thresh', type: 'number', min: 0, exclusiveMin: true, dependsOn: 'opt-chunk_offset' },
+    { id: 'opt-trim_beg',     type: 'number', min: 0, optional: true },
+    { id: 'opt-trim_end',     type: 'number', min: 0, optional: true },
     { id: 'opt-gp_log_amp',   type: 'pair', dependsOn: 'opt-use_gp' },
     { id: 'opt-gp_log_scale', type: 'pair', dependsOn: 'opt-use_gp' },
     { id: 'opt-bump_tcenter', type: 'bump_pair', dependsOn: 'opt-include_bump' },
