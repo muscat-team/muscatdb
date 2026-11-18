@@ -98,9 +98,9 @@ def test_ttv_initial_pairs_follow_periods(page):
         page.fill('#planet-t0-' + planet, str(T0))
         page.fill('#planet-period-' + planet, period)
         page.locator('#planet-period-' + planet).blur()
+    # V1298 Tau periods: c (8.25 d) < d (12.4) < b (24.14) < e (45), so pairs run c-d, d-b, b-e.
     reveal(page, '#opt-planet_letters')
-    page.fill('#opt-planet_letters', 'bcde')
-    page.locator('#opt-planet_letters').dispatch_event('change')
+    expect(page.locator('#opt-planet_letters')).to_have_value('cdbe')
     ini = page.input_value('#opt-ini_content')
     assert 'a_cd =' in ini and 'a_db =' in ini and 'a_be =' in ini
     assert 'a_bc =' not in ini

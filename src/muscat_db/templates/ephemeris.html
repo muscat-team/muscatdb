@@ -215,7 +215,7 @@
     </p>
     <div class="opt-grid">
       <div class="opt">
-        <label for="opt-planet_letters">Planet letters <span class="help-tooltip" title="Planet letter designations, e.g. bcd for three planets. Sorted alphabetically, mapped to internal indices 0,1,2.">?</span></label>
+        <label for="opt-planet_letters">Planet letters <span class="help-tooltip" title="Planet letter designations, e.g. bcd for three planets. Ordered by orbital period, mapped to internal indices 0,1,2.">?</span></label>
         <input type="text" id="opt-planet_letters" placeholder="e.g. bcd">
       </div>
       <div class="opt">
@@ -1630,8 +1630,8 @@
         }
       }
       const ephemerisChangeHandler = isManualPlanet
-        ? 'saveTargetOpts(); scheduleComputeFitIfValid()'
-        : 'saveTargetOpts(); scheduleComputeFit()';
+        ? 'saveTargetOpts(); if (orderPlanetLetters()) rebuildINI(false); scheduleComputeFitIfValid()'
+        : 'saveTargetOpts(); if (orderPlanetLetters()) rebuildINI(false); scheduleComputeFit()';
       const durationChangeHandler = isManualPlanet
         ? 'scheduleComputeFitIfValid()'
         : 'scheduleComputeFit()';
@@ -1727,7 +1727,7 @@
     }
     
     saveTargetOpts();
-    rebuildINI(true);
+    rebuildINI(!orderPlanetLetters());
     scheduleComputeFit();
     scheduleSaveView();
   };
@@ -3900,6 +3900,7 @@
     const planetLettersInput = document.getElementById('opt-planet_letters');
     if (planetLettersInput) {
       planetLettersInput.addEventListener('change', function() {
+        orderPlanetLetters();
         rebuildINI(false);
       });
     }
@@ -4464,9 +4465,18 @@
     return letters.slice().sort((a, b) => period(a) - period(b));
   }
 
+  function orderPlanetLetters() {
+    const input = document.getElementById('opt-planet_letters');
+    if (!input) return false;
+    const ordered = periodOrderedLetters(input.value.toLowerCase().split('')).join('');
+    if (ordered === input.value) return false;
+    input.value = ordered;
+    return true;
+  }
+
   function buildCSVContent() {
     if (!fitResults) return '';
-    const letters = periodOrderedLetters((document.getElementById('opt-planet_letters').value || '').toLowerCase().split(''));
+    const letters = (document.getElementById('opt-planet_letters').value || '').toLowerCase().split('');
     if (letters.length === 0) return '';
     
     let csv = 'planet,epoch,tc,tc_unc\n';
@@ -4532,7 +4542,7 @@
     const non_transiting_outer = document.getElementById('opt-non_transiting_outer').checked;
     const phase_offsets = document.getElementById('opt-phase_offsets').checked;
     const clobber = document.getElementById('opt-clobber').checked;
-    const planet_letters = periodOrderedLetters(document.getElementById('opt-planet_letters').value.toLowerCase().split('')).join('');
+    const planet_letters = document.getElementById('opt-planet_letters').value;
     const run_name = (document.getElementById('opt-run_name')?.value || '').trim();
     
     return {
@@ -4557,7 +4567,7 @@
 
   function rebuildINI(onlyT14 = false) {
     const textarea = document.getElementById('opt-ini_content');
-    const letters = periodOrderedLetters((document.getElementById('opt-planet_letters').value || '').split(''));
+    const letters = (document.getElementById('opt-planet_letters').value || '').split('');
 
     const t14Values = {};
     for (const pl of letters) {
