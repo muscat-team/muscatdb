@@ -853,6 +853,18 @@ def test_archive_predicts_transit_center(page):
     assert center.input_value() == '2461314.87'
 
 
+def test_transit_center_hint_explains_automatic_prediction(page):
+    """Visible guidance must describe the ephemeris-based blank-center default."""
+    page.goto(URL)
+    reveal(page, '.planet-tc_pred')
+    field = page.locator('.planet-card').first.locator('.opt').filter(
+        has=page.locator('.planet-tc_pred')
+    )
+    expect(field.locator('.hint').last).to_have_text(
+        'Blank center: predicted from epoch and period. Blank full width: 0.04 d.'
+    )
+
+
 def _shift_epoch(page, days: float) -> None:
     t0 = page.locator('.planet-t0').first
     mean, unc = t0.input_value().split(',')

@@ -766,8 +766,8 @@ def _validate_bump_times(o: dict, time_range: tuple[float, float] | None) -> str
 def lightcurve_time_range(csvs) -> tuple[float, float] | None:
     """Return the earliest and latest ``BJD_TDB`` across the light-curve CSVs.
 
-    ``None`` when no file has a readable ``BJD_TDB`` column, so callers treat
-    the range as unknown rather than refusing input they cannot check.
+    ``None`` when no file has readable ``BJD_TDB`` values. Callers that need
+    an automatic transit-center prediction then require an explicit center.
     """
     lo = hi = None
     for path in csvs:
