@@ -1122,9 +1122,6 @@
     renderRequests();
     lastScheduleKind = k;
   }
-  // A manual instrument change keeps the checked window's site: re-run the
-  // auto-config so the new instrument's site dropdown is filled too (applyAutoConfig
-  // never reverts a manually chosen instrument).
   function applyConstraintDefaults() {
     var muscat = val('sch-kind') === 'muscat';
     var airmass = muscat ? '2.5' : '1.6';
@@ -1134,6 +1131,9 @@
     setVal('sch-moon-sep', moonSep);
     return true;
   }
+  // A manual instrument change keeps the checked window's site: re-run the
+  // auto-config so the new instrument's site dropdown is filled too (applyAutoConfig
+  // never reverts a manually chosen instrument).
   el('sch-kind').addEventListener('change', function () {
     applyKind();
     applyAutoConfig();
