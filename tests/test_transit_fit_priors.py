@@ -591,14 +591,10 @@ def test_fit_basis_option_is_encoded_correctly(tmp_path):
     p.write_text("time,flux\n")
     csvs = [p]
 
-    # Test standard basis
-    opts = {
-        "planets": "b",
-        "fit_basis": "standard",
-    }
-    fit._write_fit_inputs(tmp_path, inst, date, target, csvs, opts)
-    fit_yaml = yaml.safe_load((tmp_path / "fit.yaml").read_text())
-    assert fit_yaml["fit_basis"] == "standard"
+    # Bases the page does not offer are refused before launch
+    for basis in ("mstar/rstar", "density", "standard"):
+        assert fit.validate_fit_options({"planets": "b", "fit_basis": basis}) is not None
+    assert fit.validate_fit_options({"planets": "b", "fit_basis": "duration"}) is None
 
     # Test duration basis (default)
     opts_default = {

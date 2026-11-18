@@ -574,6 +574,8 @@ _PLANET_TOKEN_RE = re.compile(r"^[A-Za-z]$")
 #   "num"    -> any finite number
 # An empty value is allowed for every field; it keeps the pipeline default.
 _FIT_NUMERIC_FIELDS: list[tuple[str, str, str]] = [
+    ("trim_beg",     "Trim begin (days)",    "nonneg"),
+    ("trim_end",     "Trim end (days)",      "nonneg"),
     ("tc_pred_unc", "tc_pred uncertainty",  "pos"),
     ("teff",        "Teff (K)",             "pos"),
     ("teff_unc",    "Teff uncertainty",     "pos"),
@@ -683,7 +685,7 @@ def _validate_flares(o: dict, time_range: tuple[float, float] | None) -> str | N
     rows_by_param: dict[str, list[tuple[float, float]]] = {}
     priors: dict[str, str] = {}
     for param in _FLARE_PARAMS:
-        prior = str(o.get(f"flare_{param}_prior") or "gaussian").strip().lower()
+        prior = str(o.get(f"flare_{param}_prior") or ("uniform" if param == "ampl" else "gaussian")).strip().lower()
         if prior not in _PRIOR_CHOICES:
             return f"flare {param} prior must be gaussian or uniform"
         priors[param] = prior
@@ -723,6 +725,32 @@ def _validate_flares(o: dict, time_range: tuple[float, float] | None) -> str | N
     return None
 
 
+def _validate_bump_times(o: dict, time_range: tuple[float, float] | None) -> str | None:
+    if o.get("include_bump") != "true":
+        return None
+    raw = str(o.get("bump_tcenter") or "").strip()
+    if not raw:
+        return None  # The writer seeds the center from the light-curve range.
+    prior = str(o.get("bump_tcenter_prior") or "gaussian").lower()
+    if prior not in _PRIOR_CHOICES:
+        return "bump tcenter prior must be gaussian or uniform"
+    for row in raw.split(";"):
+        try:
+            a, b = [float(v) for v in row.split(",")]
+        except (ValueError, TypeError):
+            return "bump tcenter requires value,unc or low,high pairs"
+        if not all(math.isfinite(v) for v in (a, b)):
+            return "bump tcenter must be finite"
+        if (prior == "uniform" and a >= b) or (prior == "gaussian" and b <= 0):
+            return "bump tcenter needs increasing bounds or positive uncertainty"
+        if time_range:
+            lo, hi = time_range
+            inside = a < hi and b > lo if prior == "uniform" else lo <= a <= hi
+            if not inside:
+                return f"bump tcenter lies outside the selected light curves ({lo:.6f} to {hi:.6f} BJD_TDB)"
+    return None
+
+
 def lightcurve_time_range(csvs) -> tuple[float, float] | None:
     """Return the earliest and latest ``BJD_TDB`` across the light-curve CSVs.
 
@@ -752,18 +780,21 @@ def lightcurve_time_range(csvs) -> tuple[float, float] | None:
 
 
 def validate_flare_times(options: dict | None, csvs) -> str | None:
-    """Refuse a flare ``tpeak`` that lies outside the selected light curves.
+    """Check flare and bump timing against the selected light curves.
 
-    Runs once the launch knows which CSVs are in the fit. No-op when flares are
-    off or the files carry no ``BJD_TDB`` column.
+    Runs once the launch knows which CSVs are in the fit. Without a usable
+    ``BJD_TDB`` range, skip range checks but require an explicit bump center
+    when bumps are enabled, since its default cannot be inferred.
     """
     o = options or {}
-    if o.get("include_flare") != "true":
+    if o.get("include_flare") != "true" and o.get("include_bump") != "true":
         return None
     time_range = lightcurve_time_range(csvs)
     if time_range is None:
+        if o.get("include_bump") == "true" and not str(o.get("bump_tcenter") or "").strip():
+            return "bump tcenter is required when the light curves have no BJD_TDB range"
         return None
-    return _validate_flares(o, time_range)
+    return _validate_flares(o, time_range) or _validate_bump_times(o, time_range)
 
 
 def validate_fit_options(options: dict | None, time_range: tuple[float, float] | None = None) -> str | None:
@@ -773,9 +804,17 @@ def validate_fit_options(options: dict | None, time_range: tuple[float, float] |
     bad input is rejected with a clear message instead of crashing the pipeline
     or writing a malformed sys.yaml. An empty field keeps the pipeline default.
     *time_range* is the light curves' ``(earliest, latest)`` BJD_TDB when known;
-    it lets the flare ``tpeak`` check run here as well as at launch.
+    it enables the timing checks shared with :func:`validate_flare_times`.
     """
     o = options or {}
+    if o.get("secondary_eclipse") == "true":
+        return "Secondary eclipse is not supported by timer"
+    if str(o.get("fit_basis") or "duration").strip().lower() != "duration":
+        return "fit_basis must be duration"
+    if o.get("chunk_offset") == "true":
+        threshold = _to_float(o.get("chunk_thresh", 0.02))
+        if threshold is None or not math.isfinite(threshold) or threshold <= 0:
+            return "Chunk threshold must be greater than 0 days"
 
     # Planets: comma-separated single letters (defaults to "b" when blank).
     tokens = [p.strip() for p in (o.get("planets") or "b").split(",") if p.strip()]
@@ -925,7 +964,25 @@ def validate_fit_options(options: dict | None, time_range: tuple[float, float] |
             if prior == "gaussian" and second <= 0:
                 return f"GP {param} uncertainty must be greater than 0"
 
-    err = _validate_flares(o, time_range)
+    for model in ("bump", "flare"):
+        if o.get(f"include_{model}") != "true":
+            continue
+        prior = str(o.get(f"{model}_ampl_prior") or "uniform").strip().lower()
+        if prior != "uniform":
+            return f"{model} ampl prior must be uniform with nonnegative bounds"
+        raw = o.get(f"{model}_ampl", "")
+        if not isinstance(raw, str):
+            return f"{model} ampl requires low,high bounds as text"
+        raw = raw.strip() or "0,10"
+        for row, pair in enumerate(raw.split(";"), start=1):
+            try:
+                low, high = map(float, pair.split(","))
+            except ValueError:
+                return f"{model} ampl (row {row}) requires low,high bounds"
+            if not (math.isfinite(low) and math.isfinite(high) and 0 <= low < high):
+                return f"{model} ampl bounds (row {row}) must be finite with 0 <= low < high"
+
+    err = _validate_flares(o, time_range) or _validate_bump_times(o, time_range)
     if err:
         return err
 
@@ -1276,7 +1333,7 @@ def _write_fit_inputs(
     def _trim_opt(key: str):
         v = options.get(key)
         if v is None or str(v).strip() == "": return None
-        try: return int(float(v))
+        try: return float(v)
         except (TypeError, ValueError): return None
 
     # Per-dataset detrending options (applied uniformly to every light curve).
@@ -1288,7 +1345,7 @@ def _write_fit_inputs(
         "clip": _bool_opt("clip"),
         "clip_nsig": _float_opt("clip_nsig", 7),
         "chunk_offset": _bool_opt("chunk_offset"),
-        "chunk_thresh": _float_opt("chunk_thresh", 0),
+        "chunk_thresh": _float_opt("chunk_thresh", 0.02),
         "trim_beg": _trim_opt("trim_beg"),
         "trim_end": _trim_opt("trim_end"),
     }
@@ -1409,8 +1466,6 @@ def _write_fit_inputs(
         else:
             run_mode = "new"
     fit_data["clobber"] = run_mode == "new"
-    fit_data["plot_midtransit"] = options.get("plot_midtransit") == "true"
-    fit_data["plot_ingress_egress"] = options.get("plot_ingress_egress") == "true"
 
     # Sampler options (timer defaults: tune/draws 2000, chains/cores 2). Full
     # runs default to 4 chains on 4 cores so all chains sample in parallel
@@ -1433,7 +1488,6 @@ def _write_fit_inputs(
     # Model options (timer defaults: include_mean and use_custom_optimizer on).
     fit_data["include_mean"] = _bool_opt("include_mean", default=True)
     fit_data["use_custom_optimizer"] = _bool_opt("use_custom_optimizer", default=True)
-    fit_data["secondary_eclipse"] = _bool_opt("secondary_eclipse", default=False)
     fit_data["fit_basis"] = str(options.get("fit_basis") or "duration").strip().lower()
 
     # Gaussian-process noise model. Only emit the ``gp`` block when enabled:
@@ -1449,7 +1503,7 @@ def _write_fit_inputs(
                 return (value + unc) / 2, unc - value
             return value, unc
 
-        log_amp, log_amp_unc = _gp_values("log_amp", -3.0, 2.0)
+        log_amp, log_amp_unc = _gp_values("log_amp", 0.0, 2.0)
         log_scale, log_scale_unc = _gp_values("log_scale", -1.0, 2.0)
         gp_block: dict = {
             "log_amp": log_amp,
@@ -1473,7 +1527,9 @@ def _write_fit_inputs(
     if fit_data["include_bump"]:
         def _bump_values(param: str, val_default: float, unc_default: float) -> tuple[float | list[float], float | list[float], str]:
             raw_val = options.get(f"bump_{param}", "")
-            prior = str(options.get(f"bump_{param}_prior") or "gaussian").strip().lower()
+            prior = str(options.get(f"bump_{param}_prior") or ("uniform" if param == "ampl" else "gaussian")).strip().lower()
+            if param == "ampl" and not str(raw_val).strip():
+                raw_val = "0,10"
 
             s = str(raw_val).strip()
             if not s:
@@ -1509,9 +1565,11 @@ def _write_fit_inputs(
                 return vals_val[0], vals_unc[0], prior
             return vals_val, vals_unc, prior
 
-        tcenter, tcenter_unc, tcenter_prior = _bump_values("tcenter", 0.0, 0.1)
+        span = lightcurve_time_range(csvs)
+        center = sum(span) / 2 if span else 0.0
+        tcenter, tcenter_unc, tcenter_prior = _bump_values("tcenter", center, 0.1)
         width, width_unc, width_prior = _bump_values("width", 0.02, 0.01)
-        ampl, ampl_unc, ampl_prior = _bump_values("ampl", 0.01, 0.01)
+        ampl, ampl_unc, ampl_prior = _bump_values("ampl", 10.0, 10.0)
 
         fit_data["bump"] = {
             "tcenter": tcenter,
@@ -1530,7 +1588,9 @@ def _write_fit_inputs(
     if fit_data["include_flare"]:
         def _flare_values(param: str, val_default: float, unc_default: float) -> tuple[float | list[float], float | list[float], str]:
             raw_val = options.get(f"flare_{param}", "")
-            prior = str(options.get(f"flare_{param}_prior") or "gaussian").strip().lower()
+            prior = str(options.get(f"flare_{param}_prior") or ("uniform" if param == "ampl" else "gaussian")).strip().lower()
+            if param == "ampl" and not str(raw_val).strip():
+                raw_val = "0,10"
 
             s = str(raw_val).strip()
             if not s:
@@ -1568,7 +1628,7 @@ def _write_fit_inputs(
 
         tpeak, tpeak_unc, tpeak_prior = _flare_values("tpeak", 0.0, 0.1)
         fwhm, fwhm_unc, fwhm_prior = _flare_values("fwhm", 0.02, 0.01)
-        ampl, ampl_unc, ampl_prior = _flare_values("ampl", 0.01, 0.01)
+        ampl, ampl_unc, ampl_prior = _flare_values("ampl", 10.0, 10.0)
 
         fit_data["flare"] = {
             "tpeak": tpeak,

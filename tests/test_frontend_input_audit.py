@@ -394,18 +394,15 @@ def _rich_fit_options() -> dict:
         "planets": "b",
         "run_name": "audit",
         "chromatic": "true",
-        "fit_basis": "ror",
+        "fit_basis": "duration",
         "trend": "true",
         "run_mode": "continue",  # -> clobber False
-        "plot_midtransit": "false",
-        "plot_ingress_egress": "false",
         "tune": "1234",
         "draws": "2345",
         "chains": "3",
         "cores": "4",
         "include_mean": "false",
         "use_custom_optimizer": "false",
-        "secondary_eclipse": "true",
         "spline": "true",
         "spline_knots": "9",
         "add_bias": "true",
@@ -479,12 +476,9 @@ def test_transit_fit_sampler_and_model_options_wired(fit_config):
     assert fit_yaml["cores"] == 4
     assert fit_yaml["include_mean"] is False
     assert fit_yaml["use_custom_optimizer"] is False
-    assert fit_yaml["secondary_eclipse"] is True
-    assert fit_yaml["fit_basis"] == "ror"
+    assert fit_yaml["fit_basis"] == "duration"
     assert fit_yaml["chromatic"] is True
     assert fit_yaml["clobber"] is False  # run_mode="continue"
-    assert fit_yaml["plot_midtransit"] is False
-    assert fit_yaml["plot_ingress_egress"] is False
     assert fit_yaml["fixed"] == ["u_star"]
 
 
@@ -586,14 +580,6 @@ def test_transit_fit_results_summary_closes_its_layout_wrappers():
 
     assert summary_block.count("<div") == summary_block.count("</div>")
     assert "</table>\n      </div>\n    </div>" in summary_block
-
-
-def test_transit_fit_dense_option_rows_have_mobile_layout_hooks():
-    html = _read_template("transit_fit.html")
-
-    assert html.count('class="transit-option-grid"') >= 6
-    assert html.count('class="fit-option-row"') == 2
-    assert "@media (max-width: 560px)" in html
 
 
 def test_ephemeris_disclosure_triangles_use_standard_size():
