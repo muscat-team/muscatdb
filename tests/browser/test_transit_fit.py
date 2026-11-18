@@ -12,7 +12,7 @@ from playwright.sync_api import expect
 import pytest
 
 from tests.browser.helpers import QueuedJobStore, reveal
-from tests.browser.seed import FIT_RUN_ID
+from tests.browser.seed import FIT_RUN_ID, RUN_ID
 
 
 DATASET = "inst=muscat3&date=261001&target=TOI-1000"
@@ -900,3 +900,48 @@ def test_outside_transit_warns_before_launch(page, fitter):
     with page.expect_response("**/api/transit-fit/run"):
         page.click('#message-modal-ok')
     assert len(fitter['start']) == 1
+
+
+@pytest.fixture
+def distinct_csv_spans(live_server):
+    run = live_server.root / "prose" / "muscat3" / "261001" / "_runs" / "TOI-1000" / RUN_ID
+    originals = {}
+    for name, times in zip(CSVS, ((2460000, 2460000.05), (2460000.25, 2460000.3))):
+        path = run / name
+        originals[path] = path.read_bytes()
+        path.write_text("BJD_TDB,Flux,Flux_err\n" + "".join(f"{t},1,0.001\n" for t in times))
+    yield
+    for path, content in originals.items():
+        path.write_bytes(content)
+
+
+@pytest.mark.parametrize("action", ["card", "checkbox", "select_all", "deselect_all", "reload"])
+def test_csv_selection_updates_automatic_centers(page, distinct_csv_spans, action):
+    """Transits at .1 and .3: the full span selects .1; the late CSV selects .3."""
+    page.goto(URL)
+    reveal(page, "#add-planet-btn")
+    page.click("#add-planet-btn")
+    for card in page.locator('.planet-card').all():
+        card.locator('.planet-t0').fill('2460000.1,0.001')
+        card.locator('.planet-period').fill('0.2,0.001')
+        card.locator('.planet-period').blur()
+    centers = page.locator('.planet-tc_pred')
+    expect(centers.first).to_have_value('2460000.100000')
+    centers.nth(1).fill('2460000.27')
+    centers.nth(1).blur()
+
+    if action in ('select_all', 'deselect_all', 'reload'):
+        page.locator('.csv-checkbox').first.uncheck()
+        expect(centers.first).to_have_value('2460000.300000')
+    if action == 'card':
+        page.locator('.csv-card').first.click()
+    elif action == 'checkbox':
+        page.locator('.csv-checkbox').first.uncheck()
+    elif action == 'reload':
+        page.reload()
+    else:
+        page.click('#' + action.replace('_', '-') + '-csvs')
+
+    expected = '2460000.100000' if action in ('select_all', 'deselect_all') else '2460000.300000'
+    expect(centers.first).to_have_value(expected)
+    expect(centers.nth(1)).to_have_value('2460000.27')

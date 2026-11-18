@@ -2510,7 +2510,6 @@
   setupBumpPriorSelectors();
   setupFlarePriorSelectors();
   updateDependentFields();
-  updateTransitCenters();
 
   // ----- field validation -----
   var FIELD_RULES = [
@@ -2706,7 +2705,8 @@
   function saveCsvSelection() {
     MuscatStorage.setJSON(CSV_KEY, getSelectedCsvs());
   }
-  function updateCsvCount() {
+  function updateCsvSelection() {
+    updateTransitCenters();
     var el = document.getElementById('csv-count');
     if (!el) return;
     var checked = document.querySelectorAll('.csv-checkbox:checked').length;
@@ -2743,7 +2743,7 @@
       if (cb) cb.checked = !cb.checked;
       card.classList.toggle('selected', cb.checked);
       card.classList.toggle('deselected', !cb.checked);
-      updateCsvCount();
+      updateCsvSelection();
       saveCsvSelection();
       updateChromaticForBands();
     });
@@ -2752,7 +2752,7 @@
       cb.addEventListener('change', function () {
         card.classList.toggle('selected', cb.checked);
         card.classList.toggle('deselected', !cb.checked);
-        updateCsvCount();
+        updateCsvSelection();
         saveCsvSelection();
         updateChromaticForBands();
       });
@@ -2797,7 +2797,7 @@
       card.classList.add('selected');
       card.classList.remove('deselected');
     });
-    updateCsvCount();
+    updateCsvSelection();
     saveCsvSelection();
     updateChromaticForBands();
   });
@@ -2808,11 +2808,11 @@
       card.classList.remove('selected');
       card.classList.add('deselected');
     });
-    updateCsvCount();
+    updateCsvSelection();
     saveCsvSelection();
     updateChromaticForBands();
   });
-  updateCsvCount();
+  updateCsvSelection();
   updateChromaticForBands();
 
   function setRunning(on) {
