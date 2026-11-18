@@ -482,6 +482,16 @@ graph TD
         </div>
 
         <p style="color: var(--text-dim); font-size: 0.9rem; line-height: 1.6;">
+          Enter a finite, positive reference T0 and period for each planet before calculating the O-C fit.
+          The page and API reject missing values and the placeholder pair <code>T0=2450000, P=1</code>;
+          TTV inputs that derive epochs from transit centers require the same valid reference.
+          The fit summary reports reduced χ², point count and degrees of freedom. A reduced χ² above 2
+          triggers a heuristic scatter caution, not a significance test. <strong>Unweighted</strong> remains
+          the default and derives parameter uncertainties from residual variance; <strong>Weighted</strong>
+          uses the supplied timing errors without rescaling them. Reduced χ² is unavailable when residual
+          degrees of freedom or valid timing errors are absent; an exact fit has no independent model check.
+        </p>
+        <p style="color: var(--text-dim); font-size: 0.9rem; line-height: 1.6;">
           Use <strong>Import transit CSV</strong> beside the dataset table to add external timing measurements.
           Enter the instrument name once in the import dialog; it is applied to every accepted CSV row.
           Imported rows are stored in the shareable saved-view URL, including CSV-only analyses with no completed
@@ -1860,7 +1870,7 @@ erDiagram
           <div class="faq-answer">
             <p>The <a href="https://github.com/john-livingston/harmonic" target="_blank" rel="noopener noreferrer">harmonic</a> engine fits the multi-harmonic near-resonant TTV model of Lithwick, Xie &amp; Wu (2012), sampled with <code>emcee</code>:</p>
             <ol>
-              <li><strong>Input assembly</strong> — transit centers behind the O-C plot (<code>Tc</code>, <code>tc_unc</code>, epoch per planet) are written to <code>data.csv</code>, with planet letters remapped to the integer indices harmonic expects. The dataset checkboxes and point exclusions that shape the linear fit shape the TTV fit too.</li>
+              <li><strong>Input assembly</strong> — transit centers behind the O-C plot (<code>Tc</code>, <code>tc_unc</code>, epoch per planet) are written to <code>data.csv</code>. The page orders planet letters by increasing reference period, keeping unknown-period letters in their relative order after known planets. This displayed order determines both adjacent INI pairs and CSV indices starting at 0: V1298 Tau uses <code>cdbe</code>, with pairs <code>cd</code>, <code>db</code>, <code>be</code>. Changing a reference period or source regenerates the default INI if the order changes; check any custom INI edits afterward. The dataset checkboxes and point exclusions that shape the linear fit shape the TTV fit too.</li>
               <li><strong>Configuration</strong> — <code>config.ini</code> carries an <code>[INIT]</code> section with the TTV amplitude, super-period, and phase reference (<code>a_bc</code>, <code>a_cb</code>, <code>per_bc</code>, <code>t_bc</code>) for each adjacent pair, plus optional <code>[T14]</code> (transit durations) and <code>[OUTER]</code> (non-transiting outer planet) sections.</li>
               <li><strong>Launch</strong> — options and INI are validated, the run directory is written, and the harmonic CLI runs as a background job in the conda <code>harmonic</code> environment. The exact command is shown in the run panel so it can be reproduced in a terminal.</li>
               <li><strong>Sampling</strong> — <code>emcee</code> runs with the configured walkers, steps, burn-in, thinning, processes, and seed, streaming <code>harmonic.log</code> live to the page. Completed results include a <strong>fit run log</strong> link that opens the full log in a new tab.</li>

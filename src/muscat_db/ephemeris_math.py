@@ -5,11 +5,10 @@ Extracted from the ``api_ephemeris_calculate`` route handler in ``web.py``
 least-squares fit, its variance propagation, and the epoch-centering trick
 are independently unit-testable instead of living inline in a FastAPI route.
 
-This module is output-identical to the historical inline implementation: same
-formulas, same edge-case behavior (fewer than 2 usable points, or a singular
-normal-equations matrix, both fall back to the reference ephemeris
-unchanged). It intentionally does not introduce numpy/astropy so floating
-point results match the prior implementation bit-for-bit.
+The fit and uncertainty formulas retain the historical inline implementation's
+arithmetic without introducing numpy/astropy; reduced chi-squared is an
+additional diagnostic. Fewer than 2 usable points or a singular normal-equations
+matrix fall back to the reference ephemeris unchanged.
 """
 
 from __future__ import annotations
@@ -126,18 +125,16 @@ def fit_linear_ephemeris(
       enter the fit in this mode.
 
     In both modes ``reduced_chi2`` is the chi-squared of the residuals against
-    ``uncs`` divided by ``dof``; it is None when ``dof`` is 0 or any unc is
-    zero or non-finite.
+    ``uncs`` divided by ``dof``; it is None when no fit is performed,
+    ``dof <= 0``, or any unc is non-positive or non-finite.
 
     Epochs are centered at their mid-range value (``E_center``) before the
     regression -- this keeps the design matrix well-conditioned -- then the
     fit is extrapolated back to the catalog epoch (E=0), propagating the
     T0/period covariance term through the extrapolation.
 
-    Returns an :class:`EphemerisFit` dict (JSON-serializable) with the same
-    keys and rounding-free values previously computed inline in
-    ``web.api_ephemeris_calculate``; the route handler applies its own
-    ``round()`` calls when building the JSON response, unchanged.
+    Returns an :class:`EphemerisFit` dict with rounding-free values; the route
+    handler applies its own ``round()`` calls when building the JSON response.
     """
     n = len(epochs)
     dof = n - 2
