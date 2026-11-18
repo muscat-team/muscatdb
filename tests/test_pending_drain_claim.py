@@ -188,7 +188,7 @@ def fit_drain(tmp_path, monkeypatch, jobs_db, launched):
     monkeypatch.setattr(fit, "_FIT_JOBS", {})
     get_job_store().enqueue(
         type_="transit_fit", inst=INST, date=DATE, target=TARGET, started_at=1.0,
-        run_type="full", params=json.dumps({"test_run": False, "options": {}}),
+        run_type="full", params=json.dumps({"test_run": False, "options": {"tc_pred_b": "2461041.5"}}),
         user_name=USER,
     )
     yield _spy(monkeypatch, fit)

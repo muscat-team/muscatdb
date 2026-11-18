@@ -104,6 +104,25 @@ of the owner's group can cancel or delete it.
 7. Click **▶ Test run (optimize)**.
 8. When the result looks reasonable, click **▶ Run Full Fit**.
 
+For each planet, the **Transit-center prior** automatically uses `t0 + N × period`
+nearest the midpoint between the earliest and latest selected `BJD_TDB` values.
+If two transits fall inside that span, it chooses the one nearest the midpoint
+(the later one on an exact tie). A Uniform period prior uses the midpoint of
+its bounds for this prediction. Automatic centers follow changes to the
+ephemeris and light-curve selection, including after a page reload. Typing a
+center overrides the prediction until you clear it or query the archive again.
+The second input is the Uniform prior's **full width** in days, defaulting to
+0.04 d; its bounds are the center minus/plus half that width.
+
+Before launching, the page asks for confirmation if a planet's center is
+outside the selected time span. If a center cannot be predicted, supply an
+explicit center or an epoch and positive period with readable `BJD_TDB` data;
+launches no longer fall back to the reference epoch or data mean. API callers
+get the same automatic prediction when `tc_pred_<planet>` is omitted; the
+first planet also accepts unsuffixed option keys. Each run records the centers,
+widths, bounds and fixed status in `meta.yaml` under `transit_center_priors`.
+The startup log shows the Uniform bounds or the fixed center when `t0` is fixed.
+
 The test run optimizes only, with no MCMC, so you can check your inputs
 quickly. The full run samples with MCMC chains and takes much longer. If no
 light curves are found, the page links back to the photometry page.

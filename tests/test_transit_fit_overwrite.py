@@ -43,7 +43,7 @@ def test_start_fit_delegates_overwrite_to_timer_without_deleting_outputs(
     monkeypatch.setattr("muscat_db.database.save_job", lambda **_kwargs: None)
 
     result = fit.start_fit(
-        "muscat3", "250101", "Target", {"overwrite": overwrite}, test_run=True
+        "muscat3", "250101", "Target", {"overwrite": overwrite, "tc_pred": "2460000.5"}, test_run=True
     )
 
     try:
@@ -82,7 +82,7 @@ def test_start_fit_applies_core_pinning_when_configured(
 
     monkeypatch.setattr(fit.subprocess, "Popen", fake_popen)
 
-    result = fit.start_fit("muscat3", "250101", "Target", {}, test_run=True)
+    result = fit.start_fit("muscat3", "250101", "Target", {"tc_pred": "2460000.5"}, test_run=True)
 
     try:
         assert result["ok"] is True, result
@@ -126,7 +126,7 @@ def test_start_fit_reuses_same_key_running_job_before_capacity_queue(
     })
 
     try:
-        result = fit.start_fit("muscat3", "250101", "Target", {}, test_run=False)
+        result = fit.start_fit("muscat3", "250101", "Target", {"tc_pred": "2460000.5"}, test_run=False)
         assert result == {
             "ok": True,
             "key": key,

@@ -12,7 +12,7 @@ from playwright.sync_api import expect
 import pytest
 
 from tests.browser.helpers import QueuedJobStore, reveal
-from tests.browser.seed import FIT_RUN_ID
+from tests.browser.seed import FIT_RUN_ID, RUN_ID
 
 
 DATASET = "inst=muscat3&date=261001&target=TOI-1000"
@@ -693,6 +693,9 @@ def test_bump_center_uses_selected_curve_after_reload(page, fitter, live_server,
         for path, times in zip(paths, [(2460000.1, 2460000.2), (2460000.3, 2460000.4)]):
             path.write_text("BJD_TDB,Flux,Flux_err\n" + "".join(f"{t},1,0.001\n" for t in times))
         _ready_to_fit(page)
+        # Match the transit ephemeris to the shifted fixture light curves.
+        page.locator('.planet-t0').first.fill('2460000.15,0.01')
+        page.locator('.planet-t0').first.blur()
         page.click("#deselect-all-csvs")
         page.locator('.csv-card', has_text=CSVS[0]).locator('.csv-checkbox').check()
         reveal(page, "#opt-include_bump")
@@ -839,3 +842,135 @@ def test_backup_restore_then_prior_switch_converts_values(
     else:
         expect(_flare_cell(page, 0, "ampl", "val")).to_have_value("2")
         expect(_flare_cell(page, 0, "ampl", "unc")).to_have_value("8")
+
+
+def test_archive_predicts_transit_center(page):
+    page.goto(URL)
+    _query_toi_catalog(page)
+    center = page.locator('.planet-tc_pred').first
+    assert float(center.input_value()) == pytest.approx(2461314.86, rel=0, abs=1e-6)
+    # Manual overrides survive subsequent ephemeris changes.
+    center.fill('2461314.87')
+    page.locator('.planet-period').first.fill('2.2,0.01')
+    page.locator('.planet-period').first.blur()
+    assert center.input_value() == '2461314.87'
+
+
+@pytest.mark.parametrize("added_planet", [False, True])
+def test_transit_center_hint_explains_automatic_prediction(page, added_planet):
+    """Visible guidance must describe the ephemeris-based blank-center default."""
+    page.goto(URL)
+    if added_planet:
+        reveal(page, '#add-planet-btn')
+        page.click('#add-planet-btn')
+    reveal(page, '.planet-tc_pred')
+    field = page.locator('.planet-card').last.locator('.opt').filter(
+        has=page.locator('.planet-tc_pred')
+    )
+    # Timer's Uniform prior uses a full width, not a Gaussian uncertainty.
+    expect(field.get_by_role('spinbutton', name='Predicted transit center in BJD')).to_be_visible()
+    expect(field.get_by_role('spinbutton', name='Uniform prior full width in days')).to_be_visible()
+    expect(field.locator('label')).to_contain_text('Transit-center prior')
+    expect(field.get_by_role('button', name='Help')).to_have_accessible_description(
+        'timer samples t0 from a Uniform prior. The first value is its predicted center (BJD); '
+        'the second is its full width in days, not a Gaussian uncertainty. '
+        'The bounds are center minus/plus half the full width.',
+    )
+    expect(field.locator('.hint').first).to_have_text('full width')
+    expect(field.locator('.hint').last).to_have_text(
+        'Blank center: predicted from epoch and period. Blank full width: 0.04 d.'
+    )
+
+
+def _shift_epoch(page, days: float) -> None:
+    t0 = page.locator('.planet-t0').first
+    mean, unc = t0.input_value().split(',')
+    t0.fill(f'{float(mean) + days:.6f},{unc}')
+    t0.blur()
+
+
+def test_reloaded_automatic_center_follows_the_ephemeris(page):
+    page.goto(URL)
+    _query_toi_catalog(page)
+    center = page.locator('.planet-tc_pred').first
+    before = float(center.input_value())
+    page.reload()
+    # Moving the reference epoch by 0.01 d moves epoch + N x period by 0.01 d.
+    _shift_epoch(page, 0.01)
+    assert float(center.input_value()) == pytest.approx(before + 0.01, rel=0, abs=1e-6)
+
+
+def test_card_archive_query_replaces_a_stale_center(page):
+    page.goto(URL)
+    _query_toi_catalog(page)
+    center = page.locator('.planet-tc_pred').first
+    expected = center.input_value()
+    center.fill('2461300')
+    page.locator('.planet-query-target').first.fill('TOI-1000.01')
+    page.locator('.planet-source-select').first.select_option('toi')
+    with page.expect_response("**/api/transit-fit/query-archive**"):
+        page.locator('.planet-query-btn').first.click()
+    page.click('#message-modal-ok')
+    assert center.input_value() == expected
+
+
+def test_outside_transit_warns_before_launch(page, fitter):
+    page.goto(URL)
+    _query_toi_catalog(page)
+    _complete_priors(page)
+    page.locator('.planet-tc_pred').first.fill('2461315.5')
+    page.click('#run-test-btn')
+    expect(page.locator('#message-modal-text')).to_contain_text('No predicted transit center')
+    page.click('#message-modal-cancel')
+    assert fitter['start'] == []
+
+
+    page.click('#run-test-btn')
+    with page.expect_response("**/api/transit-fit/run"):
+        page.click('#message-modal-ok')
+    assert len(fitter['start']) == 1
+
+
+@pytest.fixture
+def distinct_csv_spans(live_server):
+    run = live_server.root / "prose" / "muscat3" / "261001" / "_runs" / "TOI-1000" / RUN_ID
+    originals = {}
+    for name, times in zip(CSVS, ((2460000, 2460000.05), (2460000.25, 2460000.3))):
+        path = run / name
+        originals[path] = path.read_bytes()
+        path.write_text("BJD_TDB,Flux,Flux_err\n" + "".join(f"{t},1,0.001\n" for t in times))
+    yield
+    for path, content in originals.items():
+        path.write_bytes(content)
+
+
+@pytest.mark.parametrize("action", ["card", "checkbox", "select_all", "deselect_all", "reload"])
+def test_csv_selection_updates_automatic_centers(page, distinct_csv_spans, action):
+    """Transits at .1 and .3: the full span selects .1; the late CSV selects .3."""
+    page.goto(URL)
+    reveal(page, "#add-planet-btn")
+    page.click("#add-planet-btn")
+    for card in page.locator('.planet-card').all():
+        card.locator('.planet-t0').fill('2460000.1,0.001')
+        card.locator('.planet-period').fill('0.2,0.001')
+        card.locator('.planet-period').blur()
+    centers = page.locator('.planet-tc_pred')
+    expect(centers.first).to_have_value('2460000.100000')
+    centers.nth(1).fill('2460000.27')
+    centers.nth(1).blur()
+
+    if action in ('select_all', 'deselect_all', 'reload'):
+        page.locator('.csv-checkbox').first.uncheck()
+        expect(centers.first).to_have_value('2460000.300000')
+    if action == 'card':
+        page.locator('.csv-card').first.click()
+    elif action == 'checkbox':
+        page.locator('.csv-checkbox').first.uncheck()
+    elif action == 'reload':
+        page.reload()
+    else:
+        page.click('#' + action.replace('_', '-') + '-csvs')
+
+    expected = '2460000.100000' if action in ('select_all', 'deselect_all') else '2460000.300000'
+    expect(centers.first).to_have_value(expected)
+    expect(centers.nth(1)).to_have_value('2460000.27')

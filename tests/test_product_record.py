@@ -543,7 +543,7 @@ def test_start_fit_writes_record_with_author(db, tmp_path, monkeypatch):
     monkeypatch.setattr(fit, "_FIT_JOBS", {})
     monkeypatch.setattr("muscat_db.database.save_job", lambda **_k: None)
 
-    result = fit.start_fit(INST, DATE, TARGET, {}, test_run=True, user_name="dana")
+    result = fit.start_fit(INST, DATE, TARGET, {"tc_pred": "2460000.5"}, test_run=True, user_name="dana")
     try:
         assert result["ok"] is True
         rec = pr.read_record(run_dir)

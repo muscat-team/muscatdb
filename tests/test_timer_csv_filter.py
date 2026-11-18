@@ -319,7 +319,7 @@ def test_start_fit_states_dropped_covariates_in_the_live_log(tmp_path, monkeypat
     monkeypatch.setattr(fit, "_FIT_JOBS", {})
     monkeypatch.setattr("muscat_db.database.save_job", lambda **k: None)
 
-    result = fit.start_fit("muscat3", "230730", "V1298Tau", {}, test_run=True)
+    result = fit.start_fit("muscat3", "230730", "V1298Tau", {"tc_pred": "2460000.5"}, test_run=True)
     try:
         assert result["ok"] is True
         for job in fit._FIT_JOBS.values():
