@@ -215,7 +215,7 @@
     </p>
     <div class="opt-grid">
       <div class="opt">
-        <label for="opt-planet_letters">Planet letters <span class="help-tooltip" title="Planet letter designations, e.g. bcd for three planets. Sorted alphabetically, mapped to internal indices 0,1,2.">?</span></label>
+        <label for="opt-planet_letters">Planet letters <span class="help-tooltip" title="Planet letter designations, e.g. bcd for three planets. Ordered by orbital period, mapped to internal indices 0,1,2.">?</span></label>
         <input type="text" id="opt-planet_letters" placeholder="e.g. bcd">
       </div>
       <div class="opt">
@@ -1566,7 +1566,7 @@
       // Auto-populate planet letters from combined planets and generate default INI
       if (combinedPlanets.length > 0) {
         const planetLettersInput = document.getElementById('opt-planet_letters');
-        const autoLetters = combinedPlanets.sort().join('');
+        const autoLetters = periodOrderedLetters(combinedPlanets).join('');
         if (planetLettersInput && planetLettersInput.value !== autoLetters) {
           planetLettersInput.value = autoLetters;
           rebuildINI(false);
@@ -1606,8 +1606,8 @@
         }
       });
 
-      const t0Val = storedOpts[p + '_t0'] !== undefined ? storedOpts[p + '_t0'] : (refEphem[p] ? refEphem[p].t0 : 2450000.0);
-      const perVal = storedOpts[p + '_period'] !== undefined ? storedOpts[p + '_period'] : (refEphem[p] ? refEphem[p].period : 1.0);
+      const t0Val = storedOpts[p + '_t0'] !== undefined ? storedOpts[p + '_t0'] : (refEphem[p] ? refEphem[p].t0 : '');
+      const perVal = storedOpts[p + '_period'] !== undefined ? storedOpts[p + '_period'] : (refEphem[p] ? refEphem[p].period : '');
       
       let durVal = storedOpts[p + '_duration'] !== undefined ? storedOpts[p + '_duration'] : null;
       if (durVal === null) {
@@ -1630,8 +1630,8 @@
         }
       }
       const ephemerisChangeHandler = isManualPlanet
-        ? 'saveTargetOpts(); scheduleComputeFitIfValid()'
-        : 'saveTargetOpts(); scheduleComputeFit()';
+        ? 'saveTargetOpts(); if (orderPlanetLetters()) rebuildINI(false); scheduleComputeFitIfValid()'
+        : 'saveTargetOpts(); if (orderPlanetLetters()) rebuildINI(false); scheduleComputeFit()';
       const durationChangeHandler = isManualPlanet
         ? 'scheduleComputeFitIfValid()'
         : 'scheduleComputeFit()';
@@ -1727,7 +1727,7 @@
     }
     
     saveTargetOpts();
-    rebuildINI(true);
+    rebuildINI(!orderPlanetLetters());
     scheduleComputeFit();
     scheduleSaveView();
   };
@@ -2598,9 +2598,9 @@
       const pl = card.getAttribute('data-planet');
       const t0 = parseFloat(card.querySelector('.planet-t0').value);
       const period = parseFloat(card.querySelector('.planet-period').value);
-      if (isNaN(t0) || isNaN(period) || period <= 0) {
+      if (!Number.isFinite(t0) || !Number.isFinite(period) || t0 <= 0 || period <= 0 || (t0 === 2450000 && period === 1)) {
         if (showErrors) {
-          showMessageModal('Invalid orbital parameters', `Please enter valid orbital parameters for planet ${pl.toLowerCase()}`);
+          showMessageModal('Invalid orbital parameters', `Please enter a reference epoch and period for planet ${pl.toLowerCase()}`);
         }
         valid = false;
         return;
@@ -2709,8 +2709,9 @@
                 title="A straight line has 2 free parameters (T0, period); with only ${res.n_fit} point(s) in the fit there are 0 degrees of freedom left over, so nothing independently checks that a linear ephemeris is the right model here.">
                ⚠ Exact fit (${res.n_fit} point${res.n_fit === 1 ? '' : 's'}, 0 degrees of freedom)${res.fit_method === 'weighted' ? ' -- unverified, no residual to check the model' : ' -- reported uncertainties above are not a real precision estimate'}
              </p>`
-          : `<p style="margin-bottom: 0rem; font-size: 0.75rem; color: var(--green); font-weight: 500;">
-               ✓ ${methodLabel} linear fit converged successfully
+          : `<p style="margin-bottom: 0rem; font-size: 0.75rem; color: var(--text); font-weight: 500;">
+               ${methodLabel} linear fit: reduced χ² ${Number.isFinite(res.reduced_chi2) ? res.reduced_chi2.toFixed(3) : 'unavailable'}; ${res.n_fit} points, ${res.dof} degrees of freedom.
+               ${res.reduced_chi2 > 2 ? `⚠ Heuristic caution (reduced χ² > 2, not a significance test): scatter exceeds the quoted timing errors; a linear ephemeris may be inadequate${res.fit_method === 'weighted' ? '; formal uncertainties may underestimate uncertainty' : ''}.` : ''}
              </p>`;
         fitSummaryHtml = `
           <div style="margin-top: 0.5rem; font-size: 0.85rem;">
@@ -3899,6 +3900,7 @@
     const planetLettersInput = document.getElementById('opt-planet_letters');
     if (planetLettersInput) {
       planetLettersInput.addEventListener('change', function() {
+        orderPlanetLetters();
         rebuildINI(false);
       });
     }
@@ -4454,9 +4456,27 @@
       });
   }
 
+  function periodOrderedLetters(letters) {
+    function period(pl) {
+      const card = document.querySelector(`#planet-cards-container .planet-card[data-planet="${pl}"]`);
+      const value = card ? parseFloat(card.querySelector('.planet-period').value) : Number(combinedRefEphem[pl]?.period);
+      return Number.isFinite(value) && value > 0 ? value : Infinity;
+    }
+    return letters.slice().sort((a, b) => period(a) - period(b));
+  }
+
+  function orderPlanetLetters() {
+    const input = document.getElementById('opt-planet_letters');
+    if (!input) return false;
+    const ordered = periodOrderedLetters(input.value.toLowerCase().split('')).join('');
+    if (ordered === input.value) return false;
+    input.value = ordered;
+    return true;
+  }
+
   function buildCSVContent() {
     if (!fitResults) return '';
-    const letters = (document.getElementById('opt-planet_letters').value || '').toLowerCase().split('').sort();
+    const letters = (document.getElementById('opt-planet_letters').value || '').toLowerCase().split('');
     if (letters.length === 0) return '';
     
     let csv = 'planet,epoch,tc,tc_unc\n';
@@ -4547,7 +4567,7 @@
 
   function rebuildINI(onlyT14 = false) {
     const textarea = document.getElementById('opt-ini_content');
-    const letters = (document.getElementById('opt-planet_letters').value || '').split('').sort();
+    const letters = (document.getElementById('opt-planet_letters').value || '').split('');
 
     const t14Values = {};
     for (const pl of letters) {

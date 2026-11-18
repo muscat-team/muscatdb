@@ -287,12 +287,6 @@ def _harmonic_prefix() -> list[str]:
     return ["harmonic"]
 
 
-def _infer_planet_letters(planets: list[str]) -> str:
-    """Sort planet letter designations and return as a contiguous string."""
-    sorted_pl = sorted(set(planets))
-    return "".join(sorted_pl)
-
-
 def _make_harmonic_csv(transit_data: list[dict], planet_letters: str) -> str:
     """Convert planet-lettered transit data to harmonic's integer-indexed CSV.
 

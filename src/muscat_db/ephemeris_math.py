@@ -5,15 +5,15 @@ Extracted from the ``api_ephemeris_calculate`` route handler in ``web.py``
 least-squares fit, its variance propagation, and the epoch-centering trick
 are independently unit-testable instead of living inline in a FastAPI route.
 
-This module is output-identical to the historical inline implementation: same
-formulas, same edge-case behavior (fewer than 2 usable points, or a singular
-normal-equations matrix, both fall back to the reference ephemeris
-unchanged). It intentionally does not introduce numpy/astropy so floating
-point results match the prior implementation bit-for-bit.
+The fit and uncertainty formulas retain the historical inline implementation's
+arithmetic without introducing numpy/astropy; reduced chi-squared is an
+additional diagnostic. Fewer than 2 usable points or a singular normal-equations
+matrix fall back to the reference ephemeris unchanged.
 """
 
 from __future__ import annotations
 
+import math
 from typing import Sequence, TypedDict
 
 
@@ -49,6 +49,18 @@ class EphemerisFit(TypedDict):
     E_center: int
     n_fit: int
     dof: int
+    reduced_chi2: float | None
+
+
+PLACEHOLDER_EPHEMERIS = (2450000.0, 1.0)
+
+
+def is_valid_reference(t0: float, period: float) -> bool:
+    """True for a finite, positive reference ephemeris that is not the T0=2450000, P=1 placeholder."""
+    return (
+        math.isfinite(t0) and math.isfinite(period) and t0 > 0 and period > 0
+        and (t0, period) != PLACEHOLDER_EPHEMERIS
+    )
 
 
 def assign_epoch(tc: float, t0: float, period: float) -> int:
@@ -109,18 +121,20 @@ def fit_linear_ephemeris(
       covariance.
     - ``"unweighted"`` (default): uniform weights; the T0/period uncertainties
       are derived from the residual variance (``sum((tc - fit)**2) / dof``)
-      propagated through the same covariance structure. ``uncs`` is unused in
-      this mode other than being accepted for a uniform call signature.
+      propagated through the same covariance structure. ``uncs`` does not
+      enter the fit in this mode.
+
+    In both modes ``reduced_chi2`` is the chi-squared of the residuals against
+    ``uncs`` divided by ``dof``; it is None when no fit is performed,
+    ``dof <= 0``, or any unc is non-positive or non-finite.
 
     Epochs are centered at their mid-range value (``E_center``) before the
     regression -- this keeps the design matrix well-conditioned -- then the
     fit is extrapolated back to the catalog epoch (E=0), propagating the
     T0/period covariance term through the extrapolation.
 
-    Returns an :class:`EphemerisFit` dict (JSON-serializable) with the same
-    keys and rounding-free values previously computed inline in
-    ``web.api_ephemeris_calculate``; the route handler applies its own
-    ``round()`` calls when building the JSON response, unchanged.
+    Returns an :class:`EphemerisFit` dict with rounding-free values; the route
+    handler applies its own ``round()`` calls when building the JSON response.
     """
     n = len(epochs)
     dof = n - 2
@@ -136,6 +150,7 @@ def fit_linear_ephemeris(
         "E_center": 0,
         "n_fit": n,
         "dof": dof,
+        "reduced_chi2": None,
     }
     if n < 2:
         return result
@@ -185,6 +200,13 @@ def fit_linear_ephemeris(
     else:
         t0_fit_unc = (sigma_sq * var_t0_factor / delta) ** 0.5
 
+    reduced_chi2 = None
+    if dof > 0 and all(math.isfinite(u) and u > 0 for u in uncs):
+        reduced_chi2 = sum(
+            ((tc - (t0_centered + (epoch - e_center) * period_fit)) / unc) ** 2
+            for epoch, tc, unc in zip(epochs, tcs, uncs)
+        ) / dof
+
     return {
         "was_fit": True,
         "fit_method": fit_method,
@@ -197,4 +219,5 @@ def fit_linear_ephemeris(
         "E_center": e_center,
         "n_fit": n,
         "dof": dof,
+        "reduced_chi2": reduced_chi2,
     }
