@@ -2087,6 +2087,9 @@
       var field = document.getElementById(spec.field);
       var prior = document.getElementById(spec.prior);
       if (!field || !prior) return;
+      function formatValue(value) {
+        return spec.field === 'opt-bump_tcenter' ? value.toFixed(6) : fmtSig(value, 4);
+      }
       prior.addEventListener('change', function () {
         var next = prior.value === 'uniform' ? 'uniform' : 'gaussian';
         var prev = prior.dataset.mode || 'gaussian';
@@ -2101,9 +2104,9 @@
               var a = Number(pair[0]), b = Number(pair[1]);
               if (pair[0] !== '' && pair[1] !== '' && isFinite(a) && isFinite(b)) {
                 if (next === 'uniform') {
-                  newPairs.push(fmtSig(a - 3 * b, 4) + ',' + fmtSig(a + 3 * b, 4));
+                  newPairs.push(formatValue(a - 3 * b) + ',' + formatValue(a + 3 * b));
                 } else {
-                  newPairs.push(fmtSig((a + b) / 2, 4) + ',' + fmtSig((b - a) / 6, 4));
+                  newPairs.push(formatValue((a + b) / 2) + ',' + formatValue((b - a) / 6));
                 }
               } else {
                 ok = false;

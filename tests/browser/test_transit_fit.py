@@ -724,3 +724,32 @@ def test_bump_center_uses_selected_curve_after_reload(page, fitter, live_server,
     finally:
         for path, original in zip(paths, originals):
             path.write_text(original)
+
+
+@pytest.mark.parametrize("centers,uniform,gaussian", [
+    (None, "2461314.559000,2461315.159000", "2461314.859000,0.100000"),
+    ("2461314.850001,0.001; 2461314.870002,0.002",
+     "2461314.847001,2461314.853001; 2461314.864002,2461314.876002",
+     "2461314.850001,0.001000; 2461314.870002,0.002000"),
+])
+def test_bump_prior_conversion_preserves_bjd_precision(page, fitter, centers, uniform, gaussian):
+    """Three-sigma bounds and their inverse retain six fractional BJD digits."""
+    _ready_to_fit(page)
+    reveal(page, "#opt-include_bump")
+    page.check("#opt-include_bump")
+    if centers is not None:
+        page.fill("#opt-bump_tcenter", centers)
+    else:
+        expect(page.locator("#opt-bump_tcenter")).to_have_value("2461314.859000,0.1")
+    for prior, expected in [("uniform", uniform), ("gaussian", gaussian)]:
+        reveal(page, "#opt-bump_tcenter_prior")
+        page.select_option("#opt-bump_tcenter_prior", prior)
+        expect(page.locator("#opt-bump_tcenter")).to_have_value(expected)
+        page.reload()
+        expect(page.locator("#opt-bump_tcenter_prior")).to_have_value(prior)
+        expect(page.locator("#opt-bump_tcenter")).to_have_value(expected)
+        with page.expect_response("**/api/transit-fit/run"):
+            page.click("#run-test-btn")
+        options = fitter["start"][-1]["options"]
+        assert options["bump_tcenter"] == expected
+        assert options["bump_tcenter_prior"] == prior
