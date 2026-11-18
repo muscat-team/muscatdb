@@ -780,10 +780,11 @@ def lightcurve_time_range(csvs) -> tuple[float, float] | None:
 
 
 def validate_flare_times(options: dict | None, csvs) -> str | None:
-    """Refuse a flare ``tpeak`` that lies outside the selected light curves.
+    """Check flare and bump timing against the selected light curves.
 
-    Runs once the launch knows which CSVs are in the fit. No-op when flares are
-    off or the files carry no ``BJD_TDB`` column.
+    Runs once the launch knows which CSVs are in the fit. Without a usable
+    ``BJD_TDB`` range, skip range checks but require an explicit bump center
+    when bumps are enabled, since its default cannot be inferred.
     """
     o = options or {}
     if o.get("include_flare") != "true" and o.get("include_bump") != "true":
@@ -803,7 +804,7 @@ def validate_fit_options(options: dict | None, time_range: tuple[float, float] |
     bad input is rejected with a clear message instead of crashing the pipeline
     or writing a malformed sys.yaml. An empty field keeps the pipeline default.
     *time_range* is the light curves' ``(earliest, latest)`` BJD_TDB when known;
-    it lets the flare ``tpeak`` check run here as well as at launch.
+    it enables the timing checks shared with :func:`validate_flare_times`.
     """
     o = options or {}
     if o.get("secondary_eclipse") == "true":
