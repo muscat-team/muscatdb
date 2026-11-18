@@ -591,14 +591,14 @@ def test_fit_basis_option_is_encoded_correctly(tmp_path):
     p.write_text("time,flux\n")
     csvs = [p]
 
-    # Test standard basis
+    # Test supported stellar-mass/radius basis
     opts = {
         "planets": "b",
-        "fit_basis": "standard",
+        "fit_basis": "mstar/rstar",
     }
     fit._write_fit_inputs(tmp_path, inst, date, target, csvs, opts)
     fit_yaml = yaml.safe_load((tmp_path / "fit.yaml").read_text())
-    assert fit_yaml["fit_basis"] == "standard"
+    assert fit_yaml["fit_basis"] == "mstar/rstar"
 
     # Test duration basis (default)
     opts_default = {

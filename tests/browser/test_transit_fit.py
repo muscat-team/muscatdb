@@ -334,7 +334,6 @@ def test_sampler_and_detrending_options_persist_and_reach_the_fitter(page, fitte
     flags = {
         'spline': True, 'clip': True, 'chunk_offset': True,
         'add_bias': True, 'quadratic': True, 'include_mean': False,
-        'plot_midtransit': False, 'plot_ingress_egress': False,
     }
     for key, checked in flags.items():
         reveal(page, '#opt-' + key)
@@ -456,7 +455,7 @@ def test_flare_rows_default_to_the_data_and_persist_after_reload(page, fitter):
     assert options["include_flare"] == "true"
     assert options["flare_tpeak"] == "2461314.82,0.005; 2461314.90,0.005"
     assert options["flare_fwhm"] == "0.02,0.01; 0.02,0.01"
-    assert options["flare_ampl"] == "0.01,0.01; 0.02,0.01"
+    assert options["flare_ampl"] == "10,10; 0.02,10"
 
 
 def test_flare_outside_the_data_blocks_the_run_until_the_row_is_removed(page, fitter):
@@ -624,3 +623,58 @@ def test_fit_run_hidden_from_the_viewer_shows_not_found(page, monkeypatch):
     response = page.goto(f"{URL}&run={FIT_RUN_ID}")
     assert response.status == 404
     expect(page.locator("#run-not-found")).to_contain_text("No runs remain")
+
+
+@pytest.mark.parametrize('toggle', [None, 'chunk_offset', 'include_bump', 'include_flare', 'use_gp', 'spline', 'quadratic', 'clip'])
+def test_default_options_are_accepted_by_timer(page, fitter, tmp_path, monkeypatch, toggle):
+    """Exercise the page defaults, serialize them, and run timer's input reader.
+
+    No optimization or sampling. The real engine test skips off-host, while
+    the page-to-YAML assertions still run in CI.
+    """
+    import subprocess
+    import yaml
+    from muscat_db import transit_fit as fit
+    from tests.browser.seed import LIGHTCURVE
+
+    _ready_to_fit(page)
+    if toggle:
+        reveal(page, '#opt-' + toggle)
+        page.locator('#opt-' + toggle).check()
+    with page.expect_response('**/api/transit-fit/run'):
+        page.click('#run-test-btn')
+    options = fitter['start'][-1]['options']
+    csv = tmp_path / 'TOI-1000_muscat3_gp_261001.csv'
+    csv.write_text(LIGHTCURVE.replace("Flux_err", "Err"))
+    out = tmp_path / 'inputs'
+    out.mkdir()
+    monkeypatch.setattr(fit, '_timer_version', lambda: 'test')
+    fit._write_fit_inputs(out, 'muscat3', '261001', 'TOI-1000', [csv], options)
+    config = yaml.safe_load((out / 'fit.yaml').read_text())
+    assert config['fit_basis'] == 'duration'
+    assert 'secondary_eclipse' not in config
+    assert next(iter(config['data'].values()))['chunk_thresh'] == .02
+    if toggle == 'include_bump':
+        assert 2461314.8 <= config['bump']['tcenter'] <= 2461314.918
+        assert config['bump']['ampl'] == 10
+    if toggle == 'include_flare':
+        assert config['flare']['ampl'] == 10
+    if toggle == 'use_gp':
+        assert config['gp']['log_amp'] == 0
+    timer_python = fit._conda_env_python(fit.timer_conda_env())
+    if not timer_python:
+        pytest.skip('timer environment is not installed; page defaults verified')
+    result = subprocess.run([timer_python, '-c',
+        'from timer.fit import TransitFit; import sys; f = TransitFit.from_dir(sys.argv[1]); assert len(f.data) == 1',
+        str(out)], capture_output=True, text=True, timeout=90)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_fractional_day_trim_reaches_fitter(page, fitter):
+    _ready_to_fit(page)
+    for key in ('trim_beg', 'trim_end'):
+        reveal(page, '#opt-' + key)
+        page.fill('#opt-' + key, '0.005')
+    with page.expect_response('**/api/transit-fit/run'):
+        page.click('#run-test-btn')
+    assert fitter['start'][-1]['options']['trim_beg'] == '0.005'
