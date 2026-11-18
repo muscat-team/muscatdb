@@ -339,6 +339,7 @@ def test_airmass_ranked_plans_can_be_selected_and_restored(page):
     page.goto("/lco/schedule")
     page.select_option("#sch-source", "upload")
     page.select_option("#sch-kind", "qhy600")
+    page.fill("#sch-obs-airmass", "2")
     page.fill("#sch-coords", "330, 5")
     page.fill("#sch-range-start", "2026-11-04")
     page.fill("#sch-range-end", "2026-11-05")
@@ -963,7 +964,7 @@ def test_late_answer_for_a_previous_target_is_ignored(page):
 def test_instrument_defaults_and_saved_guiding(page):
     page.problems.allowed.extend(NO_TOKEN)
     page.goto('/lco/schedule')
-    for kind, guiding, airmass, moon in [('sinistro', 'ON', '1.6', '30'), ('muscat', 'OFF', '2.5', '18'), ('qhy600', 'ON', '1.6', '30')]:
+    for kind, guiding, airmass, moon in [('sinistro', 'ON', '2', '30'), ('muscat', 'OFF', '2', '30'), ('qhy600', 'ON', '2', '30')]:
         page.select_option('#sch-kind', kind)
         assert page.input_value('#sch-guiding-config') == guiding
         assert page.input_value('#sch-obs-airmass') == airmass
@@ -992,21 +993,19 @@ def test_preview_uses_site_camera(page, site, instrument, button, path):
     assert 'inst=' + instrument in page.url
 
 
-def test_manual_instrument_change_resets_constraints_and_stale_windows(page):
+def test_manual_instrument_change_preserves_constraints_and_windows(page):
     page.problems.allowed.extend(NO_TOKEN)
     page.goto('/lco/schedule')
+    page.fill('#sch-obs-airmass', '1.9')
+    page.fill('#sch-moon-sep', '25')
     _generate_windows(page)
     expect(page.locator('#windows-body tr')).to_have_count(4)
 
-    # QHY600 shares Sinistro's constraints, so the prediction stays current.
-    page.select_option('#sch-kind', 'qhy600')
-    expect(page.locator('#windows-body tr')).to_have_count(4)
-
-    page.select_option('#sch-kind', 'muscat')
-    assert page.input_value('#sch-obs-airmass') == '2.5'
-    assert page.input_value('#sch-moon-sep') == '18'
-    expect(page.locator('#windows-body tr')).to_have_count(0)
-    expect(page.locator('#msg-windows')).to_contain_text('Inputs changed')
+    for kind in ('qhy600', 'muscat', 'sinistro'):
+        page.select_option('#sch-kind', kind)
+        expect(page.locator('#sch-obs-airmass')).to_have_value('1.9')
+        expect(page.locator('#sch-moon-sep')).to_have_value('25')
+        expect(page.locator('#windows-body tr')).to_have_count(4)
 
 
 def test_automatic_instrument_change_keeps_constraints_and_selection(page):
@@ -1030,3 +1029,64 @@ def test_automatic_instrument_change_keeps_constraints_and_selection(page):
     assert page.input_value('#sch-moon-sep') == '25'
     expect(page.locator('#windows-body tr')).to_have_count(4)
     expect(row.locator('input[type=checkbox]')).to_be_checked()
+
+
+@pytest.mark.parametrize('kind,default', [('sinistro', 'ON'), ('qhy600', 'ON'), ('muscat', 'OFF')])
+def test_legacy_guiding_migrates_once(page, kind, default):
+    page.problems.allowed.extend(NO_TOKEN)
+    page.goto('/lco/schedule')
+    page.evaluate("""kind => localStorage.setItem('lco:schedule:options', JSON.stringify({
+        'sch-kind': kind, 'sch-guiding-config': 'OFF',
+        'sch-obs-airmass': '1.9', 'sch-moon-sep': '22',
+        'sch-range-start': '2026-11-01', 'sch-range-end': '2026-11-10'
+    }))""", kind)
+    page.goto('/lco/schedule')
+    expect(page.locator('#sch-kind')).to_have_value(kind)
+    expect(page.locator('#sch-guiding-config')).to_have_value(default)
+    expect(page.locator('#sch-obs-airmass')).to_have_value('1.9')
+    expect(page.locator('#sch-moon-sep')).to_have_value('22')
+    page.reload()
+    expect(page.locator('#sch-guiding-config')).to_have_value(default)
+    choice = 'ON' if kind == 'muscat' else 'OFF'
+    page.select_option('#sch-guiding-config', choice)
+    page.reload()
+    expect(page.locator('#sch-guiding-config')).to_have_value(choice)
+
+
+@pytest.mark.parametrize('tab,instrument', [('science', 'muscat4'), ('test', 'muscat3')])
+@pytest.mark.parametrize('button,path', [('btn-exp', '/exposure'), ('btn-fov', '/fov')])
+def test_preview_uses_active_tab_after_science_site_change(page, tab, instrument, button, path):
+    page.problems.allowed.extend(NO_TOKEN)
+    page.goto('/lco/schedule')
+    page.select_option('#sch-kind', 'muscat')
+    page.select_option('#sch-sites', 'ogg')
+    _generate_windows(page)
+    page.locator('#windows-body input[type=checkbox]:visible').first.check()
+    expect(page.locator('#sch-muscat-site')).to_have_value('ogg')
+    page.select_option('#sch-sites', 'coj')
+    expect(page.locator('#windows-body tr')).to_have_count(0)
+    if tab == 'test':
+        page.click('[data-tab="test"]')
+        page.select_option('#sch-muscat-site', 'ogg')
+    page.route('**' + path + '?**', lambda route: route.fulfill(body='preview'))
+    page.click('#' + button)
+    page.wait_for_url('**' + path + '?**')
+    assert 'inst=' + instrument in page.url
+
+
+@pytest.mark.parametrize('tab', ['science', 'test'])
+@pytest.mark.parametrize('button', ['btn-exp', 'btn-fov'])
+def test_preview_requires_active_tab_muscat_site(page, tab, button):
+    page.problems.allowed.extend(NO_TOKEN)
+    page.goto('/lco/schedule')
+    page.select_option('#sch-kind', 'muscat')
+    page.fill('#sch-target', 'TOI-1000')
+    page.click('[data-tab="test"]')
+    page.select_option('#sch-muscat-site', 'ogg' if tab == 'science' else '')
+    page.select_option('#sch-sites', '' if tab == 'science' else 'coj')
+    page.click('[data-tab="' + tab + '"]')
+    page.route('**/fov?**', lambda route: route.fulfill(body='unexpected preview'))
+    page.route('**/exposure?**', lambda route: route.fulfill(body='unexpected preview'))
+    page.click('#' + button)
+    expect(page.locator('#message-modal-text')).to_contain_text('Please select an instrument and site')
+    assert '/lco/schedule' in page.url
