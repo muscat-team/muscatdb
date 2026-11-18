@@ -15,7 +15,7 @@ def test_trim_keeps_fractional_days_and_chunk_default(tmp_path):
     assert data['trim_beg'] == .005 and data['trim_end'] == .01
     assert data['chunk_thresh'] == .02
     assert config['bump']['tcenter'] == pytest.approx(2460000.15, rel=0, abs=1e-8)
-    assert config['bump']['ampl'] == 10
+    assert config['bump']['ampl'] == 5
 
 
 @pytest.mark.parametrize('options', [{'fit_basis': 'standard'}, {'chunk_offset': 'true', 'chunk_thresh': '0'}, {'include_bump': 'true', 'bump_tcenter': '0,0.1'}])
@@ -47,3 +47,27 @@ def test_invalid_trim_days_rejected(key, value):
 @pytest.mark.parametrize('value', ['', '0', '0.005'])
 def test_valid_trim_days_accepted(key, value):
     assert fit.validate_fit_options({key: value}) is None
+
+
+@pytest.mark.parametrize('model', ['bump', 'flare'])
+@pytest.mark.parametrize('prior,pair', [('uniform', '-1,10'), ('gaussian', '10,10')])
+def test_amplitudes_cannot_have_negative_support(model, prior, pair):
+    options = {'include_' + model: 'true', model + '_ampl_prior': prior,
+               model + '_ampl': pair}
+    if model == 'flare':
+        options.update(flare_tpeak='2460000,0.1', flare_fwhm='0.02,0.01')
+    error = fit.validate_fit_options(options)
+    assert error is not None and 'ampl' in error
+
+
+@pytest.mark.parametrize('model', ['bump', 'flare'])
+def test_nonnegative_uniform_amplitude_serialization(model, tmp_path):
+    options = {'include_' + model: 'true', model + '_ampl_prior': 'uniform',
+               model + '_ampl': '0,10'}
+    if model == 'flare':
+        options.update(flare_tpeak='2460000,0.1', flare_fwhm='0.02,0.01')
+    assert fit.validate_fit_options(options) is None
+    fit._write_fit_inputs(tmp_path, 'muscat3', '260101', 'star', [], options)
+    block = yaml.safe_load((tmp_path / 'fit.yaml').read_text())[model]
+    # timer stores Uniform bounds as midpoint and full width.
+    assert (block['ampl'], block['ampl_unc'], block['ampl_prior']) == (5, 10, 'uniform')

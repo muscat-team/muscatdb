@@ -696,11 +696,11 @@
             </div>
           </div>
           <div class="opt">
-            <label for="opt-bump_ampl">ampl prior <span class="help-tooltip" title="Prior on amplitude of the bump (ppt). Gaussian: enter value,unc. Uniform: enter low,high bounds. Use ; to separate multiple bumps.">?</span></label>
+            <label for="opt-bump_ampl">ampl prior <span class="help-tooltip" title="Prior on amplitude of the bump (ppt). Uniform only: enter nonnegative low,high bounds. Use ; to separate multiple bumps.">?</span></label>
             <div style="display: flex; gap: 0.5rem; align-items: center;">
-              <input type="text" id="opt-bump_ampl" value="10,10" placeholder="value,unc" style="flex: 3; width: 100%; min-width: 0;" disabled>
-              <select id="opt-bump_ampl_prior" title="Prior shape — Gaussian: enter value,unc. Uniform: enter low,high bounds." style="flex: 2; width: 100%; min-width: 0; background: var(--input-bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 0.35rem 0.5rem; font-size: 0.85rem;" disabled>
-                <option value="gaussian">Gaussian</option>
+              <input type="text" id="opt-bump_ampl" value="0,10" placeholder="low,high" style="flex: 3; width: 100%; min-width: 0;" disabled>
+              <select id="opt-bump_ampl_prior" title="Uniform: enter nonnegative low,high bounds in ppt." style="flex: 2; width: 100%; min-width: 0; background: var(--input-bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 0.35rem 0.5rem; font-size: 0.85rem;" disabled>
+                
                 <option value="uniform">Uniform</option>
               </select>
             </div>
@@ -737,9 +737,9 @@
                     <option value="uniform">Uniform</option>
                   </select>
                 </th>
-                <th>ampl <span class="help-tooltip" title="Amplitude of the flare (ppt). Gaussian: value,unc. Uniform: low,high bounds.">?</span>
+                <th>ampl <span class="help-tooltip" title="Amplitude of the flare (ppt). Uniform only: nonnegative low,high bounds.">?</span>
                   <select id="opt-flare_ampl_prior" title="Prior shape for every flare's ampl" disabled>
-                    <option value="gaussian">Gaussian</option>
+                    
                     <option value="uniform">Uniform</option>
                   </select>
                 </th>
@@ -1101,6 +1101,7 @@
     var gpLogAmpPair = splitPair(val('opt-gp_log_amp'));
     var gpLogScalePair = splitPair(val('opt-gp_log_scale'));
     var opts = {
+      amplitude_defaults_version: '1',
       planets: planetsListStr,
       run_name: val('opt-run_name'),
       chromatic: chk('opt-chromatic') ? 'true' : 'false',
@@ -1769,6 +1770,36 @@
 
   function restoreOptions() {
     var saved = MuscatOptions.restore(OPT_KEY);
+    if (saved && saved.amplitude_defaults_version !== '1') {
+      var changed = false;
+      ['bump', 'flare'].forEach(function (model) {
+        var key = model + '_ampl';
+        if (saved[key + '_prior'] !== 'uniform') {
+          // Obsolete Gaussian pairs cannot be interpreted as Uniform bounds.
+          // Clear custom pairs for the user to replace, without guessing bounds.
+          var pairs = String(saved[key] || '').split(';');
+          saved[key] = pairs.map(function (pair) {
+            var nums = pair.split(',').map(Number);
+            return (!pair.trim() || (nums[0] === 0.01 && nums[1] === 0.01) ||
+                    (nums[0] === 10 && nums[1] === 10)) ? '0,10' : ',';
+          }).join('; ');
+          saved[key + '_prior'] = 'uniform';
+          changed = true;
+        }
+      });
+      if ((!saved.gp_log_amp_prior || saved.gp_log_amp_prior === 'gaussian') &&
+          Number(saved.gp_log_amp) === -3 && Number(saved.gp_log_amp_unc) === 2) {
+        saved.gp_log_amp = '0';
+        changed = true;
+      }
+      saved.amplitude_defaults_version = '1';
+      if (changed) {
+        var notice = document.createElement('p');
+        notice.id = 'amplitude-migration-notice';
+        notice.textContent = 'Saved amplitude settings updated: bump and flare amplitudes now require nonnegative Uniform bounds in ppt (default 0–10). Custom Gaussian amplitudes were cleared; enter new bounds before fitting. The old GP amplitude default is now 0,2.';
+        document.getElementById('flare-rows-wrap').before(notice);
+      }
+    }
 
     var container = document.getElementById('planet-cards-container');
     if (container) container.innerHTML = '';
@@ -1891,10 +1922,10 @@
                          'opt-gp_log_scale':'-1,2','opt-gp_log_scale_prior':'gaussian',
                          'opt-bump_tcenter':'','opt-bump_tcenter_prior':'gaussian',
                          'opt-bump_width':'0.02,0.01','opt-bump_width_prior':'gaussian',
-                         'opt-bump_ampl':'10,10','opt-bump_ampl_prior':'gaussian',
+                         'opt-bump_ampl':'0,10','opt-bump_ampl_prior':'uniform',
                          'opt-flare_tpeak_prior':'gaussian',
                          'opt-flare_fwhm_prior':'gaussian',
-                         'opt-flare_ampl_prior':'gaussian',
+                         'opt-flare_ampl_prior':'uniform',
                          'opt-fit_basis':'duration'};
       Object.keys(numDefaults).forEach(function (id) { var el = document.getElementById(id); if (el) el.value = numDefaults[id]; });
 
@@ -2129,11 +2160,11 @@
   // uncertainty). The prior shape lives in the column header because timer
   // applies one shape per parameter across every flare.
   var FLARE_PARAMS = ['tpeak', 'fwhm', 'ampl'];
-  var FLARE_ROW_DEFAULTS = { tpeak: ['', '0.1'], fwhm: ['0.02', '0.01'], ampl: ['10', '10'] };
+  var FLARE_ROW_DEFAULTS = { tpeak: ['', '0.1'], fwhm: ['0.02', '0.01'], ampl: ['0', '10'] };
   // The same defaults read as low,high bounds under a Uniform prior. They
   // bracket the Gaussian value, since the Gaussian pair would read as low >
   // high there and block the run.
-  var FLARE_ROW_UNIFORM_DEFAULTS = { fwhm: ['0.0', '0.1'], ampl: ['-20', '40'] };
+  var FLARE_ROW_UNIFORM_DEFAULTS = { fwhm: ['0.0', '0.1'], ampl: ['0', '10'] };
 
   function flarePriorMode(param) {
     var sel = document.getElementById('opt-flare_' + param + '_prior');
@@ -2305,6 +2336,7 @@
         if (v.value.trim() === '' || u.value.trim() === '' || !isFinite(a) || !isFinite(b)) {
           return fail([v, u], label + ': enter two numbers (' + (mode === 'uniform' ? 'low and high' : 'value and unc') + ')');
         }
+        if (param === 'ampl' && a < 0) return fail([v], label + ': lower bound must be nonnegative');
         if (mode === 'uniform' && !(a < b)) return fail([v, u], label + ': low must be less than high');
         if (mode === 'gaussian' && b <= 0) return fail([u], label + ': uncertainty must be > 0');
         if (param === 'fwhm' && (mode === 'uniform' ? b : a) <= 0) return fail([v], label + ': must be > 0');
@@ -2515,6 +2547,9 @@
           err.textContent = 'Enter value,unc (use ; for multiple bumps)'; err.classList.add('visible'); return false;
         }
         var a = Number(parts[0]), b = Number(parts[1]);
+        if (id === 'opt-bump_ampl' && !(0 <= a && a < b)) {
+          err.textContent = 'Require 0 <= low < high (ppt)'; err.classList.add('visible'); return false;
+        }
         if (isNaN(a) || !isFinite(a) || isNaN(b) || !isFinite(b)) {
           err.textContent = 'Must be numbers'; err.classList.add('visible'); return false;
         }

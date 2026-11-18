@@ -685,7 +685,7 @@ def _validate_flares(o: dict, time_range: tuple[float, float] | None) -> str | N
     rows_by_param: dict[str, list[tuple[float, float]]] = {}
     priors: dict[str, str] = {}
     for param in _FLARE_PARAMS:
-        prior = str(o.get(f"flare_{param}_prior") or "gaussian").strip().lower()
+        prior = str(o.get(f"flare_{param}_prior") or ("uniform" if param == "ampl" else "gaussian")).strip().lower()
         if prior not in _PRIOR_CHOICES:
             return f"flare {param} prior must be gaussian or uniform"
         priors[param] = prior
@@ -963,6 +963,21 @@ def validate_fit_options(options: dict | None, time_range: tuple[float, float] |
                 return f"GP {param} uniform bounds must have low < high"
             if prior == "gaussian" and second <= 0:
                 return f"GP {param} uncertainty must be greater than 0"
+
+    for model in ("bump", "flare"):
+        if o.get(f"include_{model}") != "true":
+            continue
+        prior = str(o.get(f"{model}_ampl_prior") or "uniform").strip().lower()
+        if prior != "uniform":
+            return f"{model} ampl prior must be uniform with nonnegative bounds"
+        raw = str(o.get(f"{model}_ampl") or "0,10")
+        for row, pair in enumerate(raw.split(";"), start=1):
+            try:
+                low, high = map(float, pair.split(","))
+            except ValueError:
+                return f"{model} ampl (row {row}) requires low,high bounds"
+            if not (math.isfinite(low) and math.isfinite(high) and 0 <= low < high):
+                return f"{model} ampl bounds (row {row}) must be finite with 0 <= low < high"
 
     err = _validate_flares(o, time_range) or _validate_bump_times(o, time_range)
     if err:
@@ -1509,7 +1524,9 @@ def _write_fit_inputs(
     if fit_data["include_bump"]:
         def _bump_values(param: str, val_default: float, unc_default: float) -> tuple[float | list[float], float | list[float], str]:
             raw_val = options.get(f"bump_{param}", "")
-            prior = str(options.get(f"bump_{param}_prior") or "gaussian").strip().lower()
+            prior = str(options.get(f"bump_{param}_prior") or ("uniform" if param == "ampl" else "gaussian")).strip().lower()
+            if param == "ampl" and not str(raw_val).strip():
+                raw_val = "0,10"
 
             s = str(raw_val).strip()
             if not s:
@@ -1568,7 +1585,9 @@ def _write_fit_inputs(
     if fit_data["include_flare"]:
         def _flare_values(param: str, val_default: float, unc_default: float) -> tuple[float | list[float], float | list[float], str]:
             raw_val = options.get(f"flare_{param}", "")
-            prior = str(options.get(f"flare_{param}_prior") or "gaussian").strip().lower()
+            prior = str(options.get(f"flare_{param}_prior") or ("uniform" if param == "ampl" else "gaussian")).strip().lower()
+            if param == "ampl" and not str(raw_val).strip():
+                raw_val = "0,10"
 
             s = str(raw_val).strip()
             if not s:

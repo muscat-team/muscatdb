@@ -455,7 +455,7 @@ def test_flare_rows_default_to_the_data_and_persist_after_reload(page, fitter):
     assert options["include_flare"] == "true"
     assert options["flare_tpeak"] == "2461314.82,0.005; 2461314.90,0.005"
     assert options["flare_fwhm"] == "0.02,0.01; 0.02,0.01"
-    assert options["flare_ampl"] == "10,10; 0.02,10"
+    assert options["flare_ampl"] == "0,10; 0.02,10"
 
 
 def test_flare_outside_the_data_blocks_the_run_until_the_row_is_removed(page, fitter):
@@ -487,8 +487,8 @@ def test_flare_row_added_under_uniform_priors_passes_validation(page, fitter):
     # bounds that bracket them instead.
     expect(_flare_cell(page, 1, "fwhm", "val")).to_have_value("0.0")
     expect(_flare_cell(page, 1, "fwhm", "unc")).to_have_value("0.1")
-    expect(_flare_cell(page, 1, "ampl", "val")).to_have_value("-20")
-    expect(_flare_cell(page, 1, "ampl", "unc")).to_have_value("40")
+    expect(_flare_cell(page, 1, "ampl", "val")).to_have_value("0")
+    expect(_flare_cell(page, 1, "ampl", "unc")).to_have_value("10")
 
     with page.expect_response("**/api/transit-fit/run"):
         page.click("#run-test-btn")
@@ -496,24 +496,24 @@ def test_flare_row_added_under_uniform_priors_passes_validation(page, fitter):
     assert page.locator("#flare-rows .flare-cell.is-invalid").count() == 0
     options = fitter["start"][-1]["options"]
     assert options["flare_fwhm"].endswith("; 0.0,0.1")
-    assert options["flare_ampl"] == "-20,40; -20,40"
+    assert options["flare_ampl"] == "0,10; 0,10"
 
 
 def test_flare_prior_shape_converts_every_row(page):
     _ready_to_fit(page)
     _enable_flares(page)
     page.click("#flare-add-btn")
-    _flare_cell(page, 0, "ampl", "val").fill("0.01")
-    _flare_cell(page, 0, "ampl", "unc").fill("0.001")
-    _flare_cell(page, 1, "ampl", "val").fill("0.02")
-    _flare_cell(page, 1, "ampl", "unc").fill("0.002")
-    page.select_option("#opt-flare_ampl_prior", "uniform")
+    _flare_cell(page, 0, "fwhm", "val").fill("0.01")
+    _flare_cell(page, 0, "fwhm", "unc").fill("0.001")
+    _flare_cell(page, 1, "fwhm", "val").fill("0.02")
+    _flare_cell(page, 1, "fwhm", "unc").fill("0.002")
+    page.select_option("#opt-flare_fwhm_prior", "uniform")
     # Gaussian mean,unc becomes the 3-sigma bounds on both rows.
-    expect(_flare_cell(page, 0, "ampl", "val")).to_have_value("0.007")
-    expect(_flare_cell(page, 0, "ampl", "unc")).to_have_value("0.013")
-    expect(_flare_cell(page, 1, "ampl", "val")).to_have_value("0.014")
-    expect(_flare_cell(page, 1, "ampl", "unc")).to_have_value("0.026")
-    assert _flare_cell(page, 1, "ampl", "val").get_attribute("placeholder") == "low"
+    expect(_flare_cell(page, 0, "fwhm", "val")).to_have_value("0.007")
+    expect(_flare_cell(page, 0, "fwhm", "unc")).to_have_value("0.013")
+    expect(_flare_cell(page, 1, "fwhm", "val")).to_have_value("0.014")
+    expect(_flare_cell(page, 1, "fwhm", "unc")).to_have_value("0.026")
+    assert _flare_cell(page, 1, "fwhm", "val").get_attribute("placeholder") == "low"
     # A BJD keeps its precision through the conversion.
     page.select_option("#opt-flare_tpeak_prior", "uniform")
     expect(_flare_cell(page, 0, "tpeak", "val")).to_have_value("2461314.55900")
@@ -656,9 +656,9 @@ def test_default_options_are_accepted_by_timer(page, fitter, tmp_path, monkeypat
     assert next(iter(config['data'].values()))['chunk_thresh'] == .02
     if toggle == 'include_bump':
         assert 2461314.8 <= config['bump']['tcenter'] <= 2461314.918
-        assert config['bump']['ampl'] == 10
+        assert config['bump']['ampl'] == 5
     if toggle == 'include_flare':
-        assert config['flare']['ampl'] == 10
+        assert config['flare']['ampl'] == 5
     if toggle == 'use_gp':
         assert config['gp']['log_amp'] == 0
     timer_python = fit._conda_env_python(fit.timer_conda_env())
@@ -753,3 +753,26 @@ def test_bump_prior_conversion_preserves_bjd_precision(page, fitter, centers, un
         options = fitter["start"][-1]["options"]
         assert options["bump_tcenter"] == expected
         assert options["bump_tcenter_prior"] == prior
+
+
+@pytest.mark.parametrize('custom', [False, True])
+def test_saved_gaussian_amplitudes_are_migrated_explicitly(page, custom):
+    _ready_to_fit(page)
+    page.evaluate("""({key, custom}) => {
+        const saved = JSON.parse(localStorage.getItem(key)) || {};
+        delete saved.amplitude_defaults_version;
+        saved.bump_ampl = custom ? '3,1' : '0.01,0.01';
+        saved.flare_ampl = custom ? '4,2' : '0.01,0.01';
+        saved.bump_ampl_prior = saved.flare_ampl_prior = 'gaussian';
+        saved.gp_log_amp = '-3'; saved.gp_log_amp_unc = '2';
+        localStorage.setItem(key, JSON.stringify(saved));
+    }""", {'key': OPT_KEY, 'custom': custom})
+    page.reload()
+    reveal(page, '#opt-include_flare')
+    expect(page.locator('#amplitude-migration-notice')).to_be_visible()
+    expect(page.locator('#opt-bump_ampl')).to_have_value(',' if custom else '0,10')
+    expect(page.locator('#opt-bump_ampl_prior')).to_have_value('uniform')
+    expect(page.locator('#opt-flare_ampl_prior')).to_have_value('uniform')
+    expect(_flare_cell(page, 0, 'ampl', 'val')).to_have_value('' if custom else '0')
+    expect(_flare_cell(page, 0, 'ampl', 'unc')).to_have_value('' if custom else '10')
+    expect(page.locator('#opt-gp_log_amp')).to_have_value('0,2')
