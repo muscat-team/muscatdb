@@ -34,8 +34,8 @@ SCINTILLATION_VARIANCE_COEFF = 10e-6
 # Scale height of the turbulence in Young's relation (m).
 TURBULENCE_SCALE_HEIGHT_M = 8000.0
 # Osborn's empirical correction to Young's relation. Site medians span 1.30
-# (La Palma) to 1.67 (San Pedro Martir); 1.5 is their recommended value where
-# no turbulence profile exists.
+# (La Palma) to 1.67 (San Pedro Martir); 1.5 is their table mean, used here
+# as an approximation rather than a measured coefficient for this site.
 OSBORN_CY_MEDIAN = 1.5
 
 # Aperture radius in units of the image FWHM. The aperture is taken to enclose
@@ -169,3 +169,72 @@ def readout_overhead(instrument: str, mode: str) -> float:
     except KeyError:
         known = ", ".join(sorted(READOUT_OVERHEAD_S.get(instrument, {}))) or "none"
         raise ValueError(f"no readout overhead for {instrument} mode {mode!r} (known modes: {known})") from None
+
+
+def recommend(model: BandModel, mag: float, *, comp_mags: Sequence[float],
+              airmass_range: tuple[float, float], extinction: float, diameter_m: float,
+              altitude_m: float, read_noise_e: float, sky_rate: float, dark_rate: float,
+              overhead_s: float, max_cycle_s: float, bin_s: float, sat_frac: float,
+              max_defocus_mm: float) -> dict:
+    """Best precision on a bounded grid for one band and a fixed readout mode.
+
+    The caller supplies the calibrated defocus bound, capped at the hardware
+    limit. Saturation includes sky/dark and every comparison, at the lowest
+    airmass. Precision is evaluated at the highest airmass: with non-negative
+    extinction and fixed measured sky this is the worst end of the interval.
+    Exposure times are whole seconds; defocus steps are at most 0.1 mm. The
+    longest safe exposure is included at each defocus, alongside a log grid.
+    """
+    from muscat_db.exposure_model import peak_rate
+
+    lo, hi = airmass_range
+    _require(1 <= lo <= hi <= 3, 'airmass range must satisfy 1 <= min <= max <= 3')
+    _non_negative(extinction, 'extinction')
+    _non_negative(overhead_s, 'overhead_s')
+    _positive(bin_s, 'bin_s')
+    _require(math.isfinite(max_cycle_s) and overhead_s + 1 <= max_cycle_s <= 3600,
+             'max cycle must allow at least 1 s exposure and be at most 3600 s')
+    _require(0 < sat_frac <= 1, 'saturation fraction must be in (0, 1]')
+    _require(math.isfinite(max_defocus_mm) and 0 <= max_defocus_mm <= 8,
+             'max defocus must be between 0 and 8 mm')
+    _require(len(comp_mags) <= 100, 'at most 100 comparisons are supported')
+    _require(all(math.isfinite(m) and -10 <= m <= 40 for m in [mag, *comp_mags]),
+             'magnitudes must be finite and between -10 and 40')
+    for name in ('pixscale', 'level', 'seeing_good', 'seeing_median', 'a_focus'):
+        _positive(getattr(model, name), name)
+    for name in ('zp_safe', 'zp_median'):
+        _require(math.isfinite(getattr(model, name)), f'{name} must be finite')
+    if max_defocus_mm:
+        for name in ('defocus_c', 'defocus_c_safe', 'a_defocus'):
+            _positive(getattr(model, name) or 0, name)
+    # Validate inputs even when saturation would leave no feasible candidate.
+    noise_budget(model, mag, 1, airmass=hi, extinction=extinction, diameter_m=diameter_m,
+                 altitude_m=altitude_m, read_noise_e=read_noise_e, sky_rate=sky_rate,
+                 dark_rate=dark_rate, comp_mags=comp_mags)
+    longest = math.floor(min(max_cycle_s, bin_s) - overhead_s)
+    _require(longest >= 1, 'time bin must allow at least one exposure and readout')
+    end = math.floor(max_defocus_mm * 1e6) / 1e6
+    focuses = sorted({end, *(i / 10 for i in range(math.floor(end * 10) + 1))})
+    best = None
+    for focus in focuses:
+        rate = max(peak_rate(model, m, lo, extinction, focus) for m in [mag, *comp_mags])
+        rate += sky_rate + dark_rate
+        ceiling = min(longest, math.floor(sat_frac * model.level / rate))
+        if ceiling < 1:
+            continue
+        exposures = sorted({1, ceiling, *(max(1, math.floor(ceiling ** (i / 59))) for i in range(60))})
+        for exposure in exposures:
+            budget = binned(noise_budget(
+                model, mag, exposure, airmass=hi, extinction=extinction, diameter_m=diameter_m,
+                altitude_m=altitude_m, read_noise_e=read_noise_e, sky_rate=sky_rate,
+                dark_rate=dark_rate, defocus_mm=focus, comp_mags=comp_mags,
+            ), exposure, overhead_s, bin_s)
+            score = (budget.total, focus, exposure)
+            if best is None or score < best[0]:
+                best = (score, dict(exptime_s=exposure, defocus_mm=focus,
+                                   cycle_s=exposure + overhead_s, peak_e=rate * exposure,
+                                   budget_ppm={**{k: ppm(v) for k, v in budget.terms().items()},
+                                               'total': ppm(budget.total)}, dominant=budget.dominant))
+    if best is None:
+        raise ValueError('No safe exposure of at least 1 s within the cadence and calibrated defocus limits')
+    return best[1]

@@ -187,3 +187,85 @@ def test_approximate_lookup_clears_missing_bands_and_persists(page):
     page.reload()
     expect(page.locator('#lookup-status')).to_contain_text('Approximate')
     expect(page.locator('#lookup-status')).to_contain_text('edited manually')
+
+
+def _recommend_conditions(page):
+    page.fill('#rec-sky_rate', '20')
+    page.fill('#rec-read_noise_e', '6')
+    page.fill('#rec-max_cycle_s', '90')
+
+
+def test_precision_recommendation_uses_measured_inputs_and_persists(page):
+    page.goto(URL)
+    _fill_mags(page)
+    page.fill('.mag-input[data-band="rp"]', '15')
+    _recommend_conditions(page)
+    with page.expect_response('**/api/exposure/recommend') as response:
+        page.click('#recommend-btn')
+    assert response.value.status == 200
+    payload = response.value.request.post_data_json
+    assert payload['mode'] == 'MUSCAT_FAST'
+    assert payload['sky_rate'] == 20
+    assert payload['max_cycle_s'] == 90
+    expect(page.locator('#recommend-result')).to_contain_text('ppm in 600 s')
+    expect(page.locator('#recommend-result')).to_contain_text('In-focus only')
+    page.goto('/jobs')
+    page.goto('/exposure')
+    expect(page.locator('#rec-sky_rate')).to_have_value('20')
+    expect(page.locator('#rec-max_cycle_s')).to_have_value('90')
+    page.click('#recommend-reset')
+    expect(page.locator('#rec-sky_rate')).to_have_value('')
+    expect(page.locator('#rec-max_cycle_s')).to_have_value('120')
+    page.reload()
+    expect(page.locator('#rec-sky_rate')).to_have_value('')
+
+
+def test_precision_conditions_are_cleared_when_band_or_mode_changes(page):
+    page.goto(URL)
+    _recommend_conditions(page)
+    page.select_option('#rec-band', 'zs')
+    expect(page.locator('#rec-sky_rate')).to_have_value('')
+    _recommend_conditions(page)
+    page.select_option('#rec-muscat-mode', 'MUSCAT_SLOW')
+    expect(page.locator('#rec-read_noise_e')).to_have_value('')
+    page.reload()
+    expect(page.locator('#rec-muscat-mode')).to_have_value('MUSCAT_SLOW')
+    expect(page.locator('#rec-read_noise_e')).to_have_value('')
+
+
+def test_precision_recommendation_reports_infeasible_settings(page):
+    page.problems.allowed.extend(['HTTP 400: POST /api/exposure/recommend', 'status of 400'])
+    page.goto(URL)
+    _fill_mags(page)
+    _recommend_conditions(page)
+    page.fill('#rec-max_cycle_s', '2')
+    page.click('#recommend-btn')
+    expect(page.locator('#recommend-status')).to_contain_text('max cycle')
+    expect(page.locator('#recommend-btn')).to_be_enabled()
+    expect(page.locator('#recommend-result')).not_to_be_visible()
+
+
+def test_precision_comparisons_and_selected_mode_reach_api(page, monkeypatch):
+    from muscat_db import exposure
+    monkeypatch.setattr(exposure, 'lookup_magnitudes_with_fallback', lambda *a: ({b: 15.0 for b in MAGS}, 'Pan-STARRS', False))
+    page.goto('/exposure?inst=sinistro&target=TOI-1000')
+    page.evaluate("""sessionStorage.setItem('fov.compHandoff.v1', JSON.stringify({
+      target: 'TOI-1000', instrument: 'sinistro',
+      comps: [{ra: 117.93, dec: 12.54, gmag: 15, bp_rp: 1, sep_arcsec: 40}]
+    }))""")
+    page.goto('/exposure?inst=sinistro&target=TOI-1000&fromFov=1')
+    expect(page.locator('#comps-status')).to_contain_text('Resolved 1/1')
+    page.fill('.mag-input[data-band="rp"]', '15')
+    page.select_option('#sel-confmode', 'full_frame')
+    page.select_option('#rec-site', 'lsc')
+    expect(page.locator('#rec-muscat-mode')).not_to_be_visible()
+    _recommend_conditions(page)
+    with page.expect_response('**/api/exposure/recommend') as response:
+        page.click('#recommend-btn')
+    assert response.value.status == 200
+    sent = response.value.request.post_data_json
+    assert sent['mode'] == 'full_frame'
+    assert sent['comp_mags'] == [15]
+    expect(page.locator('#recommend-result')).to_be_visible()
+    page.fill('.mag-input[data-band="rp"]', '16')
+    expect(page.locator('#recommend-result')).not_to_be_visible()

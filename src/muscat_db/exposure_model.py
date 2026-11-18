@@ -153,6 +153,7 @@ class BandModel:
     level: float            # saturation (MAXLIN), e-
     n_frames: int
     source: str = "archive"
+    max_defocus_mm: float = 0.0  # measured support; legacy models stay in focus
 
     def as_dict(self) -> dict:
         return dict(self.__dict__)
@@ -210,6 +211,7 @@ def fit_band(samples: list[FrameSample], extinction: float) -> BandModel | None:
         zp_median=float(np.median(zp)), a_focus=a_focus, a_defocus=a_defocus, defocus_c=c, defocus_c_safe=c_safe,
         seeing_good=float(np.percentile(seeing, GOOD_SEEING_PERCENTILE)), seeing_median=float(np.median(seeing)),
         pixscale=float(np.median(pix)), level=_recent_level(samples), n_frames=len(samples),
+        max_defocus_mm=float(np.max(defocus)) if c and c_safe and a_defocus else 0.0,
     )
 
 
