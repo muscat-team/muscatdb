@@ -106,3 +106,21 @@ def test_ttv_initial_pairs_follow_periods(page):
     ini = page.input_value('#opt-ini_content')
     assert 'a_cd =' in ini and 'a_db =' in ini and 'a_be =' in ini
     assert 'a_bc =' not in ini
+
+
+def test_pending_auto_fit_does_not_interrupt_adding_a_planet(page):
+    # Editing a catalog planet schedules a fit 350 ms later, while a newly
+    # added manual planet is incomplete. The automatic fit must not interrupt.
+    page.clock.install()
+    _load_toi1000(page)
+    page.click('#add-planet-btn')
+    page.fill('#planet-period-b', '24.14')
+    page.locator('#planet-period-b').blur()
+    page.clock.run_for(500)
+    expect(page.locator('#message-modal')).not_to_be_visible()
+    page.fill('#planet-t0-c', str(T0))
+    page.fill('#planet-period-c', '1.5')
+    page.locator('#planet-period-c').blur()
+    with page.expect_response('**/api/ephemeris/calculate'):
+        page.clock.run_for(500)
+    expect(page.locator('#message-modal')).not_to_be_visible()

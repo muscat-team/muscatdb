@@ -2582,7 +2582,9 @@
     }
     computeFitTimer = setTimeout(() => {
       computeFitTimer = null;
-      computeFit();
+      // Fields may have become incomplete since this automatic fit was queued.
+      if (collectFitRequest(false)) computeFit();
+      else clearFitPresentation();
     }, delay);
   }
 

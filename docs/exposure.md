@@ -71,8 +71,7 @@ is used. A failed Sesame lookup skips the subsequent VizieR attempt.
 ## Time-series noise model
 
 `muscat_db.precision` predicts the precision a star reaches at given settings
-(#344). It is a library only for now: the optimizer, API and page panel that
-use it come in later steps.
+(#344), and powers the recommendation panel described below.
 
 One frame's fractional noise is the quadrature sum of target photon noise,
 sky, read noise and dark current inside the aperture, the comparison
@@ -90,3 +89,67 @@ are LCO's published values, in `exposure_model_defaults.READOUT_OVERHEAD_S`.
 Read noise, sky rate, telescope diameter and site altitude are arguments, not
 built-in constants. The prediction is not yet calibrated against achieved
 light curves.
+
+## Recommend exposure time and defocus
+
+The **Recommend for precision** panel searches one band's exposure time and
+positive defocus offset in the selected readout mode. It supports MuSCAT3,
+MuSCAT4, Sinistro and QHY600. MuSCAT/MuSCAT2 await empirical calibration;
+SBIG has no measured readout overhead. Readout-mode selection stays manual.
+MuSCAT3 and MuSCAT4 apply one telescope defocus setting to all four bands.
+The recommendation checks the selected band's stars. Before scheduling,
+check the other science bands at that same defocus.
+
+Enter the target magnitude above and select comparisons through the FOV
+handoff if needed. Every selected comparison needs a magnitude in the chosen
+band. Sky background, read noise and dark current are prefilled with medians
+from matching instrument/site/band/readout-mode archive headers. The sample is the
+200 most recent matching indexed frames; medians are cached for one hour. Each frame's
+`L1MEDIAN * GAIN / EXPTIME` gives sky electrons/pixel/second; `RDNOISE`
+and `DARKCURR` are already in electrons/pixel and electrons/pixel/second.
+Sample counts are shown. These are archival estimates, not a forecast for
+the planned night. Missing sky/read noise require manual entry; missing dark
+current retains an explicit zero assumption. All values can be overridden and
+saved. Changing instrument, site, band or mode loads matching medians; Reset
+restores them. The cadence limit remains a user setting (default 120 seconds).
+
+Set an airmass interval and a **maximum cycle time including readout** (the
+minimum acceptable sampling cadence). The search uses whole-second exposures
+and defocus steps no larger than 0.1 mm. It minimizes the predicted noise at
+the highest airmass, while checking target and comparison peak counts plus
+sky/dark at the lowest airmass against the selected saturation fraction.
+The time bin must contain at least one complete exposure/readout cycle.
+Custom ADU limits and the forward calculator's focus/seeing settings do not
+apply to this panel: it uses the fitted good seeing for saturation and median
+seeing for precision.
+
+The calibrated upper bound is the 95th percentile of the absolute offsets
+of frames used to fit the defocus slope (at least 0.9 mm). The fit takes the
+lower observed value at that percentile so a single extreme offset cannot
+extend the range. Search stops at the smaller of this bound and the hardware
+limit. Models without a usable defocus fit search in focus only.
+
+For MuSCAT3, the shipped upper bounds are 6 mm in gp, rp and ip and 5 mm
+in zs. An independent MuSCAT3 focus sweep measured rp FWHM of 16.7 pixels
+at 6 mm. The archive model predicts 17.7 pixels at median seeing at the same
+offset. [Fukui’s MuSCAT3 focus sweep](https://github.com/akihikofukui/peak_count_estimator/blob/7e9f16c602752cabe3b4d7395f9b4f4ed2a8cf1f/peak_count_estimator_muscat3.py#L44)
+
+**Deployment of the range field.** Stored calibrations take precedence over
+the built-ins. After upgrading a database with older calibrations, submit
+`POST /api/exposure/calibrate` with `{"instrument":"muscat3"}` and poll
+`GET /api/exposure/calibrate/{job_id}` until completion. Repeat for MuSCAT4,
+Sinistro and QHY600 using their lowercase instrument names. Confirm each job
+succeeds and inspect the returned recommendation's `max_defocus_mm` for the
+band and mode being checked. Zero is appropriate when the archive has
+insufficient defocus measurements. Legacy rows stay in focus until refreshed.
+
+Results include the exposure, defocus, cycle time and each noise term in ppm
+for the requested bin. They are model predictions, not achieved precision:
+correlated noise, aperture contamination and the calibration against measured
+light curves remain follow-up work in #344. With no comparisons the prediction
+is explicitly target-only. The existing scintillation coefficient 1.5 is an
+approximate mean across sites, not a measured coefficient for the chosen site.
+
+The same calculation is available at `POST /api/exposure/recommend`. Its typed
+request is documented in `/docs`; the response records all input conditions,
+model parameters and readout overhead with the recommendation.
