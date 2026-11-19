@@ -179,3 +179,41 @@ def test_legacy_fit_with_snr_at_cutoff_and_unknown_sampler_diagnostics(page, liv
     row = page.locator("#datasets-body tr").first
     expect(row).to_contain_text("Unknown: Max R-hat, Divergences")
     expect(row.get_by_role("checkbox")).to_be_checked()
+
+
+@pytest.mark.parametrize("cache_case", ["matching", "removed_dataset", "older_version"])
+def test_cached_fit_only_restores_for_current_inputs(page, cache_case):
+    _load_toi1000(page)
+    for epoch in EPOCHS:
+        with page.expect_response("**/api/ephemeris/calculate"):
+            _add_transit_center(page, T0 + epoch * PERIOD)
+    grid = page.locator("#results-grid")
+    expect(grid).to_contain_text("Exact fit (2 points")
+
+    if cache_case == "removed_dataset":
+        def remove_dataset(route):
+            info = route.fetch().json()
+            assert info["datasets"]
+            route.fulfill(json={**info, "datasets": []})
+
+        page.route("**/api/ephemeris/target-info?**", remove_dataset)
+    elif cache_case == "older_version":
+        page.evaluate("""() => {
+            const key = 'muscat-ephem-opts-TOI1000-results';
+            const cached = JSON.parse(localStorage.getItem(key));
+            cached.version -= 1;
+            localStorage.setItem(key, JSON.stringify(cached));
+        }""")
+
+    # With the new calculation held, any result on screen came from the cache.
+    pending = []
+    page.route("**/api/ephemeris/calculate", lambda route: pending.append(route))
+    with page.expect_request("**/api/ephemeris/calculate"):
+        page.reload()
+    if cache_case == "matching":
+        expect(grid).to_contain_text("Exact fit (2 points")
+    else:
+        expect(grid).not_to_contain_text("Exact fit (2 points")
+        assert page.evaluate("localStorage.getItem('muscat-ephem-opts-TOI1000-results')") is None
+    for route in pending:
+        route.continue_()
