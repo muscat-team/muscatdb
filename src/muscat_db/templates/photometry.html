@@ -808,13 +808,20 @@
       Star IDs are those on the run's reference image. Defaults are pre-checked with their weights. Custom sets use equal weights, the same as giving those IDs as Comparison IDs.
     </p>
     <div id="rediff-bands"><p class="hint">Loading the flux cube…</p></div>
+    <div class="opt-grid">
+      <div class="opt">
+        <label for="opt-rediff_offset">Plot offset (relative flux) <span class="help-tooltip" title="Vertical gap between the default curve (top) and the custom curve (below) in the Test setting plot. Blank chooses it per band from the scatter. Only the plot changes.">?</span></label>
+        <input type="number" id="opt-rediff_offset" placeholder="auto" value="{{ postproc_defaults['rediff_offset'] }}" step="0.001" min="0" max="1">
+        <span class="hint" id="rediff-offset-used"></span>
+      </div>
+    </div>
     <div class="run-actions">
-      <button class="btn primary" type="button" id="rediff-test-btn" disabled>Test comparison</button>
-      <button class="btn primary" type="button" id="rediff-apply-btn" disabled>Apply comparison</button>
+      <button class="btn primary" type="button" id="rediff-test-btn" disabled>Test setting</button>
+      <button class="btn primary" type="button" id="rediff-apply-btn" disabled>Apply setting</button>
       <button class="btn" type="button" id="rediff-restore-btn" title="Put back the pipeline's own band CSVs and summary figure" disabled>Restore default</button>
     </div>
     <p style="color: var(--text-dim); font-size: 0.78rem; margin: 0.4rem 0 0;">
-      Test writes nothing. Apply rewrites Flux and Err of the bands you changed and regenerates the summary <code>*_lightcurves.png</code>; the pipeline's files are kept, and Restore default puts them back. Apply is refused while a post-process clip is active. A clip applied afterwards sits on top of the adopted set.
+      Test setting writes nothing. Apply setting rewrites Flux and Err of the bands you changed and regenerates the summary <code>*_lightcurves.png</code>; the pipeline's files are kept, and Restore default puts them back. Apply is refused while a post-process clip is active. A clip applied afterwards sits on top of the adopted set.
     </p>
     <div id="rediff-result" style="display:none; margin-top: 0.75rem; font-size: 0.85rem;"></div>
   </details>
@@ -1111,7 +1118,8 @@
       post_sigma: val('opt-post_sigma'),
       post_poly_deg: val('opt-post_poly_deg'),
       post_exclude_before_jd: val('opt-post_exclude_before_jd'),
-      post_exclude_after_jd: val('opt-post_exclude_after_jd')
+      post_exclude_after_jd: val('opt-post_exclude_after_jd'),
+      rediff_offset: val('opt-rediff_offset')
     };
   }
   // Bump when a default changes so options saved under the old default can be
@@ -1149,7 +1157,7 @@
     });
     ['comp_ensemble','comp_criterion','comp_min_flux_frac','clip_star_sigma','clip_star_window','run_name','ref_band','refid','ref_select','ref_select_top_k','ref_time','aper_unit','aper_radii','annulus',
      'target_id','comparison_ids','avoid_comparison_ids','avoid_nearby_star_mode','avoid_nearby_star','target_coord','test_run_frames','min_star_separation','max_num_stars',
-       'n_stars_align','cutout_size','display_stack_nframes','ccd_trim','edge_margin','bin_size_minutes','nan_imputation_method','sig_bkg','sig_fwhm','sig_dx','sig_dy','sig_flux','flux_poly_deg','min_star_area','wcs_method','centroid_method','cmap','site','telescope','mode','exclude_after_jd','exclude_before_jd','post_sigma','post_poly_deg','post_exclude_before_jd','post_exclude_after_jd'].forEach(function (id) {
+       'n_stars_align','cutout_size','display_stack_nframes','ccd_trim','edge_margin','bin_size_minutes','nan_imputation_method','sig_bkg','sig_fwhm','sig_dx','sig_dy','sig_flux','flux_poly_deg','min_star_area','wcs_method','centroid_method','cmap','site','telescope','mode','exclude_after_jd','exclude_before_jd','post_sigma','post_poly_deg','post_exclude_before_jd','post_exclude_after_jd','rediff_offset'].forEach(function (id) {
       var el = document.getElementById('opt-'+id);
       if (el && saved[id] !== undefined) el.value = saved[id];
     });
@@ -1452,7 +1460,7 @@
       });
       ['comp_ensemble','comp_criterion','comp_min_flux_frac','clip_star_sigma','clip_star_window','run_name','ref_band','refid','ref_select','ref_select_top_k','ref_time','aper_unit','aper_radii','annulus',
        'target_id','comparison_ids','avoid_comparison_ids','avoid_nearby_star_mode','avoid_nearby_star','target_coord','test_run_frames','min_star_separation','max_num_stars',
-     'n_stars_align','cutout_size','display_stack_nframes','ccd_trim','edge_margin','bin_size_minutes','nan_imputation_method','sig_bkg','sig_fwhm','sig_dx','sig_dy','sig_flux','flux_poly_deg','min_star_area','wcs_method','centroid_method','cmap','site','telescope','mode','exclude_after_jd','exclude_before_jd','post_sigma','post_poly_deg','post_exclude_before_jd','post_exclude_after_jd'].forEach(function (id) {
+     'n_stars_align','cutout_size','display_stack_nframes','ccd_trim','edge_margin','bin_size_minutes','nan_imputation_method','sig_bkg','sig_fwhm','sig_dx','sig_dy','sig_flux','flux_poly_deg','min_star_area','wcs_method','centroid_method','cmap','site','telescope','mode','exclude_after_jd','exclude_before_jd','post_sigma','post_poly_deg','post_exclude_before_jd','post_exclude_after_jd','rediff_offset'].forEach(function (id) {
         var el = document.getElementById('opt-'+id);
         if (el) {
           var d = POSTPROC_DEFAULTS[id] !== undefined ? POSTPROC_DEFAULTS[id] : DEFAULTS[id];
@@ -2336,7 +2344,7 @@
     btn.disabled = true;
     btn.textContent = apply ? 'Applying…' : 'Testing…';
     function done() { btn.disabled = false; btn.textContent = prevText; }
-    rediffPost('rediff', { selections: selections, apply: apply }).then(function (res) {
+    rediffPost('rediff', { selections: selections, apply: apply, offset: val('opt-rediff_offset') }).then(function (res) {
       done();
       if (!res.ok) {
         window.showMessageModal('Compare comparison stars', res.error || 're-differencing failed', 'error');
@@ -2344,6 +2352,10 @@
       }
       rediffResult.style.display = 'block';
       rediffResult.innerHTML = rediffReport(res);
+      var used = res.plot_offset || {};
+      document.getElementById('rediff-offset-used').textContent = Object.keys(used).length
+        ? 'Used: ' + Object.keys(used).map(function (b) { return b + ' ' + Number(used[b].toPrecision(2)); }).join(', ')
+        : '';
       if (apply) {
         window.showMessageModal('Success', 'Comparison set applied and summary light-curve regenerated.', 'success');
         setTimeout(function () { window.location.reload(); }, 900);
@@ -2373,6 +2385,9 @@
     });
   }
   if (rediffSection) {
+    // Outside .run-panel, like #postproc-section: persist the offset field directly.
+    rediffSection.addEventListener('input', debounce(saveOptions, 400));
+    rediffSection.addEventListener('change', debounce(saveOptions, 150));
     rediffBands.addEventListener('change', function (e) {
       if (e.target.classList.contains('rediff-star')) rediffStarsSummary(e.target.closest('.rediff-band'));
     });

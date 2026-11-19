@@ -162,6 +162,8 @@ POSTPROCESS_DEFAULTS: dict = {
     "post_poly_deg": 2,
     "post_exclude_before_jd": "",
     "post_exclude_after_jd": "",
+    # re-diff card: preview gap between default and custom curves; "" -> auto
+    "rediff_offset": "",
 }
 
 # LCO instruments deployed across multiple sites/telescope units, needing

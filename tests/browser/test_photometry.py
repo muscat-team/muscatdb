@@ -500,11 +500,12 @@ def rediff_calls(monkeypatch, live_server):
         calls["info"] += 1
         return {"ok": True, "bands": {"gp": band}, **state}
 
-    def rediff(*a, apply):
-        calls["rediff"].append({"selections": a[4], "apply": apply})
+    def rediff(*a, apply, offset):
+        calls["rediff"].append({"selections": a[4], "apply": apply, "offset": offset})
         part = {"comparisons": a[4][0]["comparisons"], "aperture": 0, "aper_radius": 5.0,
                 "weighting": "equal", "metrics": {"n": 9, "std_ppt": 2.5, "p2p_ppt": 2.25}}
-        return {"ok": True, "applied": apply, "bands": {"gp": {"custom": part}}, **state}
+        return {"ok": True, "applied": apply, "bands": {"gp": {"custom": part}},
+                "plot_offset": {"gp": float(offset) if offset else 0.0123}, **state}
 
     monkeypatch.setattr(web.rediff_mod, "info", info)
     monkeypatch.setattr(web.rediff_mod, "rediff", rediff)
@@ -542,8 +543,16 @@ def test_rediff_card_test_apply_and_restore(page, rediff_calls):
     with page.expect_response("**/api/photometry/rediff"):
         page.click("#rediff-test-btn")
     assert rediff_calls["rediff"][-1] == {
-        "selections": [{"band": "gp", "comparisons": [2, 4], "aperture": 0}], "apply": False}
+        "selections": [{"band": "gp", "comparisons": [2, 4], "aperture": 0}], "apply": False,
+        "offset": ""}
     expect(page.locator("#rediff-result")).to_contain_text("2.25")
+    expect(page.locator("#rediff-offset-used")).to_have_text("Used: gp 0.012")
+
+    page.fill("#opt-rediff_offset", "0.05")
+    with page.expect_response("**/api/photometry/rediff"):
+        page.click("#rediff-test-btn")
+    assert rediff_calls["rediff"][-1]["offset"] == 0.05
+    expect(page.locator("#rediff-offset-used")).to_have_text("Used: gp 0.05")
 
     page.click("#rediff-apply-btn")
     with page.expect_response("**/api/photometry/rediff"):
@@ -555,6 +564,7 @@ def test_rediff_card_test_apply_and_restore(page, rediff_calls):
     page.wait_for_load_state("networkidle")
     with page.expect_response("**/api/photometry/rediff/info"):
         page.locator("#rediff-section > summary").click()
+    expect(page.locator("#opt-rediff_offset")).to_have_value("0.05")  # persisted
     page.click("#rediff-restore-btn")
     with page.expect_response("**/api/photometry/rediff/restore"):
         page.click("#message-modal-ok")

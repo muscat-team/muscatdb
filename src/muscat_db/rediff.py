@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from pathlib import Path
 
@@ -39,6 +40,7 @@ _BAND_RE = re.compile(r"^[A-Za-z0-9_]{1,16}$")
 _MAX_COMPARISONS = 200
 _MAX_STAR_ID = 100_000
 _MAX_APERTURE = 1_000
+_MAX_OFFSET = 1.0  # relative flux; light curves are normalised to ~1
 _CLIP_ACTIVE = (
     "a post-process clip is active on this run; use Restore pre-clip first, "
     "then re-difference"
@@ -72,6 +74,19 @@ def parse_selections(raw) -> tuple[list[dict], str | None]:
         seen.add(band)
         out.append({"band": band, "comparisons": ids, "aperture": aperture})
     return out, None
+
+
+def parse_offset(raw) -> tuple[float | None, str | None]:
+    """The preview's vertical offset; ``None``/``""`` means automatic."""
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return None, None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None, "offset must be a number"
+    if not (math.isfinite(value) and 0 <= value <= _MAX_OFFSET):
+        return None, f"offset must be between 0 and {_MAX_OFFSET:g} (relative flux)"
+    return value, None
 
 
 def _select_args(selections: list[dict]) -> list[str]:
@@ -150,9 +165,17 @@ def rediff(
     *,
     apply: bool,
     allow_active_job: bool = False,
+    offset=None,
 ) -> dict:
-    """Compare (``apply=False``) or adopt (``apply=True``) a custom set."""
+    """Compare (``apply=False``) or adopt (``apply=True``) a custom set.
+
+    ``offset`` sets the preview's gap between the curves (relative flux;
+    ``None``/``""`` lets prose2 choose per band); apply ignores it.
+    """
     sel, err = parse_selections(selections)
+    if err:
+        return {"ok": False, "error": err}
+    offset_val, err = parse_offset(offset)
     if err:
         return {"ok": False, "error": err}
     context, err = _context(inst, date, target, run_id)
@@ -177,7 +200,8 @@ def rediff(
         _record_apply(rdir, report)
     else:
         preview_path = pp._preview_path()
-        report = _run(context, [*args, "--preview", preview_path])
+        extra = [] if offset_val is None else ["--offset", repr(offset_val)]
+        report = _run(context, [*args, "--preview", preview_path, *extra])
         preview_png = pp._read_preview(preview_path)
     if not report.get("ok"):
         return {"ok": False, "error": report.get("error") or "re-differencing failed",
@@ -188,6 +212,7 @@ def rediff(
         "bands": _public_bands(report),
         "summary_png": report.get("summary_png"),
         "preview_png": preview_png,
+        "plot_offset": report.get("plot_offset"),
         **_state(rdir),
     }
 

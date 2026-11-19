@@ -125,6 +125,25 @@ def test_test_mode_builds_select_and_preview_and_writes_nothing(run_dir, monkeyp
     assert _files(run_dir) == before and not (run_dir / rd._BACKUP_DIRNAME).exists()
 
 
+def test_test_mode_passes_a_set_offset_and_reports_the_one_used(run_dir, monkeypatch):
+    calls = []
+    fake = _fake_prose(run_dir, calls)
+    monkeypatch.setattr(pp, "_run_sync", lambda a: {**fake(a), "plot_offset": {"gp": 0.02}})
+    monkeypatch.setattr(pp, "_read_preview", lambda path: None)
+    res = rd.rediff(INST, DATE, TARGET, RUN, SEL, apply=False, offset="0.02")
+    assert res["plot_offset"] == {"gp": 0.02}
+    assert calls[0][calls[0].index("--offset") + 1] == "0.02"
+    rd.rediff(INST, DATE, TARGET, RUN, SEL, apply=False, offset="")
+    assert "--offset" not in calls[1]  # blank: prose2 chooses
+
+
+@pytest.mark.parametrize("bad", ["-0.1", "nan", "inf", "2", "x"])
+def test_offset_is_validated(run_dir, monkeypatch, bad):
+    monkeypatch.setattr(pp, "_run_sync", lambda a: pytest.fail("must not run prose"))
+    res = rd.rediff(INST, DATE, TARGET, RUN, SEL, apply=False, offset=bad)
+    assert not res["ok"] and "offset" in res["error"]
+
+
 def test_apply_passes_run_context_snapshots_and_records_selection(run_dir, monkeypatch):
     calls = []
     monkeypatch.setattr(pp, "_run_sync", _fake_prose(run_dir, calls))
@@ -226,15 +245,17 @@ class TestEndpoints:
 
         seen = {}
 
-        def fake(inst, date, target, run, selections, *, apply):
-            seen.update(key=(inst, date, target, run), selections=selections, apply=apply)
+        def fake(inst, date, target, run, selections, *, apply, offset):
+            seen.update(key=(inst, date, target, run), selections=selections, apply=apply,
+                        offset=offset)
             return {"ok": True, "applied": False, "bands": {}, "preview_png": "data:image/png;base64,QQ=="}
 
         monkeypatch.setattr(web.rediff_mod, "rediff", fake)
         r = self._post("rediff", {"inst": INST, "date": DATE, "target": TARGET, "run": RUN,
-                                  "selections": SEL, "apply": False})
+                                  "selections": SEL, "apply": False, "offset": 0.03})
         assert r.status_code == 200 and r.json()["preview_png"]
-        assert seen == {"key": (INST, DATE, TARGET, RUN), "selections": SEL, "apply": False}
+        assert seen == {"key": (INST, DATE, TARGET, RUN), "selections": SEL, "apply": False,
+                        "offset": 0.03}
 
     def test_bad_selection_is_400_with_reason(self, mock_db, run_dir):
         r = self._post("rediff", {"inst": INST, "date": DATE, "target": TARGET, "run": RUN,

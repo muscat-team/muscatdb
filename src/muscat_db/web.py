@@ -8847,7 +8847,8 @@ def photometry_rediff(payload: phot_api.RediffRequest):
     if apply:  # a comparison only reads the run
         _require_may_modify_run("photometry", *key, action="re-difference")
     return _rediff_reply(phot_api.RediffResponse,
-                         rediff_mod.rediff(*key, payload.get("selections"), apply=apply))
+                         rediff_mod.rediff(*key, payload.get("selections"), apply=apply,
+                                           offset=payload.get("offset")))
 
 
 @photometry_router.post("/rediff/restore", response_model=phot_api.RestoreResponse,

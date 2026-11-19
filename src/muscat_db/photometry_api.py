@@ -101,6 +101,7 @@ class PhotometryOptions(RequestModel):
     post_poly_deg: FormInt = phot.POSTPROCESS_DEFAULTS["post_poly_deg"]
     post_exclude_before_jd: FormFloat = ""
     post_exclude_after_jd: FormFloat = ""
+    rediff_offset: FormFloat = ""
 
 
 class DatasetRequest(RequestModel):
@@ -146,6 +147,7 @@ class RediffRequest(DatasetRequest):
     # a bad entry is a 400 with a reason rather than a bare 422.
     selections: SkipValidation[list | None] = None
     apply: bool = False
+    offset: FormFloat = None
 
 
 class BatchJob(DatasetRequest):
@@ -254,6 +256,7 @@ class RediffResponse(RediffState):
     bands: dict = Field(default_factory=dict, description="Band -> default and custom metrics")
     summary_png: str | None = None
     preview_png: str | None = Field(None, description="Base64 PNG preview")
+    plot_offset: dict[str, float] | None = Field(None, description="Band -> preview offset used")
 
 
 class RestoreResponse(ResponseModel):
