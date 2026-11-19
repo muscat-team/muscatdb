@@ -322,3 +322,28 @@ def test_precision_delayed_defaults_do_not_replace_edits_or_new_band(page):
     with page.expect_response('**/api/exposure/recommend-defaults?*'):
         pending[-2].fulfill(json={'ok': True, 'values': {'sky_rate': 99}, 'counts': {'sky_rate': 8}})
     expect(page.locator('#rec-sky_rate')).to_have_value('40')
+
+
+def test_results_views_plot_limiting_stars_and_selected_peak_limit(page):
+    page.goto(URL)
+    _fill_mags(page)
+    rows = [dict(band=band, source_label=label, is_target=label == 'Target',
+                 mag=12, exptime=seconds, peak_adu=40000, pct_full_well=40,
+                 is_saturated=False, fwhm_arcsec=1.5)
+            for band, label, seconds in [('gp', 'Target', 20), ('gp', 'Comp 1', 10),
+                                         ('zs', 'Target', 10), ('zs', 'Comp 1', 20)]]
+    page.route('**/api/exposure/calculate', lambda route: route.fulfill(
+        json={'ok': True, 'results': rows, 'instrument': 'muscat3'}))
+    page.click('#calc-btn')
+    expect(page.locator('#results-table')).to_be_visible()
+    page.locator('[data-results-view="plot"]').click()
+    plot = page.locator('#results-plot')
+    expect(plot.locator('rect')).to_have_count(2)
+    expect(plot.locator('circle[fill="none"]')).to_have_count(2)
+    expect(plot).to_contain_text('Comp 1')
+    expect(page.locator('#results-table')).to_be_hidden()
+    page.select_option('#sat-frac', '0.8')
+    page.click('#calc-peak-btn')
+    expect(plot).to_contain_text('80% full well')
+    page.locator('[data-results-view="table"]').click()
+    expect(page.locator('#results-table')).to_be_visible()

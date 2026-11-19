@@ -377,7 +377,12 @@
         <p>Fill in the form and click <strong>Calculate</strong> to get recommended exposure times per band.</p>
       </div>
       <div id="results-content" style="display:none;">
-        <div style="overflow-x:auto;">
+        <div class="coeff-toolbar" role="group" aria-label="Results view">
+          <button type="button" class="coeff-view-btn active" data-results-view="table" aria-pressed="true">Table</button>
+          <button type="button" class="coeff-view-btn" data-results-view="plot" aria-pressed="false">Plot</button>
+        </div>
+        <div id="results-plot" hidden></div>
+        <div id="results-table-view" style="overflow-x:auto;">
           <table class="results" id="results-table">
             <thead>
               <tr>
@@ -826,6 +831,9 @@
       .map(function (c) { return { label: c.label, mags: c.mags }; });
     if (extraSources.length) payload.extra_sources = extraSources;
 
+    var plotLimit = satFrac.value === 'custom'
+      ? {field: 'peak_adu', label: 'Peak (ADU)', value: Number(customAdu.value)}
+      : {field: 'pct_full_well', label: 'Full well (%)', value: 100 * Number(satFrac.value)};
     var btn = mode === 'exptime' ? calcBtn : calcPeakBtn;
     var label = mode === 'exptime' ? 'Calculating' : 'Calculating';
     return withLoading(btn, label, function () {
@@ -835,6 +843,7 @@
       }).then(function (r) { return r.json(); }).then(function (data) {
         if (!data.ok) { calcStatus.className = 'msg err'; calcStatus.textContent = 'Error: ' + (data.error || 'calculation failed'); return; }
         calcStatus.textContent = '';
+        renderResults.plotLimit = plotLimit;
         renderResults(data, mode);
       }).catch(function (err) {
         calcStatus.className = 'msg err'; calcStatus.textContent = 'Error: ' + err.message;
@@ -850,6 +859,87 @@
 
   // ---- Render results ----
   function fwClass(pct) { return pct >= 100 ? 'sat' : (pct >= 70 ? 'warn' : 'safe'); }
+
+  var resultsPlot = document.getElementById('results-plot');
+  var resultsViews = document.querySelectorAll('[data-results-view]');
+  resultsViews.forEach(function (button) {
+    button.addEventListener('click', function () {
+      var plot = button.dataset.resultsView === 'plot';
+      resultsPlot.hidden = !plot;
+      document.getElementById('results-table-view').hidden = plot;
+      resultsContent.querySelector('.legend').style.display = plot ? 'none' : '';
+      resultsViews.forEach(function (b) {
+        b.classList.toggle('active', b === button);
+        b.setAttribute('aria-pressed', String(b === button));
+      });
+    });
+  });
+
+  function plotResults(rows, mode, limit) {
+    resultsPlot.replaceChildren();
+    if (!rows.length) { resultsPlot.textContent = 'No results for the visible bands.'; return; }
+    var exposureMode = mode === 'exptime';
+    var field = exposureMode ? 'exptime' : limit.field;
+    var unit = exposureMode ? 'Exposure (s)' : limit.label;
+    var bands = Array.from(new Set(rows.map(r => r.band)));
+    function source(r) { return r.is_target === false ? r.source_label : 'Target'; }
+    var stars = Array.from(new Set(rows.map(source)));
+    var maximum = Math.max(1, exposureMode ? 0 : limit.value, ...rows.map(r => r[field])) * 1.08;
+    var width = Math.max(480, 65 + bands.length * Math.max(60, stars.length * 12));
+    var step = (width - 66) / bands.length;
+    var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', '0 0 ' + width + ' 230');
+    svg.setAttribute('role', 'img'); svg.setAttribute('aria-label', unit + ' by band and star');
+    svg.style.width = '100%'; svg.style.minWidth = width + 'px';
+    var scroll = document.createElement('div'); scroll.style.overflowX = 'auto';
+    resultsPlot.appendChild(scroll); scroll.appendChild(svg);
+    function mark(tag, attrs, label, parent) {
+      var el = document.createElementNS(svg.namespaceURI, tag);
+      Object.entries(attrs).forEach(([key, value]) => el.setAttribute(key, value));
+      if (label !== undefined) el.textContent = label;
+      (parent || svg).appendChild(el); return el;
+    }
+    function y(value) { return 198 - 167 * value / maximum; }
+    function textAt(x, yPos, label, anchor) {
+      mark('text', {x: x, y: yPos, 'text-anchor': anchor, fill: 'var(--text)', 'font-size': 12}, label);
+    }
+    function color(i) { return 'hsl(' + (212 + i * 137.5) % 360 + ',70%,55%)'; }
+    textAt(4, 15, unit, 'start');
+    for (var tick = 0; tick <= 4; tick++) {
+      var v = maximum * tick / 4;
+      mark('line', {x1: 55, x2: width - 8, y1: y(v), y2: y(v), stroke: 'var(--border)'});
+      textAt(51, y(v) + 4, Number(v.toPrecision(3)), 'end');
+    }
+    if (!exposureMode) mark('line', {x1: 55, x2: width - 8, y1: y(limit.value), y2: y(limit.value),
+      stroke: 'var(--text)', 'stroke-dasharray': '5 4'});
+    bands.forEach(function (band, b) {
+      var center = 55 + step * (b + 0.5);
+      textAt(center, 219, band, 'middle');
+      var bandRows = rows.filter(r => r.band === band);
+      var shortest = Math.min(...bandRows.map(r => r.exptime));
+      bandRows.forEach(function (r) {
+        var i = stars.indexOf(source(r));
+        var x = center + (i - (stars.length - 1) / 2) * Math.min(step / stars.length, 14);
+        var cy = y(r[field]);
+        var point = r.is_target === false
+          ? mark('circle', {cx: x, cy: cy, r: 4, fill: color(i)})
+          : mark('rect', {x: x - 4, y: cy - 4, width: 8, height: 8, fill: color(i)});
+        mark('title', {}, source(r) + ' · ' + band + ' · ' + unit + ' ' + r[field], point);
+        if (exposureMode && r.exptime === shortest) mark('circle', {cx: x, cy: cy, r: 7,
+          stroke: 'var(--text)', fill: 'none', 'pointer-events': 'none'});
+      });
+    });
+    stars.forEach(function (star, i) {
+      var label = document.createElement('span');
+      var symbol = document.createElement('b');
+      symbol.style.color = color(i); symbol.textContent = star === 'Target' ? '■ ' : '● ';
+      label.append(symbol, star); label.style.marginRight = '1em'; resultsPlot.appendChild(label);
+    });
+    var caption = document.createElement('p');
+    caption.textContent = exposureMode ? 'Ring = shortest exposure in each band.'
+      : 'Dashed line = selected limit (' + limit.value + (field === 'peak_adu' ? ' ADU).' : '% full well).');
+    resultsPlot.appendChild(caption);
+  }
 
   function renderResults(data, mode) {
     // Save for re-render on checkbox toggle
@@ -875,6 +965,7 @@
       return showNarrow.checked;  // Show narrowband only if checked
     });
 
+    plotResults(rows, mode, renderResults.plotLimit);
     var minExp = mode === 'exptime' && rows.length
       ? Math.min.apply(null, rows.map(function (r) { return r.exptime; })) : null;
 
