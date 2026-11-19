@@ -2018,21 +2018,25 @@ body.chat-popout #minimize-chat {
 
 /* Multi-select dropdown: a <details> whose summary shows the choice and whose
    panel holds checkboxes (re-diff comparison stars on the photometry page). */
-.check-dropdown { position: relative; display: inline-block; }
+.check-dropdown { position: relative; }
 .check-dropdown > summary {
+    /* the closed box matches .opt select */
     list-style: none;
     cursor: pointer;
-    min-width: 10rem;
-    padding: 0.3rem 1.6rem 0.3rem 0.6rem;
-    background: var(--surface2);
+    min-width: 12rem;
+    padding: 0.35rem 1.6rem 0.35rem 0.5rem;
+    background: var(--input-bg);
+    color: var(--text);
     border: 1px solid var(--border);
     border-radius: 6px;
+    font-size: 0.85rem;
+    font-family: inherit;
     position: relative;
 }
 .check-dropdown > summary::-webkit-details-marker { display: none; }
 .check-dropdown > summary::after { content: "▾"; position: absolute; right: 0.5rem; color: var(--text-dim); }
 .check-dropdown > summary:hover, .check-dropdown[open] > summary { border-color: var(--accent); }
-.check-dropdown > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.check-dropdown > summary:focus-visible { outline: none; border-color: var(--accent); }
 .check-dropdown-panel {
     position: absolute;
     top: 100%;

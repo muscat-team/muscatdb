@@ -519,8 +519,8 @@ def test_rediff_card_test_apply_and_restore(page, rediff_calls):
     page.wait_for_load_state("networkidle")
     with page.expect_response("**/api/photometry/rediff/info"):
         page.locator("#rediff-section > summary").click()
-    band = page.locator("fieldset.rediff-band[data-band='gp']")
-    expect(band).to_contain_text("one aperture radius")
+    band = page.locator(".rediff-band[data-band='gp']")
+    expect(band).to_contain_text("Only one radius was measured")
     expect(band.locator(".rediff-aperture option")).to_have_text(["4.6 pix (default)"])
     expect(band.locator(".rediff-star:checked")).to_have_count(2)
 

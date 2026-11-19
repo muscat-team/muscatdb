@@ -2224,25 +2224,25 @@
     var checked = adopted ? adopted.comparisons : defaults;
     var aperture = adopted ? adopted.aperture : b.default_aperture;
     var radii = b.aper_radii || [];
-    var html = '<fieldset class="rediff-band" data-band="' + escH(band) + '" style="border:1px solid var(--border);border-radius:8px;padding:0.5rem 0.9rem;margin:0 0 0.75rem;">';
-    html += '<legend class="mono" style="padding:0 0.3rem;">' + escH(band) + ' · target ' + escH(b.target_id) + ' · default ' + escH(b.default_weighting) + ' weights</legend>';
-    html += '<div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:0.5rem 1.25rem;font-size:0.85rem;">';
-    html += '<label>Aperture <select class="rediff-aperture">';
+    var key = 'rediff-' + band.replace(/[^A-Za-z0-9_-]/g, '');
+    var html = '<div class="opt-grid rediff-band" data-band="' + escH(band) + '">';
+    html += '<div class="opt-section-title">' + escH(band) + ' · target ' + escH(b.target_id) + ' · default ' + escH(b.default_weighting) + ' weights</div>';
+    html += '<div class="opt"><label for="' + key + '-aperture">Aperture</label><select id="' + key + '-aperture" class="rediff-aperture">';
     radii.forEach(function (r, i) {
       html += '<option value="' + i + '"' + (i === aperture ? ' selected' : '') + '>' + radiusLabel(band, r) + (i === b.default_aperture ? ' (default)' : '') + '</option>';
     });
-    html += '</select></label>';
-    html += '<div style="display:flex;align-items:center;gap:0.4rem;">Comparison stars';
-    html += '<details class="check-dropdown rediff-stars"><summary class="mono rediff-stars-summary"></summary><div class="check-dropdown-panel">';
+    html += '</select>';
+    if (radii.length === 1) {
+      html += '<span class="hint">Only one radius was measured. Set Aperture radii (<code>--aper_radii</code>) to a grid in Configure &amp; Run Photometry to compare apertures.</span>';
+    }
+    html += '</div>';
+    html += '<div class="opt"><label id="' + key + '-stars">Comparison stars</label>';
+    html += '<details class="check-dropdown rediff-stars"><summary class="rediff-stars-summary" aria-labelledby="' + key + '-stars"></summary><div class="check-dropdown-panel">';
     (b.selectable_ids || []).forEach(function (id) {
       var w = weight[id] != null ? ' <span class="hint">default, w=' + fmt(weight[id], 3) + '</span>' : '';
-      html += '<label class="mono"><input type="checkbox" class="rediff-star" value="' + id + '"' + (checked.indexOf(id) >= 0 ? ' checked' : '') + '> ' + id + w + '</label>';
+      html += '<label class="opt-check-item"><input type="checkbox" class="rediff-star" value="' + id + '"' + (checked.indexOf(id) >= 0 ? ' checked' : '') + '> ' + id + w + '</label>';
     });
     html += '</div></details></div></div>';
-    if (radii.length === 1) {
-      html += '<p class="hint" style="margin:0.3rem 0 0;">This run measured one aperture radius, so only comparison stars can be compared here. Set Aperture radii (<code>--aper_radii</code>) to a grid in Configure &amp; Run Photometry to compare apertures.</p>';
-    }
-    html += '</fieldset>';
     return html;
   }
   // Summary line of a band's star dropdown: the checked IDs and their count.
@@ -2277,7 +2277,7 @@
         html += rediffBandHtml(band, res.bands[band], (res.applied_selection || {})[band]);
       });
       rediffBands.innerHTML = html;
-      rediffBands.querySelectorAll('fieldset.rediff-band').forEach(rediffStarsSummary);
+      rediffBands.querySelectorAll('.rediff-band').forEach(rediffStarsSummary);
     }).catch(function (err) {
       rediffBands.innerHTML = '<p class="warn">' + escH(err.message) + '</p>';
     });
@@ -2286,7 +2286,7 @@
   // re-differenced counts, so applying another band keeps its adopted set).
   function rediffSelections() {
     var out = [];
-    rediffBands.querySelectorAll('fieldset.rediff-band').forEach(function (fs) {
+    rediffBands.querySelectorAll('.rediff-band').forEach(function (fs) {
       var band = fs.dataset.band;
       var b = rediffInfo.bands[band];
       var ids = Array.prototype.map.call(fs.querySelectorAll('.rediff-star:checked'), function (c) { return Number(c.value); });
@@ -2374,7 +2374,7 @@
   }
   if (rediffSection) {
     rediffBands.addEventListener('change', function (e) {
-      if (e.target.classList.contains('rediff-star')) rediffStarsSummary(e.target.closest('fieldset'));
+      if (e.target.classList.contains('rediff-star')) rediffStarsSummary(e.target.closest('.rediff-band'));
     });
     // Close an open star dropdown on a click outside it.
     document.addEventListener('click', function (e) {
