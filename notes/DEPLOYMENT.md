@@ -238,6 +238,10 @@ left without one. Check with a second `--dry-run`: it must report `would write 0
 record(s)`. Transit fits found on disk take their light curves from `fit.yaml`; an
 unreadable `fit.yaml` or a missing light curve leaves the fit undetermined.
 
+Historical harmonic directories without job rows require separate provenance
+verification. The [HIP67522 TTV recovery](issue-428-ttv-recovery.md) restores
+the verified `lco_only` record using two July job backups (#428).
+
 The access groups are the only source of visibility, and they are allow-only:
 a proposal ingested after the seed is hidden from every non-admin, and from the
 published static site, until an admin runs `access unrestrict <proposal_id>`
