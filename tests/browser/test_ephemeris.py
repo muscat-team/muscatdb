@@ -125,3 +125,57 @@ def test_harmonic_warning_follows_selected_run(page, live_server, request):
     panel.get_by_role("button", name="long", exact=True).click()
     expect(panel).to_contain_text("Converged: Yes")
     expect(panel).not_to_contain_text("Done with warnings")
+
+
+def test_flagged_midtime_requires_opt_in_for_ephemeris_and_ttv(page, live_server, request):
+    run = live_server.root / "timer/muscat3/261001/TOI-1000/fit1"
+    for path, content in [(run / "timer-fit.log", "There was 1 divergence after tuning."),
+                          (run / "out/tc.txt", f"b {T0} 0.0004")]:
+        assert not path.exists()
+        path.write_text(content)
+        request.addfinalizer(path.unlink)
+
+    # Old saved views wrote every box, including the old implicit default.
+    page.add_init_script("""if (!sessionStorage.getItem('old-view-seeded')) {
+        localStorage.setItem('muscat-ephem-opts-TOI1000-checked',
+          JSON.stringify({'TOI-1000|muscat3|261001|fit1': true}));
+        sessionStorage.setItem('old-view-seeded', '1');
+    }""")
+    _load_toi1000(page)
+    row = page.locator("#datasets-body tr").first
+    expect(row).to_contain_text("1 divergence after tuning")
+    check = row.get_by_role("checkbox")
+    expect(check).not_to_be_checked()
+
+    # Keep independent points in the fit so exclusion can also be checked in
+    # the actual harmonic launch payload, without launching an engine.
+    page.route("**/api/ttv-fit/start", lambda route: route.fulfill(json={"ok": False, "error": "test launch"}))
+    for epoch in EPOCHS:
+        with page.expect_response("**/api/ephemeris/calculate") as response:
+            _add_transit_center(page, T0 + epoch * PERIOD)
+    for included in (False, True):
+        with page.expect_request("**/api/ttv-fit/start") as launch:
+            if included:
+                with page.expect_response("**/api/ephemeris/calculate") as response:
+                    check.check()
+                    page.locator("#run-ttv-btn").click()
+            else:
+                page.locator("#run-ttv-btn").click()
+        points = response.value.json()["results"]["b"]["points"]
+        assert [p["checked"] for p in points if p.get("run_id") == "fit1"] == [included]
+        options = launch.value.post_data_json["options"]
+        assert any(p.get("run_id") == "fit1" for p in options["selection"]) == included
+        assert any(float(line.split(",")[2]) == T0 for line in options["csv_content"].splitlines()[1:]) == included
+    page.reload()
+    expect(page.locator("#datasets-body .dataset-checkbox")).to_be_checked()
+
+
+def test_legacy_fit_with_snr_at_cutoff_and_unknown_sampler_diagnostics(page, live_server, request):
+    summary = live_server.root / "timer/muscat3/261001/TOI-1000/fit1/out/summary.csv"
+    original = summary.read_bytes()
+    request.addfinalizer(lambda: summary.write_bytes(original))
+    summary.write_text(",mean,sd\nror[0],0.75,0.125\n")
+    _load_toi1000(page)
+    row = page.locator("#datasets-body tr").first
+    expect(row).to_contain_text("Unknown: Max R-hat, Divergences")
+    expect(row.get_by_role("checkbox")).to_be_checked()

@@ -618,6 +618,7 @@
   let manualPoints = [];
   let manualIdSeq = 0;
   let fitResults = null;
+  let calculatedSignature = null;
   let pendingViewState = null;
   let viewSaveTimer = null;
   let lastSavedViewJson = '';
@@ -640,7 +641,9 @@
   }
 
   function datasetStateKey(d) {
-    return [d.target || '', d.instrument || '', d.date || '', d.run_id || ''].join('|');
+    const key = [d.target || '', d.instrument || '', d.date || '', d.run_id || ''].join('|');
+    // A saved selection from before these warnings appeared is not an opt-in.
+    return d.fit_warnings?.length ? key + '|' + JSON.stringify(d.fit_warnings) : key;
   }
 
   function legacyDatasetStateKey(d) {
@@ -1538,6 +1541,7 @@
       && fitCache.signature === fitRequestSignature(cachedRequest)
       && fitCache.results;
     if (cacheMatches) {
+      calculatedSignature = fitCache.signature;
       fitResults = fitCache.results;
       renderFitResults(fitResults);
       drawPlot();
@@ -1975,7 +1979,9 @@
       const tr = document.createElement('tr');
       const key = datasetStateKey(d);
       const legacyKey = legacyDatasetStateKey(d);
-      const isChecked = checkedMap[key] !== undefined ? checkedMap[key] : (checkedMap[legacyKey] !== undefined ? checkedMap[legacyKey] : true);
+      const warnings = d.fit_warnings || [];
+      const unknown = d.unknown_diagnostics || [];
+      const isChecked = checkedMap[key] ?? (warnings.length ? false : (checkedMap[legacyKey] ?? true));
       if (isChecked) tr.classList.add('selected-row');
 
       // Create label summary of transits in this dataset
@@ -2019,7 +2025,8 @@
         </td>
         <td class="mono" style="text-align: center;">${escapeAttr(d.planets_fitted)}</td>
         <td class="mono" style="text-align: center;">${epochsSummary}</td>
-        <td>${transitsSummary}</td>
+        <td>${transitsSummary}${warnings.length ? ' <span class="badge badge-amber">' + escapeAttr(warnings.join(', ')) + '</span>' : ''}
+          ${unknown.length ? '<small>Unknown: ' + escapeAttr(unknown.join(', ')) + '</small>' : ''}</td>
       `;
       tbody.appendChild(tr);
     });
@@ -2648,7 +2655,7 @@
 
     const combinedKey = getCombinedStorageKey();
 
-    fetch('/api/ephemeris/calculate', {
+    return fetch('/api/ephemeris/calculate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(request)
@@ -2660,11 +2667,12 @@
         showMessageModal('Fit calculation failed', res.error || 'Unknown error');
         return;
       }
+      calculatedSignature = fitRequestSignature(request);
       fitResults = res.results;
       try {
         localStorage.setItem(fitResultsCacheKey(combinedKey), JSON.stringify({
           version: FIT_RESULTS_CACHE_VERSION,
-          signature: fitRequestSignature(request),
+          signature: calculatedSignature,
           results: fitResults
         }));
       } catch (e) {}
@@ -3697,7 +3705,7 @@
   window.addEventListener('load', function() {
     const runBtn = document.getElementById('run-ttv-btn');
     if (runBtn) {
-      runBtn.addEventListener('click', function() {
+      runBtn.addEventListener('click', async function() {
         const planetLetters = document.getElementById('opt-planet_letters').value;
         if (!planetLetters) {
           showMessageModal('Planet Letters Required', 'Please enter planet letters');
@@ -3710,6 +3718,15 @@
           return;
         }
         
+        // A click can beat the debounced O-C update after a checkbox change.
+        // Build harmonic's selection and CSV from the current O-C calculation.
+        if (!fitResults || calculatedSignature !== fitRequestSignature(collectFitRequest(false))) {
+          runBtn.disabled = true;
+          clearTimeout(computeFitTimer);
+          await computeFit();
+          runBtn.disabled = false;
+          if (!fitResults || calculatedSignature !== fitRequestSignature(collectFitRequest(false))) return;
+        }
         const options = collectOptions();
         if (!options.csv_content) {
           showMessageModal('No Transit Time Data', 'No transit time data. Please check at least one dataset to fit.');

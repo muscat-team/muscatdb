@@ -227,6 +227,7 @@ from muscat_db.database import (
     get_targets_for_tag as _get_targets_for_tag,
     get_tags_for_targets,
 )
+from muscat_db.jobs import fit_params
 from muscat_db.job_store import get_job_store, notify_enabled, set_owner, uses_shared_control_plane, wait_for_work_or_sleep
 from muscat_db.target_refresh import FinishedJobWatcher, refresh_worker_finished_targets
 from muscat_db.cache import LRUCache, TTLCache
@@ -7451,9 +7452,6 @@ def api_ephemeris_target_info(target: str, request: Request):
             and j["state"] == "done"
             and _is_full_transit_fit_job(j)
             and _normalize_target_name(j["target"], norm_overrides) == norm_t
-            and fit.get_fit_outputs(
-                j["instrument"], j["obsdate"], j["target"], (j.get("run_id") or "") or None
-            ).get("has_any")
         ]
     
     # 1. Query all planets from catalog
@@ -7471,6 +7469,13 @@ def api_ephemeris_target_info(target: str, request: Request):
         date = j["obsdate"]
         run_id = j.get("run_id") or ""
         
+        outputs = fit.get_fit_outputs(inst, date, j["target"], run_id or None)
+        if not outputs.get("has_any"):
+            continue
+        # Older stored summaries predate the observed chain count.
+        health = {**(outputs.get("health") or {}), **(fit_params(j).get("fit_health") or {})}
+        warnings, unknown = fit.midtime_review(health)
+
         # Discover planets fitted and their periods/t0 in dataset
         planets_fitted = "b"
         planets_ephem = {}
@@ -7552,6 +7557,8 @@ def api_ephemeris_target_info(target: str, request: Request):
             "run_name": j.get("run_name") or (run_id if run_id else "legacy"),
             "target": j["target"],
             "planets_fitted": planets_fitted,
+            "fit_warnings": warnings,
+            "unknown_diagnostics": unknown,
             "fitted_tcs": fitted,
             "planets_ephem": planets_ephem,
             "transit_coverage": _classify_transit_coverage(
@@ -8194,8 +8201,6 @@ def _all_job_rows() -> list[dict]:
 
 
 def _fit_warnings(row):
-    from muscat_db.jobs import fit_params
-
     kind = row.get("type")
     if row.get("state") != "done" or kind not in ("transit_fit", "ttv_fit"):
         return []

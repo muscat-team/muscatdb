@@ -2570,11 +2570,37 @@ def detection_snr(summary_rows: list[dict]) -> dict | None:
 _DIVERGENCES = re.compile(r"\b(\d+) divergences? after tuning\b", re.I)
 
 
+_SAMPLED_CHAINS = re.compile(r"\bSampling (\d+) chains? for [\d,_]+ tune", re.I)
+
+
+def midtime_review(health: dict) -> tuple[list[str], list[str]]:
+    """Reasons to opt in to this mid-time, and missing sampler diagnostics."""
+    metrics = health.get("metrics") or {}
+    divergences = metrics.get("Divergences")
+    rhat = metrics.get("Max R-hat")
+    snr = metrics.get("Detection SNR")
+    reasons = []
+    if divergences:
+        noun = "divergence" if divergences == 1 else "divergences"
+        reasons.append(f"{divergences} {noun} after tuning")
+    if health.get("chains") == 1:
+        reasons.append("Single chain; convergence unverified")
+    if rhat is not None and rhat >= 1.01:
+        reasons.append(f"Max R-hat {rhat:.6g} at or above 1.01")
+    if snr is None:
+        reasons.append("Detection SNR unavailable")
+    elif snr < 3:
+        reasons.append(f"Detection SNR {snr:.6g} below 3")
+    unknown = [label for label in ("Max R-hat", "Divergences") if metrics.get(label) is None]
+    return reasons, unknown
+
+
 def _timer_health(rdir, outputs):
     summary = outputs["summary"] or {}
     rhats = (_finite_float(row.get("r_hat")) for row in summary.get("rows", []))
     snr = outputs["detection_snr"] or {}
     count = None
+    chains = None
     optimize_only = False
     outer = rdir / "timer-fit.log"
     log = outer if outer.is_file() else rdir / "out" / "timer-fit.log"
@@ -2583,9 +2609,13 @@ def _timer_health(rdir, outputs):
             for line in lines:
                 if " - INFO - Output directory: " in line:
                     count = None
+                    chains = None
                     optimize_only = False
                 if "Optimize-only test run started" in line:
                     optimize_only = True
+                sampled = _SAMPLED_CHAINS.search(line)
+                if sampled:
+                    chains = int(sampled.group(1))
                 match = _DIVERGENCES.search(line)
                 if match:
                     count = int(match.group(1))
@@ -2595,12 +2625,13 @@ def _timer_health(rdir, outputs):
         # The optimize-only helper leaves any earlier posterior summary on disk.
         rhats = ()
         snr = {}
+        chains = None
         count = None
     warnings = []
     if count:
         noun = "divergence" if count == 1 else "divergences"
         warnings.append(f"{count} {noun} after tuning")
-    return {"metrics": {"Detection SNR": snr.get("combined"),
+    return {"chains": chains, "metrics": {"Detection SNR": snr.get("combined"),
                         "Max R-hat": max((r for r in rhats if r is not None), default=None),
                         "Divergences": count}, "warnings": warnings}
 

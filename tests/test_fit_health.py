@@ -36,3 +36,33 @@ def test_optimize_only_rerun_discards_old_posterior_diagnostics(tmp_path, monkey
     health = transit_fit.get_fit_outputs("muscat", "date", "target")["health"]
     assert list(health["metrics"].values()) == [None, None, None]
     assert health["warnings"] == []
+
+
+def test_ephemeris_quality_boundaries():
+    from muscat_db.transit_fit import midtime_review
+
+    def review(snr=3, rhat=1.009, divergences=0, chains=None):
+        return midtime_review({"metrics": {"Detection SNR": snr, "Max R-hat": rhat,
+                                           "Divergences": divergences}, "chains": chains})
+
+    assert review() == ([], [])
+    assert review(snr=2.999)[0] == ["Detection SNR 2.999 below 3"]
+    assert review(rhat=1.01)[0] == ["Max R-hat 1.01 at or above 1.01"]
+    assert review(snr=None)[0] == ["Detection SNR unavailable"]
+    assert review(rhat=None, divergences=None) == ([], ["Max R-hat", "Divergences"])
+    reasons, _ = review(snr=0.69, rhat=None, divergences=1, chains=1)
+    assert reasons == ["1 divergence after tuning", "Single chain; convergence unverified",
+                       "Detection SNR 0.69 below 3"]
+
+
+def test_chain_count_from_latest_sampling_run(tmp_path):
+    outputs = {"summary": None, "detection_snr": None}
+    log = tmp_path / "timer-fit.log"
+    log.write_text("INFO - Sampling 1 chain for 20 tune and 20 draw iterations\n")
+    assert transit_fit._timer_health(tmp_path, outputs)["chains"] == 1
+    with log.open("a") as f:
+        f.write(" - INFO - Output directory: out\n")
+    assert transit_fit._timer_health(tmp_path, outputs)["chains"] is None
+    with log.open("a") as f:
+        f.write("INFO - Sampling 4 chains for 1000 tune and 1000 draw iterations\n")
+    assert transit_fit._timer_health(tmp_path, outputs)["chains"] == 4
