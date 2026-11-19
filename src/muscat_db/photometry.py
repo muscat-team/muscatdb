@@ -592,6 +592,47 @@ _COORD_LOOKUPS: dict[str, tuple[Future, float]] = {}
 _COORD_LOOKUP_LOCK = threading.Lock()
 
 
+def _local_target_coord(target: str) -> tuple[float, float, str, str] | None:
+    """Resolve a target from the local catalogs and cached lookups only.
+
+    This never initiates a remote request, so it is safe to call while
+    rendering a page.
+    """
+    for name in _coord_names(target):
+        coords = catalog_lookup.resolve_target_astrometry(name, allow_remote=False)
+        if coords is not None:
+            return float(coords["ra"]), float(coords["dec"]), str(coords.get("source") or "catalog"), name
+    return None
+
+
+def _describe_target_coord(target: str, resolved: tuple[float, float, str, str]) -> str:
+    """Coordinates and their source, in the words the run log uses."""
+    ra_deg, dec_deg, source, name = resolved
+    text = f"{ra_deg:.6f} {dec_deg:.6f} deg from {_COORD_SOURCE_LABELS.get(source, source)}"
+    if name != target.strip():
+        text += f", resolved as {name!r} for OBJECT {target.strip()!r}"
+    return text
+
+
+def target_coord_preview(target: str) -> str:
+    """What a run would send as ``--target_coord`` when the box is left empty.
+
+    Shown on the photometry page before launch. It uses only the local
+    catalogs and cached lookups, so viewing the page never queries an external
+    service. A target found only by the online lookup at launch is reported as
+    not yet known here; the run log then records what was sent.
+    """
+    if not (target or "").strip():
+        return ""
+    resolved = _local_target_coord(target)
+    if resolved is None:
+        return (
+            "not in the local catalogs; muscat-db tries an online lookup at launch, "
+            "and prose resolves the name itself if that fails"
+        )
+    return _describe_target_coord(target, resolved)
+
+
 def _auto_target_coord(target: str) -> tuple[float, float, str, str] | None:
     """Resolve host first within one bounded wait; preserve prose's fallback.
 
@@ -602,11 +643,10 @@ def _auto_target_coord(target: str) -> tuple[float, float, str, str] | None:
     """
     deadline = time.monotonic() + _COORD_LOOKUP_TIMEOUT_S
     # Local and cached positions remain available even when every network
-    # worker is occupied. This pass never initiates a remote request.
-    for name in _coord_names(target):
-        coords = catalog_lookup.resolve_target_astrometry(name, allow_remote=False)
-        if coords is not None:
-            return float(coords["ra"]), float(coords["dec"]), str(coords.get("source") or "catalog"), name
+    # worker is occupied.
+    local = _local_target_coord(target)
+    if local is not None:
+        return local
     key = target.strip()
     with _COORD_LOOKUP_LOCK:
         pending = _COORD_LOOKUPS.get(key)
@@ -672,11 +712,7 @@ def target_coord_note(target: str, options: dict | None = None, *, command: list
             f"target coordinates: not resolved by muscat-db (tried {tried}); "
             "prose resolves --target_name itself"
         )
-    ra_deg, dec_deg, source, name = resolved
-    note = f"target coordinates: {ra_deg:.6f} {dec_deg:.6f} deg from {_COORD_SOURCE_LABELS.get(source, source)}"
-    if name != target.strip():
-        note += f", resolved as {name!r} for OBJECT {target.strip()!r}"
-    return note
+    return f"target coordinates: {_describe_target_coord(target, resolved)}"
 
 
 def _frozen_prose_prefix(explicit: str | None, module: str) -> list[str]:

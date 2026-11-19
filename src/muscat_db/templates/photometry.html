@@ -240,6 +240,9 @@
         {% endif %}
       </h2>
       </summary>
+      {% if ns.has_csv %}
+      <p id="time-system-note" style="color: var(--text-dim); font-size: 0.78rem; margin: 0 0 0.5rem;">Times in the CSV files are BJD_TDB (first column), whichever conversion library is chosen. The light-curve figure from prose plots JD (UTC) on its time axis.</p>
+      {% endif %}
       <div class="fig-grid col sortable" data-sort-key="summary">
         {% for item in outputs.summary_items %}
           <figure class="fig" data-fig-id="{{ item.key }}:{{ item.file }}">
@@ -420,9 +423,9 @@
               <span class="hint">--tID; empty → auto</span>
             </div>
             <div class="opt">
-              <label for="opt-target_coord">Target coordinates <span class="help-tooltip" title="Override target coordinates 'RA Dec' (e.g. '12:34:56.7 -45:32:10.0' or '187.5 -45.5'). When set, bypasses MAST name resolution (useful if astroquery fails).">?</span></label>
-              <input type="text" id="opt-target_coord" placeholder="MAST resolution" value="{{ run_defaults.target_coord }}" style="width: 100%;">
-              <span class="hint">--target_coord; empty → resolve name via MAST</span>
+              <label for="opt-target_coord">Target coordinates <span class="help-tooltip" title="Target coordinates 'RA Dec' sent to prose as --target_coord (e.g. '12:34:56.7 -45:32:10.0' or '187.5 -45.5'). Empty: muscat-db resolves the coordinate from its catalogs and sends that; the line below shows what it will send. prose resolves the name itself only when muscat-db finds nothing.">?</span></label>
+              <input type="text" id="opt-target_coord" placeholder="auto" value="{{ run_defaults.target_coord }}" style="width: 100%;">
+              <span class="hint" id="hint-target_coord" data-auto="{{ target_coord_preview }}">--target_coord; empty → {{ target_coord_preview or 'resolved by muscat-db at launch' }}</span>
             </div>
             <div class="opt">
               <label for="opt-comparison_ids">Comparison IDs <span class="help-tooltip" title="Indexes of reference/comparison stars (corresponds to --cID). Comma-separated (e.g. 1,2,3). Empty means auto-detect.">?</span></label>
@@ -589,7 +592,7 @@
               <span class="hint" id="hint-annulus">required with aperture radii (in pix)</span>
             </div>
             <div class="opt">
-              <label for="opt-cutout_size">Cutout size (pix) <span class="help-tooltip" title="Postage stamp cutout size around each star (corresponds to --cutout_size). Must be large enough to contain the sky annulus.">?</span></label>
+              <label for="opt-cutout_size">Cutout size (pix) <span class="help-tooltip" title="Side length in pixels of the stamp cut around each star (corresponds to --cutout_size). prose builds the PSF model and fits the FWHM on these stamps; the aperture and the sky annulus are measured on the full image and are not limited by it. The default does not scale with the image size or the defocus.">?</span></label>
               <input type="number" id="opt-cutout_size" value="{{ run_defaults.cutout_size }}" min="1" style="width: 100%;">
             </div>
             <div class="opt">
@@ -683,7 +686,7 @@
       </div>
       <div class="opt-check-row">
         <label class="opt-check-item"><input type="checkbox" id="opt-make_gif" checked> Make GIF <span class="help-tooltip" title="Generate an animated GIF showing target/alignment field over time (corresponds to --gif).">?</span></label>
-        <label class="opt-check-item"><input type="checkbox" id="opt-use_barycorrpy"> Use barycorrpy (BJD-TDB) <span class="help-tooltip" title="Use barycorrpy to perform high-precision BJD time conversion (corresponds to --use_barycorrpy).">?</span></label>
+        <label class="opt-check-item"><input type="checkbox" id="opt-use_barycorrpy"> Compute BJD_TDB with barycorrpy (default: astropy) <span class="help-tooltip" title="BJD_TDB is always computed and is the first column of every light-curve CSV. This box only switches the conversion from astropy to barycorrpy (corresponds to --use_barycorrpy).">?</span></label>
         <label class="opt-check-item"><input type="checkbox" id="opt-overwrite" checked> Overwrite existing products <span class="help-tooltip" title="Overwrite existing reduction products for this target (corresponds to --overwrite).">?</span></label>
         <label class="opt-check-item"><input type="checkbox" id="opt-plot_gaia_sources" checked> Plot Gaia sources <span class="help-tooltip" title="Overlay Gaia DR3 source catalog on check plots (corresponds to --plot_gaia_sources).">?</span></label>
         <label class="opt-check-item" for="opt-cmap">Colormap <span class="help-tooltip" title="Matplotlib colormap for image-display plots such as reference, stacks and cutouts (corresponds to --cmap). Names ending in '_r' are reversed.">?</span>
@@ -1138,6 +1141,16 @@
       if (el && saved[id] !== undefined) el.checked = saved[id];
     });
   }
+  // Say what a run sends as --target_coord: the entered value, or the
+  // coordinate muscat-db resolves when the box is empty.
+  function updateTargetCoordHint() {
+    var hint = document.getElementById('hint-target_coord');
+    if (!hint) return;
+    var entered = val('opt-target_coord').trim();
+    hint.textContent = entered
+      ? '--target_coord; sent as entered'
+      : '--target_coord; empty \u2192 ' + (hint.dataset.auto || 'resolved by muscat-db at launch');
+  }
   function updateApertureHints() {
     var unit = val('opt-aper_unit');
     var radiiEl = document.getElementById('opt-aper_radii');
@@ -1173,6 +1186,11 @@
   })();
 
   updateApertureHints();
+  updateTargetCoordHint();
+  (function () {
+    var coordEl = document.getElementById('opt-target_coord');
+    if (coordEl) coordEl.addEventListener('input', updateTargetCoordHint);
+  })();
 
   // JD-exclusion range sliders: pure UI helpers mirroring opt-exclude_after_jd/
   // opt-exclude_before_jd (only rendered when the server found a data span for
@@ -1417,6 +1435,7 @@
   if (aperUnitEl) {
     aperUnitEl.addEventListener('change', function () {
       updateApertureHints();
+      updateTargetCoordHint();
       saveOptions();
       refreshCmd();
     });
@@ -1445,6 +1464,7 @@
       });
       saveOptions();
       updateApertureHints();
+      updateTargetCoordHint();
       if (window.__syncRefTime) window.__syncRefTime();
       syncJdSliderFromField('exclude_after_jd', '');
       syncJdSliderFromField('exclude_before_jd', '');

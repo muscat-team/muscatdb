@@ -9,6 +9,7 @@ those stubs are the real ones. Ported from the former opt-in
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import shutil
 
 from playwright.sync_api import expect
@@ -479,3 +480,37 @@ def test_noise_budget_and_flux_cube_download(page, live_server):
             archive.unlink(missing_ok=True)
         else:
             archive.write_bytes(original)
+
+
+def test_target_coordinate_hint_says_what_will_be_sent(page):
+    """Issue #457: the page names the coordinate and its source before a run."""
+    page.goto(URL)
+    reveal(page, "#opt-target_coord")
+    hint = page.locator("#hint-target_coord")
+    expect(hint).to_have_text(re.compile(r"^--target_coord; empty → 117\.929000 12\.536000 deg from the (TOI|NASA Exoplanet Archive) catalog$"))
+    expect(page.locator("#opt-target_coord")).to_have_attribute("placeholder", "auto")
+    page.fill("#opt-target_coord", "117.93 12.54")
+    expect(hint).to_have_text("--target_coord; sent as entered")
+    # A saved entry is restored with its hint, and clearing it returns to the automatic one.
+    page.wait_for_function(
+        "key => JSON.parse(localStorage.getItem(key) || '{}').target_coord === '117.93 12.54'", arg=OPT_KEY)
+    page.reload()
+    reveal(page, "#opt-target_coord")
+    expect(hint).to_have_text("--target_coord; sent as entered")
+    page.fill("#opt-target_coord", "")
+    expect(hint).to_contain_text("empty → 117.929000 12.536000 deg")
+
+
+def test_barycorrpy_label_says_bjd_tdb_is_always_computed(page):
+    page.goto(URL)
+    reveal(page, "#opt-use_barycorrpy")
+    label = page.locator("label").filter(has=page.locator("#opt-use_barycorrpy"))
+    expect(label).to_contain_text("Compute BJD_TDB with barycorrpy (default: astropy)")
+    expect(label.get_by_role("button", name="Help")).to_have_accessible_description(
+        re.compile(r"BJD_TDB is always computed.*only switches the conversion"))
+
+
+def test_results_state_the_time_system(page):
+    page.goto(URL)
+    expect(page.locator("#time-system-note")).to_contain_text("Times in the CSV files are BJD_TDB")
+    expect(page.locator("#time-system-note")).to_contain_text("JD (UTC)")
