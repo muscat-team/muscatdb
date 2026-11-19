@@ -178,11 +178,11 @@
         <button id="fov-check-saturation" class="fov-btn ghost" type="button" style="display: none;" title="Send the target and brightest in-field stars to the Exposure Calculator to check whether any of them would saturate">Check saturation in Exp Calc &rarr;</button>
       </div>
       <div class="fov-note" id="r-note"></div>
-      <fieldset id="fov-exp-stars" hidden>
-        <legend>Stars to include in Exp Calc</legend>
-        <div id="fov-exp-options"></div>
-        <small>Uncheck a star if you accept that it may saturate. The exposure limit uses the target and the checked stars.</small>
-      </fieldset>
+      <div id="fov-exp-stars" role="group" aria-labelledby="fov-exp-heading" hidden>
+        <div class="opt-section-title" id="fov-exp-heading">Stars to include in Exp Calc</div>
+        <div class="opt-check-row" id="fov-exp-options"></div>
+        <p class="fov-note">Uncheck a star if you accept that it may saturate. The exposure limit uses the target and the checked stars.</p>
+      </div>
       <div class="fov-note" id="r-bright-note" style="display: none;"></div>
     </div>
 
@@ -492,12 +492,13 @@
     brightest.slice(0, COMP_HANDOFF_N).forEach((star, i) => {
       const label = document.createElement('label');
       const checkbox = document.createElement('input');
+      label.className = 'opt-check-item';
       checkbox.type = 'checkbox';
       checkbox.checked = true;
       checkbox.value = i;
       label.append(checkbox, ' Comp ' + (i + 1) + ' · G ' + star.gmag.toFixed(2) +
         ' · ' + star.sep_arcsec.toFixed(0) + '″ from target');
-      choices.append(label, document.createElement('br'));
+      choices.appendChild(label);
     });
     if (brightest.length) {
       const b0 = brightest[0];
