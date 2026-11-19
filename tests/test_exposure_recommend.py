@@ -96,3 +96,82 @@ def test_missing_band_mode_model_is_not_borrowed(client):
     response = client.post('/api/exposure/recommend', json=data)
     assert response.status_code == 400
     assert 'No calibrated model' in response.json()['error']
+
+
+def test_defaults_use_matching_frame_medians_and_units(client, tmp_path, monkeypatch):
+    from astropy.io import fits
+    from muscat_db.cache import clear_all_caches
+    from tests.test_exposure_model import _write_frame
+
+    paths = {}
+    conn = exposure._conn()
+    for i, (sky, gain, exp, noise, dark, band, mode, site) in enumerate([
+        (100, 2, 10, 4, .01, 'rp', 'MUSCAT_FAST', 'ogg'),
+        (300, 1, 10, 6, .03, 'rp', 'MUSCAT_FAST', 'ogg'),
+        (999, 1, 1, 99, 9, 'gp', 'MUSCAT_FAST', 'ogg'),
+        (999, 1, 1, 99, 9, 'rp', 'MUSCAT_SLOW', 'ogg'),
+        (999, 1, 1, 99, 9, 'rp', 'MUSCAT_FAST', 'coj'),
+    ]):
+        path = _write_frame(tmp_path / f'{i}.fits', band=band, mode=mode)
+        with fits.open(path, mode='update') as hdul:
+            hdul['SCI'].header.update(SITEID=site, L1MEDIAN=sky, GAIN=gain,
+                                      EXPTIME=exp, RDNOISE=noise, DARKCURR=dark)
+        filename = f'{site}-{i}'
+        paths[filename] = path
+        conn.execute('INSERT INTO frames (instrument, obsdate, ccd, filename, filter, read_mode) VALUES (?, ?, ?, ?, ?, ?)',
+                     ('muscat3', '261119', 0, filename, band, mode))
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(exposure, '_fits_exists', lambda inst, date, filename: paths[filename])
+    clear_all_caches()
+    response = client.get('/api/exposure/recommend-defaults', params={
+        'instrument': 'muscat3', 'band': 'rp', 'mode': 'MUSCAT_FAST', 'site': 'ogg'})
+    assert response.status_code == 200
+    assert response.json()['values'] == {'sky_rate': 25, 'read_noise_e': 5, 'dark_rate': .02}
+    assert response.json()['counts'] == dict.fromkeys(('sky_rate', 'read_noise_e', 'dark_rate'), 2)
+
+
+def test_defaults_missing_measurements_are_not_zero(client, tmp_path, monkeypatch):
+    from muscat_db.cache import clear_all_caches
+    from tests.test_exposure_model import _write_frame
+    path = _write_frame(tmp_path / 'no_noise.fits')
+    conn = exposure._conn()
+    conn.execute("INSERT INTO frames (instrument, obsdate, ccd, filename, filter, read_mode) "
+                 "VALUES ('muscat3', '261119', 0, 'ogg-no-noise', 'rp', 'MUSCAT_FAST')")
+    conn.commit()
+    conn.close()
+    from astropy.io import fits
+    with fits.open(path, mode='update') as hdul:
+        hdul['SCI'].header.update(SITEID='ogg', EXPTIME=0, GAIN=1, L1MEDIAN=100, RDNOISE=-1, DARKCURR=-1)
+    monkeypatch.setattr(exposure, '_fits_exists', lambda *a: path)
+    clear_all_caches()
+    response = client.get('/api/exposure/recommend-defaults', params={
+        'instrument': 'muscat3', 'band': 'rp', 'mode': 'MUSCAT_FAST', 'site': 'ogg'})
+    assert response.status_code == 200
+    assert response.json()['values'] == dict.fromkeys(('sky_rate', 'read_noise_e', 'dark_rate'))
+
+
+def test_defaults_bound_header_reads_to_200_recent_frames(client, monkeypatch):
+    from muscat_db.cache import clear_all_caches
+    conn = exposure._conn()
+    conn.executemany(
+        "INSERT INTO frames (instrument, obsdate, ccd, filename, filter, read_mode) "
+        "VALUES ('muscat3', '261119', 0, ?, 'rp', 'MUSCAT_FAST')",
+        [(f'ogg-{i:04d}',) for i in range(205)])
+    conn.commit()
+    conn.close()
+    visited = []
+
+    def missing(inst, date, filename):
+        visited.append(filename)
+        return None
+
+    monkeypatch.setattr(exposure, '_fits_exists', missing)
+    clear_all_caches()
+    params = dict(instrument='muscat3', band='rp', mode='MUSCAT_FAST', site='ogg')
+    assert client.get('/api/exposure/recommend-defaults', params=params).status_code == 200
+    assert len(visited) == 200
+    assert visited[0] == 'ogg-0204'
+    assert visited[-1] == 'ogg-0005'
+    client.get('/api/exposure/recommend-defaults', params=params)
+    assert len(visited) == 200  # subsequent requests reuse the existing cache

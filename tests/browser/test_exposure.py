@@ -269,3 +269,56 @@ def test_precision_comparisons_and_selected_mode_reach_api(page, monkeypatch):
     expect(page.locator('#recommend-result')).to_be_visible()
     page.fill('.mag-input[data-band="rp"]', '16')
     expect(page.locator('#recommend-result')).not_to_be_visible()
+
+
+def test_precision_medians_prefill_preserve_overrides_and_refresh(page):
+    def defaults(route):
+        sky = 40 if 'band=zs' in route.request.url else 25
+        route.fulfill(json={'ok': True, 'values': {'sky_rate': sky, 'read_noise_e': 5, 'dark_rate': .02},
+                            'counts': {'sky_rate': 12, 'read_noise_e': 12, 'dark_rate': 10}})
+    page.route('**/api/exposure/recommend-defaults?*', defaults)
+    page.goto(URL)
+    expect(page.locator('#rec-sky_rate')).to_have_value('25')
+    expect(page.locator('#rec-read_noise_e')).to_have_value('5')
+    expect(page.locator('#rec-dark_rate')).to_have_value('0.02')
+    expect(page.locator('#recommend-defaults-status')).to_contain_text('12 frames')
+    page.fill('#rec-sky_rate', '17')
+    page.fill('#rec-dark_rate', '0')
+    page.locator('#rec-dark_rate').blur()
+    page.reload()
+    expect(page.locator('#recommend-defaults-status')).to_contain_text('12 frames')
+    expect(page.locator('#rec-sky_rate')).to_have_value('17')
+    expect(page.locator('#rec-dark_rate')).to_have_value('0')
+    page.select_option('#rec-band', 'zs')
+    expect(page.locator('#rec-sky_rate')).to_have_value('40')
+    expect(page.locator('#rec-dark_rate')).to_have_value('0.02')
+    page.fill('#rec-sky_rate', '99')
+    page.click('#recommend-reset')
+    expect(page.locator('#rec-sky_rate')).to_have_value('25')
+
+
+def test_precision_delayed_defaults_do_not_replace_edits_or_new_band(page):
+    pending = []
+    page.route('**/api/exposure/recommend-defaults?*', lambda route: pending.append(route))
+    page.goto(URL)
+    page.wait_for_function("document.getElementById('recommend-defaults-status').textContent.includes('Loading')")
+    page.fill('#rec-sky_rate', '17')
+    with page.expect_response('**/api/exposure/recommend-defaults?*'):
+        pending[0].fulfill(json={'ok': True, 'values': {'sky_rate': 25, 'read_noise_e': 5, 'dark_rate': .02},
+                                 'counts': dict.fromkeys(('sky_rate', 'read_noise_e', 'dark_rate'), 12)})
+    expect(page.locator('#rec-read_noise_e')).to_have_value('5')
+    expect(page.locator('#rec-sky_rate')).to_have_value('17')
+    with page.expect_request('**/api/exposure/recommend-defaults?*'):
+        page.select_option('#rec-band', 'gp')
+    with page.expect_request('**/api/exposure/recommend-defaults?*'):
+        page.select_option('#rec-band', 'zs')
+    for _ in range(100):
+        if len(pending) == 3:
+            break
+        page.wait_for_timeout(50)
+    assert len(pending) == 3
+    pending[-1].fulfill(json={'ok': True, 'values': {'sky_rate': 40}, 'counts': {'sky_rate': 8}})
+    expect(page.locator('#rec-sky_rate')).to_have_value('40')
+    with page.expect_response('**/api/exposure/recommend-defaults?*'):
+        pending[-2].fulfill(json={'ok': True, 'values': {'sky_rate': 99}, 'counts': {'sky_rate': 8}})
+    expect(page.locator('#rec-sky_rate')).to_have_value('40')

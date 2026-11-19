@@ -340,9 +340,10 @@
         </div>
         {% endfor %}
       </div>
-      <p class="hint">Enter sky and read noise measured for this band, site and mode, in electrons (apply the header gain to ADU values).
-        Dark current defaults to zero; enter a measured value when significant.
-        Uses the saturation fraction above; custom ADU limits are not supported here.</p>
+      <p class="hint">Sky, read noise and dark current default to medians from up to 200 recent matching FITS headers
+        for this instrument, site, band and readout mode. Edit them for your observing conditions.
+        Maximum cycle is your cadence limit. Uses the saturation fraction above; custom ADU limits are not supported here.</p>
+      <p id="recommend-defaults-status" class="hint" role="status"></p>
       <button class="btn primary" type="button" id="recommend-btn">Recommend settings</button>
       <button class="btn" type="button" id="recommend-reset">Reset recommendation inputs</button>
       <p id="recommend-status" class="msg" role="status"></p>
@@ -606,7 +607,7 @@
     if (Array.isArray(s.comps) && s.comps.length) { currentComps = s.comps; renderComps(); }
     Object.entries(s.recommendation || {}).forEach(function (entry) {
       var el = document.getElementById(entry[0]);
-      if (recommendInputs.indexOf(el) >= 0) el.value = entry[1];
+      if (recommendInputs.indexOf(el) >= 0) { el.value = entry[1]; if (el.value !== '') el.dataset.preserved = '1'; }
     });
     if ((s.inst && s.inst !== selInst.value) || (s.target && s.target !== targetName.value)) {
       clearMeasuredConditions();
@@ -1182,7 +1183,43 @@
   document.querySelector('.exp-form').addEventListener('change', clearRecommendation);
   [lookupBtn, clearMags, document.getElementById('clear-comps')].forEach(function (el) { el.addEventListener('click', clearRecommendation); });
   recommendInputs.forEach(function (el) { el.addEventListener('change', function () { clearRecommendation(); saveState(); }); });
+  var defaultsVersion = 0;
+  var measuredKeys = ['sky_rate', 'read_noise_e', 'dark_rate'];
+  measuredKeys.forEach(function (key) {
+    document.getElementById('rec-' + key).addEventListener('input', function () { this.dataset.preserved = '1'; });
+  });
+  async function loadMedianConditions() {
+    var version = ++defaultsVersion;
+    var status = document.getElementById('recommend-defaults-status');
+    if (['muscat3', 'muscat4', 'sinistro', 'qhy600'].indexOf(selInst.value) < 0) { status.textContent = ''; return; }
+    var query = new URLSearchParams({instrument: selInst.value, band: document.getElementById('rec-band').value,
+      site: document.getElementById('rec-site').value,
+      mode: CONFMODES_BY_INST[selInst.value] ? selConfmode.value : document.getElementById('rec-muscat-mode').value});
+    status.textContent = 'Loading archive medians…';
+    try {
+      var response = await fetch('/api/exposure/recommend-defaults?' + query);
+      var data = await response.json();
+      if (version !== defaultsVersion) return;
+      if (!response.ok || !data.ok) throw new Error();
+      var labels = {sky_rate: 'Sky', read_noise_e: 'Read noise', dark_rate: 'Dark current'};
+      var changed = false;
+      status.textContent = measuredKeys.map(function (key) {
+        var el = document.getElementById('rec-' + key), value = data.values[key];
+        if (value != null && !el.dataset.preserved) {
+          var formatted = String(Number(value.toFixed(6)));
+          changed = changed || el.value !== formatted; el.value = formatted;
+        }
+        return labels[key] + ': ' + (value == null ? 'unavailable' : 'median from ' + data.counts[key] + ' frames');
+      }).join('; ') + '. Editable archive estimates, not current conditions. Missing dark current assumes zero.';
+      if (changed) clearRecommendation();
+      saveState();
+    } catch (_) {
+      if (version === defaultsVersion) status.textContent = 'Archive medians unavailable; enter measured conditions. Missing dark current assumes zero.';
+    }
+  }
   function clearMeasuredConditions() {
+    defaultsVersion++;
+    measuredKeys.forEach(function (key) { delete document.getElementById('rec-' + key).dataset.preserved; });
     ['sky_rate', 'read_noise_e'].forEach(function (key) { document.getElementById('rec-' + key).value = ''; });
     document.getElementById('rec-dark_rate').value = '0';
     clearRecommendation(); saveState();
@@ -1197,12 +1234,14 @@
     document.getElementById('rec-muscat-mode-field').style.display = fixedSite ? '' : 'none';
   }
   selInst.addEventListener('change', syncRecommendationInstrument);
+  [selInst, selConfmode, document.getElementById('rec-band'), document.getElementById('rec-site'),
+    document.getElementById('rec-muscat-mode')].forEach(function (el) { el.addEventListener('change', loadMedianConditions); });
   document.getElementById('recommend-reset').addEventListener('click', function () {
     recommendInputs.forEach(function (el) {
       if (el.tagName === 'SELECT') el.selectedIndex = el.id === 'rec-band' ? 1 : 0;
       else el.value = el.defaultValue;
     });
-    syncRecommendationInstrument(); clearRecommendation(); saveState();
+    clearMeasuredConditions(); syncRecommendationInstrument(); clearRecommendation(); saveState(); loadMedianConditions();
   });
   document.getElementById('recommend-btn').addEventListener('click', async function () {
     clearRecommendation();
@@ -1254,6 +1293,7 @@
   syncRecommendationInstrument();
   consumeFovHandoff();
   if (selInst.value) renderInstParams(selInst.value);
+  loadMedianConditions();
 })();
 </script>
 {% endblock %}

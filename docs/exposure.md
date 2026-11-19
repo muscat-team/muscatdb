@@ -99,11 +99,16 @@ SBIG has no measured readout overhead. Readout-mode selection stays manual.
 
 Enter the target magnitude above and select comparisons through the FOV
 handoff if needed. Every selected comparison needs a magnitude in the chosen
-band. Enter sky background in electrons/pixel/second and read noise in
-electrons/pixel for that band, site and readout mode. Prefer the FITS header's
-read noise and gain over telescope-file constants; convert ADU measurements
-with the header gain. Dark current defaults to zero and can be supplied.
-Changing the band, site, instrument or mode clears these measured inputs.
+band. Sky background, read noise and dark current are prefilled with medians
+from matching instrument/site/band/readout-mode archive headers. The sample is the
+200 most recent matching indexed frames; medians are cached for one hour. Each frame's
+`L1MEDIAN * GAIN / EXPTIME` gives sky electrons/pixel/second; `RDNOISE`
+and `DARKCURR` are already in electrons/pixel and electrons/pixel/second.
+Sample counts are shown. These are archival estimates, not a forecast for
+the planned night. Missing sky/read noise require manual entry; missing dark
+current retains an explicit zero assumption. All values can be overridden and
+saved. Changing instrument, site, band or mode loads matching medians; Reset
+restores them. The cadence limit remains a user setting (default 120 seconds).
 
 Set an airmass interval and a **maximum cycle time including readout** (the
 minimum acceptable sampling cadence). The search uses whole-second exposures

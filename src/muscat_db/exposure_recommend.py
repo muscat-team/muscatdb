@@ -1,9 +1,13 @@
 """One-band precision recommendations using measured observing conditions."""
+from statistics import median
 from typing import Literal
 
+from astropy.io import fits
 from pydantic import BaseModel, ConfigDict, Field
 
 from muscat_db import exposure, exposure_model, precision
+from muscat_db.cache import register_cache
+from muscat_db.instruments import INSTRUMENTS
 from muscat_db.lco import _DEFOCUS_LIMIT_MM
 from muscat_db.transit_obs import LCO_SITES
 
@@ -61,3 +65,52 @@ def recommend(request: RecommendationRequest) -> dict:
         notes.append('No comparison stars: target-only precision; differential precision will be worse.')
     return {'ok': True, **result, 'inputs': request.model_dump(), 'overhead_s': overhead,
             'max_defocus_mm': max_focus, 'model': model.as_dict(), 'notes': notes}
+
+
+@register_cache(ttl=3600, maxsize=128)
+def _archive_conditions(instrument: str, band: str, mode: str, site: str, db_path: str, root: str) -> dict:
+    """Read up to 200 recent headers; DB/root arguments isolate cached data sets."""
+    conn = exposure._conn()
+    try:
+        frames = conn.execute(
+            "SELECT obsdate, filename FROM frames WHERE instrument=? AND filter=? AND read_mode=? "
+            "AND substr(filename, 1, 3)=? ORDER BY obsdate DESC, filename DESC LIMIT 200",
+            (instrument, band, mode, site),
+        ).fetchall()
+    finally:
+        conn.close()
+    groups = {}
+    for date, filename in frames:
+        path = exposure._fits_exists(instrument, date, filename)
+        if path is None:
+            continue
+        try:
+            with fits.open(path) as hdul:
+                if 'SCI' not in hdul:
+                    continue
+                header = hdul['SCI'].header
+        except (OSError, ValueError):
+            continue
+        key = (header.get('SITEID'), header.get('FILTER'), header.get('CONFMODE'))
+        values = groups.setdefault(key, {k: [] for k in ('sky_rate', 'read_noise_e', 'dark_rate')})
+        # BANZAI's L1MEDIAN is counts; RDNOISE and DARKCURR are already electrons.
+        sky, gain, exp = (exposure_model._float(header, k) for k in ('L1MEDIAN', 'GAIN', 'EXPTIME'))
+        if sky is not None and gain is not None and exp is not None and gain > 0 and exp > 0:
+            rate = sky * gain / exp
+            if 0 <= rate <= 1e6:
+                values['sky_rate'].append(rate)
+        for field, keyword, limit in [('read_noise_e', 'RDNOISE', 1000), ('dark_rate', 'DARKCURR', 1e6)]:
+            value = exposure_model._float(header, keyword)
+            if value is not None and 0 <= value <= limit:
+                values[field].append(value)
+    return groups
+
+
+def recommendation_defaults(instrument: str, band: str, mode: str, site: str) -> dict:
+    precision.readout_overhead(instrument, mode)
+    groups = _archive_conditions(instrument, band, mode, site, exposure.db_path(), INSTRUMENTS[instrument].data_dir)
+    samples = groups.get((site, band, mode), {})
+    keys = ('sky_rate', 'read_noise_e', 'dark_rate')
+    return {'ok': True,
+            'values': {k: median(samples[k]) if samples.get(k) else None for k in keys},
+            'counts': {k: len(samples.get(k, [])) for k in keys}}
