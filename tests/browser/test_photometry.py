@@ -529,8 +529,16 @@ def test_rediff_card_test_apply_and_restore(page, rediff_calls):
     page.click("#message-modal-ok")
     assert rediff_calls["rediff"] == []
 
+    summary = band.locator(".rediff-stars-summary")
+    expect(summary).to_have_text("1, 2 (2)")
+    expect(band.locator(".rediff-star[value='4']")).to_be_hidden()  # inside the closed dropdown
+    summary.click()
+    expect(band.locator("label", has_text="default, w=0.600")).to_be_visible()
     band.locator(".rediff-star[value='1']").uncheck()
     band.locator(".rediff-star[value='4']").check()
+    expect(summary).to_have_text("2, 4 (2)")
+    page.locator("#rediff-section > p").first.click()  # a click outside closes it
+    expect(band.locator(".rediff-star[value='4']")).to_be_hidden()
     with page.expect_response("**/api/photometry/rediff"):
         page.click("#rediff-test-btn")
     assert rediff_calls["rediff"][-1] == {

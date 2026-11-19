@@ -2226,21 +2226,29 @@
     var radii = b.aper_radii || [];
     var html = '<fieldset class="rediff-band" data-band="' + escH(band) + '" style="border:1px solid var(--border);border-radius:8px;padding:0.5rem 0.9rem;margin:0 0 0.75rem;">';
     html += '<legend class="mono" style="padding:0 0.3rem;">' + escH(band) + ' · target ' + escH(b.target_id) + ' · default ' + escH(b.default_weighting) + ' weights</legend>';
-    html += '<label style="font-size:0.85rem;">Aperture <select class="rediff-aperture">';
+    html += '<div style="display:flex;flex-wrap:wrap;align-items:flex-start;gap:0.5rem 1.25rem;font-size:0.85rem;">';
+    html += '<label>Aperture <select class="rediff-aperture">';
     radii.forEach(function (r, i) {
       html += '<option value="' + i + '"' + (i === aperture ? ' selected' : '') + '>' + radiusLabel(band, r) + (i === b.default_aperture ? ' (default)' : '') + '</option>';
     });
     html += '</select></label>';
-    if (radii.length === 1) {
-      html += '<p class="hint" style="margin:0.3rem 0;">This run measured one aperture radius, so only comparison stars can be compared here. Set Aperture radii (<code>--aper_radii</code>) to a grid in Configure &amp; Run Photometry to compare apertures.</p>';
-    }
-    html += '<div style="display:flex;flex-wrap:wrap;gap:0.3rem 0.9rem;margin-top:0.4rem;font-size:0.85rem;">';
+    html += '<div style="display:flex;align-items:center;gap:0.4rem;">Comparison stars';
+    html += '<details class="check-dropdown rediff-stars"><summary class="mono rediff-stars-summary"></summary><div class="check-dropdown-panel">';
     (b.selectable_ids || []).forEach(function (id) {
-      var w = weight[id] != null ? ' <span class="hint">' + fmt(weight[id], 3) + '</span>' : '';
+      var w = weight[id] != null ? ' <span class="hint">default, w=' + fmt(weight[id], 3) + '</span>' : '';
       html += '<label class="mono"><input type="checkbox" class="rediff-star" value="' + id + '"' + (checked.indexOf(id) >= 0 ? ' checked' : '') + '> ' + id + w + '</label>';
     });
-    html += '</div></fieldset>';
+    html += '</div></details></div></div>';
+    if (radii.length === 1) {
+      html += '<p class="hint" style="margin:0.3rem 0 0;">This run measured one aperture radius, so only comparison stars can be compared here. Set Aperture radii (<code>--aper_radii</code>) to a grid in Configure &amp; Run Photometry to compare apertures.</p>';
+    }
+    html += '</fieldset>';
     return html;
+  }
+  // Summary line of a band's star dropdown: the checked IDs and their count.
+  function rediffStarsSummary(fs) {
+    var ids = Array.prototype.map.call(fs.querySelectorAll('.rediff-star:checked'), function (c) { return c.value; });
+    fs.querySelector('.rediff-stars-summary').textContent = ids.length ? ids.join(', ') + ' (' + ids.length + ')' : 'none selected';
   }
   function rediffRenderState(d) {
     var bits = [];
@@ -2269,6 +2277,7 @@
         html += rediffBandHtml(band, res.bands[band], (res.applied_selection || {})[band]);
       });
       rediffBands.innerHTML = html;
+      rediffBands.querySelectorAll('fieldset.rediff-band').forEach(rediffStarsSummary);
     }).catch(function (err) {
       rediffBands.innerHTML = '<p class="warn">' + escH(err.message) + '</p>';
     });
@@ -2364,6 +2373,15 @@
     });
   }
   if (rediffSection) {
+    rediffBands.addEventListener('change', function (e) {
+      if (e.target.classList.contains('rediff-star')) rediffStarsSummary(e.target.closest('fieldset'));
+    });
+    // Close an open star dropdown on a click outside it.
+    document.addEventListener('click', function (e) {
+      rediffBands.querySelectorAll('details.rediff-stars[open]').forEach(function (d) {
+        if (!d.contains(e.target)) d.open = false;
+      });
+    });
     rediffSection.addEventListener('toggle', function () {
       if (rediffSection.open && !rediffInfo) loadRediff();
     });
