@@ -208,7 +208,7 @@ def test_precision_recommendation_uses_measured_inputs_and_persists(page):
     assert payload['sky_rate'] == 20
     assert payload['max_cycle_s'] == 90
     expect(page.locator('#recommend-result')).to_contain_text('ppm in 600 s')
-    expect(page.locator('#recommend-result')).to_contain_text('In-focus only')
+    expect(page.locator('#recommend-result')).to_contain_text('all four bands')
     page.goto('/jobs')
     page.goto('/exposure')
     expect(page.locator('#rec-sky_rate')).to_have_value('20')

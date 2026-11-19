@@ -96,6 +96,9 @@ The **Recommend for precision** panel searches one band's exposure time and
 positive defocus offset in the selected readout mode. It supports MuSCAT3,
 MuSCAT4, Sinistro and QHY600. MuSCAT/MuSCAT2 await empirical calibration;
 SBIG has no measured readout overhead. Readout-mode selection stays manual.
+MuSCAT3 and MuSCAT4 apply one telescope defocus setting to all four bands.
+The recommendation checks the selected band's stars. Before scheduling,
+check the other science bands at that same defocus.
 
 Enter the target magnitude above and select comparisons through the FOV
 handoff if needed. Every selected comparison needs a magnitude in the chosen
@@ -120,12 +123,25 @@ Custom ADU limits and the forward calculator's focus/seeing settings do not
 apply to this panel: it uses the fitted good seeing for saturation and median
 seeing for precision.
 
-Recalibration now records the maximum sampled defocus alongside each fitted
-slope in the existing model record. Search stops at that bound or the
-instrument limit, whichever is smaller. Older and built-in models lacking
-this information permit **in-focus recommendations only**. Recalibrate from
-suitable archive frames to enable defocus search; the tool does not invent a
-supported range or extrapolate beyond it.
+The calibrated upper bound is the 95th percentile of the absolute offsets
+of frames used to fit the defocus slope (at least 0.9 mm). The fit takes the
+lower observed value at that percentile so a single extreme offset cannot
+extend the range. Search stops at the smaller of this bound and the hardware
+limit. Models without a usable defocus fit search in focus only.
+
+For MuSCAT3, the shipped upper bounds are 6 mm in gp, rp and ip and 5 mm
+in zs. An independent MuSCAT3 focus sweep measured rp FWHM of 16.7 pixels
+at 6 mm. The archive model predicts 17.7 pixels at median seeing at the same
+offset. [Fukui’s MuSCAT3 focus sweep](https://github.com/akihikofukui/peak_count_estimator/blob/7e9f16c602752cabe3b4d7395f9b4f4ed2a8cf1f/peak_count_estimator_muscat3.py#L44)
+
+**Deployment of the range field.** Stored calibrations take precedence over
+the built-ins. After upgrading a database with older calibrations, submit
+`POST /api/exposure/calibrate` with `{"instrument":"muscat3"}` and poll
+`GET /api/exposure/calibrate/{job_id}` until completion. Repeat for MuSCAT4,
+Sinistro and QHY600 using their lowercase instrument names. Confirm each job
+succeeds and inspect the returned recommendation's `max_defocus_mm` for the
+band and mode being checked. Zero is appropriate when the archive has
+insufficient defocus measurements. Legacy rows stay in focus until refreshed.
 
 Results include the exposure, defocus, cycle time and each noise term in ppm
 for the requested bin. They are model predictions, not achieved precision:

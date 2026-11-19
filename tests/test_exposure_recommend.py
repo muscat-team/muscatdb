@@ -21,13 +21,12 @@ def payload(**kwargs):
                 mag=15, comp_mags=[15.5], sky_rate=20, read_noise_e=6, **kwargs)
 
 
-def test_default_model_without_range_stays_in_focus(client):
-    response = client.post('/api/exposure/recommend', json=payload())
+def test_bright_target_uses_measured_builtin_range(client):
+    response = client.post('/api/exposure/recommend', json={**payload(), 'mag': 9, 'comp_mags': [9.5]})
     assert response.status_code == 200
     data = response.json()
-    assert data['defocus_mm'] == 0
-    assert data['max_defocus_mm'] == 0
-    assert any('In-focus only' in note for note in data['notes'])
+    assert 0 < data['defocus_mm'] <= data['max_defocus_mm']
+    assert any('all four bands' in note for note in data['notes'])
     assert data['inputs']['mode'] == 'MUSCAT_FAST'
     assert data['overhead_s'] == 6
 
@@ -175,3 +174,40 @@ def test_defaults_bound_header_reads_to_200_recent_frames(client, monkeypatch):
     assert visited[-1] == 'ogg-0005'
     client.get('/api/exposure/recommend-defaults', params=params)
     assert len(visited) == 200  # subsequent requests reuse the existing cache
+
+
+def test_one_extreme_frame_cannot_extend_calibrated_range():
+    samples = [_sample() for _ in range(5)]
+    samples += [_sample(defocus_mm=d, fwhm_arcsec=3) for d in [2, 2, 2, 2, 80]]
+    assert exposure_model.fit_band(samples, .1).max_defocus_mm == 2
+
+
+def test_legacy_stored_model_requires_recalibration(client):
+    import json
+
+    conn = exposure._conn()
+    try:
+        old = exposure_model.models_for(conn, 'muscat3')[('rp', '')].as_dict()
+        old.pop('max_defocus_mm')
+        conn.execute("INSERT INTO exposure_models (instrument,band,mode,params_json,n_frames) VALUES (?,?,?,?,?)",
+                     ('muscat3', 'rp', '', json.dumps(old), old['n_frames']))
+        conn.commit()
+    finally:
+        conn.close()
+    response = client.post('/api/exposure/recommend', json={**payload(), 'mag': 9, 'comp_mags': [9.5]})
+    assert response.status_code == 400
+    assert 'no calibrated defocus range' in response.json()['error'].lower()
+    faint = client.post('/api/exposure/recommend', json=payload()).json()
+    assert faint['ok'] and faint['max_defocus_mm'] == 0
+
+
+def test_measured_range_is_capped_at_hardware_limit(client):
+    conn = exposure._conn()
+    try:
+        exposure_model.save_models(conn, 'sinistro', [replace(_model(), mode='full_frame', max_defocus_mm=7)])
+    finally:
+        conn.close()
+    settings = {**payload(), 'instrument': 'sinistro', 'mode': 'full_frame', 'site': 'elp'}
+    result = client.post('/api/exposure/recommend', json=settings).json()
+    assert result['max_defocus_mm'] == 5
+    assert not any('all four bands' in note for note in result['notes'])

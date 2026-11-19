@@ -236,5 +236,7 @@ def recommend(model: BandModel, mag: float, *, comp_mags: Sequence[float],
                                    budget_ppm={**{k: ppm(v) for k, v in budget.terms().items()},
                                                'total': ppm(budget.total)}, dominant=budget.dominant))
     if best is None:
+        if max_defocus_mm == 0:
+            raise ValueError('No safe in-focus exposure of at least 1 s. This model has no calibrated defocus range.')
         raise ValueError('No safe exposure of at least 1 s within the cadence and calibrated defocus limits')
     return best[1]

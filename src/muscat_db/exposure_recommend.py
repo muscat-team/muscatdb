@@ -59,6 +59,9 @@ def recommend(request: RecommendationRequest) -> dict:
     notes = ['Model estimate, not calibrated against achieved light-curve precision. '
              'Uses archive seeing, a 1.5 FWHM aperture and scintillation coefficient 1.5; '
              'excludes blends and correlated noise.']
+    if fixed_site:
+        notes.append(f'Calculated for {request.band}. On MuSCAT3 and MuSCAT4, '
+                     'the telescope applies this defocus to all four bands.')
     if not max_focus:
         notes.append('In-focus only: no recorded calibrated defocus range. Recalibrate to enable defocus search.')
     if not request.comp_mags:

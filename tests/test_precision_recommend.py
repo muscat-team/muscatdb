@@ -61,9 +61,21 @@ def test_known_peak_rate_sets_the_longest_safe_whole_second_exposure():
     # ZP=25 and mag=15 give 10,000 e-/s. A=1, FWHM=sqrt(10) pixels
     # gives 1,000 e-/s at the peak, plus 20 e-/s sky. At 60,000 e-,
     # 58 s is safe (59,160 e-) and 59 s is not (60,180 e-).
-    result = recommend(15, model=_model(zp_safe=25, zp_median=25, pixscale=1,
+    result = recommend(15, model=_model(zp_safe=25, zp_median=24, pixscale=1,
                                        seeing_good=10**.5, seeing_median=10**.5),
                        comp_mags=[], max_defocus_mm=0)
     assert result['exptime_s'] == 58
     assert result['peak_e'] == pytest.approx(59160)
     assert result['cycle_s'] == 64
+
+
+def test_reported_precision_uses_high_airmass():
+    result = recommend(12)
+    exposure = result['exptime_s']
+    budget = precision.noise_budget(
+        _model(), 12, exposure, airmass=2, extinction=.1, diameter_m=2,
+        altitude_m=3000, read_noise_e=6, sky_rate=20, dark_rate=0,
+        defocus_mm=result['defocus_mm'], comp_mags=[12],
+    )
+    expected = precision.binned(budget, exposure, 6, 600)
+    assert result['budget_ppm']['total'] == pytest.approx(precision.ppm(expected.total))
