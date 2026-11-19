@@ -157,8 +157,8 @@
         <option value="nautical" selected>Nautical (−12°)</option>
         <option value="astronomical">Astronomical (−18°)</option>
       </select></div>
-    <div class="lco-field"><label for="sch-obs-airmass">Max airmass <span class="help-tooltip" title="Maximum airmass for a transit to count as observable. Lower values mean better image quality. 2.0 is typical; 1.5 for high-precision work.">?</span></label><input id="sch-obs-airmass" type="number" step="any" value="2"></div>
-    <div class="lco-field"><label for="sch-moon-sep">Min lunar (deg) <span class="help-tooltip" title="Minimum angular distance from the Moon (degrees) for a transit to count as observable. Higher values avoid moonlight contamination. Skipped automatically when the Moon is below the horizon or under 10% illuminated.">?</span></label><input id="sch-moon-sep" type="number" step="any" value="30"></div>
+    <div class="lco-field"><label for="sch-obs-airmass">Max airmass <span class="help-tooltip" title="Maximum airmass for observability and the submitted LCO request. Lower values mean better image quality.">?</span></label><input id="sch-obs-airmass" type="number" step="any" value="2"></div>
+    <div class="lco-field"><label for="sch-moon-sep">Min lunar (deg) <span class="help-tooltip" title="Minimum angular distance from the Moon (degrees), used for observability and submitted as an LCO request constraint. The local observability calculation skips this cut when the Moon is below the horizon or under 10% illuminated.">?</span></label><input id="sch-moon-sep" type="number" step="any" value="30"></div>
     <div class="lco-field"><label for="sch-max-lunar-phase">Max lunar phase <span class="help-tooltip" title="LCO max_lunar_phase: the maximum Moon illuminated fraction (0 = new, 1 = full) to observe under. 1.0 places no restriction. Windows with the Moon brighter than this are dropped, matching what LCO will schedule.">?</span></label>
       <select id="sch-max-lunar-phase">
         <option value="1.0" selected>1.0 (any)</option>
@@ -350,8 +350,8 @@
     </div>
     <div class="lco-field"><label for="sch-guiding-config">Guiding <span class="help-tooltip" title="Guide star acquisition: ON uses the guider for precise tracking; OFF uses blind offsets.">?</span></label>
       <select id="sch-guiding-config">
-        <option value="ON">ON</option>
-        <option value="OFF" selected>OFF</option>
+        <option value="ON" selected>ON</option>
+        <option value="OFF">OFF</option>
       </select>
     </div>
     <div class="lco-field"><label for="sch-defocus">Defocus (mm) <span class="help-tooltip" id="hint-defocus" title="Secondary-mirror offset from focus, in mm, to prevent CCD saturation on bright targets. 0 = focused. Limits: ±8mm for MuSCAT, ±5mm for Sinistro, ±0.5mm for QHY600.">?</span></label><input id="sch-defocus" type="number" step="any" value="0" min="-8" max="8"></div>
@@ -667,6 +667,7 @@
     var o = {};
     TEXT_IDS.forEach(function (id) { o[id] = val(id); });
     CHECK_IDS.forEach(function (id) { o[id] = chk(id); });
+    o['_guidingVersion'] = 1;
     o['_ephemTarget'] = ephemTarget;
     o['_fieldSources'] = fieldSources;
     o['_cacheKey'] = exptimeCacheKey();
@@ -707,6 +708,9 @@
     var saved = Object.assign({}, stored || {}, slug || {});
     TEXT_IDS.forEach(function (id) { if (saved[id] !== undefined && saved[id] !== '') setVal(id, saved[id]); });
     CHECK_IDS.forEach(function (id) { if (saved[id] !== undefined) setChk(id, saved[id]); });
+    if (saved['_guidingVersion'] !== 1) {
+      setSelectValue('sch-guiding-config', val('sch-kind') === 'muscat' ? 'OFF' : 'ON');
+    }
     // Exp times are only valid when restored settings match current settings.
     if (saved['_cacheKey'] && saved['_cacheKey'] !== exptimeCacheKey()) {
       clearExptimeFields();
@@ -715,6 +719,9 @@
     if (typeof saved['_ephemTarget'] === 'string') ephemTarget = saved['_ephemTarget'];
     var savedSrc = saved['_fieldSources'] || {};
     EPHEM_FIELDS.forEach(function (id) { setFieldSource(id, savedSrc[id] || ''); });
+    if (saved['_guidingVersion'] !== 1) {
+      try { localStorage.setItem(OPT_KEY, JSON.stringify(collectOptions())); } catch (e) {}
+    }
   }
   document.addEventListener('change', function (e) {
     if (e.target && (TEXT_IDS.indexOf(e.target.id) !== -1 || CHECK_IDS.indexOf(e.target.id) !== -1)) {
@@ -1112,9 +1119,11 @@
     annotateSiteOptions();
   }
 
-  function applyKind() {
+  function applyKind(restoring) {
     var k = val('sch-kind');
-    setSelectValue('sch-guiding-config', 'OFF');
+    if (!restoring && k !== lastScheduleKind) {
+      setSelectValue('sch-guiding-config', k === 'muscat' ? 'OFF' : 'ON');
+    }
     refreshInstrumentBlocks();
     // Each request's instrument choices start from the selected Instrument.
     renderRequests();
@@ -4023,20 +4032,25 @@
     saveScheduleState();
   });
 
+  function previewKind() {
+    var testTab = document.querySelector('.lco-tab.active').getAttribute('data-tab') === 'test';
+    return testKind({kind: val('sch-kind'), site: val(testTab ? 'sch-muscat-site' : 'sch-sites')});
+  }
+
   el('btn-fov').addEventListener('click', function () {
     var target = val('sch-target');
-    var inst = val('sch-kind');
+    var inst = previewKind();
     if (!target) { showMessageModal('Missing target', 'Please enter a target'); return; }
-    if (!inst) { showMessageModal('Missing instrument', 'Please select an instrument'); return; }
+    if (!inst) { showMessageModal('Missing instrument', 'Please select an instrument and site'); return; }
     var url = '/fov?target=' + encodeURIComponent(target) + '&inst=' + encodeURIComponent(inst);
     window.location.href = url;
   });
 
   el('btn-exp').addEventListener('click', function () {
     var target = val('sch-target');
-    var inst = val('sch-kind');
+    var inst = previewKind();
     if (!target) { showMessageModal('Missing target', 'Please enter a target'); return; }
-    if (!inst) { showMessageModal('Missing instrument', 'Please select an instrument'); return; }
+    if (!inst) { showMessageModal('Missing instrument', 'Please select an instrument and site'); return; }
     var url = '/exposure?target=' + encodeURIComponent(target) + '&inst=' + encodeURIComponent(inst);
     window.location.href = url;
   });
@@ -4400,7 +4414,7 @@
   syncMidtimesBlock();
   updateGenWindowsButtonState();
   ensureDefaultRange();
-  applyKind();
+  applyKind(true);
   updateScheduleFields();
   restoreScheduleState();
   updateWindowGatedButtons();

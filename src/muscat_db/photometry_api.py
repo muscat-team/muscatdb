@@ -54,6 +54,12 @@ class PhotometryOptions(RequestModel):
     aper_radii: str = Field("", description="MIN,MAX,DR; requires annulus")
     annulus: str = Field("", description="RIN,ROUT; requires aper_radii")
     target_id: Annotated[str | int, BeforeValidator(_form_number)] = ""
+    comp_ensemble: str = phot.RUN_DEFAULTS["comp_ensemble"]
+    comp_criterion: str = phot.RUN_DEFAULTS["comp_criterion"]
+    comp_min_flux_frac: FormFloat = phot.RUN_DEFAULTS["comp_min_flux_frac"]
+    clip_star_sigma: FormFloat = None
+    clip_star_window: FormInt = phot.RUN_DEFAULTS["clip_star_window"]
+    save_flux_datacube: bool = phot.RUN_DEFAULTS["save_flux_datacube"]
     comparison_ids: FormText = Field("", description="Comma-separated integer IDs")
     avoid_comparison_ids: FormText = Field("", description="Comma-separated integer IDs; requires ref_band")
     avoid_nearby_star_mode: str = phot.RUN_DEFAULTS["avoid_nearby_star_mode"]
@@ -241,6 +247,8 @@ class PhotometryOutputs(ResponseModel):
     summary_items: list[OutputFile]
     bands: dict[str, dict[str, OutputFile]]
     npz: str | None
+    flux_datacube: str | None
+    noise_budget: dict[str, dict[str, float | None]]
     log: str | None
     has_any: bool
     masters: list[str]

@@ -295,6 +295,21 @@
     </details>
     {% endif %}
 
+    {% if outputs.noise_budget %}
+    <details class="phot-section phot-fold" open>
+      <summary><h2>Noise budget</h2></summary>
+      <p class="hint">Per-point noise in ppt from the saved reduction. Achieved scatter uses successive flux differences; the ratio compares it with expected total noise. These are engine diagnostics, not a transit-fit uncertainty estimate.</p>
+      <div style="overflow-x:auto;">
+        <table id="noise-budget" style="width:auto;">
+          <thead><tr><th>Band</th>{% for key, label in noise_columns %}<th>{{ label }}</th>{% endfor %}</tr></thead>
+          <tbody>{% for band, budget in outputs.noise_budget.items() %}
+            <tr><th>{{ band }}</th>{% for key, label in noise_columns %}<td>{{ '%.3f'|format(budget[key]) if budget.get(key) is not none else '—' }}</td>{% endfor %}</tr>
+          {% endfor %}</tbody>
+        </table>
+      </div>
+    </details>
+    {% endif %}
+
     {% if outputs.bands %}
     <details class="phot-section phot-fold" open>
       <summary><h2>Per-band products</h2></summary>
@@ -339,6 +354,7 @@
       <div class="dl-row">
         {% set dl_all_url = '/api/photometry/download-all/' ~ sel_inst ~ '/' ~ sel_date ~ '/' ~ dataset_target ~ (('/run/' ~ sel_run) if sel_run else '') %}
         <a href="{{ dl_all_url }}" download style="font-weight: 600; color: var(--accent2);">📦 Download all output (.zip)</a>
+        {% if outputs.flux_datacube %}<a href="{{ file_base }}/{{ outputs.flux_datacube }}" download>per-star flux cube (.npz)</a>{% endif %}
         {% if outputs.npz %}<a href="{{ file_base }}/{{ outputs.npz }}" download>data archive (.npz)</a>{% endif %}
         {% if outputs.log %}<a href="{{ file_base }}/{{ outputs.log }}" target="_blank">📄 pipeline log</a>{% endif %}
         {% if outputs.ref_header %}<a href="{{ file_base }}/{{ outputs.ref_header }}" target="_blank">🧾 view ref header</a>{% endif %}
@@ -505,6 +521,48 @@
                 <option value="quad" {% if run_defaults.centroid_method == 'quad' %}selected{% endif %}>quad</option>
                 <option value="com" {% if run_defaults.centroid_method == 'com' %}selected{% endif %}>com</option>
               </select>
+            </div>
+          </div>
+        </details>
+
+        <details class="opt-collapse">
+          <summary>Precision</summary>
+          <p class="hint">Optional reduction choices; defaults preserve the usual reduction. Compare new runs before adopting settings for other targets.</p>
+          <div class="opt-grid">
+            <div class="opt">
+              <label for="opt-comp_ensemble">Comparison ensemble</label>
+              <select id="opt-comp_ensemble">
+                <option value="greedy" {% if run_defaults.comp_ensemble == 'greedy' %}selected{% endif %}>Greedy (default)</option>
+                <option value="bright" {% if run_defaults.comp_ensemble == 'bright' %}selected{% endif %}>All bright, consistent comparisons</option>
+              </select>
+              <span class="hint">Bright uses flux weights and rejects disagreeing stars. Ignored when explicit comparison IDs are set.</span>
+            </div>
+            <div class="opt">
+              <label for="opt-comp_criterion">Ensemble and aperture selection</label>
+              <select id="opt-comp_criterion">
+                <option value="target" {% if run_defaults.comp_criterion == 'target' %}selected{% endif %}>Target scatter (default)</option>
+                <option value="check" {% if run_defaults.comp_criterion == 'check' %}selected{% endif %}>Comparison check light curves</option>
+              </select>
+              <span class="hint">Check uses comparison light curves and the target error model, without tuning on the target light curve or its transit.</span>
+            </div>
+            <div class="opt">
+              <label for="opt-comp_min_flux_frac">Minimum comparison / target flux</label>
+              <input id="opt-comp_min_flux_frac" type="number" min="0" step="0.1" value="{{ run_defaults.comp_min_flux_frac }}">
+              <span class="hint">Used by the bright ensemble; 0.3 means at least 30% of the target's mean flux.</span>
+            </div>
+            <div class="opt">
+              <label for="opt-clip_star_sigma">Comparison-star clipping (sigma)</label>
+              <input id="opt-clip_star_sigma" type="number" min="0.1" step="0.1" placeholder="Off" value="{{ run_defaults.clip_star_sigma if run_defaults.clip_star_sigma is not none else '' }}">
+              <span class="hint">Blank disables clipping. For example, 5 interpolates comparison-star outliers beyond 5 sigma before differencing; the target is not clipped.</span>
+            </div>
+            <div class="opt">
+              <label for="opt-clip_star_window">Clipping window (frames)</label>
+              <input id="opt-clip_star_window" type="number" min="3" step="1" value="{{ run_defaults.clip_star_window }}">
+              <span class="hint">Running-median window for comparison-star clipping.</span>
+            </div>
+            <div class="opt">
+              <label><input id="opt-save_flux_datacube" type="checkbox" {% if run_defaults.save_flux_datacube %}checked{% endif %}> Save per-star flux cube</label>
+              <span class="hint">Full runs: save fluxes and errors for every star and aperture for later reprocessing in prose2. Adds a separate, potentially large download.</span>
             </div>
           </div>
         </details>
@@ -990,6 +1048,12 @@
       aper_radii: val('opt-aper_radii'),
       annulus: val('opt-annulus'),
       target_id: val('opt-target_id'),
+      comp_ensemble: val('opt-comp_ensemble'),
+      comp_criterion: val('opt-comp_criterion'),
+      comp_min_flux_frac: val('opt-comp_min_flux_frac'),
+      clip_star_sigma: val('opt-clip_star_sigma'),
+      clip_star_window: val('opt-clip_star_window'),
+      save_flux_datacube: chk('opt-save_flux_datacube'),
       comparison_ids: val('opt-comparison_ids'),
       avoid_comparison_ids: val('opt-avoid_comparison_ids'),
       avoid_nearby_star_mode: val('opt-avoid_nearby_star_mode'),
@@ -1063,13 +1127,13 @@
     document.querySelectorAll('input[name="band"]').forEach(function (c) {
       c.checked = saved.bands && saved.bands.indexOf(c.value) !== -1;
     });
-    ['run_name','ref_band','refid','ref_select','ref_select_top_k','ref_time','aper_unit','aper_radii','annulus',
+    ['comp_ensemble','comp_criterion','comp_min_flux_frac','clip_star_sigma','clip_star_window','run_name','ref_band','refid','ref_select','ref_select_top_k','ref_time','aper_unit','aper_radii','annulus',
      'target_id','comparison_ids','avoid_comparison_ids','avoid_nearby_star_mode','avoid_nearby_star','target_coord','test_run_frames','min_star_separation','max_num_stars',
        'n_stars_align','cutout_size','display_stack_nframes','ccd_trim','edge_margin','bin_size_minutes','nan_imputation_method','sig_bkg','sig_fwhm','sig_dx','sig_dy','sig_flux','flux_poly_deg','min_star_area','wcs_method','centroid_method','cmap','site','telescope','mode','exclude_after_jd','exclude_before_jd','post_sigma','post_poly_deg','post_exclude_before_jd','post_exclude_after_jd'].forEach(function (id) {
       var el = document.getElementById('opt-'+id);
       if (el && saved[id] !== undefined) el.value = saved[id];
     });
-    ['make_gif','plot_gaia_sources','use_barycorrpy','overwrite'].forEach(function (id) {
+    ['save_flux_datacube','make_gif','plot_gaia_sources','use_barycorrpy','overwrite'].forEach(function (id) {
       var el = document.getElementById('opt-'+id);
       if (el && saved[id] !== undefined) el.checked = saved[id];
     });
@@ -1366,7 +1430,7 @@
       document.querySelectorAll('input[name="band"]').forEach(function (c) {
         c.checked = DEFAULTS.bands && DEFAULTS.bands.indexOf(c.value) !== -1;
       });
-      ['run_name','ref_band','refid','ref_select','ref_select_top_k','ref_time','aper_unit','aper_radii','annulus',
+      ['comp_ensemble','comp_criterion','comp_min_flux_frac','clip_star_sigma','clip_star_window','run_name','ref_band','refid','ref_select','ref_select_top_k','ref_time','aper_unit','aper_radii','annulus',
        'target_id','comparison_ids','avoid_comparison_ids','avoid_nearby_star_mode','avoid_nearby_star','target_coord','test_run_frames','min_star_separation','max_num_stars',
      'n_stars_align','cutout_size','display_stack_nframes','ccd_trim','edge_margin','bin_size_minutes','nan_imputation_method','sig_bkg','sig_fwhm','sig_dx','sig_dy','sig_flux','flux_poly_deg','min_star_area','wcs_method','centroid_method','cmap','site','telescope','mode','exclude_after_jd','exclude_before_jd','post_sigma','post_poly_deg','post_exclude_before_jd','post_exclude_after_jd'].forEach(function (id) {
         var el = document.getElementById('opt-'+id);
@@ -1375,7 +1439,7 @@
           el.value = d !== undefined ? d : '';
         }
       });
-      ['make_gif','plot_gaia_sources','use_barycorrpy','overwrite'].forEach(function (id) {
+      ['save_flux_datacube','make_gif','plot_gaia_sources','use_barycorrpy','overwrite'].forEach(function (id) {
         var el = document.getElementById('opt-'+id);
         if (el) el.checked = !!DEFAULTS[id];
       });

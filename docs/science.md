@@ -64,6 +64,40 @@ its existing fallback; the launch log does not repeat the failed lookup or claim
 that a late coordinate result was passed to prose. Enter explicit coordinates
 when a reduction must proceed without external name resolution.
 
+## Photometry precision controls
+
+The photometry page's **Precision** section exposes prose2 v3.8.0's optional
+comparison-star processing. Defaults retain the greedy ensemble, selection by
+target scatter, and no per-star clipping. The controls persist per dataset and
+**Use default settings** resets them.
+
+- **All bright, consistent comparisons** uses flux weights over comparisons above
+  the minimum comparison/target flux fraction (default 0.3), rejecting stars that
+  disagree with the others. Explicit comparison IDs override ensemble selection.
+- **Comparison check light curves** chooses the greedy ensemble size and aperture
+  from the comparison stars and target error model, without optimizing on the
+  target light curve or its transit.
+- **Comparison-star clipping** interpolates outlying comparison samples before
+  differencing, using a running-median window (default 11 frames). Blank disables
+  it; 5 sigma is an example to evaluate. It does not clip the target, and is
+  separate from raw-target clipping and post-processing of the final light curve.
+- **Save per-star flux cube** retains every star's flux and error at every aperture
+  in a separate `*_flux_datacube.npz` download after a full run. It can be large;
+  reprocessing those arrays belongs to prose2, not this page.
+
+Completed v3.8.0 runs also log the expected noise per band and save it in the main
+NPZ archive. The page displays the photon, sky, read, comparison, and expected-total
+terms alongside the achieved point-to-point scatter, in ppt, and their
+dimensionless ratio. Missing or non-finite terms display as unavailable; older
+runs without these diagnostics have no noise-budget table. This displays the
+saved reduction's diagnostics, not a recalculation after post-processing or a
+transit-fit uncertainty estimate.
+
+The precision gains in #445 were measured for one faint, defocused target-night.
+Use a new run name to compare settings; they are not a general improvement claim.
+The untested FWHM-scaled annulus remains a manual choice under **Aperture &
+Geometry**, with aperture radii and annulus both supplied in the selected unit.
+
 ## Scientific Validation & Reproducibility
 
 | Aspect | Method / Tool | Description |

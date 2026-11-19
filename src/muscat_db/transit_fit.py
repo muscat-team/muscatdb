@@ -83,6 +83,7 @@ def _write_log_banner(
     options: dict | None = None,
     narrowband_aliases: list[tuple[str, str]] | None = None,
     covariate_drops: dict[str, dict[str, str]] | None = None,
+    transit_center_priors: dict | None = None,
 ) -> None:
     """Write a versioned startup header then the command line and parsed args to *logf*.
 
@@ -120,6 +121,17 @@ def _write_log_banner(
                 logf.write(f"  {k}: {val!r}\n")
             else:
                 logf.write(f"  {k}: {v!r}\n")
+        logf.write("\n")
+
+    if transit_center_priors:
+        logf.write("--- transit-center priors (BJD) ---\n")
+        for planet, prior in transit_center_priors.items():
+            if prior["fixed"]:
+                logf.write(f"  {planet}: fixed at {prior['center_bjd']:.6f}\n")
+            else:
+                logf.write(f"  {planet}: Uniform [{prior['lower_bjd']:.6f}, "
+                           f"{prior['upper_bjd']:.6f}], center {prior['center_bjd']:.6f}, "
+                           f"full width {prior['full_width_days']:.6f} d\n")
         logf.write("\n")
 
     if narrowband_aliases:
@@ -574,6 +586,8 @@ _PLANET_TOKEN_RE = re.compile(r"^[A-Za-z]$")
 #   "num"    -> any finite number
 # An empty value is allowed for every field; it keeps the pipeline default.
 _FIT_NUMERIC_FIELDS: list[tuple[str, str, str]] = [
+    ("trim_beg",     "Trim begin (days)",    "nonneg"),
+    ("trim_end",     "Trim end (days)",      "nonneg"),
     ("tc_pred_unc", "tc_pred uncertainty",  "pos"),
     ("teff",        "Teff (K)",             "pos"),
     ("teff_unc",    "Teff uncertainty",     "pos"),
@@ -683,7 +697,7 @@ def _validate_flares(o: dict, time_range: tuple[float, float] | None) -> str | N
     rows_by_param: dict[str, list[tuple[float, float]]] = {}
     priors: dict[str, str] = {}
     for param in _FLARE_PARAMS:
-        prior = str(o.get(f"flare_{param}_prior") or "gaussian").strip().lower()
+        prior = str(o.get(f"flare_{param}_prior") or ("uniform" if param == "ampl" else "gaussian")).strip().lower()
         if prior not in _PRIOR_CHOICES:
             return f"flare {param} prior must be gaussian or uniform"
         priors[param] = prior
@@ -723,11 +737,37 @@ def _validate_flares(o: dict, time_range: tuple[float, float] | None) -> str | N
     return None
 
 
+def _validate_bump_times(o: dict, time_range: tuple[float, float] | None) -> str | None:
+    if o.get("include_bump") != "true":
+        return None
+    raw = str(o.get("bump_tcenter") or "").strip()
+    if not raw:
+        return None  # The writer seeds the center from the light-curve range.
+    prior = str(o.get("bump_tcenter_prior") or "gaussian").lower()
+    if prior not in _PRIOR_CHOICES:
+        return "bump tcenter prior must be gaussian or uniform"
+    for row in raw.split(";"):
+        try:
+            a, b = [float(v) for v in row.split(",")]
+        except (ValueError, TypeError):
+            return "bump tcenter requires value,unc or low,high pairs"
+        if not all(math.isfinite(v) for v in (a, b)):
+            return "bump tcenter must be finite"
+        if (prior == "uniform" and a >= b) or (prior == "gaussian" and b <= 0):
+            return "bump tcenter needs increasing bounds or positive uncertainty"
+        if time_range:
+            lo, hi = time_range
+            inside = a < hi and b > lo if prior == "uniform" else lo <= a <= hi
+            if not inside:
+                return f"bump tcenter lies outside the selected light curves ({lo:.6f} to {hi:.6f} BJD_TDB)"
+    return None
+
+
 def lightcurve_time_range(csvs) -> tuple[float, float] | None:
     """Return the earliest and latest ``BJD_TDB`` across the light-curve CSVs.
 
-    ``None`` when no file has a readable ``BJD_TDB`` column, so callers treat
-    the range as unknown rather than refusing input they cannot check.
+    ``None`` when no file has readable ``BJD_TDB`` values. Callers that need
+    an automatic transit-center prediction then require an explicit center.
     """
     lo = hi = None
     for path in csvs:
@@ -752,18 +792,63 @@ def lightcurve_time_range(csvs) -> tuple[float, float] | None:
 
 
 def validate_flare_times(options: dict | None, csvs) -> str | None:
-    """Refuse a flare ``tpeak`` that lies outside the selected light curves.
+    """Check flare and bump timing against the selected light curves.
 
-    Runs once the launch knows which CSVs are in the fit. No-op when flares are
-    off or the files carry no ``BJD_TDB`` column.
+    Runs once the launch knows which CSVs are in the fit. Without a usable
+    ``BJD_TDB`` range, skip range checks but require an explicit bump center
+    when bumps are enabled, since its default cannot be inferred.
     """
     o = options or {}
-    if o.get("include_flare") != "true":
+    if o.get("include_flare") != "true" and o.get("include_bump") != "true":
         return None
     time_range = lightcurve_time_range(csvs)
     if time_range is None:
+        if o.get("include_bump") == "true" and not str(o.get("bump_tcenter") or "").strip():
+            return "bump tcenter is required when the light curves have no BJD_TDB range"
         return None
-    return _validate_flares(o, time_range)
+    return _validate_flares(o, time_range) or _validate_bump_times(o, time_range)
+
+
+DEFAULT_TC_UNC = 0.04
+
+
+def predict_transit_centers(options: dict | None, csvs) -> tuple[dict[str, dict], str | None]:
+    """Return each planet's Uniform transit-center prior, or a user-facing error.
+
+    An explicit ``tc_pred`` wins. Otherwise the center is the transit of the
+    reference epoch plus an integer number of periods nearest the middle of
+    the selected light curves. A planet with neither is an error rather than a
+    silent fallback to the raw epoch or the data mean.
+    """
+    o = options or {}
+    planets = [p.strip() for p in (o.get("planets") or "b").split(",") if p.strip()] or ["b"]
+    first = planets[0]
+    fixed = "t0" in (o.get("fixed") or [])
+    time_range = None
+    priors: dict[str, dict] = {}
+    for p in planets:
+        center = _planet_value(o, "tc_pred", p, first)
+        if center is None:
+            epoch = _planet_value(o, "t0", p, first)
+            if _prior_choice(o, "period", p, first) == "uniform":
+                period = sum(_uniform_bounds(o, "period", p, first)) / 2
+            else:
+                period = _planet_value(o, "period", p, first)
+            if time_range is None:
+                time_range = lightcurve_time_range(csvs)
+            if epoch is None or period is None or not period > 0 or time_range is None:
+                return {}, (
+                    f"planet {p} needs a transit-center prior: enter one, or give an epoch t0 "
+                    "and period with light curves that have a BJD_TDB column"
+                )
+            middle = sum(time_range) / 2
+            center = epoch + math.floor((middle - epoch) / period + 0.5) * period
+        width = _planet_value(o, "tc_pred_unc", p, first)
+        width = DEFAULT_TC_UNC if width is None else width
+        priors[p] = {"center_bjd": center, "full_width_days": width,
+                     "lower_bjd": center - width / 2, "upper_bjd": center + width / 2,
+                     "fixed": fixed}
+    return priors, None
 
 
 def validate_fit_options(options: dict | None, time_range: tuple[float, float] | None = None) -> str | None:
@@ -773,9 +858,17 @@ def validate_fit_options(options: dict | None, time_range: tuple[float, float] |
     bad input is rejected with a clear message instead of crashing the pipeline
     or writing a malformed sys.yaml. An empty field keeps the pipeline default.
     *time_range* is the light curves' ``(earliest, latest)`` BJD_TDB when known;
-    it lets the flare ``tpeak`` check run here as well as at launch.
+    it enables the timing checks shared with :func:`validate_flare_times`.
     """
     o = options or {}
+    if o.get("secondary_eclipse") == "true":
+        return "Secondary eclipse is not supported by timer"
+    if str(o.get("fit_basis") or "duration").strip().lower() != "duration":
+        return "fit_basis must be duration"
+    if o.get("chunk_offset") == "true":
+        threshold = _to_float(o.get("chunk_thresh", 0.02))
+        if threshold is None or not math.isfinite(threshold) or threshold <= 0:
+            return "Chunk threshold must be greater than 0 days"
 
     # Planets: comma-separated single letters (defaults to "b" when blank).
     tokens = [p.strip() for p in (o.get("planets") or "b").split(",") if p.strip()]
@@ -925,7 +1018,25 @@ def validate_fit_options(options: dict | None, time_range: tuple[float, float] |
             if prior == "gaussian" and second <= 0:
                 return f"GP {param} uncertainty must be greater than 0"
 
-    err = _validate_flares(o, time_range)
+    for model in ("bump", "flare"):
+        if o.get(f"include_{model}") != "true":
+            continue
+        prior = str(o.get(f"{model}_ampl_prior") or "uniform").strip().lower()
+        if prior != "uniform":
+            return f"{model} ampl prior must be uniform with nonnegative bounds"
+        raw = o.get(f"{model}_ampl", "")
+        if not isinstance(raw, str):
+            return f"{model} ampl requires low,high bounds as text"
+        raw = raw.strip() or "0,10"
+        for row, pair in enumerate(raw.split(";"), start=1):
+            try:
+                low, high = map(float, pair.split(","))
+            except ValueError:
+                return f"{model} ampl (row {row}) requires low,high bounds"
+            if not (math.isfinite(low) and math.isfinite(high) and 0 <= low < high):
+                return f"{model} ampl bounds (row {row}) must be finite with 0 <= low < high"
+
+    err = _validate_flares(o, time_range) or _validate_bump_times(o, time_range)
     if err:
         return err
 
@@ -1276,7 +1387,7 @@ def _write_fit_inputs(
     def _trim_opt(key: str):
         v = options.get(key)
         if v is None or str(v).strip() == "": return None
-        try: return int(float(v))
+        try: return float(v)
         except (TypeError, ValueError): return None
 
     # Per-dataset detrending options (applied uniformly to every light curve).
@@ -1288,7 +1399,7 @@ def _write_fit_inputs(
         "clip": _bool_opt("clip"),
         "clip_nsig": _float_opt("clip_nsig", 7),
         "chunk_offset": _bool_opt("chunk_offset"),
-        "chunk_thresh": _float_opt("chunk_thresh", 0),
+        "chunk_thresh": _float_opt("chunk_thresh", 0.02),
         "trim_beg": _trim_opt("trim_beg"),
         "trim_end": _trim_opt("trim_end"),
     }
@@ -1365,35 +1476,14 @@ def _write_fit_inputs(
     # (shape = nplanets) seeded by tc_pred: a scalar broadcasts to all planets,
     # a list gives each planet its own center. Write a scalar for single-planet
     # fits (back-compatible) and a list when there are multiple planets.
-    def _planet_float(prefix: str, p: str):
-        raw = options.get(f"{prefix}_{p}")
-        try: return float(str(raw).strip())
-        except (TypeError, ValueError): return None
-
-    DEFAULT_TC_UNC = 0.04
-    tc_vals = [_planet_float("tc_pred", p) for p in planet_list]
-    unc_vals = [_planet_float("tc_pred_unc", p) for p in planet_list]
-
-    if any(v is not None for v in tc_vals):
-        # Align the list 1:1 with planets: fill any planet missing a tc_pred with
-        # its own t0, then the mean of the provided centers.
-        provided = [v for v in tc_vals if v is not None]
-        fallback = sum(provided) / len(provided)
-        filled = [
-            v if v is not None else (_planet_float("t0", p) if _planet_float("t0", p) is not None else fallback)
-            for p, v in zip(planet_list, tc_vals)
-        ]
-        uncs = [u if u is not None else DEFAULT_TC_UNC for u in unc_vals]
-        if len(planet_list) == 1:
-            fit_data["tc_pred"] = filled[0]
-            fit_data["tc_pred_unc"] = uncs[0]
-        else:
-            fit_data["tc_pred"] = filled
-            fit_data["tc_pred_unc"] = uncs
-    else:
-        # No predicted centers given; keep a single t0-prior width.
-        provided_unc = [u for u in unc_vals if u is not None]
-        fit_data["tc_pred_unc"] = provided_unc[0] if provided_unc else DEFAULT_TC_UNC
+    # Launches refuse a planet without a computable center (see
+    # predict_transit_centers); this writer leaves tc_pred out in that case.
+    transit_center_priors, _ = predict_transit_centers(options, csvs)
+    centers = [prior["center_bjd"] for prior in transit_center_priors.values()]
+    widths = [prior["full_width_days"] for prior in transit_center_priors.values()] or [DEFAULT_TC_UNC]
+    if centers:
+        fit_data["tc_pred"] = centers[0] if len(centers) == 1 else centers
+    fit_data["tc_pred_unc"] = widths[0] if len(widths) == 1 else widths
 
     fit_data["chromatic"] = options.get("chromatic") != "false"
     # Run mode maps to timer's ``clobber``: "new" (start fresh) -> clobber=true,
@@ -1409,8 +1499,6 @@ def _write_fit_inputs(
         else:
             run_mode = "new"
     fit_data["clobber"] = run_mode == "new"
-    fit_data["plot_midtransit"] = options.get("plot_midtransit") == "true"
-    fit_data["plot_ingress_egress"] = options.get("plot_ingress_egress") == "true"
 
     # Sampler options (timer defaults: tune/draws 2000, chains/cores 2). Full
     # runs default to 4 chains on 4 cores so all chains sample in parallel
@@ -1433,7 +1521,6 @@ def _write_fit_inputs(
     # Model options (timer defaults: include_mean and use_custom_optimizer on).
     fit_data["include_mean"] = _bool_opt("include_mean", default=True)
     fit_data["use_custom_optimizer"] = _bool_opt("use_custom_optimizer", default=True)
-    fit_data["secondary_eclipse"] = _bool_opt("secondary_eclipse", default=False)
     fit_data["fit_basis"] = str(options.get("fit_basis") or "duration").strip().lower()
 
     # Gaussian-process noise model. Only emit the ``gp`` block when enabled:
@@ -1449,7 +1536,7 @@ def _write_fit_inputs(
                 return (value + unc) / 2, unc - value
             return value, unc
 
-        log_amp, log_amp_unc = _gp_values("log_amp", -3.0, 2.0)
+        log_amp, log_amp_unc = _gp_values("log_amp", 0.0, 2.0)
         log_scale, log_scale_unc = _gp_values("log_scale", -1.0, 2.0)
         gp_block: dict = {
             "log_amp": log_amp,
@@ -1473,7 +1560,9 @@ def _write_fit_inputs(
     if fit_data["include_bump"]:
         def _bump_values(param: str, val_default: float, unc_default: float) -> tuple[float | list[float], float | list[float], str]:
             raw_val = options.get(f"bump_{param}", "")
-            prior = str(options.get(f"bump_{param}_prior") or "gaussian").strip().lower()
+            prior = str(options.get(f"bump_{param}_prior") or ("uniform" if param == "ampl" else "gaussian")).strip().lower()
+            if param == "ampl" and not str(raw_val).strip():
+                raw_val = "0,10"
 
             s = str(raw_val).strip()
             if not s:
@@ -1509,9 +1598,11 @@ def _write_fit_inputs(
                 return vals_val[0], vals_unc[0], prior
             return vals_val, vals_unc, prior
 
-        tcenter, tcenter_unc, tcenter_prior = _bump_values("tcenter", 0.0, 0.1)
+        span = lightcurve_time_range(csvs)
+        center = sum(span) / 2 if span else 0.0
+        tcenter, tcenter_unc, tcenter_prior = _bump_values("tcenter", center, 0.1)
         width, width_unc, width_prior = _bump_values("width", 0.02, 0.01)
-        ampl, ampl_unc, ampl_prior = _bump_values("ampl", 0.01, 0.01)
+        ampl, ampl_unc, ampl_prior = _bump_values("ampl", 10.0, 10.0)
 
         fit_data["bump"] = {
             "tcenter": tcenter,
@@ -1530,7 +1621,9 @@ def _write_fit_inputs(
     if fit_data["include_flare"]:
         def _flare_values(param: str, val_default: float, unc_default: float) -> tuple[float | list[float], float | list[float], str]:
             raw_val = options.get(f"flare_{param}", "")
-            prior = str(options.get(f"flare_{param}_prior") or "gaussian").strip().lower()
+            prior = str(options.get(f"flare_{param}_prior") or ("uniform" if param == "ampl" else "gaussian")).strip().lower()
+            if param == "ampl" and not str(raw_val).strip():
+                raw_val = "0,10"
 
             s = str(raw_val).strip()
             if not s:
@@ -1568,7 +1661,7 @@ def _write_fit_inputs(
 
         tpeak, tpeak_unc, tpeak_prior = _flare_values("tpeak", 0.0, 0.1)
         fwhm, fwhm_unc, fwhm_prior = _flare_values("fwhm", 0.02, 0.01)
-        ampl, ampl_unc, ampl_prior = _flare_values("ampl", 0.01, 0.01)
+        ampl, ampl_unc, ampl_prior = _flare_values("ampl", 10.0, 10.0)
 
         fit_data["flare"] = {
             "tpeak": tpeak,
@@ -1662,6 +1755,7 @@ def _write_fit_inputs(
         "run_name": run_name or "",
         "run_id": run_id or "",
         "run_type": run_type or "",
+        "transit_center_priors": transit_center_priors,
         "covariates": list(covariates),
         "covariates_fitted": covariates_fitted,
         "covariates_dropped": covariates_dropped,
@@ -1681,6 +1775,17 @@ def covariate_drops(rdir: pathlib.Path) -> dict[str, dict[str, str]]:
         logger.warning("could not read covariate drops from %s/meta.yaml", rdir, exc_info=True)
         return {}
     return meta.get("covariates_dropped") or {}
+
+
+def recorded_transit_center_priors(rdir: pathlib.Path) -> dict:
+    """The transit-center priors :func:`_write_fit_inputs` recorded in
+    ``rdir/meta.yaml``; empty if no record."""
+    try:
+        meta = yaml.safe_load((rdir / "meta.yaml").read_text()) or {}
+    except (OSError, yaml.YAMLError):
+        logger.warning("could not read transit-center priors from %s/meta.yaml", rdir, exc_info=True)
+        return {}
+    return meta.get("transit_center_priors") or {}
 
 
 # Path to the standalone helper run inside the `timer` conda env.
@@ -1726,6 +1831,10 @@ def compute_logp(inst: str, date: str, target: str, options: dict, selected_csvs
         return {"ok": False, "error": err}
 
     err = validate_flare_times(options, csvs)
+    if err:
+        return {"ok": False, "error": err}
+
+    _, err = predict_transit_centers(options, csvs)
     if err:
         return {"ok": False, "error": err}
 
@@ -1869,6 +1978,10 @@ def start_fit(
     if err:
         return {"ok": False, "error": err}
 
+    _, err = predict_transit_centers(options, csvs)
+    if err:
+        return {"ok": False, "error": err}
+
     # Identify this run: site/telescope/mode derived from the selected
     # lightcurves (mixing allowed -> "mixed"), plus the user's run-name label.
     # The run id isolates the working directory so distinct runs never
@@ -1998,7 +2111,8 @@ def start_fit(
         cmd = _fit_command(rdir, run_type)
         log_path = rdir / "timer-fit.log"
         logf = open(log_path, "w")
-        _write_log_banner(logf, cmd, options, narrowband_aliases, covariate_drops(rdir))
+        _write_log_banner(logf, cmd, options, narrowband_aliases, covariate_drops(rdir),
+                          recorded_transit_center_priors(rdir))
         logf.flush()
 
         try:
@@ -3175,6 +3289,9 @@ def sync_jobs() -> None:
                     if selected_csvs is not None:
                         selected = set(str(p) for p in selected_csvs)
                         csvs = [c for c in csvs if str(c) in selected]
+                    _, center_err = predict_transit_centers(opts, csvs)
+                    if center_err:
+                        raise ValueError(center_err)
                     narrowband_aliases = _write_fit_inputs(
                         rdir, inst, date, target, csvs, opts,
                         site=site, telescope=telescope, mode=mode, run_name=run_name, run_id=run_id,
@@ -3193,7 +3310,8 @@ def sync_jobs() -> None:
                 log_path = rdir / "timer-fit.log"
                 try:
                     logf = open(log_path, "w")
-                    _write_log_banner(logf, cmd, opts, narrowband_aliases, covariate_drops(rdir))
+                    _write_log_banner(logf, cmd, opts, narrowband_aliases, covariate_drops(rdir),
+                                      recorded_transit_center_priors(rdir))
                     logf.flush()
                     proc = subprocess.Popen(cmd, cwd=str(rdir), stdout=logf, stderr=subprocess.STDOUT, text=True, start_new_session=True, env={**os.environ, **jobs.core_pinning_env()})
                     try:

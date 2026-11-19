@@ -12,7 +12,7 @@ from playwright.sync_api import expect
 import pytest
 
 from tests.browser.helpers import QueuedJobStore, reveal
-from tests.browser.seed import FIT_RUN_ID
+from tests.browser.seed import FIT_RUN_ID, RUN_ID
 
 
 DATASET = "inst=muscat3&date=261001&target=TOI-1000"
@@ -334,7 +334,6 @@ def test_sampler_and_detrending_options_persist_and_reach_the_fitter(page, fitte
     flags = {
         'spline': True, 'clip': True, 'chunk_offset': True,
         'add_bias': True, 'quadratic': True, 'include_mean': False,
-        'plot_midtransit': False, 'plot_ingress_egress': False,
     }
     for key, checked in flags.items():
         reveal(page, '#opt-' + key)
@@ -456,7 +455,7 @@ def test_flare_rows_default_to_the_data_and_persist_after_reload(page, fitter):
     assert options["include_flare"] == "true"
     assert options["flare_tpeak"] == "2461314.82,0.005; 2461314.90,0.005"
     assert options["flare_fwhm"] == "0.02,0.01; 0.02,0.01"
-    assert options["flare_ampl"] == "0.01,0.01; 0.02,0.01"
+    assert options["flare_ampl"] == "0,10; 0.02,10"
 
 
 def test_flare_outside_the_data_blocks_the_run_until_the_row_is_removed(page, fitter):
@@ -488,8 +487,8 @@ def test_flare_row_added_under_uniform_priors_passes_validation(page, fitter):
     # bounds that bracket them instead.
     expect(_flare_cell(page, 1, "fwhm", "val")).to_have_value("0.0")
     expect(_flare_cell(page, 1, "fwhm", "unc")).to_have_value("0.1")
-    expect(_flare_cell(page, 1, "ampl", "val")).to_have_value("0.0")
-    expect(_flare_cell(page, 1, "ampl", "unc")).to_have_value("0.05")
+    expect(_flare_cell(page, 1, "ampl", "val")).to_have_value("0")
+    expect(_flare_cell(page, 1, "ampl", "unc")).to_have_value("10")
 
     with page.expect_response("**/api/transit-fit/run"):
         page.click("#run-test-btn")
@@ -497,24 +496,24 @@ def test_flare_row_added_under_uniform_priors_passes_validation(page, fitter):
     assert page.locator("#flare-rows .flare-cell.is-invalid").count() == 0
     options = fitter["start"][-1]["options"]
     assert options["flare_fwhm"].endswith("; 0.0,0.1")
-    assert options["flare_ampl"].endswith("; 0.0,0.05")
+    assert options["flare_ampl"] == "0,10; 0,10"
 
 
 def test_flare_prior_shape_converts_every_row(page):
     _ready_to_fit(page)
     _enable_flares(page)
     page.click("#flare-add-btn")
-    _flare_cell(page, 0, "ampl", "val").fill("0.01")
-    _flare_cell(page, 0, "ampl", "unc").fill("0.001")
-    _flare_cell(page, 1, "ampl", "val").fill("0.02")
-    _flare_cell(page, 1, "ampl", "unc").fill("0.002")
-    page.select_option("#opt-flare_ampl_prior", "uniform")
+    _flare_cell(page, 0, "fwhm", "val").fill("0.01")
+    _flare_cell(page, 0, "fwhm", "unc").fill("0.001")
+    _flare_cell(page, 1, "fwhm", "val").fill("0.02")
+    _flare_cell(page, 1, "fwhm", "unc").fill("0.002")
+    page.select_option("#opt-flare_fwhm_prior", "uniform")
     # Gaussian mean,unc becomes the 3-sigma bounds on both rows.
-    expect(_flare_cell(page, 0, "ampl", "val")).to_have_value("0.007")
-    expect(_flare_cell(page, 0, "ampl", "unc")).to_have_value("0.013")
-    expect(_flare_cell(page, 1, "ampl", "val")).to_have_value("0.014")
-    expect(_flare_cell(page, 1, "ampl", "unc")).to_have_value("0.026")
-    assert _flare_cell(page, 1, "ampl", "val").get_attribute("placeholder") == "low"
+    expect(_flare_cell(page, 0, "fwhm", "val")).to_have_value("0.007")
+    expect(_flare_cell(page, 0, "fwhm", "unc")).to_have_value("0.013")
+    expect(_flare_cell(page, 1, "fwhm", "val")).to_have_value("0.014")
+    expect(_flare_cell(page, 1, "fwhm", "unc")).to_have_value("0.026")
+    assert _flare_cell(page, 1, "fwhm", "val").get_attribute("placeholder") == "low"
     # A BJD keeps its precision through the conversion.
     page.select_option("#opt-flare_tpeak_prior", "uniform")
     expect(_flare_cell(page, 0, "tpeak", "val")).to_have_value("2461314.55900")
@@ -624,3 +623,354 @@ def test_fit_run_hidden_from_the_viewer_shows_not_found(page, monkeypatch):
     response = page.goto(f"{URL}&run={FIT_RUN_ID}")
     assert response.status == 404
     expect(page.locator("#run-not-found")).to_contain_text("No runs remain")
+
+
+@pytest.mark.parametrize('toggle', [None, 'chunk_offset', 'include_bump', 'include_flare', 'use_gp', 'spline', 'quadratic', 'clip'])
+def test_default_options_are_accepted_by_timer(page, fitter, tmp_path, monkeypatch, toggle):
+    """Exercise the page defaults, serialize them, and run timer's input reader.
+
+    No optimization or sampling. The real engine test skips off-host, while
+    the page-to-YAML assertions still run in CI.
+    """
+    import subprocess
+    import yaml
+    from muscat_db import transit_fit as fit
+    from tests.browser.seed import LIGHTCURVE
+
+    _ready_to_fit(page)
+    if toggle:
+        reveal(page, '#opt-' + toggle)
+        page.locator('#opt-' + toggle).check()
+    with page.expect_response('**/api/transit-fit/run'):
+        page.click('#run-test-btn')
+    options = fitter['start'][-1]['options']
+    csv = tmp_path / 'TOI-1000_muscat3_gp_261001.csv'
+    csv.write_text(LIGHTCURVE.replace("Flux_err", "Err"))
+    out = tmp_path / 'inputs'
+    out.mkdir()
+    monkeypatch.setattr(fit, '_timer_version', lambda: 'test')
+    fit._write_fit_inputs(out, 'muscat3', '261001', 'TOI-1000', [csv], options)
+    config = yaml.safe_load((out / 'fit.yaml').read_text())
+    assert config['fit_basis'] == 'duration'
+    assert 'secondary_eclipse' not in config
+    assert next(iter(config['data'].values()))['chunk_thresh'] == .02
+    if toggle == 'include_bump':
+        assert 2461314.8 <= config['bump']['tcenter'] <= 2461314.918
+        assert config['bump']['ampl'] == 5
+    if toggle == 'include_flare':
+        assert config['flare']['ampl'] == 5
+    if toggle == 'use_gp':
+        assert config['gp']['log_amp'] == 0
+    timer_python = fit._conda_env_python(fit.timer_conda_env())
+    if not timer_python:
+        pytest.skip('timer environment is not installed; page defaults verified')
+    result = subprocess.run([timer_python, '-c',
+        'from timer.fit import TransitFit; import sys; f = TransitFit.from_dir(sys.argv[1]); assert len(f.data) == 1',
+        str(out)], capture_output=True, text=True, timeout=90)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_fractional_day_trim_reaches_fitter(page, fitter):
+    _ready_to_fit(page)
+    for key in ('trim_beg', 'trim_end'):
+        reveal(page, '#opt-' + key)
+        page.fill('#opt-' + key, '0.005')
+    with page.expect_response('**/api/transit-fit/run'):
+        page.click('#run-test-btn')
+    assert fitter['start'][-1]['options']['trim_beg'] == '0.005'
+
+
+@pytest.mark.parametrize("prior", ["gaussian", "uniform"])
+@pytest.mark.parametrize("stored_center", ["initialized", "blank", "explicit"])
+def test_bump_center_uses_selected_curve_after_reload(page, fitter, live_server, prior, stored_center):
+    """A selected .1–.2 BJD interval owns the center, not the unselected .3–.4."""
+    from tests.browser.seed import RUN_ID
+
+    run = live_server.root / "prose" / "muscat3" / "261001" / "_runs" / "TOI-1000" / RUN_ID
+    paths = [run / name for name in CSVS]
+    originals = [path.read_text() for path in paths]
+    try:
+        for path, times in zip(paths, [(2460000.1, 2460000.2), (2460000.3, 2460000.4)]):
+            path.write_text("BJD_TDB,Flux,Flux_err\n" + "".join(f"{t},1,0.001\n" for t in times))
+        _ready_to_fit(page)
+        # Match the transit ephemeris to the shifted fixture light curves.
+        page.locator('.planet-t0').first.fill('2460000.15,0.01')
+        page.locator('.planet-t0').first.blur()
+        page.click("#deselect-all-csvs")
+        page.locator('.csv-card', has_text=CSVS[0]).locator('.csv-checkbox').check()
+        reveal(page, "#opt-include_bump")
+        page.check("#opt-include_bump")
+        if prior == "uniform":
+            page.select_option("#opt-bump_tcenter_prior", prior)
+            page.fill("#opt-bump_tcenter", "")
+            page.uncheck("#opt-include_bump")
+            page.check("#opt-include_bump")
+        expected = "2460000.100000,2460000.200000" if prior == "uniform" else "2460000.150000,0.1"
+        expect(page.locator("#opt-bump_tcenter")).to_have_value(expected)
+        if stored_center == "blank":
+            page.evaluate("""key => {
+                const saved = JSON.parse(localStorage.getItem(key));
+                saved.bump_tcenter = '';
+                localStorage.setItem(key, JSON.stringify(saved));
+            }""", OPT_KEY)
+        elif stored_center == "explicit":
+            expected = "2460000.12,2460000.18" if prior == "uniform" else "2460000.12,0.02"
+            page.fill("#opt-bump_tcenter", expected)
+        else:
+            assert page.evaluate("key => JSON.parse(localStorage.getItem(key)).bump_tcenter", OPT_KEY) == expected
+        page.reload()
+        expect(page.locator("#csv-count")).to_have_text("1 / 2 selected")
+        expect(page.locator("#opt-bump_tcenter")).to_have_value(expected)
+        with page.expect_response("**/api/transit-fit/run"):
+            page.click("#run-test-btn")
+        assert fitter["start"][-1]["options"]["bump_tcenter"] == expected
+    finally:
+        for path, original in zip(paths, originals):
+            path.write_text(original)
+
+
+@pytest.mark.parametrize("centers,uniform,gaussian", [
+    (None, "2461314.559000,2461315.159000", "2461314.859000,0.100000"),
+    ("2461314.850001,0.001; 2461314.870002,0.002",
+     "2461314.847001,2461314.853001; 2461314.864002,2461314.876002",
+     "2461314.850001,0.001000; 2461314.870002,0.002000"),
+])
+def test_bump_prior_conversion_preserves_bjd_precision(page, fitter, centers, uniform, gaussian):
+    """Three-sigma bounds and their inverse retain six fractional BJD digits."""
+    _ready_to_fit(page)
+    reveal(page, "#opt-include_bump")
+    page.check("#opt-include_bump")
+    if centers is not None:
+        page.fill("#opt-bump_tcenter", centers)
+    else:
+        expect(page.locator("#opt-bump_tcenter")).to_have_value("2461314.859000,0.1")
+    for prior, expected in [("uniform", uniform), ("gaussian", gaussian)]:
+        reveal(page, "#opt-bump_tcenter_prior")
+        page.select_option("#opt-bump_tcenter_prior", prior)
+        expect(page.locator("#opt-bump_tcenter")).to_have_value(expected)
+        page.reload()
+        expect(page.locator("#opt-bump_tcenter_prior")).to_have_value(prior)
+        expect(page.locator("#opt-bump_tcenter")).to_have_value(expected)
+        with page.expect_response("**/api/transit-fit/run"):
+            page.click("#run-test-btn")
+        options = fitter["start"][-1]["options"]
+        assert options["bump_tcenter"] == expected
+        assert options["bump_tcenter_prior"] == prior
+
+
+@pytest.mark.parametrize('custom', [False, True])
+@pytest.mark.parametrize('backup', [False, True])
+def test_saved_gaussian_amplitudes_are_migrated_explicitly(page, custom, backup):
+    _ready_to_fit(page)
+    page.evaluate("""({key, custom}) => {
+        const saved = JSON.parse(localStorage.getItem(key)) || {};
+        delete saved.amplitude_defaults_version;
+        saved.bump_ampl = custom ? '3,1' : '0.01,0.01';
+        saved.flare_ampl = custom ? '4,2' : '0.01,0.01';
+        saved.bump_ampl_prior = saved.flare_ampl_prior = 'gaussian';
+        saved.gp_log_amp = '-3'; saved.gp_log_amp_unc = '2';
+        localStorage.setItem(key, JSON.stringify(saved));
+    }""", {'key': 'muscat_fit_options_backup' if backup else OPT_KEY, 'custom': custom})
+    if backup:
+        reveal(page, '#restore-btn')
+        page.click('#restore-btn')
+        page.click('#message-modal-ok')
+    else:
+        page.reload()
+    reveal(page, '#opt-include_flare')
+    expect(page.locator('#amplitude-migration-notice')).to_be_visible()
+    expect(page.locator('#opt-bump_ampl')).to_have_value(',' if custom else '0,10')
+    expect(page.locator('#opt-bump_ampl_prior')).to_have_value('uniform')
+    expect(page.locator('#opt-flare_ampl_prior')).to_have_value('uniform')
+    expect(_flare_cell(page, 0, 'ampl', 'val')).to_have_value('' if custom else '0')
+    expect(_flare_cell(page, 0, 'ampl', 'unc')).to_have_value('' if custom else '10')
+    expect(page.locator('#opt-gp_log_amp')).to_have_value('0,2')
+
+    page.reload()
+    expect(page.locator('#amplitude-migration-notice')).to_have_count(0)
+    expect(page.locator('#opt-bump_ampl')).to_have_value(',' if custom else '0,10')
+    expect(page.locator('#opt-gp_log_amp')).to_have_value('0,2')
+
+
+@pytest.mark.parametrize("model,param,gaussian,uniform", [
+    ("bump", "tcenter", ("2461314.850001", "0.001000"),
+     ("2461314.847001", "2461314.853001")),
+    ("bump", "width", ("0.02", "0.001"), ("0.017", "0.023")),
+    ("flare", "tpeak", ("2461314.85001", "0.00100"),
+     ("2461314.84701", "2461314.85301")),
+    ("flare", "fwhm", ("0.02", "0.001"), ("0.017", "0.023")),
+])
+@pytest.mark.parametrize("saved_mode", ["gaussian", "uniform"])
+def test_backup_restore_then_prior_switch_converts_values(
+    page, model, param, gaussian, uniform, saved_mode
+):
+    """Restored priors convert using three-sigma bounds and their inverse."""
+    _ready_to_fit(page)
+    reveal(page, f"#opt-include_{model}")
+    page.check(f"#opt-include_{model}")
+    selector = f"#opt-{model}_{param}_prior"
+    page.select_option(selector, saved_mode)
+    saved_pair = gaussian if saved_mode == "gaussian" else uniform
+    next_mode = "uniform" if saved_mode == "gaussian" else "gaussian"
+    expected_pair = uniform if next_mode == "uniform" else gaussian
+    if model == "bump":
+        fields = [page.locator(f"#opt-bump_{param}")]
+        fields[0].fill(",".join(saved_pair))
+        page.fill("#opt-bump_ampl", "2,8")
+    else:
+        fields = [_flare_cell(page, 0, param, which) for which in ("val", "unc")]
+        for field, value in zip(fields, saved_pair):
+            field.fill(value)
+        _flare_cell(page, 0, "ampl", "val").fill("2")
+        _flare_cell(page, 0, "ampl", "unc").fill("8")
+    reveal(page, "#save-btn")
+    page.click("#save-btn")
+    page.click("#message-modal-ok")
+    page.select_option(selector, next_mode)
+    page.click("#restore-btn")
+    page.click("#message-modal-ok")
+    expect(page.locator(selector)).to_have_value(saved_mode)
+    page.select_option(selector, next_mode)
+    actual = fields[0].input_value().split(",") if model == "bump" else [
+        field.input_value() for field in fields
+    ]
+    assert [float(value) for value in actual] == pytest.approx(
+        [float(value) for value in expected_pair], rel=0, abs=1e-8
+    )
+    if model == "bump":
+        expect(page.locator("#opt-bump_ampl")).to_have_value("2,8")
+    else:
+        expect(_flare_cell(page, 0, "ampl", "val")).to_have_value("2")
+        expect(_flare_cell(page, 0, "ampl", "unc")).to_have_value("8")
+
+
+def test_archive_predicts_transit_center(page):
+    page.goto(URL)
+    _query_toi_catalog(page)
+    center = page.locator('.planet-tc_pred').first
+    assert float(center.input_value()) == pytest.approx(2461314.86, rel=0, abs=1e-6)
+    # Manual overrides survive subsequent ephemeris changes.
+    center.fill('2461314.87')
+    page.locator('.planet-period').first.fill('2.2,0.01')
+    page.locator('.planet-period').first.blur()
+    assert center.input_value() == '2461314.87'
+
+
+@pytest.mark.parametrize("added_planet", [False, True])
+def test_transit_center_hint_explains_automatic_prediction(page, added_planet):
+    """Visible guidance must describe the ephemeris-based blank-center default."""
+    page.goto(URL)
+    if added_planet:
+        reveal(page, '#add-planet-btn')
+        page.click('#add-planet-btn')
+    reveal(page, '.planet-tc_pred')
+    field = page.locator('.planet-card').last.locator('.opt').filter(
+        has=page.locator('.planet-tc_pred')
+    )
+    # Timer's Uniform prior uses a full width, not a Gaussian uncertainty.
+    expect(field.get_by_role('spinbutton', name='Predicted transit center in BJD')).to_be_visible()
+    expect(field.get_by_role('spinbutton', name='Uniform prior full width in days')).to_be_visible()
+    expect(field.locator('label')).to_contain_text('Transit-center prior')
+    expect(field.get_by_role('button', name='Help')).to_have_accessible_description(
+        'timer samples t0 from a Uniform prior. The first value is its predicted center (BJD); '
+        'the second is its full width in days, not a Gaussian uncertainty. '
+        'The bounds are center minus/plus half the full width.',
+    )
+    expect(field.locator('.hint').first).to_have_text('full width')
+    expect(field.locator('.hint').last).to_have_text(
+        'Blank center: predicted from epoch and period. Blank full width: 0.04 d.'
+    )
+
+
+def _shift_epoch(page, days: float) -> None:
+    t0 = page.locator('.planet-t0').first
+    mean, unc = t0.input_value().split(',')
+    t0.fill(f'{float(mean) + days:.6f},{unc}')
+    t0.blur()
+
+
+def test_reloaded_automatic_center_follows_the_ephemeris(page):
+    page.goto(URL)
+    _query_toi_catalog(page)
+    center = page.locator('.planet-tc_pred').first
+    before = float(center.input_value())
+    page.reload()
+    # Moving the reference epoch by 0.01 d moves epoch + N x period by 0.01 d.
+    _shift_epoch(page, 0.01)
+    assert float(center.input_value()) == pytest.approx(before + 0.01, rel=0, abs=1e-6)
+
+
+def test_card_archive_query_replaces_a_stale_center(page):
+    page.goto(URL)
+    _query_toi_catalog(page)
+    center = page.locator('.planet-tc_pred').first
+    expected = center.input_value()
+    center.fill('2461300')
+    page.locator('.planet-query-target').first.fill('TOI-1000.01')
+    page.locator('.planet-source-select').first.select_option('toi')
+    with page.expect_response("**/api/transit-fit/query-archive**"):
+        page.locator('.planet-query-btn').first.click()
+    page.click('#message-modal-ok')
+    assert center.input_value() == expected
+
+
+def test_outside_transit_warns_before_launch(page, fitter):
+    page.goto(URL)
+    _query_toi_catalog(page)
+    _complete_priors(page)
+    page.locator('.planet-tc_pred').first.fill('2461315.5')
+    page.click('#run-test-btn')
+    expect(page.locator('#message-modal-text')).to_contain_text('No predicted transit center')
+    page.click('#message-modal-cancel')
+    assert fitter['start'] == []
+
+
+    page.click('#run-test-btn')
+    with page.expect_response("**/api/transit-fit/run"):
+        page.click('#message-modal-ok')
+    assert len(fitter['start']) == 1
+
+
+@pytest.fixture
+def distinct_csv_spans(live_server):
+    run = live_server.root / "prose" / "muscat3" / "261001" / "_runs" / "TOI-1000" / RUN_ID
+    originals = {}
+    for name, times in zip(CSVS, ((2460000, 2460000.05), (2460000.25, 2460000.3))):
+        path = run / name
+        originals[path] = path.read_bytes()
+        path.write_text("BJD_TDB,Flux,Flux_err\n" + "".join(f"{t},1,0.001\n" for t in times))
+    yield
+    for path, content in originals.items():
+        path.write_bytes(content)
+
+
+@pytest.mark.parametrize("action", ["card", "checkbox", "select_all", "deselect_all", "reload"])
+def test_csv_selection_updates_automatic_centers(page, distinct_csv_spans, action):
+    """Transits at .1 and .3: the full span selects .1; the late CSV selects .3."""
+    page.goto(URL)
+    reveal(page, "#add-planet-btn")
+    page.click("#add-planet-btn")
+    for card in page.locator('.planet-card').all():
+        card.locator('.planet-t0').fill('2460000.1,0.001')
+        card.locator('.planet-period').fill('0.2,0.001')
+        card.locator('.planet-period').blur()
+    centers = page.locator('.planet-tc_pred')
+    expect(centers.first).to_have_value('2460000.100000')
+    centers.nth(1).fill('2460000.27')
+    centers.nth(1).blur()
+
+    if action in ('select_all', 'deselect_all', 'reload'):
+        page.locator('.csv-checkbox').first.uncheck()
+        expect(centers.first).to_have_value('2460000.300000')
+    if action == 'card':
+        page.locator('.csv-card').first.click()
+    elif action == 'checkbox':
+        page.locator('.csv-checkbox').first.uncheck()
+    elif action == 'reload':
+        page.reload()
+    else:
+        page.click('#' + action.replace('_', '-') + '-csvs')
+
+    expected = '2460000.100000' if action in ('select_all', 'deselect_all') else '2460000.300000'
+    expect(centers.first).to_have_value(expected)
+    expect(centers.nth(1)).to_have_value('2460000.27')

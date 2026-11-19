@@ -53,7 +53,7 @@ def test_transit_fit_refuses_full_run_when_disabled(monkeypatch):
 
     result = transit_fit.start_fit(
         "muscat3", "260720", "TOI-123",
-        options={"run_mode": "new"}, selected_csvs=None, test_run=False,
+        options={"run_mode": "new", "tc_pred": "2460000.5"}, selected_csvs=None, test_run=False,
     )
     assert result["ok"] is False
     assert "MUSCAT_MAX_FULL_JOBS=0" in result["error"]

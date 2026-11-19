@@ -666,7 +666,7 @@ Every current page/route → its home in the redesign. **Core** pages work on `[
 | ObsLog → dates → CCD → frames | `/obs`, `/{inst}[/{date}[/ccd{n}]]` | `pages.py` | `[web]` |
 | Target page (aliases, TIC, HARPS/JWST/spectra, ADS) | `/target` + `/api/targets/*` + `/api/ads/*` | `routers/target.py` + `web/resolve.py` | `[web]` |
 | Photometry (run/status/cancel/delete/download) | `/photometry` + `/api/photometry/*` | `routers/photometry.py` + `pipelines/prose.py` + `JobRunner` | `[web]` |
-| Transit fit (new/continue/secondary eclipse) | `/transit-fit` + `/api/transit-fit/*` | `routers/transit_fit.py` + `pipelines/timer.py` | `[web]` |
+| Transit fit (new/continue) | `/transit-fit` + `/api/transit-fit/*` | `routers/transit_fit.py` + `pipelines/timer.py` | `[web]` |
 | Ephemeris O-C + provenance + export | `/ephemeris` + `/api/ephemeris/*` | `routers/ephemeris.py` + `web/ephemeris_math.py` | `[web]` |
 | TTV fit (harmonic) | `/api/ttv-fit/*` | `routers/ephemeris.py` + `pipelines/harmonic.py` | `[web]` |
 | Jobs (history, live log, rerun) | `/jobs` + `/api/jobs/*` | `routers/jobs.py` + `core/jobs/*` | `[web]` |

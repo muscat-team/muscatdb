@@ -21,6 +21,7 @@ as that string in a response.
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import time
@@ -148,6 +149,7 @@ def _save_job(type_: str, date: str, target: str, *, inst: str = INST, state: st
         returncode=0 if state == "done" else None, elapsed=1, started_at=time.time(),
         run_id=RUN if type_ != "lco_archive_download" else "job-1",
         run_name=RUN, run_type="full",
+        params=json.dumps({"options": {"tc_pred": "2460000.5"}}) if type_ == "transit_fit" else "",
     )
 
 

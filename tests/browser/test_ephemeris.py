@@ -75,3 +75,32 @@ def test_loaded_target_and_transit_centers_survive_a_reload(page):
     tc = page.locator("#datasets-body tr.manual-row .manual-tc")
     expect(tc).to_have_count(1)
     assert float(tc.input_value()) == pytest.approx(T0 + EPOCHS[0] * PERIOD, abs=1e-5)
+
+
+def test_linear_fit_reports_scatter_instead_of_convergence(page):
+    _load_toi1000(page)
+    for epoch, offset in [(0, .001), (1, -.002), (2, .001)]:
+        with page.expect_response('**/api/ephemeris/calculate'):
+            _add_transit_center(page, T0 + epoch * PERIOD + offset)
+    expect(page.locator('#results-grid')).to_contain_text('reduced χ²')
+    expect(page.locator('#results-grid')).to_contain_text('3 points')
+    expect(page.locator('#results-grid')).to_contain_text('Heuristic caution')
+    expect(page.locator('#results-grid')).not_to_contain_text('underestimate')
+    expect(page.locator('#results-grid')).not_to_contain_text('converged successfully')
+
+
+def test_ttv_initial_pairs_follow_periods(page):
+    from tests.browser.helpers import reveal
+    _load_toi1000(page)
+    for _ in range(3):
+        page.click('#add-planet-btn')
+    for planet, period in [('b', '24.14'), ('c', '8.25'), ('d', '12.4'), ('e', '45')]:
+        page.fill('#planet-t0-' + planet, str(T0))
+        page.fill('#planet-period-' + planet, period)
+        page.locator('#planet-period-' + planet).blur()
+    # V1298 Tau periods: c (8.25 d) < d (12.4) < b (24.14) < e (45), so pairs run c-d, d-b, b-e.
+    reveal(page, '#opt-planet_letters')
+    expect(page.locator('#opt-planet_letters')).to_have_value('cdbe')
+    ini = page.input_value('#opt-ini_content')
+    assert 'a_cd =' in ini and 'a_db =' in ini and 'a_be =' in ini
+    assert 'a_bc =' not in ini

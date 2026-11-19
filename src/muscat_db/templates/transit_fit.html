@@ -609,21 +609,21 @@
             <input type="number" id="opt-clip_nsig" value="7" min="1" step="0.5" style="width: 100%;" disabled>
           </div>
           <div class="opt">
-            <label for="opt-chunk_thresh">Chunk thresh <span class="help-tooltip" title="Time gap (days) that separates data into chunks for Chunk offset. Default 0.">?</span></label>
-            <input type="number" id="opt-chunk_thresh" value="0" min="0" step="0.01" style="width: 100%;" disabled>
+            <label for="opt-chunk_thresh">Chunk thresh <span class="help-tooltip" title="Time gap (days) that separates data into chunks for Chunk offset. Default 0.02 d.">?</span></label>
+            <input type="number" id="opt-chunk_thresh" value="0.02" min="0.000001" step="0.01" style="width: 100%;" disabled>
           </div>
           <div class="opt">
-            <label for="opt-trim_beg">Trim begin <span class="help-tooltip" title="Number of data points to trim from the start of each light curve. Empty = none.">?</span></label>
-            <input type="number" id="opt-trim_beg" placeholder="none" min="0" step="1" style="width: 100%;">
+            <label for="opt-trim_beg">Trim begin (days) <span class="help-tooltip" title="Time in days to trim from the start of each light curve. Empty = none.">?</span></label>
+            <input type="number" id="opt-trim_beg" placeholder="none" min="0" step="any" style="width: 100%;">
           </div>
           <div class="opt">
-            <label for="opt-trim_end">Trim end <span class="help-tooltip" title="Number of data points to trim from the end of each light curve. Empty = none.">?</span></label>
-            <input type="number" id="opt-trim_end" placeholder="none" min="0" step="1" style="width: 100%;">
+            <label for="opt-trim_end">Trim end (days) <span class="help-tooltip" title="Time in days to trim from the end of each light curve. Empty = none.">?</span></label>
+            <input type="number" id="opt-trim_end" placeholder="none" min="0" step="any" style="width: 100%;">
           </div>
         </div>
         </details>
         <details class="opt-collapse">
-        <summary>Gaussian Process (GP) <span class="help-tooltip" title="Model time-correlated (red) noise with a per-light-curve celerite2 Matern-3/2 kernel. Hyperparameters are in log10 space: amplitude sigma = 10^log_amp (flux units), timescale rho = 10^log_scale (days). The gp block is only written to fit.yaml when Use GP is on.">?</span></summary>
+        <summary>Gaussian Process (GP) <span class="help-tooltip" title="Model time-correlated (red) noise with a per-light-curve celerite2 Matern-3/2 kernel. Hyperparameters are in log10 space: amplitude sigma = 10^log_amp (ppt), timescale rho = 10^log_scale (days). The gp block is only written to fit.yaml when Use GP is on.">?</span></summary>
         <div style="grid-column: 1 / -1; display: flex; gap: 1.25rem; flex-wrap: wrap; align-items: flex-end; padding-bottom: 0.45rem;">
           <div class="opt check" style="margin-top: 0; white-space: nowrap;">
             <input type="checkbox" id="opt-use_gp">
@@ -640,9 +640,9 @@
         </div>
         <div class="transit-option-grid" style="grid-column: 1 / -1; display: grid; grid-template-columns: repeat(2, 1fr); gap: 1.25rem;">
           <div class="opt">
-            <label for="opt-gp_log_amp">log_amp prior <span class="help-tooltip" title="Prior on log10 of the GP amplitude sigma (flux units). Gaussian: enter mean,uncertainty. Uniform: enter low,high bounds. Default -3,2 Gaussian.">?</span></label>
+            <label for="opt-gp_log_amp">log_amp prior <span class="help-tooltip" title="Prior on log10 of the GP amplitude sigma (ppt). Gaussian: enter mean,uncertainty. Uniform: enter low,high bounds. Default 0,2 Gaussian (1 ppt amplitude).">?</span></label>
             <div style="display: flex; gap: 0.5rem; align-items: center;">
-              <input type="text" id="opt-gp_log_amp" value="-3,2" placeholder="mean,unc" style="flex: 3; width: 100%; min-width: 0;" disabled>
+              <input type="text" id="opt-gp_log_amp" value="0,2" placeholder="mean,unc" style="flex: 3; width: 100%; min-width: 0;" disabled>
               <select id="opt-gp_log_amp_prior" title="Prior shape — Gaussian: enter mean,uncertainty. Uniform: enter low,high bounds." style="flex: 2; width: 100%; min-width: 0; background: var(--input-bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 0.35rem 0.5rem; font-size: 0.85rem;" disabled>
                 <option value="gaussian">Gaussian</option>
                 <option value="uniform">Uniform</option>
@@ -678,7 +678,7 @@
           <div class="opt">
             <label for="opt-bump_tcenter">tcenter prior <span class="help-tooltip" title="Prior on center time of the bump (BJD_TDB). Gaussian: enter value,unc. Uniform: enter low,high bounds. Use ; to separate multiple bumps.">?</span></label>
             <div style="display: flex; gap: 0.5rem; align-items: center;">
-              <input type="text" id="opt-bump_tcenter" value="0.0,0.1" placeholder="value,unc" style="flex: 3; width: 100%; min-width: 0;" disabled>
+              <input type="text" id="opt-bump_tcenter" value="" placeholder="value,unc" style="flex: 3; width: 100%; min-width: 0;" disabled>
               <select id="opt-bump_tcenter_prior" title="Prior shape — Gaussian: enter value,unc. Uniform: enter low,high bounds." style="flex: 2; width: 100%; min-width: 0; background: var(--input-bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 0.35rem 0.5rem; font-size: 0.85rem;" disabled>
                 <option value="gaussian">Gaussian</option>
                 <option value="uniform">Uniform</option>
@@ -696,11 +696,10 @@
             </div>
           </div>
           <div class="opt">
-            <label for="opt-bump_ampl">ampl prior <span class="help-tooltip" title="Prior on amplitude of the bump (flux units). Gaussian: enter value,unc. Uniform: enter low,high bounds. Use ; to separate multiple bumps.">?</span></label>
+            <label for="opt-bump_ampl">ampl prior <span class="help-tooltip" title="Prior on amplitude of the bump (ppt). Uniform only: enter nonnegative low,high bounds. Use ; to separate multiple bumps.">?</span></label>
             <div style="display: flex; gap: 0.5rem; align-items: center;">
-              <input type="text" id="opt-bump_ampl" value="0.01,0.01" placeholder="value,unc" style="flex: 3; width: 100%; min-width: 0;" disabled>
-              <select id="opt-bump_ampl_prior" title="Prior shape — Gaussian: enter value,unc. Uniform: enter low,high bounds." style="flex: 2; width: 100%; min-width: 0; background: var(--input-bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 0.35rem 0.5rem; font-size: 0.85rem;" disabled>
-                <option value="gaussian">Gaussian</option>
+              <input type="text" id="opt-bump_ampl" value="0,10" placeholder="low,high" style="flex: 3; width: 100%; min-width: 0;" disabled>
+              <select id="opt-bump_ampl_prior" title="Uniform: enter nonnegative low,high bounds in ppt." style="flex: 2; width: 100%; min-width: 0; background: var(--input-bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 0.35rem 0.5rem; font-size: 0.85rem;" disabled>
                 <option value="uniform">Uniform</option>
               </select>
             </div>
@@ -737,9 +736,8 @@
                     <option value="uniform">Uniform</option>
                   </select>
                 </th>
-                <th>ampl <span class="help-tooltip" title="Amplitude of the flare (relative flux). Gaussian: value,unc. Uniform: low,high bounds.">?</span>
+                <th>ampl <span class="help-tooltip" title="Amplitude of the flare (ppt). Uniform only: nonnegative low,high bounds.">?</span>
                   <select id="opt-flare_ampl_prior" title="Prior shape for every flare's ampl" disabled>
-                    <option value="gaussian">Gaussian</option>
                     <option value="uniform">Uniform</option>
                   </select>
                 </th>
@@ -781,18 +779,13 @@
             <input type="checkbox" id="opt-use_custom_optimizer" checked>
             <label for="opt-use_custom_optimizer">Custom optimizer <span class="help-tooltip" title="Use timer's custom MAP optimizer instead of PyMC's default for the initial solution. Default on.">?</span></label>
           </div>
-          <div class="opt check" style="margin-top: 0; white-space: nowrap;">
-            <input type="checkbox" id="opt-secondary_eclipse">
-            <label for="opt-secondary_eclipse">Secondary eclipse <span class="help-tooltip" title="Fit a secondary eclipse (at phase 0.5) instead of a primary transit. Default off.">?</span></label>
-          </div>
           <div style="margin-top: 0; display: inline-flex; align-items: center; gap: 0.45rem; white-space: nowrap;">
             <label for="opt-fit_basis" style="margin: 0; font-size: 0.85rem; color: var(--text); display: inline-flex; align-items: center; gap: 0.25rem;">
               Fit basis
-              <span class="help-tooltip" title="Basis parameterization for PyMC transit model: standard (semi-major axis scale a/R* etc.) or duration (transit duration).">?</span>
+              <span class="help-tooltip" title="Basis parameterization for PyMC transit model: duration (transit duration).">?</span>
             </label>
             <select id="opt-fit_basis" style="background: var(--input-bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 0.15rem 0.4rem; font-size: 0.8rem; margin: 0; height: 24px; box-sizing: border-box; line-height: 1; cursor: pointer;">
               <option value="duration" selected>duration</option>
-              <option value="standard">standard</option>
             </select>
           </div>
           <div style="margin-top: 0; display: inline-flex; align-items: center; gap: 0.45rem; white-space: nowrap;">
@@ -807,16 +800,6 @@
           </div>
         </div>
 
-        <div class="fit-option-row" style="grid-column: 1 / -1; display: flex; gap: 1.25rem; flex-wrap: nowrap; align-items: flex-end; padding-bottom: 0.45rem;">
-          <div class="opt check" style="margin-top: 0; white-space: nowrap;">
-            <input type="checkbox" id="opt-plot_midtransit" checked>
-            <label for="opt-plot_midtransit">Plot midtransit <span class="help-tooltip" title="Plot a solid vertical line at the nearest midtransit time on data.png.">?</span></label>
-          </div>
-          <div class="opt check" style="margin-top: 0; white-space: nowrap;">
-            <input type="checkbox" id="opt-plot_ingress_egress" checked>
-            <label for="opt-plot_ingress_egress">Plot ing/egr <span class="help-tooltip" title="Plot dashed vertical lines at ingress and egress times on data.png.">?</span></label>
-          </div>
-        </div>
       </div>
     </details>
 
@@ -1063,6 +1046,7 @@
   }
 
   function collectOptions() {
+    updateTransitCenters();
     var fixed = [];
     document.querySelectorAll('input[name="fixed-params"]:checked').forEach(function (c) { fixed.push(c.value); });
 
@@ -1093,7 +1077,8 @@
       planetData['t0_unc_' + letter] = t0Pair[1];
       planetData['dur_' + letter] = hoursToDays(durPair[0]);
       planetData['dur_unc_' + letter] = hoursToDays(durPair[1]);
-      planetData['tc_pred_' + letter] = card.querySelector('.planet-tc_pred').value;
+      var tcPredEl = card.querySelector('.planet-tc_pred');
+      planetData['tc_pred_' + letter] = tcPredEl.value === tcPredEl.dataset.predicted ? '' : tcPredEl.value;
       planetData['tc_pred_unc_' + letter] = card.querySelector('.planet-tc_pred-unc').value;
       planetData['ror_' + letter] = rorPair[0];
       planetData['ror_unc_' + letter] = rorPair[1];
@@ -1116,6 +1101,7 @@
     var gpLogAmpPair = splitPair(val('opt-gp_log_amp'));
     var gpLogScalePair = splitPair(val('opt-gp_log_scale'));
     var opts = {
+      amplitude_defaults_version: '1',
       planets: planetsListStr,
       run_name: val('opt-run_name'),
       chromatic: chk('opt-chromatic') ? 'true' : 'false',
@@ -1123,15 +1109,12 @@
       trend: chk('opt-trend') ? 'true' : 'false',
       covariates: getCovariates(),
       run_mode: document.getElementById('run-mode-select')?.value || 'new',
-      plot_midtransit: chk('opt-plot_midtransit') ? 'true' : 'false',
-      plot_ingress_egress: chk('opt-plot_ingress_egress') ? 'true' : 'false',
       tune: val('opt-tune'),
       draws: val('opt-draws'),
       chains: val('opt-chains'),
       cores: val('opt-cores'),
       include_mean: chk('opt-include_mean') ? 'true' : 'false',
       use_custom_optimizer: chk('opt-use_custom_optimizer') ? 'true' : 'false',
-      secondary_eclipse: chk('opt-secondary_eclipse') ? 'true' : 'false',
       spline: chk('opt-spline') ? 'true' : 'false',
       spline_knots: val('opt-spline_knots'),
       add_bias: chk('opt-add_bias') ? 'true' : 'false',
@@ -1567,7 +1550,7 @@
           priorField('planet-period', cmb_period, val_period_prior) +
         '</div>' +
         '<div class="opt">' +
-          '<label for="planet-t0-' + uid + '">Epoch t0 (BJD) <span class="help-tooltip" title="Reference epoch entered as mean,uncertainty (BJD). timer fits the transit centre with a uniform prior centred on tc_pred (this value is the fallback when tc_pred is blank), full width tc_pred_unc (default 0.04 d).">?</span></label>' +
+          '<label for="planet-t0-' + uid + '">Epoch t0 (BJD) <span class="help-tooltip" title="Reference epoch entered as mean,uncertainty (BJD). timer fits the transit centre with a uniform prior centred on tc_pred (predicted from this reference epoch and the period at the middle of the selected data when no explicit center is entered), full width tc_pred_unc (default 0.04 d).">?</span></label>' +
           plainPairField('planet-t0', cmb_t0, 'mean,unc') +
         '</div>' +
         '<div class="opt">' +
@@ -1586,11 +1569,11 @@
         '<div class="opt">' +
           '<label for="planet-tc_pred-' + uid + '">Transit-center prior <span class="help-tooltip" tabindex="0" title="timer samples t0 from a Uniform prior. The first value is its predicted center (BJD); the second is its full width in days, not a Gaussian uncertainty. The bounds are center minus/plus half the full width.">?</span></label>' +
           '<div style="display: flex; gap: 0.5rem; align-items: center;">' +
-            '<input id="planet-tc_pred-' + uid + '" type="number" class="planet-tc_pred" value="' + val_tc_pred + '" aria-label="Predicted transit center in BJD" placeholder="center / auto" step="0.00001" style="flex: 3; width: 100%; min-width: 0;">' +
+            '<input id="planet-tc_pred-' + uid + '" type="number" class="planet-tc_pred" value="' + val_tc_pred + '" aria-label="Predicted transit center in BJD" placeholder="epoch + N × period" step="0.00001" style="flex: 3; width: 100%; min-width: 0;">' +
             '<span class="hint" aria-hidden="true" style="white-space: nowrap;">full width</span>' +
             '<input id="planet-tc_pred-width-' + uid + '" type="number" class="planet-tc_pred-unc" value="' + val_tc_pred_unc + '" aria-label="Uniform prior full width in days" placeholder="0.04 d" step="0.001" style="flex: 2; width: 100%; min-width: 0;">' +
           '</div>' +
-          '<span class="hint">Uniform prior: center, full width (days); blank values use dataset mean and 0.04 d.</span>' +
+          '<span class="hint">Blank center: predicted from epoch and period. Blank full width: 0.04 d.</span>' +
         '</div>' +
       '</div>';
 
@@ -1682,6 +1665,9 @@
             return bs === '' ? as : as + ',' + bs;
           }
           resetAllPlanetPriorsToGaussian(card);
+          var cardTcEl = card.querySelector('.planet-tc_pred');
+          cardTcEl.value = '';
+          delete cardTcEl.dataset.predicted;
           card.querySelector('.planet-period').value = joinPair(params.period, params.period_unc, SIG_FIGS.period);
           card.querySelector('.planet-t0').value = joinDp(params.t0, params.t0_unc, T0_DECIMALS);
           card.querySelector('.planet-dur').value = joinPair(params.dur, params.dur_unc, SIG_FIGS.dur);
@@ -1711,6 +1697,7 @@
             syncPlanetsInput();
           }
 
+          updateTransitCenters();
           validatePlanetCard(card);
           saveOptions();
           window.showMessageModal('Success', 'Successfully loaded parameters for ' + data.pl_name + ' from ' + sourceLabel + '.', 'success');
@@ -1785,8 +1772,44 @@
     }
   }
 
+  function migrateAmplitudeOptions(saved) {
+    if (saved && saved.amplitude_defaults_version !== '1') {
+      var changed = false;
+      ['bump', 'flare'].forEach(function (model) {
+        var key = model + '_ampl';
+        if (saved[key + '_prior'] !== 'uniform') {
+          // Obsolete Gaussian pairs cannot be interpreted as Uniform bounds.
+          // Clear custom pairs for the user to replace, without guessing bounds.
+          var pairs = String(saved[key] || '').split(';');
+          saved[key] = pairs.map(function (pair) {
+            var nums = pair.split(',').map(Number);
+            return (!pair.trim() || (nums[0] === 0.01 && nums[1] === 0.01) ||
+                    (nums[0] === 10 && nums[1] === 10)) ? '0,10' : ',';
+          }).join('; ');
+          saved[key + '_prior'] = 'uniform';
+          changed = true;
+        }
+      });
+      if ((!saved.gp_log_amp_prior || saved.gp_log_amp_prior === 'gaussian') &&
+          Number(saved.gp_log_amp) === -3 && Number(saved.gp_log_amp_unc) === 2) {
+        saved.gp_log_amp = '0';
+        changed = true;
+      }
+      saved.amplitude_defaults_version = '1';
+      if (changed) {
+        var notice = document.getElementById('amplitude-migration-notice') || document.createElement('p');
+        notice.id = 'amplitude-migration-notice';
+        notice.textContent = 'Saved amplitude settings updated: bump and flare amplitudes now require nonnegative Uniform bounds in ppt (default 0–10). Custom Gaussian amplitudes were cleared; enter new bounds before fitting. The old GP amplitude default is now 0,2.';
+        document.getElementById('flare-rows-wrap').before(notice);
+      }
+    }
+
+    return saved;
+  }
+
   function restoreOptions() {
-    var saved = MuscatOptions.restore(OPT_KEY);
+    var saved = migrateAmplitudeOptions(MuscatOptions.restore(OPT_KEY));
+    if (saved) MuscatStorage.setJSON(OPT_KEY, saved);
 
     var container = document.getElementById('planet-cards-container');
     if (container) container.innerHTML = '';
@@ -1824,11 +1847,10 @@
       }
     });
 
-    ['include_mean','use_custom_optimizer','secondary_eclipse','spline','add_bias','quadratic','clip','chunk_offset',
+    ['include_mean','use_custom_optimizer','spline','add_bias','quadratic','clip','chunk_offset',
      'use_gp','gp_per_dataset_log_amp','gp_per_dataset_log_scale',
      'include_bump','chromatic_bump',
-     'include_flare','chromatic_flare',
-     'plot_midtransit','plot_ingress_egress'].forEach(function (id) {
+     'include_flare','chromatic_flare'].forEach(function (id) {
       var el = document.getElementById('opt-'+id);
       if (el && saved[id] !== undefined) el.checked = saved[id] === 'true';
     });
@@ -1905,24 +1927,23 @@
       if (selectEl) selectEl.value = 'new';
 
       var numDefaults = {'opt-tune':'2000','opt-draws':'2000','opt-chains':'4','opt-cores':'4',
-                         'opt-spline_knots':'5','opt-clip_nsig':'7','opt-chunk_thresh':'0','opt-trim_beg':'','opt-trim_end':'',
-                         'opt-gp_log_amp':'-3,2','opt-gp_log_amp_prior':'gaussian',
+                         'opt-spline_knots':'5','opt-clip_nsig':'7','opt-chunk_thresh':'0.02','opt-trim_beg':'','opt-trim_end':'',
+                         'opt-gp_log_amp':'0,2','opt-gp_log_amp_prior':'gaussian',
                          'opt-gp_log_scale':'-1,2','opt-gp_log_scale_prior':'gaussian',
-                         'opt-bump_tcenter':'0.0,0.1','opt-bump_tcenter_prior':'gaussian',
+                         'opt-bump_tcenter':'','opt-bump_tcenter_prior':'gaussian',
                          'opt-bump_width':'0.02,0.01','opt-bump_width_prior':'gaussian',
-                         'opt-bump_ampl':'0.01,0.01','opt-bump_ampl_prior':'gaussian',
+                         'opt-bump_ampl':'0,10','opt-bump_ampl_prior':'uniform',
                          'opt-flare_tpeak_prior':'gaussian',
                          'opt-flare_fwhm_prior':'gaussian',
-                         'opt-flare_ampl_prior':'gaussian',
+                         'opt-flare_ampl_prior':'uniform',
                          'opt-fit_basis':'duration'};
       Object.keys(numDefaults).forEach(function (id) { var el = document.getElementById(id); if (el) el.value = numDefaults[id]; });
 
-      var checkDefaults = {'opt-include_mean':true,'opt-use_custom_optimizer':true,'opt-secondary_eclipse':false,'opt-spline':false,
+      var checkDefaults = {'opt-include_mean':true,'opt-use_custom_optimizer':true,'opt-spline':false,
                            'opt-add_bias':false,'opt-quadratic':false,'opt-clip':false,'opt-chunk_offset':false,
                            'opt-use_gp':false,'opt-gp_per_dataset_log_amp':false,'opt-gp_per_dataset_log_scale':false,
                            'opt-include_bump':false,'opt-chromatic_bump':false,
-                           'opt-include_flare':false,'opt-chromatic_flare':false,
-                           'opt-plot_midtransit':true,'opt-plot_ingress_egress':true};
+                           'opt-include_flare':false,'opt-chromatic_flare':false};
       Object.keys(checkDefaults).forEach(function (id) { var el = document.getElementById(id); if (el) el.checked = checkDefaults[id]; });
       setCovariates(undefined);
       refreshGpPriorControls();
@@ -1966,12 +1987,17 @@
       var backup;
       backup = MuscatStorage.getJSON(BACKUP_KEY, null);
       if (backup) {
+        migrateAmplitudeOptions(backup);
+        MuscatStorage.setJSON(BACKUP_KEY, backup);
         ['teff','teff_unc','logg','logg_unc','feh','feh_unc',
          'tune','draws','chains','cores','spline_knots','clip_nsig','chunk_thresh','trim_beg','trim_end',
+         'bump_tcenter','bump_tcenter_prior','bump_width','bump_width_prior','bump_ampl','bump_ampl_prior',
+         'flare_tpeak_prior','flare_fwhm_prior','flare_ampl_prior',
          'gp_log_amp_prior','gp_log_scale_prior'].forEach(function (id) {
           var el = document.getElementById('opt-'+id);
           if (el && backup[id] !== undefined) el.value = backup[id];
         });
+        setFlareRowsFromStrings(backup);
         [['gp_log_amp', 'gp_log_amp_unc'], ['gp_log_scale', 'gp_log_scale_unc']].forEach(function (keys) {
           var el = document.getElementById('opt-' + keys[0]);
           if (el && (backup[keys[0]] !== undefined || backup[keys[1]] !== undefined)) {
@@ -1979,13 +2005,15 @@
           }
         });
 
-        ['include_mean','use_custom_optimizer','secondary_eclipse','spline','add_bias','quadratic','clip','chunk_offset',
-         'use_gp','gp_per_dataset_log_amp','gp_per_dataset_log_scale',
-         'plot_midtransit','plot_ingress_egress'].forEach(function (id) {
+        ['include_mean','use_custom_optimizer','spline','add_bias','quadratic','clip','chunk_offset',
+         'include_bump','chromatic_bump','include_flare','chromatic_flare',
+         'use_gp','gp_per_dataset_log_amp','gp_per_dataset_log_scale'].forEach(function (id) {
           var el = document.getElementById('opt-'+id);
           if (el && backup[id] !== undefined) el.checked = backup[id] === 'true';
         });
         refreshGpPriorControls();
+        refreshBumpPriorControls();
+        refreshFlarePriorControls();
         updateDependentFields();
 
         var stellarRefEl = document.getElementById('stellar-ref-container');
@@ -2108,6 +2136,9 @@
       var field = document.getElementById(spec.field);
       var prior = document.getElementById(spec.prior);
       if (!field || !prior) return;
+      function formatValue(value) {
+        return spec.field === 'opt-bump_tcenter' ? value.toFixed(6) : fmtSig(value, 4);
+      }
       prior.addEventListener('change', function () {
         var next = prior.value === 'uniform' ? 'uniform' : 'gaussian';
         var prev = prior.dataset.mode || 'gaussian';
@@ -2122,9 +2153,9 @@
               var a = Number(pair[0]), b = Number(pair[1]);
               if (pair[0] !== '' && pair[1] !== '' && isFinite(a) && isFinite(b)) {
                 if (next === 'uniform') {
-                  newPairs.push(fmtSig(a - 3 * b, 4) + ',' + fmtSig(a + 3 * b, 4));
+                  newPairs.push(formatValue(a - 3 * b) + ',' + formatValue(a + 3 * b));
                 } else {
-                  newPairs.push(fmtSig((a + b) / 2, 4) + ',' + fmtSig((b - a) / 6, 4));
+                  newPairs.push(formatValue((a + b) / 2) + ',' + formatValue((b - a) / 6));
                 }
               } else {
                 ok = false;
@@ -2147,11 +2178,10 @@
   // uncertainty). The prior shape lives in the column header because timer
   // applies one shape per parameter across every flare.
   var FLARE_PARAMS = ['tpeak', 'fwhm', 'ampl'];
-  var FLARE_ROW_DEFAULTS = { tpeak: ['', '0.1'], fwhm: ['0.02', '0.01'], ampl: ['0.01', '0.01'] };
-  // The same defaults read as low,high bounds under a Uniform prior. They
-  // bracket the Gaussian value, since the Gaussian pair would read as low >
-  // high there and block the run.
-  var FLARE_ROW_UNIFORM_DEFAULTS = { fwhm: ['0.0', '0.1'], ampl: ['0.0', '0.05'] };
+  var FLARE_ROW_DEFAULTS = { tpeak: ['', '0.1'], fwhm: ['0.02', '0.01'], ampl: ['0', '10'] };
+  // Width needs separate Uniform bounds: its Gaussian mean,unc pair would
+  // read as low > high and block the run. Amplitude is always Uniform.
+  var FLARE_ROW_UNIFORM_DEFAULTS = { fwhm: ['0.0', '0.1'], ampl: ['0', '10'] };
 
   function flarePriorMode(param) {
     var sel = document.getElementById('opt-flare_' + param + '_prior');
@@ -2184,6 +2214,27 @@
     });
     return (lo === null || hi === null) ? null : [lo, hi];
   }
+
+  // Keep an automatic center tied to the selected data and ephemeris. A user
+  // edit becomes an explicit override until cleared or the archive is queried.
+  function updateTransitCenters() {
+    var range = selectedTimeRange();
+    document.querySelectorAll('.planet-card').forEach(function (card) {
+      var el = card.querySelector('.planet-tc_pred');
+      if (el.value && el.value !== el.dataset.predicted) return;
+      var epoch = parseFloat(card.querySelector('.planet-t0').value);
+      var pair = splitPair(card.querySelector('.planet-period').value);
+      var period = parseFloat(pair[0]);
+      if (card.querySelector('.planet-period-prior').value === 'uniform') period = (period + parseFloat(pair[1])) / 2;
+      if (!range || !isFinite(epoch) || !isFinite(period) || period <= 0) {
+        el.value = ''; delete el.dataset.predicted; return;
+      }
+      var center = epoch + Math.floor(((range[0] + range[1]) / 2 - epoch) / period + 0.5) * period;
+      el.value = center.toFixed(6);
+      el.dataset.predicted = el.value;
+    });
+  }
+  document.addEventListener('change', updateTransitCenters);
 
   // A new flare starts at the middle of the data (Gaussian) or spanning it
   // (Uniform); without a known range the peak time is left for the user.
@@ -2323,6 +2374,7 @@
         if (v.value.trim() === '' || u.value.trim() === '' || !isFinite(a) || !isFinite(b)) {
           return fail([v, u], label + ': enter two numbers (' + (mode === 'uniform' ? 'low and high' : 'value and unc') + ')');
         }
+        if (param === 'ampl' && a < 0) return fail([v], label + ': lower bound must be nonnegative');
         if (mode === 'uniform' && !(a < b)) return fail([v, u], label + ': low must be less than high');
         if (mode === 'gaussian' && b <= 0) return fail([u], label + ': uncertainty must be > 0');
         if (param === 'fwhm' && (mode === 'uniform' ? b : a) <= 0) return fail([v], label + ': must be > 0');
@@ -2427,6 +2479,16 @@
   ];
 
   function updateDependentFields() {
+    var bumpCenter = document.getElementById('opt-bump_tcenter');
+    if (chk('opt-include_bump') && bumpCenter && !bumpCenter.value.trim()) {
+      var range = selectedTimeRange();
+      if (range) {
+        bumpCenter.value = val('opt-bump_tcenter_prior') === 'uniform'
+          ? range[0].toFixed(6) + ',' + range[1].toFixed(6)
+          : ((range[0] + range[1]) / 2).toFixed(6) + ',0.1';
+        saveOptions();
+      }
+    }
     CONTROL_DEPENDENCIES.forEach(function (dependency) {
       var enabled = chk(dependency.controller);
       dependency.targets.forEach(function (id) {
@@ -2441,6 +2503,8 @@
     refreshFlareRowsEnabled();
   }
 
+  var csvCards = document.querySelectorAll('.csv-card');
+  restoreCsvSelection();
   restoreOptions();
   setupGpPriorSelectors();
   setupBumpPriorSelectors();
@@ -2464,9 +2528,9 @@
     { id: 'opt-cores',       type: 'integer', min: 1 },
     { id: 'opt-spline_knots', type: 'integer', min: 1, dependsOn: 'opt-spline' },
     { id: 'opt-clip_nsig',    type: 'number', min: 0, exclusiveMin: true, dependsOn: 'opt-clip' },
-    { id: 'opt-chunk_thresh', type: 'number', min: 0, dependsOn: 'opt-chunk_offset' },
-    { id: 'opt-trim_beg',     type: 'integer', min: 0, optional: true },
-    { id: 'opt-trim_end',     type: 'integer', min: 0, optional: true },
+    { id: 'opt-chunk_thresh', type: 'number', min: 0, exclusiveMin: true, dependsOn: 'opt-chunk_offset' },
+    { id: 'opt-trim_beg',     type: 'number', min: 0, optional: true },
+    { id: 'opt-trim_end',     type: 'number', min: 0, optional: true },
     { id: 'opt-gp_log_amp',   type: 'pair', dependsOn: 'opt-use_gp' },
     { id: 'opt-gp_log_scale', type: 'pair', dependsOn: 'opt-use_gp' },
     { id: 'opt-bump_tcenter', type: 'bump_pair', dependsOn: 'opt-include_bump' },
@@ -2521,6 +2585,9 @@
           err.textContent = 'Enter value,unc (use ; for multiple bumps)'; err.classList.add('visible'); return false;
         }
         var a = Number(parts[0]), b = Number(parts[1]);
+        if (id === 'opt-bump_ampl' && !(0 <= a && a < b)) {
+          err.textContent = 'Require 0 <= low < high (ppt)'; err.classList.add('visible'); return false;
+        }
         if (isNaN(a) || !isFinite(a) || isNaN(b) || !isFinite(b)) {
           err.textContent = 'Must be numbers'; err.classList.add('visible'); return false;
         }
@@ -2550,6 +2617,7 @@
   }
 
   function validateAllFields() {
+    updateTransitCenters();
     var ok = true, firstErr = null;
     FIELD_RULES.forEach(function (rule) {
       if (!validateField(rule.id, rule)) { ok = false; if (!firstErr) firstErr = document.getElementById(rule.id); }
@@ -2572,6 +2640,20 @@
       firstErr.focus();
     }
     return ok;
+  }
+
+  // Resolves true when every planet's center lies inside the selected data or
+  // the user chooses to launch anyway.
+  function confirmTransitsInsideData() {
+    var range = selectedTimeRange(), outside = [];
+    if (range) document.querySelectorAll('.planet-card').forEach(function (card) {
+      var center = parseFloat(card.querySelector('.planet-tc_pred').value);
+      if (center < range[0] || center > range[1]) outside.push(card.querySelector('.planet-letter-input').value);
+    });
+    if (!outside.length) return Promise.resolve(true);
+    return window.showConfirmModal('No transit in the selected data',
+      'No predicted transit center falls inside the selected data for planet(s) ' + outside.join(', ') + '. Continue with this prior?',
+      { confirmLabel: 'Launch anyway' });
   }
 
   // Blur validation for non-planet fields
@@ -2620,11 +2702,11 @@
   })();
 
   // ---- CSV selection ----
-  var csvCards = document.querySelectorAll('.csv-card');
   function saveCsvSelection() {
     MuscatStorage.setJSON(CSV_KEY, getSelectedCsvs());
   }
-  function updateCsvCount() {
+  function updateCsvSelection() {
+    updateTransitCenters();
     var el = document.getElementById('csv-count');
     if (!el) return;
     var checked = document.querySelectorAll('.csv-checkbox:checked').length;
@@ -2661,7 +2743,7 @@
       if (cb) cb.checked = !cb.checked;
       card.classList.toggle('selected', cb.checked);
       card.classList.toggle('deselected', !cb.checked);
-      updateCsvCount();
+      updateCsvSelection();
       saveCsvSelection();
       updateChromaticForBands();
     });
@@ -2670,15 +2752,13 @@
       cb.addEventListener('change', function () {
         card.classList.toggle('selected', cb.checked);
         card.classList.toggle('deselected', !cb.checked);
-        updateCsvCount();
+        updateCsvSelection();
         saveCsvSelection();
         updateChromaticForBands();
       });
       card.classList.add(cb.checked ? 'selected' : 'deselected');
     }
   });
-  restoreCsvSelection();
-
   function extractBand(csvName) {
     var parts = csvName.split('_' + inst + '_');
     if (parts.length > 1) {
@@ -2717,7 +2797,7 @@
       card.classList.add('selected');
       card.classList.remove('deselected');
     });
-    updateCsvCount();
+    updateCsvSelection();
     saveCsvSelection();
     updateChromaticForBands();
   });
@@ -2728,11 +2808,11 @@
       card.classList.remove('selected');
       card.classList.add('deselected');
     });
-    updateCsvCount();
+    updateCsvSelection();
     saveCsvSelection();
     updateChromaticForBands();
   });
-  updateCsvCount();
+  updateCsvSelection();
   updateChromaticForBands();
 
   function setRunning(on) {
@@ -2849,6 +2929,10 @@
       if (errEl) errEl.textContent = 'Please fill in all required fields marked in red above.';
       return;
     }
+    confirmTransitsInsideData().then(function (ok) { if (ok) launchValidated(testRun); });
+  }
+
+  function launchValidated(testRun) {
     // For full fits with existing results, validate that a run mode is selected
     if (!testRun && fitResultsExist) {
       var runModeSelected = document.getElementById('run-mode-select')?.value;
@@ -3145,7 +3229,8 @@
           var fcard = document.querySelector('.planet-card');
           if (fcard) {
             var tcEl = fcard.querySelector('.planet-tc_pred');
-            if (tcEl) tcEl.value = '';
+            if (tcEl) { tcEl.value = ''; delete tcEl.dataset.predicted; }
+            updateTransitCenters();
             var tcuEl = fcard.querySelector('.planet-tc_pred-unc');
             if (tcuEl) tcuEl.value = '';
           }

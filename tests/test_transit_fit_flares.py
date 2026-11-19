@@ -37,8 +37,8 @@ def _flare_options(**overrides) -> dict:
         "flare_tpeak_prior": "gaussian",
         "flare_fwhm": "0.02,0.01",
         "flare_fwhm_prior": "gaussian",
-        "flare_ampl": "0.01,0.01",
-        "flare_ampl_prior": "gaussian",
+        "flare_ampl": "0,10",
+        "flare_ampl_prior": "uniform",
     }
     options.update(overrides)
     return options
@@ -55,7 +55,7 @@ def test_two_complete_flare_rows_validate():
     options = _flare_options(
         flare_tpeak=f"{MID:.5f},0.01; {MID + 0.02:.5f},0.01",
         flare_fwhm="0.02,0.01; 0.03,0.01",
-        flare_ampl="0.01,0.01; 0.02,0.01",
+        flare_ampl="0,10; 0,20",
     )
     assert fit.validate_fit_options(options) is None
 
@@ -70,7 +70,7 @@ def test_malformed_flare_row_is_refused_naming_the_row():
 
 
 def test_incomplete_flare_row_is_refused_naming_the_row():
-    options = _flare_options(flare_ampl="0.01,0.01; 0.02")
+    options = _flare_options(flare_ampl="0,10; 0.02")
 
     error = fit.validate_fit_options(options)
 
@@ -186,7 +186,7 @@ def test_two_flare_rows_write_equal_length_lists(tmp_path):
     options = _flare_options(
         flare_tpeak=f"{MID:.5f},0.01; {MID + 0.02:.5f},0.02",
         flare_fwhm="0.02,0.01; 0.03,0.01",
-        flare_ampl="0.01,0.01; 0.02,0.01",
+        flare_ampl="0,10; 0,20",
     )
     assert fit.validate_fit_options(options) is None
 
@@ -196,7 +196,7 @@ def test_two_flare_rows_write_equal_length_lists(tmp_path):
     assert flare["tpeak"] == pytest.approx([MID, MID + 0.02], abs=1e-5)
     assert flare["tpeak_unc"] == [0.01, 0.02]
     assert flare["fwhm"] == [0.02, 0.03]
-    assert flare["ampl"] == [0.01, 0.02]
+    assert flare["ampl"] == [5, 10]
     assert len(flare["tpeak"]) == len(flare["fwhm"]) == len(flare["ampl"]) == 2
 
 
