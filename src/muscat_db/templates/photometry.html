@@ -2209,6 +2209,20 @@
     }).then(function (r) { return r.json(); });
   }
   function fmt(x, n) { return x == null ? '—' : Number(x).toFixed(n); }
+  // Radius labels only (the request sends the aperture index, so nothing is
+  // rounded in the data): whole pixels when that keeps a band's radii
+  // distinct, otherwise one decimal; '≈' marks a rounded value.
+  function radiusDigits(radii, unit) {
+    if (unit !== 'pix') return 1;
+    var whole = radii.map(function (r) { return Math.round(r); });
+    return new Set(whole).size === radii.length ? 0 : 1;
+  }
+  function radiusLabel(band, r) {
+    if (r == null) return '—';
+    var b = (rediffInfo && rediffInfo.bands[band]) || {};
+    var text = Number(r).toFixed(radiusDigits(b.aper_radii || [r], b.aper_unit));
+    return (Math.abs(Number(text) - r) > 1e-6 ? '≈' : '') + text + ' ' + escH(b.aper_unit || '');
+  }
   function rediffBandHtml(band, b, adopted) {
     var defaults = (b.default_comparisons || []).map(function (c) { return c.id; });
     var weight = {};
@@ -2220,7 +2234,7 @@
     html += '<legend class="mono" style="padding:0 0.3rem;">' + escH(band) + ' · target ' + escH(b.target_id) + ' · default ' + escH(b.default_weighting) + ' weights</legend>';
     html += '<label style="font-size:0.85rem;">Aperture <select class="rediff-aperture">';
     radii.forEach(function (r, i) {
-      html += '<option value="' + i + '"' + (i === aperture ? ' selected' : '') + '>' + fmt(r, 2) + ' ' + escH(b.aper_unit) + (i === b.default_aperture ? ' (default)' : '') + '</option>';
+      html += '<option value="' + i + '"' + (i === aperture ? ' selected' : '') + '>' + radiusLabel(band, r) + (i === b.default_aperture ? ' (default)' : '') + '</option>';
     });
     html += '</select></label>';
     if (radii.length === 1) {
@@ -2239,7 +2253,7 @@
     var adopted = d.applied_selection || {};
     Object.keys(adopted).forEach(function (band) {
       var a = adopted[band];
-      bits.push(escH(band) + ': ' + (a.comparisons || []).join(', ') + ' at ' + fmt(a.aper_radius, 2));
+      bits.push(escH(band) + ': ' + (a.comparisons || []).join(', ') + ' at ' + radiusLabel(band, a.aper_radius));
     });
     var html = '';
     if (bits.length) html += '<p style="color:var(--green);margin:0 0 0.5rem;">Adopted (equal weights) — ' + bits.join('; ') + '</p>';
@@ -2289,7 +2303,7 @@
         var p = d.bands[band][kind];
         if (!p) return;
         html += '<tr><td>' + escH(band) + '</td><td>' + kind + ' (' + escH(p.weighting) + ')</td><td>' + (p.comparisons || []).join(', ') +
-          '</td><td>' + fmt(p.aper_radius, 2) + '</td><td>' + fmt(p.metrics && p.metrics.std_ppt, 2) + '</td><td>' + fmt(p.metrics && p.metrics.p2p_ppt, 2) + '</td></tr>';
+          '</td><td>' + radiusLabel(band, p.aper_radius) + '</td><td>' + fmt(p.metrics && p.metrics.std_ppt, 2) + '</td><td>' + fmt(p.metrics && p.metrics.p2p_ppt, 2) + '</td></tr>';
       });
     });
     html += '</table>';

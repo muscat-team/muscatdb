@@ -491,7 +491,7 @@ def rediff_calls(monkeypatch, live_server):
     cube = phot.run_output_dir("muscat3", "261001", "TOI-1000", RUN_ID) / "TOI-1000_muscat3_261001_flux_datacube.npz"
     cube.write_bytes(b"stub")
     calls = {"info": 0, "rediff": [], "restore": 0}
-    band = {"target_id": 0, "aper_radii": [5.0], "aper_unit": "pix", "default_aperture": 0,
+    band = {"target_id": 0, "aper_radii": [4.627], "aper_unit": "pix", "default_aperture": 0,
             "default_weighting": "broeg", "selectable_ids": [1, 2, 3, 4],
             "default_comparisons": [{"id": 2, "weight": 0.6}, {"id": 1, "weight": 0.4}]}
     state = {"restorable": True, "clip_active": False, "applied_selection": {}}
@@ -521,6 +521,7 @@ def test_rediff_card_test_apply_and_restore(page, rediff_calls):
         page.locator("#rediff-section > summary").click()
     band = page.locator("fieldset.rediff-band[data-band='gp']")
     expect(band).to_contain_text("one aperture radius")
+    expect(band.locator(".rediff-aperture option")).to_have_text(["≈5 pix (default)"])
     expect(band.locator(".rediff-star:checked")).to_have_count(2)
 
     page.click("#rediff-test-btn")  # nothing changed yet: no request
