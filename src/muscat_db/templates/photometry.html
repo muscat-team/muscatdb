@@ -2210,18 +2210,12 @@
   }
   function fmt(x, n) { return x == null ? '—' : Number(x).toFixed(n); }
   // Radius labels only (the request sends the aperture index, so nothing is
-  // rounded in the data): whole pixels when that keeps a band's radii
-  // distinct, otherwise one decimal; '≈' marks a rounded value.
-  function radiusDigits(radii, unit) {
-    if (unit !== 'pix') return 1;
-    var whole = radii.map(function (r) { return Math.round(r); });
-    return new Set(whole).size === radii.length ? 0 : 1;
-  }
+  // rounded in the data): up to one decimal in pixels, two in FWHM units.
   function radiusLabel(band, r) {
     if (r == null) return '—';
     var b = (rediffInfo && rediffInfo.bands[band]) || {};
-    var text = Number(r).toFixed(radiusDigits(b.aper_radii || [r], b.aper_unit));
-    return (Math.abs(Number(text) - r) > 1e-6 ? '≈' : '') + text + ' ' + escH(b.aper_unit || '');
+    var digits = b.aper_unit === 'pix' ? 1 : 2;
+    return String(Number(Number(r).toFixed(digits))) + ' ' + escH(b.aper_unit || '');
   }
   function rediffBandHtml(band, b, adopted) {
     var defaults = (b.default_comparisons || []).map(function (c) { return c.id; });

@@ -521,7 +521,7 @@ def test_rediff_card_test_apply_and_restore(page, rediff_calls):
         page.locator("#rediff-section > summary").click()
     band = page.locator("fieldset.rediff-band[data-band='gp']")
     expect(band).to_contain_text("one aperture radius")
-    expect(band.locator(".rediff-aperture option")).to_have_text(["≈5 pix (default)"])
+    expect(band.locator(".rediff-aperture option")).to_have_text(["4.6 pix (default)"])
     expect(band.locator(".rediff-star:checked")).to_have_count(2)
 
     page.click("#rediff-test-btn")  # nothing changed yet: no request
