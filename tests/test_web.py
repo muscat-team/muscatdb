@@ -1243,7 +1243,7 @@ def test_ephemeris_calculate_only_returns_requested_production_datasets(
     ]
 
 
-def _post_manual_calculate(planets_ephem, manual_points, fit_method="unweighted"):
+def _post_manual_calculate(planets_ephem, manual_points, fit_method=None):
     """POST /api/ephemeris/calculate for a target with no database fits, so the
     only points come from the manually entered transit centers under test."""
     return TestClient(app).post(
@@ -1253,7 +1253,7 @@ def _post_manual_calculate(planets_ephem, manual_points, fit_method="unweighted"
             "planets_ephem": planets_ephem,
             "datasets": [],
             "manual_points": manual_points,
-            "fit_method": fit_method,
+            **({"fit_method": fit_method} if fit_method else {}),
         },
     )
 
@@ -1301,6 +1301,7 @@ def test_manual_transit_centers_are_fitted_and_placed_on_epoch_grid(
     assert len(by_id["m0"]["date"]) == 6 and by_id["m0"]["date"].isdigit()
 
     # A perfectly linear series is fitted with no 5-sigma flags.
+    assert body["results"]["b"]["fit_method"] == "weighted"
     assert body["results"]["b"]["was_fit"] is True
     assert all(p["flagged"] is False for p in points)
 
@@ -1318,7 +1319,7 @@ def test_ephemeris_calculate_exposes_dof_for_two_point_fit(
         {"id": "m1", "planet": "b", "tc": 2458010.0, "tc_unc": 0.001, "checked": True},
     ]
 
-    body = _post_manual_calculate(planets_ephem, manual_points).json()
+    body = _post_manual_calculate(planets_ephem, manual_points, fit_method="unweighted").json()
     result = body["results"]["b"]
 
     assert result["was_fit"] is True

@@ -7842,7 +7842,7 @@ def api_ephemeris_calculate(payload: dict = Body(...)):
         # ephemeris_math.fit_linear_ephemeris; only checked, positive-uncertainty
         # points may participate in the regression.
         fit_points = [p for p in points if p["checked"] and p["unc"] is not None and p["unc"] > 0]
-        fit_method = payload.get("fit_method", "unweighted")
+        fit_method = payload.get("fit_method", "weighted")
         fit_result = ephemeris_math.fit_linear_ephemeris(
             [p["epoch"] for p in fit_points],
             [p["tc"] for p in fit_points],

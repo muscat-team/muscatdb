@@ -1606,7 +1606,7 @@
       durationLine(durSrc, durEntry, durSrc ? 'linear fit has no duration of its own' : ''),
     ];
     var calcBody = {
-      target: lastInfoTarget, fit_method: 'unweighted', planets_ephem: {},
+      target: lastInfoTarget, planets_ephem: {},
       datasets: datasets.map(function (d) {
         return { target: d.target, instrument: d.instrument, date: d.date, run_id: d.run_id || '', checked: true };
       })
