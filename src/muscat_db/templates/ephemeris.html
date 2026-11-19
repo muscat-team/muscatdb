@@ -4143,6 +4143,7 @@
   var selectedTTVRun = null;
   // run_name -> whether the viewer may delete it (from /api/ttv-fit/runs)
   var ttvRunCanModify = {};
+  var ttvRunWarnings = {};
   var ttvModelData = null;
   var ttvModelRun = null;
   var ttvModelAvailable = false;
@@ -4167,7 +4168,11 @@
       .then(res => {
         const runs = (res.ok && res.runs) ? res.runs.map(r => r.run_name) : [];
         ttvRunCanModify = {};
-        ((res.ok && res.runs) ? res.runs : []).forEach(r => { ttvRunCanModify[r.run_name] = r.can_modify !== false; });
+        ttvRunWarnings = {};
+        ((res.ok && res.runs) ? res.runs : []).forEach(r => {
+          ttvRunCanModify[r.run_name] = r.can_modify !== false;
+          ttvRunWarnings[r.run_name] = r.warnings || [];
+        });
         if (runs.length === 0) {
           const deleteBtn = document.getElementById('delete-btn');
           if (deleteBtn) deleteBtn.style.display = 'none';
@@ -4259,16 +4264,27 @@
     if (!container) return;
 
     let html = '<h2>TTV Fit Results <span style="font-size: 0.8rem; color: var(--text-dim); font-weight: 400;">— ' +
-               (runName || 'default') + '</span></h2>';
+               escapeAttr(runName || 'default') + '</span></h2>';
 
     // Chips to switch between stored runs, mirroring the transit-fit page.
     if (runs && runs.length > 1) {
       html += '<div class="site-chips"><span class="site-label">Run:</span>';
       runs.forEach(r => {
         const active = r === runName ? ' active' : '';
-        html += `<button type="button" class="site-chip${active}" data-run="${r}">${r}</button>`;
+        html += `<button type="button" class="site-chip${active}" data-run="${escapeAttr(r)}">${escapeAttr([r, ...(ttvRunWarnings[r] || [])].join(" — "))}</button>`;
       });
       html += '</div>';
+    }
+
+    if (outputs.health) {
+      const {warnings, metrics} = outputs.health;
+      if (warnings.length) html += '<p><strong>Done with warnings</strong> — ' + escapeAttr(warnings.join(', ')) + '</p>';
+      html += '<p>' + Object.entries(metrics).map(([label, value]) => {
+        let display = value ?? 'Unknown';
+        if (typeof value === 'number') display = Number(value.toFixed(6));
+        if (typeof value === 'boolean') display = value ? 'Yes' : 'No';
+        return escapeAttr(label) + ': ' + escapeAttr(String(display));
+      }).join(' · ') + '</p>';
     }
 
     if (outputs.plots && outputs.plots.length > 0) {

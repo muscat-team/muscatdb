@@ -104,3 +104,24 @@ def test_ttv_initial_pairs_follow_periods(page):
     ini = page.input_value('#opt-ini_content')
     assert 'a_cd =' in ini and 'a_db =' in ini and 'a_be =' in ini
     assert 'a_bc =' not in ini
+
+
+def test_harmonic_warning_follows_selected_run(page, live_server, request):
+    import json
+    from muscat_db import ttv_fit
+
+    for name, converged in (("short", False), ("long", True)):
+        run = ttv_fit.ttv_output_dir("TOI1000", name)
+        assert run.is_relative_to(live_server.root)
+        run.mkdir(parents=True)
+        request.addfinalizer(run.rmdir)
+        request.addfinalizer((run / "fit_stats.json").unlink)
+        (run / "fit_stats.json").write_text(json.dumps({"converged": converged}))
+    _load_toi1000(page)
+    panel = page.locator("#ttv-outputs-container")
+    panel.get_by_role("button", name="short — Sampler reported non-convergence").click()
+    expect(panel).to_contain_text("Done with warnings")
+    expect(panel).to_contain_text("Acceptance fraction: Unknown")
+    panel.get_by_role("button", name="long", exact=True).click()
+    expect(panel).to_contain_text("Converged: Yes")
+    expect(panel).not_to_contain_text("Done with warnings")
