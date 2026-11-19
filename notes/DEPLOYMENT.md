@@ -195,6 +195,18 @@ driven by `deploy/pull-deploy.sh` from cron, which restarts the matching session
 after a `git reset --hard` in the dedicated checkout; since `--reload` is gone,
 HTML/JavaScript changes require that deploy restart before they are live.
 
+### Production rollout of release #467, 2026-11-19
+
+The production cron deployed `bf12bd26b51b5607a46cc0ca39053c4ecc8ec043` to ut2 and recorded a healthy web process on port 8001 at 05:25:09 UTC. The release was already merged when the rollout began. The production checkout was still on `54b8136` when the fleet stopped. [Release PR #467](https://github.com/muscat-team/muscatdb/pull/467)
+
+The production job store had no pending, running, cancelling or finalizing rows before shutdown. The guarded `workers.py --profile prod down` stopped all 18 units on ut3 through ut7. Fleet status confirmed all were inactive. After the web health check, `up` started all 18. Systemd activation times ranged from 05:25:16 to 05:26:13 UTC, and fleet status confirmed every configured pipeline was active.
+
+The full-fit canary used the archived Sinistro ELP light curve for TOI-6109.44 from observing night 241113. The submitter received a queued response and worker `muscat-ut6` claimed job `transit_fit:sinistro/241113/TIC384984325.44(TOI6109.44)/elp-tel06-full_frame-release_467_canary`.
+
+With the predicted center blank, the selected data had midpoint BJD 2460628.836783. The nearest transit was cycle 117 of reference epoch 2458792.113800 and period 15.698700 days. For planet e, `meta.yaml` recorded center 2460628.861700, full width 0.080000 days, bounds [2460628.821700, 2460628.901700] and `fixed: false`. The worker log printed the same interval. In `fit.yaml`, `tc_pred` and `tc_pred_unc` reproduced the center and full width.
+
+The production job store recorded `done`, exit code 0, elapsed time 386 s and zero retries. Timer saved the results and reported three divergences after tuning across four chains (maximum reported R-hat 1.00). The queued worker and prior checks passed. Review the sampler warning before using this canary timing for science.
+
 ### Release order (test → main)
 
 Merging to `main` deploys nothing by itself; the cron entry for `main` takes the
