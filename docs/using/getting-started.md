@@ -111,8 +111,20 @@ If two transits fall inside that span, it chooses the one nearest the midpoint
 its bounds for this prediction. Automatic centers follow changes to the
 ephemeris and light-curve selection, including after a page reload. Typing a
 center overrides the prediction until you clear it or query the archive again.
-The second input is the Uniform prior's **full width** in days, defaulting to
-0.04 d; its bounds are the center minus/plus half that width.
+
+The width of the prior is set in one of two ways. With **± N sigma**, the
+prior reaches N sigma either side of the center (3 by default), where 1 sigma
+is the ephemeris uncertainty propagated to that transit,
+`sqrt(sigma_t0^2 + (N sigma_P)^2)`. The page shows this value and the reach of
+the prior under the boxes. It uses the uncertainties entered for the epoch and
+the period, whether or not the fit samples the period, so it needs both entered
+as `mean,uncertainty`. With **full width (d)**, the number is the Uniform
+prior's full width in days, defaulting to 0.04 d, and the bounds are the center
+minus/plus half of it. Use the full width for a planet with transit timing
+variations, because the propagated uncertainty of a linear ephemeris is too
+small there. The page warns when the prior reaches less than 3 sigma either
+side, and the fit still launches. The log and `meta.yaml` record the mode, the
+number of sigma and the propagated uncertainty.
 
 Before launching, the page asks for confirmation if a planet's center is
 outside the selected time span. If a center cannot be predicted, supply an

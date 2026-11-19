@@ -1080,6 +1080,11 @@
       var tcPredEl = card.querySelector('.planet-tc_pred');
       planetData['tc_pred_' + letter] = tcPredEl.value === tcPredEl.dataset.predicted ? '' : tcPredEl.value;
       planetData['tc_pred_unc_' + letter] = card.querySelector('.planet-tc_pred-unc').value;
+      // A mode the page chose itself (no propagated uncertainty) is sent blank,
+      // so the server and a later restore both apply the default again.
+      var tcModeEl = card.querySelector('.planet-tc_pred-mode');
+      planetData['tc_pred_mode_' + letter] = tcModeEl.dataset.auto ? '' : tcModeEl.value;
+      planetData['tc_pred_nsigma_' + letter] = card.querySelector('.planet-tc_pred-nsigma').value;
       planetData['ror_' + letter] = rorPair[0];
       planetData['ror_unc_' + letter] = rorPair[1];
       planetData['b_' + letter] = bPair[0];
@@ -1268,10 +1273,12 @@
       setPlanetCardError(el.closest('.opt'), msg || 'Required');
     }
 
-    // tc_pred is always the centre plus the *full* Uniform-prior width (two
-    // fields, no prior selector). timer converts that width to centre ± width/2.
+    // tc_pred is the centre of a Uniform prior. Its width is either a number of
+    // sigma of the propagated ephemeris uncertainty, reached either side of the
+    // centre, or the *full* width in days. timer takes centre ± width/2.
     [
       { selector: '.planet-tc_pred', min: 0, inclusive: false, msg: 'Must be > 0' },
+      { selector: '.planet-tc_pred-nsigma', min: 0, inclusive: false, msg: 'Number of sigma must be > 0' },
       { selector: '.planet-tc_pred-unc', min: 0, inclusive: true, msg: 'Must be ≥ 0' }
     ].forEach(function (chk) {
       var el = card.querySelector(chk.selector);
@@ -1414,6 +1421,8 @@
       b_unc: stored['b_unc_' + letter] !== undefined ? stored['b_unc_' + letter] : '',
       tc_pred: stored['tc_pred_' + letter] !== undefined ? stored['tc_pred_' + letter] : '',
       tc_pred_unc: stored['tc_pred_unc_' + letter] !== undefined ? stored['tc_pred_unc_' + letter] : '',
+      tc_pred_mode: stored['tc_pred_mode_' + letter] !== undefined ? stored['tc_pred_mode_' + letter] : '',
+      tc_pred_nsigma: stored['tc_pred_nsigma_' + letter] !== undefined ? stored['tc_pred_nsigma_' + letter] : '',
       period_prior: stored['period_prior_' + letter] !== undefined ? stored['period_prior_' + letter] : 'gaussian',
       dur_prior: stored['dur_prior_' + letter] !== undefined ? stored['dur_prior_' + letter] : 'gaussian',
       ror_prior: stored['ror_prior_' + letter] !== undefined ? stored['ror_prior_' + letter] : 'gaussian',
@@ -1424,6 +1433,9 @@
     if (letter === firstLetter) {
       if (vals.tc_pred === '' && stored.tc_pred !== undefined) vals.tc_pred = stored.tc_pred;
       if (stored.tc_pred_unc !== undefined && stored['tc_pred_unc_' + letter] === undefined) vals.tc_pred_unc = stored.tc_pred_unc;
+      ['tc_pred_mode', 'tc_pred_nsigma'].forEach(function (key) {
+        if (vals[key] === '' && stored[key] !== undefined) vals[key] = stored[key];
+      });
       ['period', 'period_unc', 't0', 't0_unc', 'dur', 'dur_unc', 'ror', 'ror_unc', 'b', 'b_unc', 'pl_ref'].forEach(function (key) {
         if (vals[key] === '' && stored[key] !== undefined) vals[key] = stored[key];
       });
@@ -1494,6 +1506,11 @@
     var val_b_unc = values && values.b_unc !== undefined ? values.b_unc : '';
     var val_tc_pred = values && values.tc_pred !== undefined ? values.tc_pred : '';
     var val_tc_pred_unc = values && values.tc_pred_unc !== undefined ? values.tc_pred_unc : '';
+    var val_tc_pred_nsigma = values && values.tc_pred_nsigma !== undefined ? values.tc_pred_nsigma : '';
+    // With no saved mode, a saved full width means the user set it directly;
+    // otherwise the width follows the ephemeris uncertainty (see updateTransitWidth).
+    var val_tc_pred_mode = values && values.tc_pred_mode ? values.tc_pred_mode
+      : (String(val_tc_pred_unc).trim() !== '' ? 'direct' : 'sigma');
 
     // Prior shape per fitting parameter: 'gaussian' or 'uniform'. Defaults to
     // gaussian to match timer. Each parameter uses ONE comma-separated field:
@@ -1567,13 +1584,19 @@
           priorField('planet-ror', cmb_ror, val_ror_prior) +
         '</div>' +
         '<div class="opt">' +
-          '<label for="planet-tc_pred-' + uid + '">Transit-center prior <span class="help-tooltip" tabindex="0" title="timer samples t0 from a Uniform prior. The first value is its predicted center (BJD); the second is its full width in days, not a Gaussian uncertainty. The bounds are center minus/plus half the full width.">?</span></label>' +
-          '<div style="display: flex; gap: 0.5rem; align-items: center;">' +
-            '<input id="planet-tc_pred-' + uid + '" type="number" class="planet-tc_pred" value="' + val_tc_pred + '" aria-label="Predicted transit center in BJD" placeholder="epoch + N × period" step="0.00001" style="flex: 3; width: 100%; min-width: 0;">' +
-            '<span class="hint" aria-hidden="true" style="white-space: nowrap;">full width</span>' +
+          '<label for="planet-tc_pred-' + uid + '">Transit-center prior <span class="help-tooltip" tabindex="0" title="timer samples t0 from a Uniform prior. The first value is its predicted center (BJD). The width is set either as a number of sigma, reached either side of the center, where 1 sigma is the ephemeris uncertainty propagated to this transit: sqrt(sigma_t0^2 + (N sigma_P)^2); or directly as the full width in days (center minus/plus half of it). For a planet with transit timing variations the propagated uncertainty of a linear ephemeris is too small: set the full width directly.">?</span></label>' +
+          '<input id="planet-tc_pred-' + uid + '" type="number" class="planet-tc_pred" value="' + val_tc_pred + '" aria-label="Predicted transit center in BJD" placeholder="epoch + N × period" step="0.00001" style="width: 100%; min-width: 0;">' +
+          '<div style="display: flex; gap: 0.5rem; align-items: center; margin-top: 0.35rem;">' +
+            '<span class="hint" aria-hidden="true" style="white-space: nowrap;">width</span>' +
+            '<select id="planet-tc_pred-mode-' + uid + '" class="planet-tc_pred-mode" aria-label="How the prior width is set" style="flex: 3; width: 100%; min-width: 0; background: var(--input-bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 0.35rem 0.5rem; font-size: 0.85rem;">' +
+              '<option value="sigma"' + (val_tc_pred_mode === 'direct' ? '' : ' selected') + '>± N sigma</option>' +
+              '<option value="direct"' + (val_tc_pred_mode === 'direct' ? ' selected' : '') + '>full width (d)</option>' +
+            '</select>' +
+            '<input id="planet-tc_pred-nsigma-' + uid + '" type="number" class="planet-tc_pred-nsigma" value="' + val_tc_pred_nsigma + '" aria-label="Number of sigma either side of the center" placeholder="3" step="0.5" min="0" style="flex: 2; width: 100%; min-width: 0;">' +
             '<input id="planet-tc_pred-width-' + uid + '" type="number" class="planet-tc_pred-unc" value="' + val_tc_pred_unc + '" aria-label="Uniform prior full width in days" placeholder="0.04 d" step="0.001" style="flex: 2; width: 100%; min-width: 0;">' +
           '</div>' +
-          '<span class="hint">Blank center: predicted from epoch and period. Blank full width: 0.04 d.</span>' +
+          '<span class="hint planet-tc_pred-hint"></span>' +
+          '<span class="hint planet-tc_pred-warn" role="status" style="display: none; color: var(--amber, #b45309);"></span>' +
         '</div>' +
       '</div>';
 
@@ -2233,8 +2256,87 @@
       el.value = center.toFixed(6);
       el.dataset.predicted = el.value;
     });
+    document.querySelectorAll('.planet-card').forEach(updateTransitWidth);
   }
   document.addEventListener('change', updateTransitCenters);
+
+  // Defaults shared with transit_fit.py (DEFAULT_TC_NSIGMA, TC_WARN_NSIGMA,
+  // DEFAULT_TC_UNC). The server computes the width that is used; this only
+  // shows the user what it will be.
+  var TC_DEFAULT_NSIGMA = 3, TC_WARN_NSIGMA = 3, TC_DEFAULT_FULL_WIDTH = 0.04;
+
+  function fmtInterval(days) {
+    var minutes = days * 1440;
+    return minutes >= 120 ? (minutes / 60).toPrecision(3) + ' h' : minutes.toPrecision(3) + ' min';
+  }
+
+  // 1 sigma of the predicted center, sqrt(sigma_t0^2 + (N sigma_P)^2), from the
+  // ephemeris on the card whether or not the fit samples the period. Null when
+  // either uncertainty is missing, or the period is given as Uniform bounds.
+  function propagatedCenterSigma(card) {
+    var t0 = splitPair(card.querySelector('.planet-t0').value);
+    var per = splitPair(card.querySelector('.planet-period').value);
+    var epoch = parseFloat(t0[0]), t0Unc = parseFloat(t0[1]);
+    var period = parseFloat(per[0]), periodUnc = parseFloat(per[1]);
+    var center = parseFloat(card.querySelector('.planet-tc_pred').value);
+    if (card.querySelector('.planet-period-prior').value === 'uniform') return null;
+    if (!isFinite(epoch) || !isFinite(center) || !(period > 0) || !(t0Unc > 0) || !(periodUnc > 0)) return null;
+    var n = Math.floor((center - epoch) / period + 0.5);
+    return { n: n, sigma: Math.sqrt(t0Unc * t0Unc + n * periodUnc * n * periodUnc) };
+  }
+
+  // Show the width box that matches the mode, the propagated uncertainty, and
+  // a warning when the prior reaches less than 3 sigma either side.
+  function updateTransitWidth(card) {
+    var modeEl = card.querySelector('.planet-tc_pred-mode');
+    if (!modeEl) return;
+    var nEl = card.querySelector('.planet-tc_pred-nsigma');
+    var wEl = card.querySelector('.planet-tc_pred-unc');
+    var hint = card.querySelector('.planet-tc_pred-hint');
+    var warn = card.querySelector('.planet-tc_pred-warn');
+    var prop = propagatedCenterSigma(card);
+
+    // Sigma mode needs a propagated uncertainty. Without one the page falls
+    // back to the full width, and returns to sigma once it can be computed,
+    // unless the user picked the full width themselves.
+    modeEl.querySelector('option[value="sigma"]').disabled = !prop;
+    if (!prop && modeEl.value === 'sigma') { modeEl.value = 'direct'; modeEl.dataset.auto = '1'; }
+    else if (prop && modeEl.dataset.auto) { modeEl.value = 'sigma'; delete modeEl.dataset.auto; }
+    var sigmaMode = modeEl.value === 'sigma';
+    nEl.style.display = sigmaMode ? '' : 'none';
+    wEl.style.display = sigmaMode ? 'none' : '';
+
+    var text = 'Blank center: predicted from epoch and period. ';
+    var narrow = false;
+    if (!prop) {
+      text += 'Blank full width: ' + TC_DEFAULT_FULL_WIDTH + ' d. To set the width in sigma, enter the epoch and the period as mean,uncertainty.';
+    } else {
+      var nSigma = nEl.value.trim() === '' ? TC_DEFAULT_NSIGMA : parseFloat(nEl.value);
+      var fullWidth = wEl.value.trim() === '' ? TC_DEFAULT_FULL_WIDTH : parseFloat(wEl.value);
+      var half = sigmaMode ? nSigma * prop.sigma : fullWidth / 2;
+      text += '1 sigma = ' + fmtInterval(prop.sigma) + ' at epoch ' + prop.n + '.';
+      if (isFinite(half) && half > 0) {
+        var reach = half / prop.sigma;
+        text += ' The prior reaches ± ' + fmtInterval(half) + ' (' + reach.toPrecision(3) + ' sigma).';
+        var t0Fixed = document.querySelector('input[name="fixed-params"][value="t0"]');
+        narrow = reach < TC_WARN_NSIGMA * (1 - 1e-9) && !(t0Fixed && t0Fixed.checked);
+      }
+    }
+    hint.textContent = text;
+    warn.textContent = narrow ? 'The prior reaches less than ' + TC_WARN_NSIGMA + ' sigma either side of the predicted center, so the transit may fall outside it. The fit will still launch.' : '';
+    warn.style.display = narrow ? 'block' : 'none';
+  }
+  document.addEventListener('input', function (e) {
+    var card = e.target && e.target.closest ? e.target.closest('.planet-card') : null;
+    if (card) updateTransitWidth(card);
+  });
+  // A mode the user picks is theirs: it no longer follows the availability of
+  // the propagated uncertainty.
+  document.addEventListener('change', function (e) {
+    if (e.target && e.target.classList && e.target.classList.contains('planet-tc_pred-mode')) {
+      delete e.target.dataset.auto;
+    }
+  }, true);
 
   // A new flare starts at the middle of the data (Gaussian) or spanning it
   // (Uniform); without a known range the peak time is left for the user.
@@ -3233,6 +3335,11 @@
             updateTransitCenters();
             var tcuEl = fcard.querySelector('.planet-tc_pred-unc');
             if (tcuEl) tcuEl.value = '';
+            var tcnEl = fcard.querySelector('.planet-tc_pred-nsigma');
+            if (tcnEl) tcnEl.value = '';
+            var tcmEl = fcard.querySelector('.planet-tc_pred-mode');
+            if (tcmEl) { tcmEl.value = 'sigma'; delete tcmEl.dataset.auto; }
+            updateTransitWidth(fcard);
           }
 
           document.querySelectorAll('input[name="fixed-params"]').forEach(function (c) {
