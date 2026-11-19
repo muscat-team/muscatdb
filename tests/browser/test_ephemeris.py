@@ -54,6 +54,7 @@ def test_transit_centers_on_the_ephemeris_fit_with_zero_o_minus_c(page):
     result = resp.value.json()
     assert result["ok"]
     fit = result["results"]["b"]
+    assert fit["fit_method"] == "weighted"
     assert fit["n_fit"] == 2
     assert fit["period_fit"] == pytest.approx(PERIOD, abs=1e-6)
     assert fit["t0_fit"] == pytest.approx(T0, abs=1e-6)
@@ -79,6 +80,7 @@ def test_loaded_target_and_transit_centers_survive_a_reload(page):
 
 def test_linear_fit_reports_scatter_instead_of_convergence(page):
     _load_toi1000(page)
+    page.get_by_role("radio", name="Unweighted", exact=True).check()
     for epoch, offset in [(0, .001), (1, -.002), (2, .001)]:
         with page.expect_response('**/api/ephemeris/calculate'):
             _add_transit_center(page, T0 + epoch * PERIOD + offset)

@@ -116,11 +116,11 @@
     <div class="opt-check-row" title="Unweighted fit treats all transits equally. Weighted fit uses individual fit uncertainties." style="padding: 0; display: flex; align-items: center; gap: 0.85rem; min-height: 34px;">
       <span style="font-size: 0.85rem; color: var(--text-dim); font-weight: 500; white-space: nowrap;">Linear Fitting Method</span>
       <label class="opt-check-item" style="display: inline-flex; align-items: center; gap: 0.35rem; cursor: pointer;">
-        <input type="radio" name="fit-method-type" value="unweighted" checked style="margin: 0;">
+        <input type="radio" name="fit-method-type" value="unweighted" style="margin: 0;">
         <span style="font-size: 0.85rem;">Unweighted</span>
       </label>
       <label class="opt-check-item" style="display: inline-flex; align-items: center; gap: 0.35rem; cursor: pointer;">
-        <input type="radio" name="fit-method-type" value="weighted" style="margin: 0;">
+        <input type="radio" name="fit-method-type" value="weighted" checked style="margin: 0;">
         <span style="font-size: 0.85rem;">Weighted</span>
       </label>
     </div>
@@ -795,7 +795,7 @@
       if (selectEl) planetOptions[pl + '_source'] = selectEl.value;
     });
 
-    const fitMethod = document.querySelector('input[name="fit-method-type"]:checked')?.value || 'unweighted';
+    const fitMethod = document.querySelector('input[name="fit-method-type"]:checked')?.value || 'weighted';
     const plotTitle = document.getElementById('plot-suptitle-input')?.value || '';
     const currentPlanetPlotSettings = {};
     combinedPlanets.forEach(pl => {
@@ -2629,7 +2629,7 @@
       planets_ephem: planetsEphem,
       datasets: datasets,
       manual_points: collectManualPointsForRequest(),
-      fit_method: fitMethodRadio ? fitMethodRadio.value : 'unweighted'
+      fit_method: fitMethodRadio ? fitMethodRadio.value : 'weighted'
     };
   }
 
