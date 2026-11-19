@@ -321,6 +321,14 @@
       {% for band, prods in outputs.bands.items() %}
       <div class="band-panel {% if loop.first %}active{% endif %}" data-band="{{ band }}">
         <div class="fig-grid col sortable" data-sort-key="band">
+          {% if prods.get('unmatched_ref') %}
+            {% set ref = prods.unmatched_ref %}
+            <figure class="fig" data-fig-id="unmatched_ref">
+              <figcaption class="cap">{{ band }} reference · Target not identified</figcaption>
+              {{ product_image(file_base, ref.file, ref.version, band ~ ' unmatched reference') }}
+              <p class="hint">Identify the target in this frame, then enter its source number in Target ID. For independently numbered bands, retry one band at a time.</p>
+            </figure>
+          {% endif %}
           {% for key in ['ref', 'apertures', 'cutouts', 'alignment', 'covariates', 'gif'] %}
             {% if prods.get(key) %}
             <figure class="fig" data-fig-id="{{ key }}">
@@ -364,8 +372,14 @@
   {% else %}
     <div class="empty-state error">
       <div class="empty-icon">⚠</div>
-      <h2>No reduction found</h2>
-      <p>No prose outputs yet for this target — configure options below and run.</p>
+      <div id="phot-no-reduction">
+        <h2>No reduction found</h2>
+        <p>No prose outputs yet for this target — configure options below and run.</p>
+      </div>
+      <div id="phot-no-reference" hidden>
+        <h2>Target not identified</h2>
+        <p>This run saved no numbered reference frame. Check the run log for the selected frame in each band. Verify the target against a numbered frame before entering a Target ID.</p>
+      </div>
     </div>
   {% endif %}
   </div>
@@ -415,7 +429,7 @@
           <summary>Target & Star Selection <span class="help-tooltip" title="Settings to identify target coordinate and comparison stars.">?</span></summary>
           <div style="grid-column: 1 / -1; display: grid; grid-template-columns: repeat(4, 1fr); gap: 1.25rem;">
             <div class="opt">
-              <label for="opt-target_id">Target ID <span class="help-tooltip" title="Target index in Gaia catalog (corresponds to --tID). Empty means auto-detect target at center.">?</span></label>
+              <label for="opt-target_id">Target ID <span class="help-tooltip" title="Zero-based source number on the numbered reference frame (--tID). Leave empty for automatic identification. Independently detected bands can number the same star differently.">?</span></label>
               <input type="text" id="opt-target_id" placeholder="auto" value="{{ run_defaults.target_id }}" style="width: 100%;">
               <span class="hint">--tID; empty → auto</span>
             </div>
@@ -1486,6 +1500,12 @@
   };
   function renderRunStatus(state, errorDesc) {
     if (!statusEl) return;
+    var noReference = document.getElementById('phot-no-reference');
+    if (noReference) {
+      var unmatched = state === 'error' && /target not located/i.test(errorDesc || '');
+      noReference.hidden = !unmatched;
+      document.getElementById('phot-no-reduction').hidden = unmatched;
+    }
     var info = STATE_BADGES[state];
     if (!info) {
       statusEl.style.display = 'none';
