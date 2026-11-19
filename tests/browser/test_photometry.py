@@ -420,10 +420,11 @@ def test_precision_options_persist_submit_and_reset(page, pipeline):
         else:
             page.fill(selector, value)
     reveal(page, "#opt-save_flux_datacube")
-    page.check("#opt-save_flux_datacube")
+    expect(page.locator("#opt-save_flux_datacube")).to_be_checked()  # on by default
+    page.uncheck("#opt-save_flux_datacube")
     page.wait_for_function("""([key, values]) => {
         const saved = JSON.parse(localStorage.getItem(key) || '{}');
-        return saved.save_flux_datacube === true &&
+        return saved.save_flux_datacube === false &&
             Object.entries(values).every(([k, v]) => saved[k] === v);
     }""", arg=[OPT_KEY, values])
     page.goto("/jobs")
@@ -431,7 +432,7 @@ def test_precision_options_persist_submit_and_reset(page, pipeline):
     page.wait_for_load_state("networkidle")
     for key, value in values.items():
         expect(page.locator("#opt-" + key)).to_have_value(value)
-    expect(page.locator("#opt-save_flux_datacube")).to_be_checked()
+    expect(page.locator("#opt-save_flux_datacube")).not_to_be_checked()
     with page.expect_response("**/api/photometry/run") as response:
         page.click("#run-full-btn")
     assert response.value.ok
@@ -440,7 +441,7 @@ def test_precision_options_persist_submit_and_reset(page, pipeline):
     assert options["comp_criterion"] == "check"
     for key in ("comp_min_flux_frac", "clip_star_sigma", "clip_star_window"):
         assert options[key] == float(values[key])
-    assert options["save_flux_datacube"] is True
+    assert options["save_flux_datacube"] is False
     with page.expect_response("**/api/photometry/cancel"):
         page.click("#cancel-btn")
     reveal(page, "#defaults-btn")
@@ -450,7 +451,7 @@ def test_precision_options_persist_submit_and_reset(page, pipeline):
     for key, value in dict(comp_ensemble="greedy", comp_criterion="target",
                            comp_min_flux_frac="0.3", clip_star_sigma="", clip_star_window="11").items():
         expect(page.locator("#opt-" + key)).to_have_value(value)
-    expect(page.locator("#opt-save_flux_datacube")).not_to_be_checked()
+    expect(page.locator("#opt-save_flux_datacube")).to_be_checked()
 
 
 def test_noise_budget_and_flux_cube_download(page, live_server):
@@ -479,3 +480,79 @@ def test_noise_budget_and_flux_cube_download(page, live_server):
             archive.unlink(missing_ok=True)
         else:
             archive.write_bytes(original)
+
+
+@pytest.fixture
+def rediff_calls(monkeypatch, live_server):
+    """A flux cube in the seeded run and stubbed re-diff calls."""
+    from muscat_db import photometry as phot
+    from muscat_db import web
+
+    cube = phot.run_output_dir("muscat3", "261001", "TOI-1000", RUN_ID) / "TOI-1000_muscat3_261001_flux_datacube.npz"
+    cube.write_bytes(b"stub")
+    calls = {"info": 0, "rediff": [], "restore": 0}
+    band = {"target_id": 0, "aper_radii": [5.0], "aper_unit": "pix", "default_aperture": 0,
+            "default_weighting": "broeg", "selectable_ids": [1, 2, 3, 4],
+            "default_comparisons": [{"id": 2, "weight": 0.6}, {"id": 1, "weight": 0.4}]}
+    state = {"restorable": True, "clip_active": False, "applied_selection": {}}
+
+    def info(*a):
+        calls["info"] += 1
+        return {"ok": True, "bands": {"gp": band}, **state}
+
+    def rediff(*a, apply):
+        calls["rediff"].append({"selections": a[4], "apply": apply})
+        part = {"comparisons": a[4][0]["comparisons"], "aperture": 0, "aper_radius": 5.0,
+                "weighting": "equal", "metrics": {"n": 9, "std_ppt": 2.5, "p2p_ppt": 2.25}}
+        return {"ok": True, "applied": apply, "bands": {"gp": {"custom": part}}, **state}
+
+    monkeypatch.setattr(web.rediff_mod, "info", info)
+    monkeypatch.setattr(web.rediff_mod, "rediff", rediff)
+    monkeypatch.setattr(web.rediff_mod, "restore_rediff", lambda *a: calls.__setitem__("restore", calls["restore"] + 1) or {
+        "ok": True, "restored": [], "n_files": 0})
+    yield calls
+    cube.unlink(missing_ok=True)
+
+
+def test_rediff_card_test_apply_and_restore(page, rediff_calls):
+    page.goto(URL)
+    page.wait_for_load_state("networkidle")
+    with page.expect_response("**/api/photometry/rediff/info"):
+        page.locator("#rediff-section > summary").click()
+    band = page.locator("fieldset.rediff-band[data-band='gp']")
+    expect(band).to_contain_text("one aperture radius")
+    expect(band.locator(".rediff-star:checked")).to_have_count(2)
+
+    page.click("#rediff-test-btn")  # nothing changed yet: no request
+    expect(page.locator("#message-modal")).to_contain_text("Change the comparison stars")
+    page.click("#message-modal-ok")
+    assert rediff_calls["rediff"] == []
+
+    band.locator(".rediff-star[value='1']").uncheck()
+    band.locator(".rediff-star[value='4']").check()
+    with page.expect_response("**/api/photometry/rediff"):
+        page.click("#rediff-test-btn")
+    assert rediff_calls["rediff"][-1] == {
+        "selections": [{"band": "gp", "comparisons": [2, 4], "aperture": 0}], "apply": False}
+    expect(page.locator("#rediff-result")).to_contain_text("2.25")
+
+    page.click("#rediff-apply-btn")
+    with page.expect_response("**/api/photometry/rediff"):
+        page.click("#message-modal-ok")  # confirm
+    assert rediff_calls["rediff"][-1]["apply"] is True
+    page.click("#message-modal-ok")
+
+    page.goto(URL)
+    page.wait_for_load_state("networkidle")
+    with page.expect_response("**/api/photometry/rediff/info"):
+        page.locator("#rediff-section > summary").click()
+    page.click("#rediff-restore-btn")
+    with page.expect_response("**/api/photometry/rediff/restore"):
+        page.click("#message-modal-ok")
+    assert rediff_calls["restore"] == 1
+
+
+def test_rediff_card_is_hidden_without_a_flux_cube(page):
+    page.goto(URL)
+    page.wait_for_load_state("networkidle")
+    expect(page.locator("#rediff-section")).to_have_count(0)

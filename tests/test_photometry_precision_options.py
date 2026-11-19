@@ -15,7 +15,11 @@ def test_precision_options_reach_engine(monkeypatch, tmp_path):
         assert command[command.index("--" + key) + 1] == str(phot.normalize_run_options(OPTIONS)[key])
     assert "--save_flux_datacube" in command
     default = phot.build_command("muscat3", "261115", "k2-384", {}, test_run=False)
-    assert not any("--" + key in default for key in OPTIONS)
+    assert not any("--" + key in default for key in OPTIONS.keys() - {"save_flux_datacube"})
+    # The flux cube is on by default so a run can be re-differenced (#476).
+    assert "--save_flux_datacube" in default
+    off = phot.build_command("muscat3", "261115", "k2-384", {"save_flux_datacube": False}, test_run=False)
+    assert "--save_flux_datacube" not in off
 
 
 @pytest.mark.parametrize("key,value", [

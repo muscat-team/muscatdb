@@ -85,6 +85,7 @@ from muscat_db import transit_fit_api as fit_api
 from muscat_db import ttv_fit_api as ttv_api
 from muscat_db import ref_time as ref_time_lib
 from muscat_db import postprocess as postproc
+from muscat_db import rediff as rediff_mod
 from muscat_db import exposure as exp_calc
 from muscat_db.admin import router as admin_router
 from muscat_db.access import (
@@ -8798,6 +8799,66 @@ def photometry_postprocess_restore(payload: phot_api.RestoreRequest):
     if not result.get("ok"):
         return phot_api.response(phot_api.RestoreResponse, result, status_code=400)
     return phot_api.response(phot_api.RestoreResponse, result)
+
+
+def _rediff_target(payload: dict, model) -> tuple[tuple | None, JSONResponse | None]:
+    """Validate the dataset and run of a re-diff request and check visibility."""
+    inst = (payload.get("inst") or "").strip()
+    date = (payload.get("date") or "").strip()
+    target = (payload.get("target") or "").strip()
+    run = (payload.get("run") or "").strip()
+    if inst not in INSTRUMENTS or not phot.valid_date(date) or not target:
+        return None, phot_api.response(model, {"ok": False, "error": "invalid instrument, date or target"}, status_code=400)
+    if not run:
+        return None, phot_api.response(model, {"ok": False, "error": "a run is required"}, status_code=400)
+    _require_visible_run("photometry", inst, date, target, run)
+    return (inst, date, target, run), None
+
+
+def _rediff_reply(model, result: dict) -> JSONResponse:
+    return phot_api.response(model, result, status_code=200 if result.get("ok") else 400)
+
+
+@photometry_router.post("/rediff/info", response_model=phot_api.RediffInfoResponse,
+                        responses={400: {"model": phot_api.RediffInfoResponse}})
+def photometry_rediff_info(payload: phot_api.RestoreRequest):
+    """Selectable comparison stars, default comparisons and weights, and
+    aperture radii per band from the run's flux datacube."""
+    key, error = _rediff_target(payload.model_dump(exclude_unset=True), phot_api.RediffInfoResponse)
+    if error:
+        return error
+    return _rediff_reply(phot_api.RediffInfoResponse, rediff_mod.info(*key))
+
+
+@photometry_router.post("/rediff", response_model=phot_api.RediffResponse,
+                        responses={400: {"model": phot_api.RediffResponse}})
+def photometry_rediff(payload: phot_api.RediffRequest):
+    """Re-difference a run against chosen comparison stars and aperture.
+
+    ``apply=false`` compares with the default light curve (metrics and a
+    base64 overlay); ``apply=true`` rewrites the selected bands' Flux/Err and
+    the summary figure, keeping the pipeline's files for restore.
+    """
+    payload = payload.model_dump(exclude_unset=True)
+    key, error = _rediff_target(payload, phot_api.RediffResponse)
+    if error:
+        return error
+    apply = bool(payload.get("apply", False))
+    if apply:  # a comparison only reads the run
+        _require_may_modify_run("photometry", *key, action="re-difference")
+    return _rediff_reply(phot_api.RediffResponse,
+                         rediff_mod.rediff(*key, payload.get("selections"), apply=apply))
+
+
+@photometry_router.post("/rediff/restore", response_model=phot_api.RestoreResponse,
+                        responses={400: {"model": phot_api.RestoreResponse}})
+def photometry_rediff_restore(payload: phot_api.RestoreRequest):
+    """Undo the run's re-diff: put back the pipeline's band CSVs and summary figure."""
+    key, error = _rediff_target(payload.model_dump(exclude_unset=True), phot_api.RestoreResponse)
+    if error:
+        return error
+    _require_may_modify_run("photometry", *key, action="restore")
+    return _rediff_reply(phot_api.RestoreResponse, rediff_mod.restore_rediff(*key))
 
 
 @photometry_router.get("/status", response_model=phot_api.JobStatus)

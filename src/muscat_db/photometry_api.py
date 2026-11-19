@@ -140,6 +140,14 @@ class RestoreRequest(DatasetRequest):
     run: str = ""
 
 
+class RediffRequest(DatasetRequest):
+    run: str = ""
+    # [{band, comparisons, aperture}]; validated by rediff.parse_selections so
+    # a bad entry is a 400 with a reason rather than a bare 422.
+    selections: SkipValidation[list | None] = None
+    apply: bool = False
+
+
 class BatchJob(DatasetRequest):
     run: str = ""
 
@@ -224,6 +232,28 @@ class PostprocessResponse(ResponseModel):
     summary_png: str | None = None
     preview_png: str | None = Field(None, description="Base64 PNG preview")
     restorable: bool = False
+
+
+class RediffState(ResponseModel):
+    restorable: bool = False
+    clip_active: bool = False
+    applied_selection: dict = Field(default_factory=dict,
+                                    description="Band -> adopted comparisons, aperture, weighting")
+
+
+class RediffInfoResponse(RediffState):
+    ok: bool
+    error: str | None = None
+    bands: dict = Field(default_factory=dict, description="prose2 rediff_lightcurves --info per band")
+
+
+class RediffResponse(RediffState):
+    ok: bool
+    error: str | None = None
+    applied: bool = False
+    bands: dict = Field(default_factory=dict, description="Band -> default and custom metrics")
+    summary_png: str | None = None
+    preview_png: str | None = Field(None, description="Base64 PNG preview")
 
 
 class RestoreResponse(ResponseModel):

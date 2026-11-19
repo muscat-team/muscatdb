@@ -118,7 +118,7 @@ RUN_DEFAULTS: dict = {
     "comp_min_flux_frac": 0.3,
     "clip_star_sigma": None,
     "clip_star_window": 11,
-    "save_flux_datacube": False,
+    "save_flux_datacube": True,
     "comparison_ids": "",      # "" -> auto, or "1,2,3"
     "avoid_comparison_ids": "",  # "" -> none; "1,2,3" -> --avoid_cids (requires --ref_band)
     "avoid_nearby_star_mode": "auto",  # off | auto | custom
@@ -250,6 +250,7 @@ _PID_FILE_NAME = "photometry.pid"
 _CONDA_ENV_DEFAULT = "prose"   # prose deps live in a conda env named "prose"
 _MODULE = "prose.scripts.run_photometry"
 _POSTPROCESS_MODULE = "prose.scripts.postprocess_lightcurves"
+_REDIFF_MODULE = "prose.scripts.rediff_lightcurves"
 
 _DATE_RE = re.compile(r"^\d{6}$")
 # A served filename is a single path segment of safe characters only.

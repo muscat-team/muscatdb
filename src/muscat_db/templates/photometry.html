@@ -799,6 +799,26 @@
     </p>
     <div id="postproc-result" style="display:none; margin-top: 0.75rem; font-size: 0.85rem;"></div>
   </details>
+  {% if outputs.flux_datacube and sel_run %}
+  <details class="phot-section phot-fold" id="rediff-section" style="margin: 0 0 1rem; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 1rem 1.25rem;">
+    <summary>
+      <span style="font-size: 0.9rem; color: var(--text-dim);">Compare comparison stars &amp; apertures <span class="help-tooltip" title="Rebuild the target light curve from this run's per-star flux cube against comparison stars and an aperture you choose, and compare it with the pipeline's default. A manual sanity check of the automatic selection: no photometry is re-run.">?</span></span>
+    </summary>
+    <p style="color: var(--text-dim); font-size: 0.78rem; margin: 0.6rem 0;">
+      Star IDs are those on the run's reference image. Defaults are pre-checked with their weights. Custom sets use equal weights, the same as giving those IDs as Comparison IDs.
+    </p>
+    <div id="rediff-bands"><p class="hint">Loading the flux cube…</p></div>
+    <div class="run-actions">
+      <button class="btn primary" type="button" id="rediff-test-btn" disabled>Test comparison</button>
+      <button class="btn primary" type="button" id="rediff-apply-btn" disabled>Apply comparison</button>
+      <button class="btn" type="button" id="rediff-restore-btn" title="Put back the pipeline's own band CSVs and summary figure" disabled>Restore default</button>
+    </div>
+    <p style="color: var(--text-dim); font-size: 0.78rem; margin: 0.4rem 0 0;">
+      Test writes nothing. Apply rewrites Flux and Err of the bands you changed and regenerates the summary <code>*_lightcurves.png</code>; the pipeline's files are kept, and Restore default puts them back. Apply is refused while a post-process clip is active. A clip applied afterwards sits on top of the adopted set.
+    </p>
+    <div id="rediff-result" style="display:none; margin-top: 0.75rem; font-size: 0.85rem;"></div>
+  </details>
+  {% endif %}
   {% endif %}
 
   <div id="delete-confirm-overlay">
@@ -2170,6 +2190,179 @@
   if (postprocRestoreBtn) postprocRestoreBtn.addEventListener('click', restorePostprocess);
   if (postprocTestBtn) postprocTestBtn.addEventListener('click', function () { runPostprocess(false); });
   if (postprocApplyBtn) postprocApplyBtn.addEventListener('click', function () { runPostprocess(true); });
+
+  // ----- re-diff card: compare chosen comparison stars / aperture (flux cube) -----
+  var rediffSection = document.getElementById('rediff-section');
+  var rediffBands = document.getElementById('rediff-bands');
+  var rediffResult = document.getElementById('rediff-result');
+  var rediffTestBtn = document.getElementById('rediff-test-btn');
+  var rediffApplyBtn = document.getElementById('rediff-apply-btn');
+  var rediffRestoreBtn = document.getElementById('rediff-restore-btn');
+  var rediffInfo = null;
+  var escH = MuscatDom.escapeHtml;
+  function rediffRunBody(extra) {
+    return JSON.stringify(Object.assign({ inst: inst, date: date, target: target, run: runId }, extra || {}));
+  }
+  function rediffPost(path, extra) {
+    return fetch('/api/photometry/' + path, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: rediffRunBody(extra)
+    }).then(function (r) { return r.json(); });
+  }
+  function fmt(x, n) { return x == null ? '—' : Number(x).toFixed(n); }
+  function rediffBandHtml(band, b, adopted) {
+    var defaults = (b.default_comparisons || []).map(function (c) { return c.id; });
+    var weight = {};
+    (b.default_comparisons || []).forEach(function (c) { weight[c.id] = c.weight; });
+    var checked = adopted ? adopted.comparisons : defaults;
+    var aperture = adopted ? adopted.aperture : b.default_aperture;
+    var radii = b.aper_radii || [];
+    var html = '<fieldset class="rediff-band" data-band="' + escH(band) + '" style="border:1px solid var(--border);border-radius:8px;padding:0.5rem 0.9rem;margin:0 0 0.75rem;">';
+    html += '<legend class="mono" style="padding:0 0.3rem;">' + escH(band) + ' · target ' + escH(b.target_id) + ' · default ' + escH(b.default_weighting) + ' weights</legend>';
+    html += '<label style="font-size:0.85rem;">Aperture <select class="rediff-aperture">';
+    radii.forEach(function (r, i) {
+      html += '<option value="' + i + '"' + (i === aperture ? ' selected' : '') + '>' + fmt(r, 2) + ' ' + escH(b.aper_unit) + (i === b.default_aperture ? ' (default)' : '') + '</option>';
+    });
+    html += '</select></label>';
+    if (radii.length === 1) {
+      html += '<p class="hint" style="margin:0.3rem 0;">This run measured one aperture radius, so only comparison stars can be compared here. Set Aperture radii (<code>--aper_radii</code>) to a grid in Configure &amp; Run Photometry to compare apertures.</p>';
+    }
+    html += '<div style="display:flex;flex-wrap:wrap;gap:0.3rem 0.9rem;margin-top:0.4rem;font-size:0.85rem;">';
+    (b.selectable_ids || []).forEach(function (id) {
+      var w = weight[id] != null ? ' <span class="hint">' + fmt(weight[id], 3) + '</span>' : '';
+      html += '<label class="mono"><input type="checkbox" class="rediff-star" value="' + id + '"' + (checked.indexOf(id) >= 0 ? ' checked' : '') + '> ' + id + w + '</label>';
+    });
+    html += '</div></fieldset>';
+    return html;
+  }
+  function rediffRenderState(d) {
+    var bits = [];
+    var adopted = d.applied_selection || {};
+    Object.keys(adopted).forEach(function (band) {
+      var a = adopted[band];
+      bits.push(escH(band) + ': ' + (a.comparisons || []).join(', ') + ' at ' + fmt(a.aper_radius, 2));
+    });
+    var html = '';
+    if (bits.length) html += '<p style="color:var(--green);margin:0 0 0.5rem;">Adopted (equal weights) — ' + bits.join('; ') + '</p>';
+    if (d.clip_active) html += '<p class="warn">⚠ A post-process clip is active; use Restore pre-clip before applying another comparison set.</p>';
+    rediffApplyBtn.disabled = !!d.clip_active;
+    rediffRestoreBtn.disabled = !d.restorable;
+    rediffTestBtn.disabled = false;
+    return html;
+  }
+  function loadRediff() {
+    rediffPost('rediff/info').then(function (res) {
+      if (!res.ok) {
+        rediffBands.innerHTML = '<p class="warn">' + escH(res.error || 'could not read the flux cube') + '</p>';
+        return;
+      }
+      rediffInfo = res;
+      var html = rediffRenderState(res);
+      Object.keys(res.bands).forEach(function (band) {
+        html += rediffBandHtml(band, res.bands[band], (res.applied_selection || {})[band]);
+      });
+      rediffBands.innerHTML = html;
+    }).catch(function (err) {
+      rediffBands.innerHTML = '<p class="warn">' + escH(err.message) + '</p>';
+    });
+  }
+  // Bands whose choice differs from the pipeline default (a band already
+  // re-differenced counts, so applying another band keeps its adopted set).
+  function rediffSelections() {
+    var out = [];
+    rediffBands.querySelectorAll('fieldset.rediff-band').forEach(function (fs) {
+      var band = fs.dataset.band;
+      var b = rediffInfo.bands[band];
+      var ids = Array.prototype.map.call(fs.querySelectorAll('.rediff-star:checked'), function (c) { return Number(c.value); });
+      var aperture = Number(fs.querySelector('.rediff-aperture').value);
+      var defaults = (b.default_comparisons || []).map(function (c) { return c.id; });
+      var same = aperture === b.default_aperture && ids.length === defaults.length &&
+        ids.every(function (i) { return defaults.indexOf(i) >= 0; });
+      if (!same) out.push({ band: band, comparisons: ids, aperture: aperture });
+    });
+    return out;
+  }
+  function rediffReport(d) {
+    var html = d.applied ? '<p style="font-weight:600;color:var(--green);margin:0 0 0.4rem;">Applied into ' + escH(d.summary_png || 'summary figure') + '.</p>' : '';
+    html += '<table class="mono" style="border-collapse:collapse;margin:0 0 0.5rem;"><tr><th>band</th><th>set</th><th>comparisons</th><th>aperture</th><th>std (ppt)</th><th>p2p (ppt)</th></tr>';
+    Object.keys(d.bands || {}).forEach(function (band) {
+      ['default', 'custom'].forEach(function (kind) {
+        var p = d.bands[band][kind];
+        if (!p) return;
+        html += '<tr><td>' + escH(band) + '</td><td>' + kind + ' (' + escH(p.weighting) + ')</td><td>' + (p.comparisons || []).join(', ') +
+          '</td><td>' + fmt(p.aper_radius, 2) + '</td><td>' + fmt(p.metrics && p.metrics.std_ppt, 2) + '</td><td>' + fmt(p.metrics && p.metrics.p2p_ppt, 2) + '</td></tr>';
+      });
+    });
+    html += '</table>';
+    if (d.preview_png) html += '<img src="' + d.preview_png + '" alt="default vs custom light curves" style="max-width:100%; border:1px solid var(--border); border-radius:6px;">';
+    return html;
+  }
+  async function runRediff(apply) {
+    if (!rediffInfo) return;
+    var selections = rediffSelections();
+    if (!selections.length) {
+      window.showMessageModal('Compare comparison stars', 'Change the comparison stars or the aperture of at least one band first.', 'notice');
+      return;
+    }
+    var empty = selections.filter(function (s) { return !s.comparisons.length; });
+    if (empty.length) {
+      window.showMessageModal('Compare comparison stars', 'Select at least one comparison star in band ' + empty[0].band + '.', 'notice');
+      return;
+    }
+    if (apply) {
+      var ok = await window.showConfirmModal('Apply this comparison set?',
+        'Rewrite Flux and Err of band(s) ' + selections.map(function (s) { return s.band; }).join(', ') + ' and the summary figure. Restore default puts the pipeline\'s files back.',
+        { confirmLabel: 'Apply' });
+      if (!ok) return;
+    }
+    var btn = apply ? rediffApplyBtn : rediffTestBtn;
+    var prevText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = apply ? 'Applying…' : 'Testing…';
+    function done() { btn.disabled = false; btn.textContent = prevText; }
+    rediffPost('rediff', { selections: selections, apply: apply }).then(function (res) {
+      done();
+      if (!res.ok) {
+        window.showMessageModal('Compare comparison stars', res.error || 're-differencing failed', 'error');
+        return;
+      }
+      rediffResult.style.display = 'block';
+      rediffResult.innerHTML = rediffReport(res);
+      if (apply) {
+        window.showMessageModal('Success', 'Comparison set applied and summary light-curve regenerated.', 'success');
+        setTimeout(function () { window.location.reload(); }, 900);
+      }
+    }).catch(function (err) {
+      done();
+      window.showMessageModal('Compare comparison stars', err.message, 'error');
+    });
+  }
+  async function restoreRediff() {
+    var ok = await window.showConfirmModal('Restore the default light curves?',
+      'Put back the band CSVs and summary figure the pipeline wrote, undoing the applied comparison set.',
+      { confirmLabel: 'Restore' });
+    if (!ok) return;
+    rediffRestoreBtn.disabled = true;
+    rediffPost('rediff/restore').then(function (res) {
+      if (!res.ok) {
+        rediffRestoreBtn.disabled = false;
+        window.showMessageModal('Restore default', res.error || 'restore failed', 'error');
+        return;
+      }
+      window.showMessageModal('Success', 'Restored ' + (res.n_files || 0) + ' file(s) written by the pipeline.', 'success');
+      setTimeout(function () { window.location.reload(); }, 900);
+    }).catch(function (err) {
+      rediffRestoreBtn.disabled = false;
+      window.showMessageModal('Restore default', err.message, 'error');
+    });
+  }
+  if (rediffSection) {
+    rediffSection.addEventListener('toggle', function () {
+      if (rediffSection.open && !rediffInfo) loadRediff();
+    });
+    rediffTestBtn.addEventListener('click', function () { runRediff(false); });
+    rediffApplyBtn.addEventListener('click', function () { runRediff(true); });
+    rediffRestoreBtn.addEventListener('click', restoreRediff);
+  }
 
   // ----- download all CSV links -----
   var dlAll = document.getElementById('dl-all-csv');
