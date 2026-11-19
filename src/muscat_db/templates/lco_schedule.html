@@ -157,8 +157,8 @@
         <option value="nautical" selected>Nautical (−12°)</option>
         <option value="astronomical">Astronomical (−18°)</option>
       </select></div>
-    <div class="lco-field"><label for="sch-obs-airmass">Max airmass <span class="help-tooltip" title="Maximum airmass for observability and the submitted LCO request. Lower values mean better image quality.">?</span></label><input id="sch-obs-airmass" type="number" step="any" value="2"></div>
-    <div class="lco-field"><label for="sch-moon-sep">Min lunar (deg) <span class="help-tooltip" title="Minimum angular distance from the Moon (degrees), used for observability and submitted as an LCO request constraint. The local observability calculation skips this cut when the Moon is below the horizon or under 10% illuminated.">?</span></label><input id="sch-moon-sep" type="number" step="any" value="30"></div>
+    <div class="lco-field"><label for="sch-obs-airmass">Max airmass <span class="help-tooltip" title="Maximum airmass for observability and the submitted LCO request. Lower values mean better image quality.">?</span></label><input id="sch-obs-airmass" type="number" step="any" value="{{ constraint_defaults.sinistro[0] }}"></div>
+    <div class="lco-field"><label for="sch-moon-sep">Min lunar (deg) <span class="help-tooltip" title="Minimum angular distance from the Moon (degrees), used for observability and submitted as an LCO request constraint. The local observability calculation skips this cut when the Moon is below the horizon or under 10% illuminated.">?</span></label><input id="sch-moon-sep" type="number" step="any" value="{{ constraint_defaults.sinistro[1] }}"></div>
     <div class="lco-field"><label for="sch-max-lunar-phase">Max lunar phase <span class="help-tooltip" title="LCO max_lunar_phase: the maximum Moon illuminated fraction (0 = new, 1 = full) to observe under. 1.0 places no restriction. Windows with the Moon brighter than this are dropped, matching what LCO will schedule.">?</span></label>
       <select id="sch-max-lunar-phase">
         <option value="1.0" selected>1.0 (any)</option>
@@ -283,7 +283,7 @@
   <div class="sinistro-only" style="margin-top: 0.6rem;">
     <div class="lco-subhead lco-block-title" id="single-block-title">Sinistro / QHY600</div>
     <div class="lco-grid" style="grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 0.5rem 1rem;">
-      <div class="lco-field"><label for="sch-sin-count">Exp count <span class="help-tooltip" title="Number of exposures per visit.">?</span></label><input id="sch-sin-count" type="number" min="1" value="1"></div>
+      <div class="lco-field"><label for="sch-sin-count">Exp count <span class="help-tooltip" title="Calculated from the observing window and exposure time. REPEAT_EXPOSE repeats one exposure block for the observing duration.">?</span></label><input id="sch-sin-count" readonly type="number" min="1" value="1"></div>
       <div class="lco-field">
         <label for="sch-effective-filter">Filter <span class="help-tooltip" title="LCO Sinistro filters: Pan-STARRS (rp/gp/ip/up/zs/w) and Bessell (U/B/V/R/I). central_2k_2x2 readout only calibrates up/gp/rp/ip/zs/w. QHY600 offers a wider set incl. narrowband (OIII, S[II], H-Alpha).">?</span></label>
         <select id="sch-effective-filter">
@@ -319,8 +319,8 @@
     </div>
     <div class="lco-subhead">Settings</div>
     <div class="lco-grid" style="grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 0.5rem 1rem;">
-      <div class="lco-field"><label for="sch-count">Exp count <span class="help-tooltip" title="Number of exposures per visit. Each exposure covers all 4 bands simultaneously.">?</span></label>
-        <input id="sch-count" type="number" min="1" value="1"></div>
+      <div class="lco-field"><label for="sch-count">Exp count <span class="help-tooltip" title="Calculated from the observing window and exposure time. REPEAT_EXPOSE repeats one exposure block for the observing duration. Each exposure covers all 4 bands simultaneously.">?</span></label>
+        <input id="sch-count" readonly type="number" min="1" value="1"></div>
       <div class="lco-field"><label for="sch-exp-mode">Exp mode <span class="help-tooltip" title="Async returns immediately after exposure; Sync blocks until data is available.">?</span></label>
         <select id="sch-exp-mode"><option value="ASYNCHRONOUS" selected>Async</option><option value="SYNCHRONOUS">Sync</option></select></div>
       <div class="lco-field"><label for="sch-readout">Readout mode <span class="help-tooltip" title="MUSCAT_FAST is faster but noisier; MUSCAT_SLOW is slower but lower read noise.">?</span></label><select id="sch-readout"><option value="MUSCAT_FAST">MUSCAT_FAST</option><option value="MUSCAT_SLOW">MUSCAT_SLOW</option></select></div>
@@ -336,7 +336,7 @@
 
   <div class="lco-grid" style="margin-top: 0.6rem; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));">
     <div class="lco-field"><label for="sch-ipp">IPP value <span class="help-tooltip" title="Observing Priority Parity. Higher values (e.g. 2.0) increase priority in the LCO queue. Default is 1.0.">?</span></label><input id="sch-ipp" type="number" step="any" value="1.0"></div>
-    <div class="lco-field"><label for="sch-type">Type <span class="help-tooltip" title="REPEAT_EXPOSE runs the exposure sequence once per visit. EXPOSE runs a single exposure.">?</span></label>
+    <div class="lco-field"><label for="sch-type">Type <span class="help-tooltip" title="REPEAT_EXPOSE repeats the sequence for the observing duration. EXPOSE runs the calculated exposure count once.">?</span></label>
       <select id="sch-type">
         <option value="REPEAT_EXPOSE">REPEAT_EXPOSE</option>
         <option value="EXPOSE">EXPOSE</option>
@@ -663,11 +663,35 @@
     return Object.keys(opts).length ? opts : null;
   }
 
+  var constraintDefaults = {{ constraint_defaults | tojson }};
+  var constraintFields = ['sch-obs-airmass', 'sch-moon-sep'];
+  var editedLimits = {};
+  constraintFields.forEach(function (id) {
+    el(id).addEventListener('input', function () { editedLimits[id] = true; });
+  });
+  function applyConstraintDefaults() {
+    var limits = constraintDefaults[val('sch-kind')];
+    if (!limits) return;
+    var changed = false;
+    constraintFields.forEach(function (id, index) {
+      if (!editedLimits[id] && num(id) !== limits[index]) {
+        setVal(id, limits[index]);
+        changed = true;
+      }
+    });
+    if (changed) {
+      invalidateGeneratedWindows();
+      // On initial restore the cached windows have not been rendered yet.
+      if (!lastScheduleKind) saveScheduleState();
+    }
+  }
+
   function collectOptions() {
     var o = {};
     TEXT_IDS.forEach(function (id) { o[id] = val(id); });
     CHECK_IDS.forEach(function (id) { o[id] = chk(id); });
     o['_guidingVersion'] = 1;
+    o['_editedLimits'] = editedLimits;
     o['_ephemTarget'] = ephemTarget;
     o['_fieldSources'] = fieldSources;
     o['_cacheKey'] = exptimeCacheKey();
@@ -707,6 +731,10 @@
     if (!stored && !slug) return;
     var saved = Object.assign({}, stored || {}, slug || {});
     TEXT_IDS.forEach(function (id) { if (saved[id] !== undefined && saved[id] !== '') setVal(id, saved[id]); });
+    // Older forms did not record edits. Keep their saved limits.
+    constraintFields.forEach(function (id) {
+      editedLimits[id] = saved._editedLimits ? !!saved._editedLimits[id] : saved[id] != null && saved[id] !== '';
+    });
     CHECK_IDS.forEach(function (id) { if (saved[id] !== undefined) setChk(id, saved[id]); });
     if (saved['_guidingVersion'] !== 1) {
       setSelectValue('sch-guiding-config', val('sch-kind') === 'muscat' ? 'OFF' : 'ON');
@@ -1121,6 +1149,7 @@
 
   function applyKind(restoring) {
     var k = val('sch-kind');
+    applyConstraintDefaults();
     if (!restoring && k !== lastScheduleKind) {
       setSelectValue('sch-guiding-config', k === 'muscat' ? 'OFF' : 'ON');
     }
@@ -3504,6 +3533,7 @@
     // real #sch-kind options (they're view-only instrument identities).
     var muscat = !isSingleFilterKind(p.kind);
     setSelectValue('sch-kind', muscat ? 'muscat' : p.kind);
+    editedLimits = {'sch-obs-airmass': p.max_airmass != null, 'sch-moon-sep': p.min_lunar_distance != null};
     applyKind();
     if (p.proposal != null && p.proposal !== '') setSelectValue('sch-proposal', String(p.proposal));
     if (p.target_name != null) setVal('sch-target', p.target_name);

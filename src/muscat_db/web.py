@@ -5344,7 +5344,13 @@ def lco_page():
 
 @app.get("/lco/schedule", response_class=HTMLResponse)
 def lco_schedule_page():
-    return _render("lco_schedule.html")
+    return _render(
+        "lco_schedule.html",
+        constraint_defaults={
+            kind: lco._request_constraints(kind, {})[:2]
+            for kind in ("sinistro", "qhy600", "muscat")
+        },
+    )
 
 
 @app.get("/lco/archive", response_class=HTMLResponse)
