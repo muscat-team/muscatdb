@@ -961,10 +961,31 @@ def test_late_answer_for_a_previous_target_is_ignored(page):
     expect(page.locator('#sch-coords')).to_have_value('201.00000, -50.00000')
 
 
+def test_calculated_exposure_counts_and_type_help(page):
+    page.problems.allowed.extend(NO_TOKEN)
+    page.goto('/lco/schedule')
+    for kind, count_id in [('sinistro', 'sch-sin-count'), ('qhy600', 'sch-sin-count'), ('muscat', 'sch-count')]:
+        page.select_option('#sch-kind', kind)
+        count = page.locator('#' + count_id)
+        expect(count).to_be_visible()
+        expect(count).to_have_attribute('readonly', '')
+        tooltip = page.locator(f'label[for="{count_id}"] .help-tooltip')
+        tooltip.focus()
+        expect(tooltip).to_have_accessible_description(
+            'Calculated from the observing window and exposure time. REPEAT_EXPOSE repeats one exposure block '
+            'for the observing duration.' + (' Each exposure covers all 4 bands simultaneously.' if kind == 'muscat' else '')
+        )
+    type_help = page.locator('label[for="sch-type"] .help-tooltip')
+    type_help.focus()
+    expect(type_help).to_have_accessible_description(
+        'REPEAT_EXPOSE repeats the sequence for the observing duration. EXPOSE runs the calculated exposure count once.'
+    )
+
+
 def test_instrument_defaults_and_saved_guiding(page):
     page.problems.allowed.extend(NO_TOKEN)
     page.goto('/lco/schedule')
-    for kind, guiding, airmass, moon in [('sinistro', 'ON', '1.6', '30'), ('muscat', 'OFF', '2.5', '18'), ('qhy600', 'ON', '1.6', '30')]:
+    for kind, guiding, airmass, moon in [('sinistro', 'ON', '2', '30'), ('muscat', 'OFF', '2', '30'), ('qhy600', 'ON', '2', '30')]:
         page.select_option('#sch-kind', kind)
         assert page.input_value('#sch-guiding-config') == guiding
         assert page.input_value('#sch-obs-airmass') == airmass
@@ -991,25 +1012,6 @@ def test_preview_uses_site_camera(page, site, instrument, button, path):
     page.click('#' + button)
     page.wait_for_url('**' + path + '?**')
     assert 'inst=' + instrument in page.url
-
-
-def test_instrument_change_invalidates_windows_when_an_unedited_limit_changes(page):
-    page.problems.allowed.extend(NO_TOKEN)
-    page.goto('/lco/schedule')
-    page.fill('#sch-obs-airmass', '1.9')
-    _generate_windows(page)
-    expect(page.locator('#windows-body tr')).to_have_count(4)
-    page.select_option('#sch-kind', 'muscat')
-    expect(page.locator('#sch-obs-airmass')).to_have_value('1.9')
-    expect(page.locator('#sch-moon-sep')).to_have_value('18')
-    expect(page.locator('#windows-table')).to_be_hidden()
-    expect(page.locator('#sch-count')).not_to_be_editable()
-    page.reload()
-    expect(page.locator('#windows-table')).to_be_hidden()
-    page.select_option('#sch-kind', 'qhy600')
-    expect(page.locator('#sch-obs-airmass')).to_have_value('1.9')
-    expect(page.locator('#sch-moon-sep')).to_have_value('30')
-    expect(page.locator('#sch-sin-count')).not_to_be_editable()
 
 
 def test_manual_instrument_change_preserves_constraints_and_windows(page):

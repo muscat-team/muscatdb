@@ -157,8 +157,8 @@
         <option value="nautical" selected>Nautical (−12°)</option>
         <option value="astronomical">Astronomical (−18°)</option>
       </select></div>
-    <div class="lco-field"><label for="sch-obs-airmass">Max airmass <span class="help-tooltip" title="Maximum airmass for observability and the submitted LCO request. Lower values mean better image quality.">?</span></label><input id="sch-obs-airmass" type="number" step="any" value="{{ constraint_defaults.sinistro[0] }}"></div>
-    <div class="lco-field"><label for="sch-moon-sep">Min lunar (deg) <span class="help-tooltip" title="Minimum angular distance from the Moon (degrees), used for observability and submitted as an LCO request constraint. The local observability calculation skips this cut when the Moon is below the horizon or under 10% illuminated.">?</span></label><input id="sch-moon-sep" type="number" step="any" value="{{ constraint_defaults.sinistro[1] }}"></div>
+    <div class="lco-field"><label for="sch-obs-airmass">Max airmass <span class="help-tooltip" title="Maximum airmass for observability and the submitted LCO request. Lower values mean better image quality.">?</span></label><input id="sch-obs-airmass" type="number" step="any" value="2"></div>
+    <div class="lco-field"><label for="sch-moon-sep">Min lunar (deg) <span class="help-tooltip" title="Minimum angular distance from the Moon (degrees), used for observability and submitted as an LCO request constraint. The local observability calculation skips this cut when the Moon is below the horizon or under 10% illuminated.">?</span></label><input id="sch-moon-sep" type="number" step="any" value="30"></div>
     <div class="lco-field"><label for="sch-max-lunar-phase">Max lunar phase <span class="help-tooltip" title="LCO max_lunar_phase: the maximum Moon illuminated fraction (0 = new, 1 = full) to observe under. 1.0 places no restriction. Windows with the Moon brighter than this are dropped, matching what LCO will schedule.">?</span></label>
       <select id="sch-max-lunar-phase">
         <option value="1.0" selected>1.0 (any)</option>
@@ -663,35 +663,11 @@
     return Object.keys(opts).length ? opts : null;
   }
 
-  var constraintDefaults = {{ constraint_defaults | tojson }};
-  var constraintFields = ['sch-obs-airmass', 'sch-moon-sep'];
-  var editedLimits = {};
-  constraintFields.forEach(function (id) {
-    el(id).addEventListener('input', function () { editedLimits[id] = true; });
-  });
-  function applyConstraintDefaults() {
-    var limits = constraintDefaults[val('sch-kind')];
-    if (!limits) return;
-    var changed = false;
-    constraintFields.forEach(function (id, index) {
-      if (!editedLimits[id] && num(id) !== limits[index]) {
-        setVal(id, limits[index]);
-        changed = true;
-      }
-    });
-    if (changed) {
-      invalidateGeneratedWindows();
-      // On initial restore the cached windows have not been rendered yet.
-      if (!lastScheduleKind) saveScheduleState();
-    }
-  }
-
   function collectOptions() {
     var o = {};
     TEXT_IDS.forEach(function (id) { o[id] = val(id); });
     CHECK_IDS.forEach(function (id) { o[id] = chk(id); });
     o['_guidingVersion'] = 1;
-    o['_editedLimits'] = editedLimits;
     o['_ephemTarget'] = ephemTarget;
     o['_fieldSources'] = fieldSources;
     o['_cacheKey'] = exptimeCacheKey();
@@ -731,10 +707,6 @@
     if (!stored && !slug) return;
     var saved = Object.assign({}, stored || {}, slug || {});
     TEXT_IDS.forEach(function (id) { if (saved[id] !== undefined && saved[id] !== '') setVal(id, saved[id]); });
-    // Older forms did not record edits. Keep their saved limits.
-    constraintFields.forEach(function (id) {
-      editedLimits[id] = saved._editedLimits ? !!saved._editedLimits[id] : saved[id] != null && saved[id] !== '';
-    });
     CHECK_IDS.forEach(function (id) { if (saved[id] !== undefined) setChk(id, saved[id]); });
     if (saved['_guidingVersion'] !== 1) {
       setSelectValue('sch-guiding-config', val('sch-kind') === 'muscat' ? 'OFF' : 'ON');
@@ -1149,7 +1121,6 @@
 
   function applyKind(restoring) {
     var k = val('sch-kind');
-    applyConstraintDefaults();
     if (!restoring && k !== lastScheduleKind) {
       setSelectValue('sch-guiding-config', k === 'muscat' ? 'OFF' : 'ON');
     }
@@ -3533,7 +3504,6 @@
     // real #sch-kind options (they're view-only instrument identities).
     var muscat = !isSingleFilterKind(p.kind);
     setSelectValue('sch-kind', muscat ? 'muscat' : p.kind);
-    editedLimits = {'sch-obs-airmass': p.max_airmass != null, 'sch-moon-sep': p.min_lunar_distance != null};
     applyKind();
     if (p.proposal != null && p.proposal !== '') setSelectValue('sch-proposal', String(p.proposal));
     if (p.target_name != null) setVal('sch-target', p.target_name);
