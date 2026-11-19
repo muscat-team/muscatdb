@@ -2,7 +2,7 @@
 
 The production run `HIP67522/_runs/lco_only` has eight timings and no
 `_product.json`. A viewer with access to all eight inputs consequently loses
-access to the fit. Restore its record using the archived jobs. The existing
+access to the fit. The proposed recovery reconstructs its record using archived jobs. The existing
 product visibility checks then evaluate the original inputs on each request.
 
 The July 21 backup contains the completed TTV job, including its author,
@@ -12,20 +12,28 @@ target and no manual points. The July 17 backup contains all eight original
 transit-fit jobs and their selected legacy, night-level photometry CSVs.
 Seven time/uncertainty pairs still match their fits. The Sinistro 250319 fit
 was rerun at 04:39 UTC on July 21, after the TTV fit at 01:30 UTC. Its
-original and replacement jobs selected the same single light curve. Use the
-earlier jobs to pin the inputs, including that of the replaced fit.
+original and replacement jobs selected the same single light curve. The earlier job identifies the selected light curve, but the original
+fit output is still needed to confirm its time and uncertainty.
+
+**Pending verification.** Keep the production run restricted. Before installing,
+a reviewer must identify an independently preserved `out/tc.txt` from the
+original 250319 `cpt-default` fit and record its provenance in #428. The TTV
+CSV and other fits that reused that timing do not independently verify it.
+The current replacement fit fails the check below.
 
 ## On ut2
 
 Run from the project environment with the two July database backups under
-`$HOME/temp`. First point `run_dir` at a private copy of the run. Use the
+`$HOME/temp`. Set `original_tc` to the reviewed original output and `run_dir` to a private
+copy of the run for rehearsal. Use the
 production directory only when applying the reviewed correction, with no
 writer running for that fit. The command verifies the audited artifacts and
 creates the missing record atomically. It refuses to replace an existing
 record.
 
 ```sh
-uv run python - "$run_dir" <<'PY'
+uv run python - "${run_dir:?set the run directory}" "${original_tc:?set the verified original tc.txt}" <<'PY'
+import csv
 import hashlib
 import json
 import os
@@ -47,6 +55,16 @@ for name, expected in {
     with (run / name).open("rb") as stream:
         if hashlib.file_digest(stream, "sha256").hexdigest() != expected:
             raise SystemExit(f"Unexpected historical artifact: {name}")
+
+# The historical timer wrote BKJD. Compare the original planet b timing
+# and uncertainty with epoch 309 of planet 0 in this specific harmonic run.
+with (run / "data.csv").open() as stream:
+    [timing] = [row for row in csv.DictReader(stream)
+                if (row["planet"], row["epoch"]) == ("0", "309")]
+planet, bkjd, uncertainty = Path(sys.argv[2]).read_text().split()
+if (planet != "b" or float(bkjd) + 2454833 != float(timing["tc"])
+        or float(uncertainty) != float(timing["tc_unc"])):
+    raise SystemExit("The supplied fit output does not verify the original 250319 timing")
 
 def job(day, key):
     backup = Path.home() / "temp" / f"muscat.db.2026-07-{day}"

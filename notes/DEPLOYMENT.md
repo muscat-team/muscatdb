@@ -239,8 +239,9 @@ record(s)`. Transit fits found on disk take their light curves from `fit.yaml`; 
 unreadable `fit.yaml` or a missing light curve leaves the fit undetermined.
 
 Historical harmonic directories without job rows require separate provenance
-verification. The [HIP67522 TTV recovery](issue-428-ttv-recovery.md) restores
-the verified `lco_only` record using two July job backups (#428).
+verification. The [HIP67522 TTV recovery](issue-428-ttv-recovery.md) describes the
+proposed `lco_only` repair. Production installation awaits verification of the
+original 250319 timing and maintainer review (#428).
 
 The access groups are the only source of visibility, and they are allow-only:
 a proposal ingested after the seed is hidden from every non-admin, and from the
