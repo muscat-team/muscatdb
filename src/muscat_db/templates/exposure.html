@@ -262,17 +262,20 @@
     <div class="exp-section" id="mags-section">
       <div class="mag-head">
         <h3 style="margin:0;">Magnitudes per band <span class="help-icon multiline" data-help="Broadband filter magnitudes (gp, rp, ip, zs). Narrowband filters (g_narrow, i_narrow, z_narrow, Na_D) use these same magnitudes with filter-width-dependent peak count adjustments in the calculation.">?</span></h3>
-        <button class="copy-btn" type="button" id="clear-mags">Clear</button>
+        <button class="copy-btn" type="button" id="clear-mags">Clear target mags</button>
       </div>
       <p class="hint" style="margin-bottom:0.6rem;">Enter magnitudes manually or look up measured griz from Pan-STARRS, SkyMapper, TIC or SDSS. Gaia estimates are labeled and explain why measurements were unavailable.</p>
       <div class="mag-grid" id="mag-broad"></div>
+      <p class="hint" style="font-size:0.8rem">To include comparison stars, open the <a href="/fov">FOV Optimizer</a>,
+        run <strong>Optimize FOV</strong>, then choose <strong>Check saturation in Exp Calc</strong>.
+        A brighter star can set a shorter exposure for its band. With no comparisons, only the target sets the limit.</p>
     </div>
 
     {# ---- Comparison stars (handed off from the FOV optimizer) ---- #}
     <div class="exp-section" id="comps-section" style="display:none;">
       <div class="mag-head">
         <h3 style="margin:0;">Comparison stars <span class="help-icon multiline" data-help="Bright in-field stars sent over from the FOV Optimizer. MuSCAT instruments expose every star in the field at once, so a comparison star brighter than the target can saturate first and cap the usable exposure — these are included in the calculation below.">?</span></h3>
-        <button class="copy-btn" type="button" id="clear-comps">Clear</button>
+        <button class="copy-btn" type="button" id="clear-comps">Remove comparisons</button>
       </div>
       <div id="comps-status" class="msg dim"></div>
       <div id="comps-list"></div>
@@ -738,6 +741,11 @@
     var payload;
     try { payload = JSON.parse(raw); } catch (e) { return; }
     var comps = payload && payload.comps ? payload.comps : [];
+    if (!Array.isArray(payload?.comps)) return;
+    currentComps = [];
+    compsStatus.textContent = '';
+    renderComps();
+    saveState();
     if (!comps.length) return;
 
     compsSection.style.display = '';
@@ -758,7 +766,7 @@
       currentComps = comps.map(function (c, i) {
         var res = data.results[i] || {};
         return {
-          label: 'Comp ' + (i + 1),
+          label: 'Comp ' + (Number.isInteger(c.field_index) ? c.field_index + 1 : i + 1),
           sepArcsec: c.sep_arcsec, gmag: c.gmag,
           mags: res.mags || null, source: res.source || null, isApprox: !!res.is_approx,
         };
