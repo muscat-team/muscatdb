@@ -535,7 +535,12 @@ def test_rediff_card_test_apply_and_restore(page, rediff_calls):
     expect(band.locator(".rediff-star[value='4']")).to_be_hidden()  # inside the closed dropdown
     summary.click()
     expect(band.locator("label", has_text="default, w=0.600")).to_be_visible()
-    band.locator(".rediff-star[value='1']").uncheck()
+    band.locator(".rediff-check-all").click()
+    expect(summary).to_have_text("1, 2, 3, 4 (4)")
+    band.locator(".rediff-uncheck-all").click()
+    expect(summary).to_have_text("none selected")
+    expect(band.locator(".rediff-star[value='4']")).to_be_visible()  # dropdown stays open
+    band.locator(".rediff-star[value='2']").check()
     band.locator(".rediff-star[value='4']").check()
     expect(summary).to_have_text("2, 4 (2)")
     page.locator("#rediff-section > p").first.click()  # a click outside closes it

@@ -2246,6 +2246,7 @@
     html += '</div>';
     html += '<div class="opt"><label id="' + key + '-stars">Comparison stars</label>';
     html += '<details class="check-dropdown rediff-stars"><summary class="rediff-stars-summary" aria-labelledby="' + key + '-stars"></summary><div class="check-dropdown-panel">';
+    html += '<div class="check-dropdown-actions"><button type="button" class="btn sm rediff-check-all">Check all</button><button type="button" class="btn sm rediff-uncheck-all">Uncheck all</button></div>';
     (b.selectable_ids || []).forEach(function (id) {
       var w = weight[id] != null ? ' <span class="hint">default, w=' + fmt(weight[id], 3) + '</span>' : '';
       html += '<label class="opt-check-item"><input type="checkbox" class="rediff-star" value="' + id + '"' + (checked.indexOf(id) >= 0 ? ' checked' : '') + '> ' + id + w + '</label>';
@@ -2390,6 +2391,13 @@
     rediffSection.addEventListener('change', debounce(saveOptions, 150));
     rediffBands.addEventListener('change', function (e) {
       if (e.target.classList.contains('rediff-star')) rediffStarsSummary(e.target.closest('.rediff-band'));
+    });
+    rediffBands.addEventListener('click', function (e) {
+      var all = e.target.classList.contains('rediff-check-all');
+      if (!all && !e.target.classList.contains('rediff-uncheck-all')) return;
+      var fs = e.target.closest('.rediff-band');
+      fs.querySelectorAll('.rediff-star').forEach(function (c) { c.checked = all; });
+      rediffStarsSummary(fs);
     });
     // Close an open star dropdown on a click outside it.
     document.addEventListener('click', function (e) {
