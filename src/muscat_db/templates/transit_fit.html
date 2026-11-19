@@ -358,7 +358,7 @@
       <span class="site-label">Run:</span>
       {% for r in runs %}
       <a class="site-chip {% if r.run_id == sel_run %}active{% endif %}"
-         href="{{ base_qs ~ '&run=' ~ (r.run_id or '__legacy__') }}">{{ run_labels[r.run_id] }}</a>
+         href="{{ base_qs ~ '&run=' ~ (r.run_id or '__legacy__') }}">{{ run_labels[r.run_id] }}{% if run_warnings[r.run_id] %} — {{ run_warnings[r.run_id] | join(', ') }}{% endif %}</a>
       {% endfor %}
     </div>
   </div>
@@ -371,6 +371,10 @@
   <div class="phot-section">
     <h2>Transit Fit Results{% if sel_run %} <span style="font-size:0.8rem;color:var(--text-dim);font-weight:400;">— {{ sel_run }}</span>{% endif %}</h2>
 
+    {% if outputs.health %}
+    {% if outputs.health.warnings %}<p><strong>Done with warnings</strong> — {{ outputs.health.warnings | join(', ') }}</p>{% endif %}
+    <p>{% for label, value in outputs.health.metrics.items() %}{{ label }}: {{ 'Unknown' if value is none else value | round(6) }}{% if not loop.last %} · {% endif %}{% endfor %}</p>
+    {% endif %}
     <div class="fig-grid">
       {% for p in outputs.plots %}
       <figure class="fig">

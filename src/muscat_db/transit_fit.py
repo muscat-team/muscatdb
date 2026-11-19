@@ -2493,6 +2493,7 @@ def empty_fit_outputs() -> dict:
         "systematics_plots": [],
         "summary": None,
         "detection_snr": None,
+        "health": None,
         "has_log": False,
         "has_fit_yaml": False,
         "has_sys_yaml": False,
@@ -2566,6 +2567,44 @@ def detection_snr(summary_rows: list[dict]) -> dict | None:
     return {"bands": bands, "combined": combined, "combined_text": f"{combined:.1f}"}
 
 
+_DIVERGENCES = re.compile(r"\b(\d+) divergences? after tuning\b", re.I)
+
+
+def _timer_health(rdir, outputs):
+    summary = outputs["summary"] or {}
+    rhats = (_finite_float(row.get("r_hat")) for row in summary.get("rows", []))
+    snr = outputs["detection_snr"] or {}
+    count = None
+    optimize_only = False
+    outer = rdir / "timer-fit.log"
+    log = outer if outer.is_file() else rdir / "out" / "timer-fit.log"
+    try:
+        with log.open(errors="replace") as lines:
+            for line in lines:
+                if " - INFO - Output directory: " in line:
+                    count = None
+                    optimize_only = False
+                if "Optimize-only test run started" in line:
+                    optimize_only = True
+                match = _DIVERGENCES.search(line)
+                if match:
+                    count = int(match.group(1))
+    except OSError:
+        pass
+    if optimize_only:
+        # The optimize-only helper leaves any earlier posterior summary on disk.
+        rhats = ()
+        snr = {}
+        count = None
+    warnings = []
+    if count:
+        noun = "divergence" if count == 1 else "divergences"
+        warnings.append(f"{count} {noun} after tuning")
+    return {"metrics": {"Detection SNR": snr.get("combined"),
+                        "Max R-hat": max((r for r in rhats if r is not None), default=None),
+                        "Divergences": count}, "warnings": warnings}
+
+
 def get_fit_outputs(inst: str, date: str, target: str, run_id: str | None = None) -> dict:
     """Check and retrieve output files, plots, and summary values from a completed run.
 
@@ -2584,7 +2623,7 @@ def get_fit_outputs(inst: str, date: str, target: str, run_id: str | None = None
         return _get_fit_outputs_mtime(inst, date, target, run_id, -1.0)
 
     mtime = 0.0
-    for d in (rdir, rdir / "out"):
+    for d in (rdir, rdir / "out", rdir / "out/summary.csv", rdir / "timer-fit.log", rdir / "out/timer-fit.log"):
         try:
             mtime = max(mtime, d.stat().st_mtime)
         except OSError:
@@ -2683,6 +2722,7 @@ def _get_fit_outputs_mtime(
         except Exception:
             logger.debug("failed to read timer summary preview from %s", out_dir / "summary.csv", exc_info=True)
 
+    outputs["health"] = _timer_health(rdir, outputs)
     return outputs
 
 
@@ -3102,6 +3142,7 @@ def sync_jobs() -> None:
                 date=job.date,
                 target=job.target,
                 run_id=job.run_id,
+                params=jobs.with_fit_health(existing, get_fit_outputs(job.inst, job.date, job.target, job.run_id)) if persist_state == "done" else "",
                 state=persist_state,
                 returncode=persist_rc,
                 elapsed=round(elapsed),
@@ -3164,6 +3205,7 @@ def sync_jobs() -> None:
                 
             if completed_ok:
                 store.save(
+                    params=jobs.with_fit_health(row, get_fit_outputs(inst, date, target, run_id)),
                     type_="transit_fit",
                     inst=inst,
                     date=date,

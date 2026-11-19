@@ -92,7 +92,9 @@
       </td>
       <td class="status-cell">
         {% if j.state == 'done' %}
-          <span class="badge badge-green status-badge">Done</span>
+          {% if j.fit_warnings %}
+          <span class="badge badge-amber status-badge">Done with warnings</span> {{ j.fit_warnings | join(', ') }}
+          {% else %}<span class="badge badge-green status-badge">Done</span>{% endif %}
         {% elif j.state == 'error' %}
           <span class="badge badge-error status-badge">Failed</span>
         {% elif j.state == 'cancelled' %}
@@ -492,7 +494,7 @@
     tbody.insertBefore(logRow, empty || null);
     allRows.push(row);
     addInstFilterIfMissing(job.inst || '');
-    replaceStatusBadge(row, job.state || '');
+    replaceStatusBadge(row, job.state || '', job.fit_warnings);
     updateRunName(row, job.run_name || '');
     updateDetails(row, job.details || '');
     replaceActions(row, job.state || '', job.key || '', 'lco_archive_download', job.inst || '', job.date || '', job.target || '', '');
@@ -556,7 +558,7 @@
     });
   }
 
-  function replaceStatusBadge(row, state) {
+  function replaceStatusBadge(row, state, warnings) {
     var td = row.querySelector('.status-cell');
     if (!td) return;
     var labels = {done: 'Done', error: 'Failed', cancelled: 'Cancelled', running: 'Running', cancelling: 'Cancelling…', pending: 'Pending'};
@@ -568,6 +570,11 @@
     else if (state === 'pending') badge.style.cssText = 'background:var(--blue);color:white;';
     badge.textContent = labels[state] || String(state || '');
     td.replaceChildren(badge);
+    if (state === 'done' && warnings && warnings.length) {
+      badge.className = 'badge badge-amber status-badge';
+      badge.textContent = 'Done with warnings';
+      td.append(' ' + warnings.join(', '));
+    }
   }
 
   function actionButton(label, className, action, attrs) {
@@ -1048,7 +1055,7 @@
           if (f.action_date != null) row.setAttribute('data-action-date', f.action_date || '');
           if (f.photometry_url != null) row.setAttribute('data-photometry-url', f.photometry_url || '');
           if (f.obslog_url) setLcoObslogLink(row, f.obslog_url, f.action_date || f.date || '');
-          replaceStatusBadge(row, f.state);
+          replaceStatusBadge(row, f.state, f.fit_warnings);
           var td = row.querySelector('.elapsed-cell');
           if (td && f.elapsed != null) {
             td.setAttribute('data-elapsed', f.elapsed);

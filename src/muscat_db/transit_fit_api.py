@@ -81,6 +81,7 @@ class FitOutputs(ResponseModel):
     plots: list[FitPlot]
     systematics_plots: list[FitPlot]
     summary: FitSummary | None
+    health: dict | None = None
     detection_snr: Any = None
     has_log: bool
     has_fit_yaml: bool

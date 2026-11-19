@@ -3212,6 +3212,8 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
         sel_site=sel_site, sel_telescope=sel_telescope, sel_mode=sel_mode,
         csv_sites=csv_sites, csv_telescopes=csv_telescopes, csv_modes=csv_modes,
         runs=runs, run_labels=phot.run_chip_labels(runs), sel_run=sel_run,
+        run_warnings={r.run_id: (fit.get_fit_outputs(inst, date, target, r.run_id).get("health") or {}).get("warnings", [])
+                      for r in runs if len(runs) > 1},
         missing_run=missing_run,
         can_modify_run=_viewer_may_modify_run("transit_fit", inst, date, target, sel_run or ""),
         runs_json=runs_json,
@@ -8191,6 +8193,22 @@ def _all_job_rows() -> list[dict]:
     return [dict(row) for row in rows]
 
 
+def _fit_warnings(row):
+    from muscat_db.jobs import fit_params
+
+    kind = row.get("type")
+    if row.get("state") != "done" or kind not in ("transit_fit", "ttv_fit"):
+        return []
+    params = fit_params(row)
+    if "fit_health" in params:
+        health = params["fit_health"]
+    elif kind == "transit_fit":
+        health = fit.get_fit_outputs(row["inst"], row["date"], row["target"], row.get("run_id")).get("health")
+    else:
+        health = ttv.get_ttv_outputs(row["target"], row.get("run_name") or row.get("run_id") or "").get("health")
+    return (health or {}).get("warnings", [])
+
+
 @app.get("/jobs", response_class=HTMLResponse)
 def jobs_page():
     all_jobs = _visible_jobs(_all_job_rows())
@@ -8201,6 +8219,7 @@ def jobs_page():
     is_admin = _jobs_user_is_admin(user)
     for j in all_jobs:
         j["elapsed"] = _live_elapsed(j)
+        j["fit_warnings"] = _fit_warnings(j)
         j["stored"] = j["key"] in stored_keys
         j["can_delete"] = j["stored"] and _may_delete_job(j, user, is_admin)
         j["can_cancel"] = _may_cancel_job_row(j)
@@ -8255,6 +8274,7 @@ def jobs_status(active_only: bool = False, watch: Annotated[list[str] | None, Qu
         )
         if (j["key"] in watched_keys and j.get("state") in _JOB_TERMINAL_STATES) or is_terminal_lco_archive:
             finished[j["key"]] = {
+                "fit_warnings": _fit_warnings(j),
                 "key": j["key"],
                 "type": j.get("type", ""),
                 "inst": j.get("inst", ""),
@@ -9160,7 +9180,8 @@ def ttv_fit_runs(target: str = ""):
         return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
     products = _product_visibility()
     runs = [
-        {**r, "can_modify": _viewer_may_modify_run("ttv_fit", "", "", target.strip(), r["run_name"])}
+        {**r, "warnings": (ttv.get_ttv_outputs(target.strip(), r["run_name"]).get("health") or {}).get("warnings", []),
+         "can_modify": _viewer_may_modify_run("ttv_fit", "", "", target.strip(), r["run_name"])}
         for r in ttv.list_ttv_runs(target.strip())
         if not _ttv_run_hidden(target, r["run_name"], products)
     ]
