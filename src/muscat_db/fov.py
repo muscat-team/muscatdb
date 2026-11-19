@@ -1045,7 +1045,7 @@ def optimize(
             res.error = (
                 f"No pointing keeps the target in the field while avoiding all "
                 f"{len(avoid_idx)} star(s) brighter than Gmag {avoid_mag:g}. "
-                "Use a smaller Gmag limit to exclude fewer stars, or clear the limit and run again."
+                f"Try a fainter 'avoid brighter than' limit."
             )
         else:
             res.error = "No valid pointing found for the given constraints."

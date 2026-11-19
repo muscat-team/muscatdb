@@ -372,7 +372,6 @@
   const $ = (id) => document.getElementById(id);
   const msg = $('fov-msg');
 
-  let A;  // Keep the initialized viewer even if a timed-out script arrives later.
   let aladin = null;
   let footprintOverlay = null;
   let observedFootprintOverlay = null;
@@ -420,38 +419,32 @@
 
   function loadSkyView() {
     const status = $('fov-sky-status');
-    const script = document.createElement('script');
-    script.src = 'https://aladin.cds.unistra.fr/AladinLite/api/v3/3.8.1/aladin.js';
-    const primary = new Promise((resolve, reject) => {
-      script.onload = () => resolve(window.A);
-      script.onerror = reject;
-      document.head.appendChild(script);
-    });
-    async function start(load) {
-      let timer;
-      try {
-        const api = await Promise.race([
-          load.then(async api => { await api.init; return api; }),
-          new Promise((_, reject) => { timer = setTimeout(reject, 8000); })
-        ]);
-        A = api;
-        initializeSkyView();
-        status.textContent = '';
-      } finally {
-        clearTimeout(timer);
-      }
-    }
-    start(primary).catch(async () => {
-      script.remove();
+    let finished = false;
+    const unavailable = () => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      aladin = null;
       $('aladin-lite-div').replaceChildren();
-      try {
-        await start(import('https://cdn.jsdelivr.net/npm/aladin-lite@3.8.1/dist/aladin.js').then(module => module.default));
-      } catch {
-        aladin = null;
-        $('aladin-lite-div').replaceChildren();
-        status.textContent = 'Sky view unavailable. The viewer could not initialize.';
-      }
-    });
+      status.textContent = 'Sky view unavailable (CDS unreachable)';
+    };
+    // Includes script download and A.init's WASM initialization. A late load
+    // after the deadline must not replace the unavailable state.
+    const timer = setTimeout(unavailable, 8000);
+    const script = document.createElement('script');
+    script.async = true;
+    script.src = 'https://aladin.cds.unistra.fr/AladinLite/api/v3/3.8.1/aladin.js';
+    script.onerror = unavailable;
+    script.onload = () => {
+      Promise.resolve().then(() => window.A.init).then(() => {
+        if (finished) return;
+        initializeSkyView();
+        finished = true;
+        clearTimeout(timer);
+        status.textContent = '';
+      }).catch(unavailable);
+    };
+    document.head.appendChild(script);
   }
 
   function setMsg(text, kind) {

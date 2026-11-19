@@ -118,21 +118,8 @@ def test_cds_outage_keeps_resolve_and_run_working(page, gaia, failure):
     assert response.value.json()["ok"]
     expect(page.locator("#fov-results")).to_be_visible()
     expect(page.locator("#fov-sky-status")).to_have_text(
-        "Sky view unavailable. The viewer could not initialize.", timeout=12_000,
+        "Sky view unavailable (CDS unreachable)", timeout=12_000,
     )
-
-
-def test_sky_view_uses_mirror_when_cds_asset_is_missing(page):
-    from pathlib import Path
-
-    stub = (Path(__file__).parent / "stubs" / "aladin.js").read_text()
-    page.route("https://aladin.cds.unistra.fr/**", lambda r: r.abort("blockedbyclient"))
-    page.route("https://cdn.jsdelivr.net/npm/aladin-lite@3.8.1/dist/aladin.js",
-               lambda r: r.fulfill(body=stub + "\nexport default window.A;",
-                                   content_type="application/javascript", headers={"Access-Control-Allow-Origin": "*"}))
-    page.goto("/fov")
-    expect(page.locator("#fov-sky-status")).to_have_text("")
-    assert page.evaluate("A.__calls.some(call => call.fn === 'addCatalog')")
 
 
 def test_late_viewer_initialization_plots_existing_results(page, gaia):
