@@ -1032,6 +1032,19 @@ def test_invalid_visible_width_still_blocks_and_names_the_problem(page, fitter):
     assert fitter['start'] == []
 
 
+def test_zero_full_width_blocks_the_launch(page, fitter):
+    """The page and the server agree: a full width must be greater than 0."""
+    page.goto(URL)
+    _query_toi_catalog(page)
+    _complete_priors(page)
+    field = _width_field(page)
+    field.locator('.planet-tc_pred-mode').select_option('direct')
+    field.locator('.planet-tc_pred-unc').fill('0')
+    page.click('#run-test-btn')
+    expect(field).to_contain_text('Full width must be > 0')
+    assert fitter['start'] == []
+
+
 def test_sigma_mode_is_offered_only_with_both_uncertainties(page):
     page.goto(URL)
     _query_toi_catalog(page)

@@ -601,7 +601,6 @@ _PLANET_TOKEN_RE = re.compile(r"^[A-Za-z]$")
 _FIT_NUMERIC_FIELDS: list[tuple[str, str, str]] = [
     ("trim_beg",     "Trim begin (days)",    "nonneg"),
     ("trim_end",     "Trim end (days)",      "nonneg"),
-    ("tc_pred_unc", "tc_pred uncertainty",  "pos"),
     ("teff",        "Teff (K)",             "pos"),
     ("teff_unc",    "Teff uncertainty",     "pos"),
     ("logg",        "log g",                "num"),
@@ -852,7 +851,9 @@ def _planet_text(options: dict, key: str, planet: str, first_planet: str) -> str
     raw = options.get(f"{key}_{planet}")
     if raw is None and planet == first_planet:
         raw = options.get(key)
-    return str(raw or "").strip()
+    # Only a missing value is blank. A JSON 0 or False is an explicit value
+    # and must reach the caller's validation instead of becoming the default.
+    return "" if raw is None else str(raw).strip()
 
 
 def predict_transit_centers(options: dict | None, csvs) -> tuple[dict[str, dict], str | None]:
@@ -912,9 +913,9 @@ def predict_transit_centers(options: dict | None, csvs) -> tuple[dict[str, dict]
         mode = _planet_text(o, "tc_pred_mode", p, first).lower()
         if mode and mode not in _TC_WIDTH_MODES:
             return {}, f"tc_pred_mode (planet {p}) must be sigma or direct"
-        direct_width = _planet_value(o, "tc_pred_unc", p, first)
+        raw_width = _planet_text(o, "tc_pred_unc", p, first)
         if not mode:
-            mode = "sigma" if direct_width is None and sigma is not None else "direct"
+            mode = "sigma" if not raw_width and sigma is not None else "direct"
 
         n_sigma = None
         if mode == "sigma":
@@ -930,7 +931,14 @@ def predict_transit_centers(options: dict | None, csvs) -> tuple[dict[str, dict]
                 return {}, f"number of sigma for the transit-center prior (planet {p}) must be greater than 0"
             width = 2 * n_sigma * sigma
         else:
-            width = DEFAULT_TC_UNC if direct_width is None else direct_width
+            # The full width is checked only here, where it is used: a value
+            # left over in a sigma-mode request must not block the launch.
+            width = _to_float(raw_width) if raw_width else DEFAULT_TC_UNC
+            if width is None or not math.isfinite(width) or width <= 0:
+                return {}, (
+                    f"full width of the transit-center prior (planet {p}) must be a "
+                    "number of days greater than 0"
+                )
 
         half_width_sigma = width / 2 / sigma if sigma is not None else None
         # The relative tolerance keeps exactly 3 sigma from warning after the

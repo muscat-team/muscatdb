@@ -1285,7 +1285,7 @@
     [
       { selector: '.planet-tc_pred', min: 0, inclusive: false, msg: 'Center must be > 0', active: true },
       { selector: '.planet-tc_pred-nsigma', min: 0, inclusive: false, msg: 'Number of sigma must be > 0', active: tcSigmaMode },
-      { selector: '.planet-tc_pred-unc', min: 0, inclusive: true, msg: 'Full width must be ≥ 0', active: !tcSigmaMode }
+      { selector: '.planet-tc_pred-unc', min: 0, inclusive: false, msg: 'Full width must be > 0', active: !tcSigmaMode }
     ].forEach(function (chk) {
       var el = card.querySelector(chk.selector);
       if (!el) return;

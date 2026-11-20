@@ -195,3 +195,44 @@ def test_sigma_does_not_depend_on_the_period_being_fixed(tmp_path):
         assert err is None
         assert priors['b']['sigma_days'] == pytest.approx(_SIGMA_300)
         assert priors['b']['mode'] == 'sigma'
+
+
+@pytest.mark.parametrize('value', [0, '0', 0.0, -2, '-2', False])
+def test_explicit_zero_or_negative_sigma_count_is_refused(tmp_path, value):
+    """A JSON number 0 is an explicit value, not a blank that defaults to 3."""
+    priors, err = fit.predict_transit_centers(
+        dict(_EPHEM, tc_pred_mode_b='sigma', tc_pred_nsigma_b=value), [_lightcurve(tmp_path)])
+    assert priors == {}
+    assert 'sigma' in err
+
+
+@pytest.mark.parametrize('value', [None, '', '  '])
+def test_missing_or_blank_sigma_count_defaults_to_three(tmp_path, value):
+    priors, err = fit.predict_transit_centers(
+        dict(_EPHEM, tc_pred_mode_b='sigma', tc_pred_nsigma_b=value), [_lightcurve(tmp_path)])
+    assert err is None
+    assert priors['b']['n_sigma'] == 3
+
+
+@pytest.mark.parametrize('key', ['tc_pred_unc', 'tc_pred_unc_b'])
+@pytest.mark.parametrize('value', [-1, '-1', 0, 'wide'])
+def test_direct_width_is_checked_only_in_direct_mode(tmp_path, key, value):
+    """A bad full width is ignored in sigma mode and refused in direct mode,
+    whether it arrives suffixed (the page) or unsuffixed (API callers)."""
+    csvs = [_lightcurve(tmp_path)]
+    sigma = dict(_EPHEM, tc_pred_mode_b='sigma', **{key: value})
+    assert fit.validate_fit_options(sigma) is None
+    priors, err = fit.predict_transit_centers(sigma, csvs)
+    assert err is None
+    assert priors['b']['full_width_days'] == pytest.approx(6 * _SIGMA_300)
+
+    direct = dict(_EPHEM, tc_pred_mode_b='direct', **{key: value})
+    priors, err = fit.predict_transit_centers(direct, csvs)
+    assert priors == {}
+    assert 'full width' in err
+
+
+def test_direct_width_without_a_mode_is_still_checked(tmp_path):
+    priors, err = fit.predict_transit_centers(dict(_EPHEM, tc_pred_unc=-1), [_lightcurve(tmp_path)])
+    assert priors == {}
+    assert 'full width' in err
