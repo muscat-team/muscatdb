@@ -155,6 +155,8 @@ def test_flagged_midtime_requires_opt_in_for_ephemeris_and_ttv(page, live_server
     for epoch in EPOCHS:
         with page.expect_response("**/api/ephemeris/calculate") as response:
             _add_transit_center(page, T0 + epoch * PERIOD)
+    # Start with a shareable view that still excludes the flagged timing.
+    page.wait_for_function("new URL(location.href).searchParams.has('view')")
     for included in (False, True):
         with page.expect_request("**/api/ttv-fit/start") as launch:
             if included:
@@ -170,6 +172,21 @@ def test_flagged_midtime_requires_opt_in_for_ephemeris_and_ttv(page, live_server
         assert any(float(line.split(",")[2]) == T0 for line in options["csv_content"].splitlines()[1:]) == included
     page.reload()
     expect(page.locator("#datasets-body .dataset-checkbox")).to_be_checked()
+
+
+def test_reload_keeps_pending_edit_but_opening_saved_link_restores_snapshot(page):
+    _load_toi1000(page)
+    page.wait_for_function("new URL(location.href).searchParams.has('view')")
+    saved_url = page.url
+    box = page.locator("#datasets-body .dataset-checkbox").first
+    expect(box).to_be_checked()
+
+    # Change and reload in the same task, before the debounced POST can run.
+    box.evaluate("el => { el.click(); location.reload(); }")
+    expect(box).not_to_be_checked()
+    page.wait_for_function("old => location.href !== old && new URL(location.href).searchParams.has('view')", arg=saved_url)
+    page.goto(saved_url)
+    expect(box).to_be_checked()
 
 
 def test_legacy_fit_with_low_snr_and_unknown_sampler_diagnostics(page, live_server, request):

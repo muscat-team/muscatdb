@@ -906,6 +906,23 @@
     }, delay);
   }
 
+  // A reload can cancel either the debounce timer or an in-flight save. Keep
+  // the unsaved snapshot in this tab until it can receive its own view URL.
+  const RELOAD_DRAFT_KEY = 'muscat-ephem-reload-draft';
+  window.addEventListener('pagehide', () => {
+    if (!currentViewSlug() || !loadedTargets.length || pendingViewState) return;
+    const state = collectEphemerisViewState();
+    try {
+      if (JSON.stringify(state) === lastSavedViewJson) {
+        sessionStorage.removeItem(RELOAD_DRAFT_KEY);
+      } else {
+        sessionStorage.setItem(RELOAD_DRAFT_KEY, JSON.stringify({url: location.href, state}));
+      }
+    } catch (error) {
+      console.warn('Could not preserve pending ephemeris edits for reload:', error);
+    }
+  });
+
   // 1. Initial Page Load Setup
   document.addEventListener('DOMContentLoaded', function() {
     const urlTargets = parseUrlTargets();
@@ -933,7 +950,19 @@
       }
     }
 
-    if (viewSlug) {
+    // Navigating to a saved link explicitly always opens its server snapshot.
+    const isReload = performance.getEntriesByType('navigation')[0]?.type === 'reload';
+    let draft;
+    try {
+      if (isReload && viewSlug) draft = JSON.parse(sessionStorage.getItem(RELOAD_DRAFT_KEY));
+      else sessionStorage.removeItem(RELOAD_DRAFT_KEY);
+    } catch (error) {
+      console.warn('Could not read pending ephemeris edits:', error);
+    }
+    if (draft?.url === location.href && Array.isArray(draft.state?.targets)) {
+      pendingViewState = draft.state;
+      loadMultipleTargets(draft.state.targets);
+    } else if (viewSlug) {
       fetch('/api/ephemeris/view/' + encodeURIComponent(viewSlug))
         .then(r => r.json())
         .then(res => {

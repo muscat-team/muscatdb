@@ -61,6 +61,10 @@ results are cached for five minutes; failed evaluations can be retried immediate
 Invalid ranking uncertainties leave the transit windows available with a ranking
 error instead of failing the scheduling request.
 
+On the ephemeris page, reloading the same tab preserves timing selections made
+while a view save is pending. Opening a shared view link restores the snapshot
+identified by that link.
+
 The schedule page can also take mid-transit times from outside muscat-db: choose
 **Uploaded mid-times** as the ephemeris source and paste or load a list (full
 BJD_TDB or ISO UTC per line, optionally `tc_err` in days, separated by commas or whitespace). Each time is
