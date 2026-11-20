@@ -29,6 +29,9 @@ import re
 import shutil
 import tempfile
 from pathlib import Path
+from zipfile import BadZipFile
+
+import numpy as np
 
 from muscat_db import postprocess as pp
 from muscat_db.photometry import _REDIFF_MODULE, _prose_prefix
@@ -130,6 +133,69 @@ def _read_applied(rdir: Path) -> dict:
     except (OSError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def input_selection(csv: Path, inst: str) -> dict | None:
+    """Match the product stem and read small selection arrays without loading fluxes."""
+    csv = csv.resolve()
+    match = re.fullmatch(r"(.+)_(\d{6}(?:_full)?)", csv.stem)
+    if not match:
+        return None
+    stem, date = match.groups()
+    target, separator, _ = stem.partition(f"_{inst}_")
+    if not separator:
+        return None
+    matches = []
+    try:
+        for path in csv.parent.glob(f"*_{date}_flux_datacube.npz"):
+            if not path.name.startswith(target + separator):
+                continue
+            with np.load(path, allow_pickle=False) as cube:
+                bands = cube["__bands__"].tolist()
+                for band in bands:
+                    if not stem.endswith("_" + band):
+                        continue
+                    prefix = stem.removesuffix("_" + band)
+                    if path.name in (f"{prefix}_{date}_flux_datacube.npz",
+                                     f"{prefix}_{'_'.join(bands)}_{date}_flux_datacube.npz"):
+                        matches.append(_band_selection(csv, band, cube))
+    except (OSError, BadZipFile, ValueError, TypeError, KeyError, IndexError):
+        return None
+    return matches[0] if len(matches) == 1 else None
+
+
+def _band_selection(csv: Path, band: str, cube) -> dict | None:
+    unit = str(cube[f"{band}__aper_unit"].item())
+    backup = pp._backup_dir(csv.parent, _BACKUP_DIRNAME)
+    if backup.is_dir():
+        # The re-diff manifest identifies the pre-clip CSV when a clip is active.
+        base = pp._backup_dir(csv.parent) / csv.name
+        stat = csv.stat()
+        if base.is_file():
+            clip_manifest = pp._read_manifest(csv.parent) or {}
+            if clip_manifest.get(csv.name) != [stat.st_size, stat.st_mtime_ns]:
+                return None
+            stat = base.stat()
+        manifest = pp._read_manifest(csv.parent, _BACKUP_DIRNAME) or {}
+        applied = _read_applied(csv.parent)
+        if ((backup / "publishing").exists() or not applied
+                or manifest.get(csv.name) != [stat.st_size, stat.st_mtime_ns]):
+            return None
+        if band in applied:
+            custom = applied[band]
+            return {"source": "Custom", "aper_unit": unit,
+                    **{k: custom[k] for k in ("comparisons", "aperture", "aper_radius", "weighting")}}
+
+    aperture = int(cube[f"{band}__aperture"].item())
+    weights = cube[f"{band}__weights"][aperture]
+    order = np.argsort(-weights, kind="stable")
+    indices = order[(weights[order] > 0) & (order != cube[f"{band}__target_index"].item())]
+    if not indices.size:
+        return None
+    normalized = weights[indices] / weights[indices].sum()
+    return {"source": "Pipeline", "comparisons": cube[f"{band}__star_ids"][indices].tolist(),
+            "aperture": aperture, "aper_radius": float(cube[f"{band}__aper_radii"][aperture]),
+            "aper_unit": unit, "weighting": "equal" if np.allclose(normalized, normalized[0]) else "broeg"}
 
 
 def _state(rdir: Path) -> dict:

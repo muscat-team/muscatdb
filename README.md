@@ -685,6 +685,12 @@ with each file's name and SHA-256, the mapping, facility and band) to
 transit fit lists it under the pseudo-instrument **external** and passes the
 mapped covariates to timer under their own names.
 
+The Transit Fit light-curve picker shows the comparison star IDs, aperture radius
+and weighting for each CSV with a matching flux datacube. Open **Photometry used
+by this fit** in the results to see the selection saved when each CSV was copied.
+Applying or restoring photometry later does not change that record. Older fits
+and inputs without selection metadata show **Selection not recorded**.
+
 For prose2 light curves the transit fit hands timer a fixed set of covariates,
 whatever else the CSV holds: `Bkg`, `Peak` (ADU or e-), `Airmass`, `Dx(pix)`,
 `Dy(pix)` and `FWHM(pix)`. Other columns, such as `GJD_UTC` and

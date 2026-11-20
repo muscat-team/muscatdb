@@ -1154,3 +1154,29 @@ def test_csv_selection_updates_automatic_centers(page, distinct_csv_spans, actio
     expected = '2460000.100000' if action in ('select_all', 'deselect_all') else '2460000.300000'
     expect(centers.first).to_have_value(expected)
     expect(centers.nth(1)).to_have_value('2460000.27')
+
+
+def test_fit_shows_saved_selection_and_handles_legacy_results(page, extra_fit_run, live_server):
+    import numpy as np
+    import yaml
+
+    source = live_server.root / "prose/muscat3/261001/_runs/TOI-1000" / RUN_ID
+    cube = source / "TOI-1000_muscat3_gp_261001_flux_datacube.npz"
+    np.savez(cube, __bands__=["gp"], gp__aper_unit="px", gp__aperture=0,
+             gp__aper_radii=[4.], gp__star_ids=[0, 7], gp__target_index=0, gp__weights=[[0., 1.]])
+    try:
+        metadata = extra_fit_run / "meta.yaml"
+        saved = yaml.safe_load(metadata.read_text())
+        saved["input_selections"] = {CSVS[0]: dict(source="Custom", comparisons=[3, 5],
+                                                    aperture=1, aper_radius=6., aper_unit="px", weighting="equal")}
+        metadata.write_text(yaml.safe_dump(saved))
+        page.goto(f"{URL}&run=fit-extra")
+        expect(page.locator(".csv-card", has_text=CSVS[0])).to_contain_text("Pipeline · stars 7 · aperture 4 px")
+        details = page.locator("details", has=page.get_by_text("Photometry used by this fit", exact=True))
+        details.locator("summary").click()
+        expect(details).to_contain_text(f"{CSVS[0]} · Custom · stars 3, 5 · aperture 6 px · equal weights")
+        page.goto(f"{URL}&run={FIT_RUN_ID}")
+        details.locator("summary").click()
+        expect(details).to_contain_text("Selection not recorded")
+    finally:
+        cube.unlink()
