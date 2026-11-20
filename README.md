@@ -16,6 +16,10 @@ and NExScI catalogs. Supported workflow pages expose a unique, shareable view st
 allowing configurations, selections, and results to be reviewed transparently,
 reproduced consistently, and communicated easily among collaborators.
 
+On `/projects`, drag a card by its upper-right grip to save its position in this browser.
+Open a project and enter a target name to include it before observations arrive.
+Planned names such as TOI4406 become linked targets when matching observations are visible.
+
 ## Pipeline engines
 
 muscat-db orchestrates three external packages. Development uses editable

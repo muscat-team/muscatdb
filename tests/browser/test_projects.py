@@ -161,11 +161,35 @@ def test_duplicate_project_and_rename_conflicts_leave_existing_data_intact(page,
     assert live_server.sql("SELECT description FROM tag_descriptions WHERE tag='conflict-project'") == [('keep this description',)]
 
 
-def test_unknown_target_attachment_is_reported_without_adding_a_row(page):
-    page.problems.allowed += ['HTTP 404: PUT /api/targets/', 'status of 404']
-    _create(page, 'unknown-target')
-    page.fill('#attach-target-input', 'does-not-exist')
-    page.click('#attach-target-btn')
-    expect(page.locator('#message-modal-text')).to_contain_text('Could not attach target')
-    page.click('#message-modal-ok')
-    expect(page.get_by_role('heading', name='No targets attached yet')).to_be_visible()
+def test_planned_target_attachment(page):
+    _create(page, 'planned-targets')
+    for name in ('TOI-4406', 'TOI1859', 'TOI4406'):
+        page.fill('#attach-target-input', name)
+        with page.expect_navigation():
+            page.click('#attach-target-btn')
+    rows = page.locator('#project-targets-table tbody tr')
+    expect(rows).to_have_count(2)
+    row = rows.filter(has_text='TOI4406')
+    expect(row).to_contain_text('Planned')
+    expect(row.locator('a')).to_have_count(0)
+    row.get_by_role('button', name='Detach').click()
+    with page.expect_navigation():
+        _confirm(page)
+    expect(rows).to_have_count(1)
+    expect(rows).to_contain_text('TOI1859')
+
+
+def test_drag_project_by_grip_and_restore_order(page):
+    _create(page, 'zz-reorder')
+    page.goto('/projects')
+    cards = page.locator('#project-grid .card')
+    original = cards.locator('.name').all_text_contents()
+    cards.last.locator('.drag-handle').drag_to(cards.first)
+    expected = [original[-1], *original[:-1]]
+    expect(cards.locator('.name')).to_have_text(expected)
+    page.reload()
+    expect(cards.locator('.name')).to_have_text(expected)
+    cards.first.locator('.drag-handle').press('ArrowRight')
+    expect(cards.nth(1).locator('.name')).to_have_text(original[-1])
+    cards.nth(1).get_by_role('link').click()
+    expect(page.locator('#project-name-cell')).to_contain_text(original[-1])

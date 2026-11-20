@@ -455,7 +455,7 @@ def _tag_projects(client, db) -> None:
 def _project_cards(html: str) -> dict[str, str]:
     """Card name -> the card's meta text, from /projects."""
     cards = {}
-    for block in html.split('<div class="card">')[1:]:
+    for block in html.split('<div class="card"')[1:]:
         name = re.search(r'<div class="name">([^<]+)</div>', block)
         meta = re.search(r'<div class="meta">([^<]+)</div>', block)
         if name:
@@ -1106,3 +1106,17 @@ def test_only_the_creator_or_an_admin_may_reanalyze_a_test(client, db):
         response = client.post(url, headers=_headers(user))
         assert response.status_code == 400, user
         assert "cannot re-analyze" in response.json()["error"]
+
+def test_planning_name_does_not_disclose_restricted_membership(client, db):
+    _tag_projects(client, db)
+    tag = {"tag": "beta", "allow_placeholder": True}
+    for name in ("HIDDENTGT", "TOI4406"):
+        assert client.put(f"/api/targets/{name}/tags", json=tag, headers=_headers("alice")).is_success
+    page = client.get("/tag?name=beta", headers=_headers("alice")).text
+    assert page.count('class="hint">Planned') == 2
+    assert _project_cards(client.get("/projects", headers=_headers("alice")).text)["beta"] == "2 targets"
+    counts = client.get("/api/tags", headers=_headers("alice")).json()["tags"]
+    assert next(p["target_count"] for p in counts if p["tag"] == "beta") == 2
+    client.request("DELETE", "/api/targets/HIDDENTGT/tags", json=tag, headers=_headers("alice"))
+    assert "HIDDENTGT" not in client.get("/tag?name=beta", headers=_headers("alice")).text
+    assert "HIDDENTGT" in client.get("/tag?name=beta", headers=_headers("root")).text
