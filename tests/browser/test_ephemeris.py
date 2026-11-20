@@ -207,7 +207,10 @@ def _seed_amplitudes(page, results) -> dict:
 
 
 def _points(*pairs):
-    return {'points': [{'oc_min': oc, 'oc_err_min': err, 'checked': True} for oc, err in pairs]}
+    """Checked timings as /api/ephemeris/calculate returns them: O-C and its
+    error in minutes, tc_unc in days."""
+    return {'points': [{'oc_min': oc, 'oc_err_min': err, 'tc_unc': err / 1440, 'checked': True,
+                        'epoch': i, 'bjd': T0 + i} for i, (oc, err) in enumerate(pairs)]}
 
 
 def test_ttv_amplitude_keeps_a_small_positive_value(page):
@@ -226,6 +229,28 @@ def test_ttv_amplitude_floor_is_the_median_uncertainty(page):
     ini = _seed_amplitudes(page, {'b': _points((0.0, 1.0), (0.0, 9.0)), 'c': _points((30.0, 21.0))})
     assert ini['a_bc'] == pytest.approx(9 / 1440, rel=5e-3)
     assert ini['a_cb'] == pytest.approx(30 / 1440, rel=5e-3)
+
+
+def test_ttv_amplitude_floor_ignores_planets_harmonic_does_not_get(page):
+    """Only the timings sent to harmonic set the floor: planet d is not in
+    Planet letters, so its timings must not move the b-c seed (review on #486)."""
+    one_minute = {'b': _points((0.0, 1.0)), 'c': _points((0.0, 1.0))}
+    ini = _seed_amplitudes(page, one_minute)
+    assert ini['a_bc'] == pytest.approx(1 / 1440, rel=5e-3)
+    with_d = {**one_minute, 'd': _points((0.0, 60.0), (0.0, 60.0), (0.0, 60.0))}
+    page.evaluate("results => { fitResults = results; rebuildINI(false); }", with_d)
+    assert _ini(page)['a_bc'] == pytest.approx(1 / 1440, rel=5e-3)
+    assert 'd' not in page.input_value('#opt-planet_letters')
+
+
+def test_ttv_amplitude_floor_ignores_timings_without_an_uncertainty(page):
+    """A checked timing with no tc_unc is left out of harmonic's CSV, so it
+    must not count toward the floor either."""
+    results = {'b': _points((0.0, 1.0), (0.0, 1.0))}
+    for epoch in (5, 6):
+        results['b']['points'].append({'oc_min': 0.0, 'oc_err_min': 90.0, 'tc_unc': None,
+                                       'checked': True, 'epoch': epoch, 'bjd': T0 + epoch})
+    assert _seed_amplitudes(page, results)['a_bc'] == pytest.approx(1 / 1440, rel=5e-3)
 
 
 def test_harmonic_warning_follows_selected_run(page, live_server, request):

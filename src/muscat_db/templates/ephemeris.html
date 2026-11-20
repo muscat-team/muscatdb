@@ -4530,23 +4530,36 @@
     return superPeriod >= TTV_MIN_SUPER_PERIOD_FACTOR * pOuter ? superPeriod : null;
   }
 
-  // Largest |O-C| of a planet in the current linear fit, in days, floored at
-  // the median timing uncertainty of every selected timing in the fit. This is
-  // harmonic's own scale for the amplitude bound (maxoc in params.build_spec,
-  // where the median is taken over all planets). Null before a fit, or when
-  // the planet has no selected timing.
+  // The timings harmonic receives: planets named in Planet letters, checked,
+  // with an uncertainty. buildCSVContent, buildSelection and the amplitude
+  // seed all read this one list, so the seed can only see what harmonic sees.
+  function harmonicTimingRows() {
+    if (!fitResults) return [];
+    const letters = (document.getElementById('opt-planet_letters').value || '').toLowerCase().split('');
+    const rows = [];
+    for (const pl in fitResults) {
+      const index = letters.indexOf(pl.toLowerCase());
+      if (index === -1) continue;
+      ((fitResults[pl] || {}).points || []).forEach(p => {
+        if (p.checked && p.tc_unc !== null && p.tc_unc !== undefined) rows.push({ planet: pl, index: index, point: p });
+      });
+    }
+    return rows;
+  }
+
+  // Largest |O-C| of a planet among the timings harmonic receives, in days,
+  // floored at the median uncertainty of all of them. This is harmonic's own
+  // scale for the amplitude bound (maxoc and med_unc in params.build_spec).
+  // Null when the planet has no timing in that set.
   function largestOminusC(pl) {
-    const selected = planet => (((fitResults || {})[planet] || {}).points || [])
-      .filter(p => p.checked !== false && Number.isFinite(p.oc_min));
-    const used = selected(pl);
-    if (!used.length) return null;
-    const errs = Object.keys(fitResults || {})
-      .flatMap(planet => selected(planet).map(p => Math.abs(p.oc_err_min)))
-      .filter(Number.isFinite).sort((x, y) => x - y);
+    const rows = harmonicTimingRows();
+    const own = rows.filter(r => r.planet === pl && Number.isFinite(r.point.oc_min));
+    if (!own.length) return null;
+    const errs = rows.map(r => Math.abs(Number(r.point.tc_unc))).filter(Number.isFinite).sort((x, y) => x - y);
     const middle = Math.floor(errs.length / 2);
     const medianErr = !errs.length ? 0
       : (errs.length % 2 ? errs[middle] : (errs[middle - 1] + errs[middle]) / 2);
-    const days = Math.max(Math.max(...used.map(p => Math.abs(p.oc_min))), medianErr) / 1440.0;
+    const days = Math.max(Math.max(...own.map(r => Math.abs(r.point.oc_min))) / 1440.0, medianErr);
     return days > 0 ? days : null;
   }
 
@@ -4566,28 +4579,10 @@
   }
 
   function buildCSVContent() {
-    if (!fitResults) return '';
-    const letters = (document.getElementById('opt-planet_letters').value || '').toLowerCase().split('');
-    if (letters.length === 0) return '';
-    
     let csv = 'planet,epoch,tc,tc_unc\n';
-    let hasPoints = false;
-    for (const pl in fitResults) {
-      const plLower = pl.toLowerCase();
-      const idx = letters.indexOf(plLower);
-      if (idx === -1) continue;
-      
-      const res = fitResults[pl];
-      if (res && res.points) {
-        res.points.forEach(p => {
-          if (p.checked && p.tc_unc !== null && p.tc_unc !== undefined) {
-            csv += `${idx},${p.epoch},${p.bjd},${p.tc_unc}\n`;
-            hasPoints = true;
-          }
-        });
-      }
-    }
-    return hasPoints ? csv : '';
+    const rows = harmonicTimingRows();
+    rows.forEach(r => { csv += `${r.index},${r.point.epoch},${r.point.bjd},${r.point.tc_unc}\n`; });
+    return rows.length ? csv : '';
   }
 
   // The checked O-C points that buildCSVContent() sends, named so the server can
@@ -4597,27 +4592,13 @@
   // Same filter as the CSV: planets selected in planet_letters, checked, with an
   // uncertainty.
   function buildSelection() {
-    if (!fitResults) return [];
-    const letters = (document.getElementById('opt-planet_letters').value || '').toLowerCase().split('');
-    const selection = [];
-    for (const pl in fitResults) {
-      if (letters.indexOf(pl.toLowerCase()) === -1) continue;
-      const res = fitResults[pl];
-      ((res && res.points) || []).forEach(p => {
-        if (!p.checked || p.tc_unc === null || p.tc_unc === undefined) return;
-        if (p.manual) {
-          selection.push({
-            kind: 'manual', planet: pl, epoch: p.epoch, tc: p.bjd, tc_unc: p.tc_unc, note: p.note || ''
-          });
-        } else {
-          selection.push({
-            kind: 'product', planet: pl, instrument: p.instrument, date: p.date,
-            target: p.target, run_id: p.run_id || ''
-          });
-        }
-      });
-    }
-    return selection;
+    return harmonicTimingRows().map(r => {
+      const p = r.point;
+      return p.manual
+        ? { kind: 'manual', planet: r.planet, epoch: p.epoch, tc: p.bjd, tc_unc: p.tc_unc, note: p.note || '' }
+        : { kind: 'product', planet: r.planet, instrument: p.instrument, date: p.date,
+            target: p.target, run_id: p.run_id || '' };
+    });
   }
 
   function collectOptions() {
