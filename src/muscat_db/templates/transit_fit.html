@@ -1257,9 +1257,9 @@
 
   // Width used for a Gaussian prior entered as a mean only, in the units the
   // page shows (duration in hours). Mirrors PRIOR_WIDTH_DEFAULTS in transit_fit.py.
+  // t0 has none: its sampled width is the transit-center prior's.
   var PRIOR_WIDTH_NOTES = {
     'planet-period': { param: 'period', text: '0.001 d' },
-    'planet-t0': { param: 't0', text: '0.01 d' },
     'planet-dur': { param: 'dur', text: '0.24 h' },
     'planet-ror': { param: 'ror', text: '0.005' },
     'planet-b': { param: 'b', text: '0.1' }

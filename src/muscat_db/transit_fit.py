@@ -586,8 +586,12 @@ _DEFAULT_FIXED_PARAMS: tuple[str, ...] = ("period", "u_star")
 
 # Prior width written to sys.yaml when a Gaussian prior is entered as a mean
 # with no uncertainty, per planet parameter, in the parameter's own units
-# (days for period, t0 and duration).
-PRIOR_WIDTH_DEFAULTS = {"period": 0.001, "t0": 0.01, "dur": 0.01, "ror": 0.005, "b": 0.1}
+# (days for period and duration). t0 is not here: timer samples it from the
+# Uniform transit-center prior (tc_pred, tc_pred_unc), whatever sys.yaml says.
+PRIOR_WIDTH_DEFAULTS = {"period": 0.001, "dur": 0.01, "ror": 0.005, "b": 0.1}
+# The t0 uncertainty written to sys.yaml when none is entered. timer does not
+# use it for the sampled t0, so it is not reported as a prior width.
+SYS_T0_UNC_DEFAULT = 0.01
 
 
 def defaulted_prior_widths(options: dict | None) -> list[tuple[str, str, float]]:
@@ -1855,7 +1859,14 @@ def _write_fit_inputs(
     }
     for p in [p.strip() for p in planets_str.split(",") if p.strip()]:
         def get_val(key, default):
-            return options.get(f"{key}_{p}") or options.get(key) or default
+            # An unsuffixed key belongs to the first planet only, as in
+            # _planet_value. The form repeats the first planet's values
+            # unsuffixed, so broadcasting them would give a later planet the
+            # first planet's width instead of the advertised default.
+            value = options.get(f"{key}_{p}")
+            if not value and p == first_planet:
+                value = options.get(key)
+            return value or default
 
         def planet_pair(param, val_default, unc_default):
             # Uniform: derive a central [value, unc] from the [low, high] bounds
@@ -1868,7 +1879,7 @@ def _write_fit_inputs(
 
         sys_data["planets"][p] = {
             "period": planet_pair("period", 1.0, PRIOR_WIDTH_DEFAULTS["period"]),
-            "t0": [float(get_val("t0", 2450000.0)), float(get_val("t0_unc", PRIOR_WIDTH_DEFAULTS["t0"]))],
+            "t0": [float(get_val("t0", 2450000.0)), float(get_val("t0_unc", SYS_T0_UNC_DEFAULT))],
             "dur": planet_pair("dur", 0.1, PRIOR_WIDTH_DEFAULTS["dur"]),
             "ror": planet_pair("ror", 0.05, PRIOR_WIDTH_DEFAULTS["ror"]),
             "b": planet_pair("b", 0.0, PRIOR_WIDTH_DEFAULTS["b"]),

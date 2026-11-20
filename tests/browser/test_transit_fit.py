@@ -1188,6 +1188,10 @@ def test_mean_without_uncertainty_shows_the_width_that_will_be_used(page):
     expect(note).to_have_text("No uncertainty entered: 0.24 h is used.")
     dur.fill("2.1,0.05")
     expect(note).to_be_hidden()
+    # t0 gets no note: its sampled width is the transit-center prior's.
+    t0 = card.locator(".planet-t0")
+    t0.fill(t0.input_value().split(",")[0])
+    expect(card.locator(".opt").filter(has=page.locator(".planet-t0")).locator(".prior-width-note")).to_have_count(0)
     # A fixed parameter has no prior width, so there is nothing to say.
     dur.fill("2.1")
     reveal(page, 'input[name="fixed-params"][value="dur"]')
