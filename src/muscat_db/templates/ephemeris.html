@@ -260,8 +260,12 @@
         </p>
         <ul>
           <li><code>a_bc</code>, <code>a_cb</code> — TTV amplitude each planet induces on
-            the other, in days (default <code>0.02</code>).</li>
-          <li><code>per_bc</code> — TTV super-period, in days (default <code>1000</code>).</li>
+            the other, in days. The starting value is the planet's largest
+            |O−C| in the current linear fit, or <code>0.02</code> before a fit exists.</li>
+          <li><code>per_bc</code> — TTV super-period, in days. The starting value is that of
+            the nearest first-order resonance j:(j−1), 1 / |j/P<sub>c</sub> − (j−1)/P<sub>b</sub>|,
+            or <code>1000</code> when the pair is far from one. It is sensitive to the
+            periods, and harmonic fits it.</li>
           <li><code>t_bc</code> — TTV phase reference, in BJD (seeded from the first
             planet's T<sub>0</sub>, else <code>2450000</code>).</li>
         </ul>
@@ -1630,8 +1634,8 @@
         }
       }
       const ephemerisChangeHandler = isManualPlanet
-        ? 'saveTargetOpts(); if (orderPlanetLetters()) rebuildINI(false); scheduleComputeFitIfValid()'
-        : 'saveTargetOpts(); if (orderPlanetLetters()) rebuildINI(false); scheduleComputeFit()';
+        ? 'saveTargetOpts(); rebuildINI(!orderPlanetLetters()); scheduleComputeFitIfValid()'
+        : 'saveTargetOpts(); rebuildINI(!orderPlanetLetters()); scheduleComputeFit()';
       const durationChangeHandler = isManualPlanet
         ? 'scheduleComputeFitIfValid()'
         : 'scheduleComputeFit()';
@@ -2673,6 +2677,8 @@
       renderFitResults(res.results);
       drawPlot();
       markFlaggedManualRows(res.results);
+      // The amplitude starting values come from this fit's O-C.
+      rebuildINI(true);
     })
     .catch(e => {
       if (requestSeq !== computeFitRequestSeq) return;
@@ -4458,13 +4464,48 @@
       });
   }
 
+  // A planet's period from its card, else the reference ephemeris; Infinity when unknown.
+  function planetPeriod(pl) {
+    const card = document.querySelector(`#planet-cards-container .planet-card[data-planet="${pl}"]`);
+    const value = card ? parseFloat(card.querySelector('.planet-period').value) : Number(combinedRefEphem[pl]?.period);
+    return Number.isFinite(value) && value > 0 ? value : Infinity;
+  }
+
   function periodOrderedLetters(letters) {
-    function period(pl) {
-      const card = document.querySelector(`#planet-cards-container .planet-card[data-planet="${pl}"]`);
-      const value = card ? parseFloat(card.querySelector('.planet-period').value) : Number(combinedRefEphem[pl]?.period);
-      return Number.isFinite(value) && value > 0 ? value : Infinity;
-    }
-    return letters.slice().sort((a, b) => period(a) - period(b));
+    return letters.slice().sort((a, b) => planetPeriod(a) - planetPeriod(b));
+  }
+
+  // Starting values for harmonic's [INIT]. harmonic fits both and clips each
+  // into its own bounds, so these only decide where the sampler starts.
+  const TTV_DEFAULT_SUPER_PERIOD = 1000.0;  // days, when the periods give no estimate
+  const TTV_DEFAULT_AMPLITUDE = 0.02;       // days, before a linear fit exists
+  const TTV_MIN_SUPER_PERIOD_FACTOR = 5.0;  // harmonic's lower bound, in outer periods
+
+  // Super-period of the nearest first-order resonance j:(j-1),
+  // 1 / |j/P_outer - (j-1)/P_inner|. Null when a period is unknown, or when
+  // the pair is so far from that resonance that the value falls below
+  // harmonic's lower bound; the caller then keeps the fixed default.
+  function firstOrderSuperPeriod(pInner, pOuter) {
+    if (!Number.isFinite(pInner) || !Number.isFinite(pOuter) || !(pOuter > pInner)) return null;
+    const ratio = pOuter / pInner;
+    const j = Math.max(2, Math.round(ratio / (ratio - 1)));
+    const beat = Math.abs(j / pOuter - (j - 1) / pInner);
+    if (!(beat > 0)) return null;
+    const superPeriod = 1 / beat;
+    return superPeriod >= TTV_MIN_SUPER_PERIOD_FACTOR * pOuter ? superPeriod : null;
+  }
+
+  // Largest |O-C| of a planet in the current linear fit, in days, floored at
+  // its median timing uncertainty: the scale harmonic uses for the amplitude
+  // bound. Null before a fit, or when the planet has no selected timing.
+  function largestOminusC(pl) {
+    const points = ((fitResults || {})[pl] || {}).points || [];
+    const used = points.filter(p => p.checked !== false && Number.isFinite(p.oc_min));
+    if (!used.length) return null;
+    const errs = used.map(p => Math.abs(p.oc_err_min)).filter(Number.isFinite).sort((a, b) => a - b);
+    const medianErr = errs.length ? errs[Math.floor(errs.length / 2)] : 0;
+    const days = Math.max(Math.max(...used.map(p => Math.abs(p.oc_min))), medianErr) / 1440.0;
+    return days > 0 ? days : null;
   }
 
   function orderPlanetLetters() {
@@ -4599,7 +4640,11 @@
     
     let initSection = '';
     
-    if (onlyT14 && textarea.value) {
+    // An [INIT] the page generated and the user has not touched is refreshed
+    // when a new linear fit or period changes its inputs. An edited one is kept.
+    const untouched = textarea.dataset.generated !== undefined
+      && textarea.value.trim() === textarea.dataset.generated;
+    if (onlyT14 && textarea.value && !untouched) {
       // Extract existing sections other than [T14]
       const lines = textarea.value.split('\n');
       let currentSection = '';
@@ -4632,9 +4677,9 @@
       for (let i = 0; i < letters.length - 1; i++) {
         const p1 = letters[i];
         const p2 = letters[i + 1];
-        const a1 = '0.02';
-        const a2 = '0.02';
-        const per = '1000.0';
+        const a1 = (largestOminusC(p1) ?? TTV_DEFAULT_AMPLITUDE).toFixed(5);
+        const a2 = (largestOminusC(p2) ?? TTV_DEFAULT_AMPLITUDE).toFixed(5);
+        const per = (firstOrderSuperPeriod(planetPeriod(p1), planetPeriod(p2)) ?? TTV_DEFAULT_SUPER_PERIOD).toFixed(1);
         
         let t = '2450000.0';
         if (combinedRefEphem[p1] && combinedRefEphem[p1].t0) {
@@ -4650,7 +4695,10 @@
       }
     }
     
+    const generated = !(onlyT14 && textarea.value && !untouched);
     textarea.value = initSection.trim() + '\n' + t14Section.trim();
+    if (generated) textarea.dataset.generated = textarea.value.trim();
+    else delete textarea.dataset.generated;
   }
 </script>
 {% endblock %}

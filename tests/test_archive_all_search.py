@@ -79,3 +79,44 @@ def test_request_id_filters_locally_denied_rows(mock_db, monkeypatch):
     monkeypatch.setattr(web, '_annotate_lco_archive_results', lambda inst, rows, **kw: (rows, 0))
     data = TestClient(web.app).get('/api/lco/archive/frames?request_id=101').json()
     assert data['results'] == [] and data['count'] == 0
+
+
+@pytest.mark.parametrize('params,sent_end', [
+    # The page's End (UTC) is the last day the user wants. The archive reads a
+    # date-only end as midnight at the start of that day, so the request must
+    # carry the next day (issue #458, checked against archive-api.lco.global).
+    ({'start': '2021-03-10', 'end': '2021-03-10'}, '2021-03-11'),
+    ({'start': '2021-02-27', 'end': '2021-02-28'}, '2021-03-01'),
+    ({'start': '2021-03-10'}, None),
+])
+def test_end_date_is_inclusive(mock_db, monkeypatch, params, sent_end):
+    monkeypatch.setattr(web, '_resolve_archive_coords', lambda name: (1.0, 2.0, 'catalog'))
+    monkeypatch.setattr(web, '_annotate_lco_archive_results', lambda inst, rows, **kw: (rows, 1))
+    calls = []
+
+    def page(url, **kw):
+        calls.append(parse_qs(urlsplit(url).query))
+        return {'results': [frame(1)], 'next': None}
+
+    monkeypatch.setattr(lco, '_lco_api_request', page)
+    response = TestClient(web.app).get('/api/lco/archive/frames', params={'OBJECT': 'TOI-1000', **params})
+    assert response.status_code == 200
+    assert calls[0].get('start') == [params['start']]
+    assert calls[0].get('end') == ([sent_end] if sent_end else None)
+
+
+def test_end_date_that_is_not_a_date_is_refused(mock_db, monkeypatch):
+    monkeypatch.setattr(web, '_resolve_archive_coords', lambda name: (1.0, 2.0, 'catalog'))
+    monkeypatch.setattr(lco, '_lco_api_request', lambda *a, **kw: pytest.fail('the archive was queried'))
+    response = TestClient(web.app).get('/api/lco/archive/frames', params={'OBJECT': 'TOI-1000', 'end': 'tomorrow'})
+    assert response.status_code == 400
+    assert 'End' in response.json()['error']
+
+
+def test_inclusive_end_helper():
+    assert lco.archive_inclusive_end('2021-12-31') == '2022-01-01'
+    assert lco.archive_inclusive_end('') == ''
+    # A full timestamp is already an exact upper bound and is passed through.
+    assert lco.archive_inclusive_end('2021-03-10T12:00:00') == '2021-03-10T12:00:00'
+    with pytest.raises(ValueError):
+        lco.archive_inclusive_end('tomorrow')

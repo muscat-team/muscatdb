@@ -75,7 +75,7 @@ def _search(coords, user_name, start, end, *, require_own_token):
             filters['start'] = start
         if end:
             # User-facing end date is inclusive; archive timestamps use an upper bound.
-            filters['end'] = (dt.date.fromisoformat(end) + dt.timedelta(days=1)).isoformat()
+            filters['end'] = lco.archive_inclusive_end(end)
         # Discard download URLs and other large payload fields as each page arrives.
         fields = ('id', 'filename', 'basename', 'SITEID', 'TELID', 'INSTRUME', 'DAY_OBS',
                   'DATE_OBS', 'observation_date', 'OBJECT', 'FILTER', 'EXPTIME',

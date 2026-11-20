@@ -413,6 +413,25 @@ def get_request(
     return _lco_api_request(url, user_name=user_name, token=token, require_own_token=require_own_token)
 
 
+def archive_inclusive_end(end: str) -> str:
+    """Turn a user-facing last day into the upper bound the archive expects.
+
+    The archive reads a date-only ``end`` as midnight at the start of that
+    day, so ``start=2021-03-10&end=2021-03-10`` matches nothing and any range
+    loses its last day. A date is therefore moved to the next day. A value
+    that already carries a time is an exact bound and is returned unchanged.
+    Raises ``ValueError`` for anything else, so a typo is reported instead of
+    being sent to the archive.
+    """
+    end = (end or "").strip()
+    if not end:
+        return ""
+    if "T" in end or " " in end:
+        datetime.datetime.fromisoformat(end.replace("Z", "+00:00"))
+        return end
+    return (datetime.date.fromisoformat(end) + datetime.timedelta(days=1)).isoformat()
+
+
 def _query_params(filters: dict) -> str:
     """Encode API filters without dropping meaningful zero/false values."""
     return urllib.parse.urlencode(

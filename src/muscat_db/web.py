@@ -6564,6 +6564,11 @@ def api_lco_archive_frames(
     except (TypeError, ValueError):
         return JSONResponse({"ok": False, "error": "Limit must be all or a number from 1 to 10000."}, status_code=400)
     max_frames = requested_limit
+    try:
+        # The page's End (UTC) is the last day wanted; the archive's is exclusive.
+        end = lco.archive_inclusive_end(end)
+    except ValueError:
+        return JSONResponse({"ok": False, "error": "End (UTC) must be a date, YYYY-MM-DD."}, status_code=400)
     filters = {
         "proposal_id": proposal_id,
         "SITEID": SITEID,
