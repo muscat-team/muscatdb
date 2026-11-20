@@ -2025,7 +2025,8 @@
         </td>
         <td class="mono" style="text-align: center;">${escapeAttr(d.planets_fitted)}</td>
         <td class="mono" style="text-align: center;">${epochsSummary}</td>
-        <td>${transitsSummary}${warnings.length ? ' <span class="badge badge-amber">' + escapeAttr(warnings.join(', ')) + '</span>' : ''}
+        <td>${transitsSummary} <small>Detection SNR: ${Number.isFinite(d.detection_snr) ? d.detection_snr.toFixed(1) : 'Unknown'}</small>
+          ${warnings.length ? ' <span class="badge badge-amber">' + escapeAttr(warnings.join(', ')) + '</span>' : ''}
           ${unknown.length ? '<small>Unknown: ' + escapeAttr(unknown.join(', ')) + '</small>' : ''}</td>
       `;
       tbody.appendChild(tr);

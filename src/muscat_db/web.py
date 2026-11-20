@@ -7496,8 +7496,14 @@ def api_ephemeris_target_info(target: str, request: Request):
         outputs = fit.get_fit_outputs(inst, date, j["target"], run_id or None)
         if not outputs.get("has_any"):
             continue
-        # Older stored summaries predate the observed chain count.
-        health = {**(outputs.get("health") or {}), **(fit_params(j).get("fit_health") or {})}
+        # Keep persisted diagnostics when an artifact has aged out. Older
+        # records omit ESS and may have a null count for a clean sampling run.
+        stored = fit_params(j).get("fit_health") or {}
+        current = outputs.get("health") or {}
+        metrics = dict(stored.get("metrics") or {})
+        metrics.update({k: v for k, v in (current.get("metrics") or {}).items() if v is not None})
+        chains = current.get("chains")
+        health = {"metrics": metrics, "chains": stored.get("chains") if chains is None else chains}
         warnings, unknown = fit.midtime_review(health)
 
         # Discover planets fitted and their periods/t0 in dataset
@@ -7583,6 +7589,7 @@ def api_ephemeris_target_info(target: str, request: Request):
             "planets_fitted": planets_fitted,
             "fit_warnings": warnings,
             "unknown_diagnostics": unknown,
+            "detection_snr": metrics.get("Detection SNR"),
             "fitted_tcs": fitted,
             "planets_ephem": planets_ephem,
             "transit_coverage": _classify_transit_coverage(

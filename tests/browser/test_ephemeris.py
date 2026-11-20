@@ -172,14 +172,15 @@ def test_flagged_midtime_requires_opt_in_for_ephemeris_and_ttv(page, live_server
     expect(page.locator("#datasets-body .dataset-checkbox")).to_be_checked()
 
 
-def test_legacy_fit_with_snr_at_cutoff_and_unknown_sampler_diagnostics(page, live_server, request):
+def test_legacy_fit_with_low_snr_and_unknown_sampler_diagnostics(page, live_server, request):
     summary = live_server.root / "timer/muscat3/261001/TOI-1000/fit1/out/summary.csv"
     original = summary.read_bytes()
     request.addfinalizer(lambda: summary.write_bytes(original))
-    summary.write_text(",mean,sd\nror[0],0.75,0.125\n")
+    summary.write_text(",mean,sd\nror[0],0.25,0.125\n")
     _load_toi1000(page)
     row = page.locator("#datasets-body tr").first
-    expect(row).to_contain_text("Unknown: Max R-hat, Divergences")
+    expect(row).to_contain_text("Detection SNR: 1.0")
+    expect(row).to_contain_text("Unknown: Max R-hat, Divergences, Min bulk ESS, Min tail ESS")
     expect(row.get_by_role("checkbox")).to_be_checked()
 
 
