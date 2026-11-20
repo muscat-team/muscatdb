@@ -197,6 +197,120 @@ def test_ttv_amplitude_starts_from_the_largest_o_minus_c(page):
     assert _ini(page)['a_cb'] == 0.02
 
 
+def test_harmonic_warning_follows_selected_run(page, live_server, request):
+    import json
+    from muscat_db import ttv_fit
+
+    for name, converged in (("short", False), ("long", True)):
+        run = ttv_fit.ttv_output_dir("TOI1000", name)
+        assert run.is_relative_to(live_server.root)
+        run.mkdir(parents=True)
+        request.addfinalizer(run.rmdir)
+        request.addfinalizer((run / "fit_stats.json").unlink)
+        (run / "fit_stats.json").write_text(json.dumps({"converged": converged}))
+    _load_toi1000(page)
+    panel = page.locator("#ttv-outputs-container")
+    panel.get_by_role("button", name="short — Sampler reported non-convergence").click()
+    expect(panel).to_contain_text("Done with warnings")
+    expect(panel).to_contain_text("Acceptance fraction: Unknown")
+    panel.get_by_role("button", name="long", exact=True).click()
+    expect(panel).to_contain_text("Converged: Yes")
+    expect(panel).not_to_contain_text("Done with warnings")
+
+
+def test_flagged_midtime_requires_opt_in_for_ephemeris_and_ttv(page, live_server, request):
+    run = live_server.root / "timer/muscat3/261001/TOI-1000/fit1"
+    for path, content in [(run / "timer-fit.log", "There was 1 divergence after tuning."),
+                          (run / "out/tc.txt", f"b {T0} 0.0004")]:
+        assert not path.exists()
+        path.write_text(content)
+        request.addfinalizer(path.unlink)
+
+    # Old saved views wrote every box, including the old implicit default.
+    page.add_init_script("""if (!sessionStorage.getItem('old-view-seeded')) {
+        localStorage.setItem('muscat-ephem-opts-TOI1000-checked',
+          JSON.stringify({'TOI-1000|muscat3|261001|fit1': true}));
+        sessionStorage.setItem('old-view-seeded', '1');
+    }""")
+    _load_toi1000(page)
+    row = page.locator("#datasets-body tr").first
+    expect(row).to_contain_text("1 divergence after tuning")
+    check = row.get_by_role("checkbox")
+    expect(check).not_to_be_checked()
+
+    # Keep independent points in the fit so exclusion can also be checked in
+    # the actual harmonic launch payload, without launching an engine.
+    page.route("**/api/ttv-fit/start", lambda route: route.fulfill(json={"ok": False, "error": "test launch"}))
+    for epoch in EPOCHS:
+        with page.expect_response("**/api/ephemeris/calculate") as response:
+            _add_transit_center(page, T0 + epoch * PERIOD)
+    for included in (False, True):
+        with page.expect_request("**/api/ttv-fit/start") as launch:
+            if included:
+                with page.expect_response("**/api/ephemeris/calculate") as response:
+                    check.check()
+                    page.locator("#run-ttv-btn").click()
+            else:
+                page.locator("#run-ttv-btn").click()
+        points = response.value.json()["results"]["b"]["points"]
+        assert [p["checked"] for p in points if p.get("run_id") == "fit1"] == [included]
+        options = launch.value.post_data_json["options"]
+        assert any(p.get("run_id") == "fit1" for p in options["selection"]) == included
+        assert any(float(line.split(",")[2]) == T0 for line in options["csv_content"].splitlines()[1:]) == included
+    page.reload()
+    expect(page.locator("#datasets-body .dataset-checkbox")).to_be_checked()
+
+
+def test_legacy_fit_with_low_snr_and_unknown_sampler_diagnostics(page, live_server, request):
+    summary = live_server.root / "timer/muscat3/261001/TOI-1000/fit1/out/summary.csv"
+    original = summary.read_bytes()
+    request.addfinalizer(lambda: summary.write_bytes(original))
+    summary.write_text(",mean,sd\nror[0],0.25,0.125\n")
+    _load_toi1000(page)
+    row = page.locator("#datasets-body tr").first
+    expect(row).to_contain_text("Detection SNR: 1.0")
+    expect(row).to_contain_text("Unknown: Max R-hat, Divergences, Min bulk ESS, Min tail ESS")
+    expect(row.get_by_role("checkbox")).to_be_checked()
+
+
+@pytest.mark.parametrize("cache_case", ["matching", "removed_dataset", "older_version"])
+def test_cached_fit_only_restores_for_current_inputs(page, cache_case):
+    _load_toi1000(page)
+    for epoch in EPOCHS:
+        with page.expect_response("**/api/ephemeris/calculate"):
+            _add_transit_center(page, T0 + epoch * PERIOD)
+    grid = page.locator("#results-grid")
+    expect(grid).to_contain_text("Exact fit (2 points")
+
+    if cache_case == "removed_dataset":
+        def remove_dataset(route):
+            info = route.fetch().json()
+            assert info["datasets"]
+            route.fulfill(json={**info, "datasets": []})
+
+        page.route("**/api/ephemeris/target-info?**", remove_dataset)
+    elif cache_case == "older_version":
+        page.evaluate("""() => {
+            const key = 'muscat-ephem-opts-TOI1000-results';
+            const cached = JSON.parse(localStorage.getItem(key));
+            cached.version -= 1;
+            localStorage.setItem(key, JSON.stringify(cached));
+        }""")
+
+    # With the new calculation held, any result on screen came from the cache.
+    pending = []
+    page.route("**/api/ephemeris/calculate", lambda route: pending.append(route))
+    with page.expect_request("**/api/ephemeris/calculate"):
+        page.reload()
+    if cache_case == "matching":
+        expect(grid).to_contain_text("Exact fit (2 points")
+    else:
+        expect(grid).not_to_contain_text("Exact fit (2 points")
+        assert page.evaluate("localStorage.getItem('muscat-ephem-opts-TOI1000-results')") is None
+    for route in pending:
+        route.continue_()
+
+
 def test_pending_auto_fit_does_not_interrupt_adding_a_planet(page):
     # Editing a catalog planet schedules a fit 350 ms later, while a newly
     # added manual planet is incomplete. The automatic fit must not interrupt.

@@ -958,6 +958,7 @@ def get_ttv_outputs(target: str, run_name: str = "") -> dict:
     mtime = 0.0
     try:
         mtime = rdir.stat().st_mtime
+        mtime = max(mtime, (rdir / "fit_stats.json").stat().st_mtime)
     except OSError:
         pass
     return _get_ttv_outputs_mtime(target, run_name, mtime)
@@ -989,13 +990,18 @@ def read_fit_stats(rdir: pathlib.Path) -> dict | None:
     that was resumed without ``--clobber``, or that predates the feature, has
     none. Callers offer a recompute instead.
     """
+    stats = _raw_fit_stats(rdir)
+    return stats if all(key in stats for key in _DBIC_KEYS) else None
+
+
+def _raw_fit_stats(rdir):
     path = rdir / "fit_stats.json"
     try:
         stats = json.loads(path.read_text())
     except (OSError, ValueError):
-        return None
-    if not isinstance(stats, dict) or any(key not in stats for key in _DBIC_KEYS):
-        return None
+        return {}
+    if not isinstance(stats, dict):
+        return {}
     return {key: _finite(value) for key, value in stats.items()}
 
 
@@ -1010,6 +1016,7 @@ def empty_ttv_outputs() -> dict:
         "has_samples": False,
         "has_model": False,
         "fit_stats": None,
+        "health": None,
         "extra_files": [],
         "input_snapshot": None,
     }
@@ -1048,7 +1055,22 @@ def _get_ttv_outputs_mtime(
         (rdir / name).is_file()
         for name in ("samples.csv.gz", "data.csv", "config.ini", "fit_config.json")
     )
-    outputs["fit_stats"] = read_fit_stats(rdir)
+    stats = _raw_fit_stats(rdir)
+    outputs["fit_stats"] = stats if all(key in stats for key in _DBIC_KEYS) else None
+    converged = stats.get("converged")
+
+    def numeric(key):
+        value = stats.get(key)
+        return value if type(value) in (int, float) else None
+
+    outputs["health"] = {
+        "metrics": {
+            "Converged": converged if isinstance(converged, bool) else None,
+            "Max autocorrelation time": numeric("tau_max"),
+            "Acceptance fraction": numeric("accept_frac"),
+        },
+        "warnings": ["Sampler reported non-convergence"] if converged is False else [],
+    }
 
     for p in sorted(rdir.glob("*.png")):
         if p.is_file():
@@ -1405,6 +1427,7 @@ def sync_jobs() -> None:
                 inst=job.inst or "_",
                 date=job.date or "_",
                 target=job.target,
+                params=jobs.with_fit_health(existing, get_ttv_outputs(job.target, job.run_name)) if persist_state == "done" else "",
                 state=persist_state,
                 returncode=persist_rc,
                 elapsed=round(elapsed),
@@ -1454,6 +1477,7 @@ def sync_jobs() -> None:
 
             if completed_ok:
                 store.save(
+                    params=jobs.with_fit_health(row, get_ttv_outputs(target, run_name)),
                     type_="ttv_fit",
                     inst=row.get("inst") or "_", date=row.get("date") or "_", target=target,
                     state="done", returncode=0,

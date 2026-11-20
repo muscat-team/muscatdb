@@ -87,6 +87,7 @@ from muscat_db import transit_fit_api as fit_api
 from muscat_db import ttv_fit_api as ttv_api
 from muscat_db import ref_time as ref_time_lib
 from muscat_db import postprocess as postproc
+from muscat_db import rediff as rediff_mod
 from muscat_db import exposure as exp_calc
 from muscat_db.admin import router as admin_router
 from muscat_db.access import (
@@ -229,6 +230,7 @@ from muscat_db.database import (
     get_targets_for_tag as _get_targets_for_tag,
     get_tags_for_targets,
 )
+from muscat_db.jobs import fit_params
 from muscat_db.job_store import get_job_store, notify_enabled, set_owner, uses_shared_control_plane, wait_for_work_or_sleep
 from muscat_db.target_refresh import FinishedJobWatcher, refresh_worker_finished_targets
 from muscat_db.cache import LRUCache, TTLCache
@@ -3214,6 +3216,8 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
         sel_site=sel_site, sel_telescope=sel_telescope, sel_mode=sel_mode,
         csv_sites=csv_sites, csv_telescopes=csv_telescopes, csv_modes=csv_modes,
         runs=runs, run_labels=phot.run_chip_labels(runs), sel_run=sel_run,
+        run_warnings={r.run_id: (fit.get_fit_outputs(inst, date, target, r.run_id).get("health") or {}).get("warnings", [])
+                      for r in runs if len(runs) > 1},
         missing_run=missing_run,
         can_modify_run=_viewer_may_modify_run("transit_fit", inst, date, target, sel_run or ""),
         runs_json=runs_json,
@@ -7478,9 +7482,6 @@ def api_ephemeris_target_info(target: str, request: Request):
             and j["state"] == "done"
             and _is_full_transit_fit_job(j)
             and _normalize_target_name(j["target"], norm_overrides) == norm_t
-            and fit.get_fit_outputs(
-                j["instrument"], j["obsdate"], j["target"], (j.get("run_id") or "") or None
-            ).get("has_any")
         ]
     
     # 1. Query all planets from catalog
@@ -7498,6 +7499,19 @@ def api_ephemeris_target_info(target: str, request: Request):
         date = j["obsdate"]
         run_id = j.get("run_id") or ""
         
+        outputs = fit.get_fit_outputs(inst, date, j["target"], run_id or None)
+        if not outputs.get("has_any"):
+            continue
+        # Keep persisted diagnostics when an artifact has aged out. Older
+        # records omit ESS and may have a null count for a clean sampling run.
+        stored = fit_params(j).get("fit_health") or {}
+        current = outputs.get("health") or {}
+        metrics = dict(stored.get("metrics") or {})
+        metrics.update({k: v for k, v in (current.get("metrics") or {}).items() if v is not None})
+        chains = current.get("chains")
+        health = {"metrics": metrics, "chains": stored.get("chains") if chains is None else chains}
+        warnings, unknown = fit.midtime_review(health)
+
         # Discover planets fitted and their periods/t0 in dataset
         planets_fitted = "b"
         planets_ephem = {}
@@ -7579,6 +7593,9 @@ def api_ephemeris_target_info(target: str, request: Request):
             "run_name": j.get("run_name") or (run_id if run_id else "legacy"),
             "target": j["target"],
             "planets_fitted": planets_fitted,
+            "fit_warnings": warnings,
+            "unknown_diagnostics": unknown,
+            "detection_snr": metrics.get("Detection SNR"),
             "fitted_tcs": fitted,
             "planets_ephem": planets_ephem,
             "transit_coverage": _classify_transit_coverage(
@@ -8220,6 +8237,20 @@ def _all_job_rows() -> list[dict]:
     return [dict(row) for row in rows]
 
 
+def _fit_warnings(row):
+    kind = row.get("type")
+    if row.get("state") != "done" or kind not in ("transit_fit", "ttv_fit"):
+        return []
+    params = fit_params(row)
+    if "fit_health" in params:
+        health = params["fit_health"]
+    elif kind == "transit_fit":
+        health = fit.get_fit_outputs(row["inst"], row["date"], row["target"], row.get("run_id")).get("health")
+    else:
+        health = ttv.get_ttv_outputs(row["target"], row.get("run_name") or row.get("run_id") or "").get("health")
+    return (health or {}).get("warnings", [])
+
+
 @app.get("/jobs", response_class=HTMLResponse)
 def jobs_page():
     all_jobs = _visible_jobs(_all_job_rows())
@@ -8230,6 +8261,7 @@ def jobs_page():
     is_admin = _jobs_user_is_admin(user)
     for j in all_jobs:
         j["elapsed"] = _live_elapsed(j)
+        j["fit_warnings"] = _fit_warnings(j)
         j["stored"] = j["key"] in stored_keys
         j["can_delete"] = j["stored"] and _may_delete_job(j, user, is_admin)
         j["can_cancel"] = _may_cancel_job_row(j)
@@ -8284,6 +8316,7 @@ def jobs_status(active_only: bool = False, watch: Annotated[list[str] | None, Qu
         )
         if (j["key"] in watched_keys and j.get("state") in _JOB_TERMINAL_STATES) or is_terminal_lco_archive:
             finished[j["key"]] = {
+                "fit_warnings": _fit_warnings(j),
                 "key": j["key"],
                 "type": j.get("type", ""),
                 "inst": j.get("inst", ""),
@@ -8829,6 +8862,67 @@ def photometry_postprocess_restore(payload: phot_api.RestoreRequest):
     return phot_api.response(phot_api.RestoreResponse, result)
 
 
+def _rediff_target(payload: dict, model) -> tuple[tuple | None, JSONResponse | None]:
+    """Validate the dataset and run of a re-diff request and check visibility."""
+    inst = (payload.get("inst") or "").strip()
+    date = (payload.get("date") or "").strip()
+    target = (payload.get("target") or "").strip()
+    run = (payload.get("run") or "").strip()
+    if inst not in INSTRUMENTS or not phot.valid_date(date) or not target:
+        return None, phot_api.response(model, {"ok": False, "error": "invalid instrument, date or target"}, status_code=400)
+    if not run:
+        return None, phot_api.response(model, {"ok": False, "error": "a run is required"}, status_code=400)
+    _require_visible_run("photometry", inst, date, target, run)
+    return (inst, date, target, run), None
+
+
+def _rediff_reply(model, result: dict) -> JSONResponse:
+    return phot_api.response(model, result, status_code=200 if result.get("ok") else 400)
+
+
+@photometry_router.post("/rediff/info", response_model=phot_api.RediffInfoResponse,
+                        responses={400: {"model": phot_api.RediffInfoResponse}})
+def photometry_rediff_info(payload: phot_api.RestoreRequest):
+    """Selectable comparison stars, default comparisons and weights, and
+    aperture radii per band from the run's flux datacube."""
+    key, error = _rediff_target(payload.model_dump(exclude_unset=True), phot_api.RediffInfoResponse)
+    if error:
+        return error
+    return _rediff_reply(phot_api.RediffInfoResponse, rediff_mod.info(*key))
+
+
+@photometry_router.post("/rediff", response_model=phot_api.RediffResponse,
+                        responses={400: {"model": phot_api.RediffResponse}})
+def photometry_rediff(payload: phot_api.RediffRequest):
+    """Re-difference a run against chosen comparison stars and aperture.
+
+    ``apply=false`` compares with the default light curve (metrics and a
+    base64 overlay); ``apply=true`` rewrites the selected bands' Flux/Err and
+    the summary figure, keeping the pipeline's files for restore.
+    """
+    payload = payload.model_dump(exclude_unset=True)
+    key, error = _rediff_target(payload, phot_api.RediffResponse)
+    if error:
+        return error
+    apply = bool(payload.get("apply", False))
+    if apply:  # a comparison only reads the run
+        _require_may_modify_run("photometry", *key, action="re-difference")
+    return _rediff_reply(phot_api.RediffResponse,
+                         rediff_mod.rediff(*key, payload.get("selections"), apply=apply,
+                                           offset=payload.get("offset")))
+
+
+@photometry_router.post("/rediff/restore", response_model=phot_api.RestoreResponse,
+                        responses={400: {"model": phot_api.RestoreResponse}})
+def photometry_rediff_restore(payload: phot_api.RestoreRequest):
+    """Undo the run's re-diff: put back the pipeline's band CSVs and summary figure."""
+    key, error = _rediff_target(payload.model_dump(exclude_unset=True), phot_api.RestoreResponse)
+    if error:
+        return error
+    _require_may_modify_run("photometry", *key, action="restore")
+    return _rediff_reply(phot_api.RestoreResponse, rediff_mod.restore_rediff(*key))
+
+
 @photometry_router.get("/status", response_model=phot_api.JobStatus)
 def photometry_status(inst: str, date: str, target: str, run: str = ""):
     # Drain the queue so a pending full job is promoted once the slot frees,
@@ -9189,7 +9283,8 @@ def ttv_fit_runs(target: str = ""):
         return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
     products = _product_visibility()
     runs = [
-        {**r, "can_modify": _viewer_may_modify_run("ttv_fit", "", "", target.strip(), r["run_name"])}
+        {**r, "warnings": (ttv.get_ttv_outputs(target.strip(), r["run_name"]).get("health") or {}).get("warnings", []),
+         "can_modify": _viewer_may_modify_run("ttv_fit", "", "", target.strip(), r["run_name"])}
         for r in ttv.list_ttv_runs(target.strip())
         if not _ttv_run_hidden(target, r["run_name"], products)
     ]

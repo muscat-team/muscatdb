@@ -124,3 +124,29 @@ class TestTransitFitFinalizeGrace:
             assert fit_saves[-1]["returncode"] is None
         finally:
             _clear_jobs()
+
+
+def test_sync_jobs_saves_divergence_with_original_options(monkeypatch, tmp_path):
+    import json
+
+    job, proc, log = _make_job(tmp_path)
+    proc._rc = 0
+    (tmp_path / "out").mkdir()
+    log.write_text("There was 1 divergence after tuning.")
+    os.utime(log, (100, 100))
+    row = {"key": f"transit_fit:{job.key}", "state": "running", "type": "transit_fit",
+           "started_at": job.started_at, "params": '{"options":{"chains":1}}'}
+    saved = []
+    monkeypatch.setattr(fit, "fit_output_dir", lambda *args: tmp_path)
+    monkeypatch.setattr("muscat_db.database.get_persisted_jobs", lambda: [row])
+    monkeypatch.setattr("muscat_db.database.save_job", lambda **kw: saved.append(kw))
+    monkeypatch.setattr("muscat_db.database.refresh_target_status", lambda *args: None)
+    monkeypatch.setattr(fit.jobs, "fire_job_finished", lambda **kwargs: None)
+    try:
+        fit.sync_jobs()
+        assert saved[-1]["state"] == "done"
+        params = json.loads(saved[-1]["params"])
+        assert params["options"] == {"chains": 1}
+        assert params["fit_health"]["warnings"] == ["1 divergence after tuning"]
+    finally:
+        _clear_jobs()
