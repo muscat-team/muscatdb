@@ -844,6 +844,8 @@ def test_postprocess_of_a_hidden_run_is_404(client, env):
     body = {"inst": INST, "date": "260103", "target": "OPENTGT", "run": RUN}
     assert _post(client, "/api/photometry/postprocess", body).status_code == 404
     assert _post(client, "/api/photometry/postprocess/restore", body).status_code == 404
+    for path in ("rediff/info", "rediff", "rediff/restore"):
+        assert _post(client, f"/api/photometry/{path}", body).status_code == 404, path
 
 
 # ── queued runs ─────────────────────────────────────────────────────────

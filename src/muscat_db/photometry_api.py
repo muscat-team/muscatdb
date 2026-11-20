@@ -101,6 +101,7 @@ class PhotometryOptions(RequestModel):
     post_poly_deg: FormInt = phot.POSTPROCESS_DEFAULTS["post_poly_deg"]
     post_exclude_before_jd: FormFloat = ""
     post_exclude_after_jd: FormFloat = ""
+    rediff_offset: FormFloat = ""
 
 
 class DatasetRequest(RequestModel):
@@ -138,6 +139,15 @@ class PostprocessRequest(DatasetRequest):
 
 class RestoreRequest(DatasetRequest):
     run: str = ""
+
+
+class RediffRequest(DatasetRequest):
+    run: str = ""
+    # [{band, comparisons, aperture}]; validated by rediff.parse_selections so
+    # a bad entry is a 400 with a reason rather than a bare 422.
+    selections: SkipValidation[list | None] = None
+    apply: bool = False
+    offset: FormFloat = None
 
 
 class BatchJob(DatasetRequest):
@@ -224,6 +234,29 @@ class PostprocessResponse(ResponseModel):
     summary_png: str | None = None
     preview_png: str | None = Field(None, description="Base64 PNG preview")
     restorable: bool = False
+
+
+class RediffState(ResponseModel):
+    restorable: bool = False
+    clip_active: bool = False
+    applied_selection: dict = Field(default_factory=dict,
+                                    description="Band -> adopted comparisons, aperture, weighting")
+
+
+class RediffInfoResponse(RediffState):
+    ok: bool
+    error: str | None = None
+    bands: dict = Field(default_factory=dict, description="prose2 rediff_lightcurves --info per band")
+
+
+class RediffResponse(RediffState):
+    ok: bool
+    error: str | None = None
+    applied: bool = False
+    bands: dict = Field(default_factory=dict, description="Band -> default and custom metrics, plus default_equal on preview")
+    summary_png: str | None = None
+    preview_png: str | None = Field(None, description="Base64 PNG preview")
+    plot_offset: dict[str, float] | None = Field(None, description="Band -> preview offset used")
 
 
 class RestoreResponse(ResponseModel):
