@@ -123,6 +123,13 @@ def _write_log_banner(
                 logf.write(f"  {k}: {v!r}\n")
         logf.write("\n")
 
+    defaulted = defaulted_prior_widths(options) if options else []
+    if defaulted:
+        logf.write("--- priors with no uncertainty entered (default width used) ---\n")
+        for planet, param, width in defaulted:
+            logf.write(f"  {planet}: {param} width {width:g} (default)\n")
+        logf.write("\n")
+
     if transit_center_priors:
         logf.write("--- transit-center priors (BJD) ---\n")
         for planet, prior in transit_center_priors.items():
@@ -575,6 +582,38 @@ _FIXABLE_PARAMS = {"t0", "period", "dur", "u_star", "b", "ror"}
 # page load, or a client that omits the key). Matches the checkboxes that
 # ship pre-checked in transit_fit.html.
 _DEFAULT_FIXED_PARAMS: tuple[str, ...] = ("period", "u_star")
+
+
+# Prior width written to sys.yaml when a Gaussian prior is entered as a mean
+# with no uncertainty, per planet parameter, in the parameter's own units
+# (days for period, t0 and duration).
+PRIOR_WIDTH_DEFAULTS = {"period": 0.001, "t0": 0.01, "dur": 0.01, "ror": 0.005, "b": 0.1}
+
+
+def defaulted_prior_widths(options: dict | None) -> list[tuple[str, str, float]]:
+    """``(planet, parameter, width)`` for each sampled Gaussian prior that has a
+    mean but no uncertainty, so the fit uses :data:`PRIOR_WIDTH_DEFAULTS`.
+
+    Fixed parameters have no prior width, and a Uniform prior carries its own
+    bounds, so neither is listed. Used to say so in the log banner (#458).
+    """
+    o = options or {}
+    planets = [p.strip() for p in (o.get("planets") or "b").split(",") if p.strip()] or ["b"]
+    first = planets[0]
+    fixed = set(_resolved_fixed_params(o))
+    out = []
+    for p in planets:
+        for param, width in PRIOR_WIDTH_DEFAULTS.items():
+            if param in fixed:
+                continue
+            if param in _PRIOR_PARAMS and _prior_choice(o, param, p, first) == "uniform":
+                continue
+            if _planet_value(o, param, p, first) is None:
+                continue
+            raw_unc = o.get(f"{param}_unc_{p}") or (o.get(f"{param}_unc") if p == first else None)
+            if str(raw_unc or "").strip() == "":
+                out.append((p, param, width))
+    return out
 
 
 def _resolved_fixed_params(options: dict) -> list:
@@ -1828,11 +1867,11 @@ def _write_fit_inputs(
             return [float(get_val(param, val_default)), float(get_val(f"{param}_unc", unc_default))]
 
         sys_data["planets"][p] = {
-            "period": planet_pair("period", 1.0, 0.001),
-            "t0": [float(get_val("t0", 2450000.0)), float(get_val("t0_unc", 0.01))],
-            "dur": planet_pair("dur", 0.1, 0.01),
-            "ror": planet_pair("ror", 0.05, 0.005),
-            "b": planet_pair("b", 0.0, 0.1),
+            "period": planet_pair("period", 1.0, PRIOR_WIDTH_DEFAULTS["period"]),
+            "t0": [float(get_val("t0", 2450000.0)), float(get_val("t0_unc", PRIOR_WIDTH_DEFAULTS["t0"]))],
+            "dur": planet_pair("dur", 0.1, PRIOR_WIDTH_DEFAULTS["dur"]),
+            "ror": planet_pair("ror", 0.05, PRIOR_WIDTH_DEFAULTS["ror"]),
+            "b": planet_pair("b", 0.0, PRIOR_WIDTH_DEFAULTS["b"]),
         }
 
     with open(rdir / "sys.yaml", "w") as f:

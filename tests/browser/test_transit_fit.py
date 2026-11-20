@@ -1154,3 +1154,42 @@ def test_csv_selection_updates_automatic_centers(page, distinct_csv_spans, actio
     expected = '2460000.100000' if action in ('select_all', 'deselect_all') else '2460000.300000'
     expect(centers.first).to_have_value(expected)
     expect(centers.nth(1)).to_have_value('2460000.27')
+
+
+def test_clear_values_returns_chromatic_and_trend_to_their_defaults(page):
+    page.goto(URL)
+    for control in ("#opt-chromatic", "#opt-trend", "#clear-btn"):
+        reveal(page, control)
+    page.locator("#opt-chromatic").uncheck()
+    page.locator("#opt-trend").uncheck()
+    page.click("#clear-btn")
+    expect(page.locator("#opt-chromatic")).to_be_checked()
+    expect(page.locator("#opt-trend")).to_be_checked()
+
+
+def test_quadratic_option_says_it_squares_the_covariates(page):
+    page.goto(URL)
+    reveal(page, "#opt-quadratic")
+    label = page.locator('label[for="opt-quadratic"]')
+    expect(label).to_contain_text("Quadratic covariates")
+    expect(label.get_by_role("button", name="Help")).to_have_accessible_description(
+        re.compile(r"square of each covariate.*does not change the time trend"))
+
+
+def test_mean_without_uncertainty_shows_the_width_that_will_be_used(page):
+    page.goto(URL)
+    _query_toi_catalog(page)
+    card = page.locator(".planet-card").first
+    dur = card.locator(".planet-dur")
+    note = card.locator(".opt").filter(has=page.locator(".planet-dur")).locator(".prior-width-note")
+    expect(note).to_be_hidden()
+    dur.fill("2.1")
+    expect(note).to_be_visible()
+    expect(note).to_have_text("No uncertainty entered: 0.24 h is used.")
+    dur.fill("2.1,0.05")
+    expect(note).to_be_hidden()
+    # A fixed parameter has no prior width, so there is nothing to say.
+    dur.fill("2.1")
+    reveal(page, 'input[name="fixed-params"][value="dur"]')
+    page.locator('input[name="fixed-params"][value="dur"]').check()
+    expect(note).to_be_hidden()

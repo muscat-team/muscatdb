@@ -4419,6 +4419,9 @@ def exposure_page(inst: str = "", target: str = ""):
         sel_target=target,
         calibrations=calibrations,
         inst_params=exp_calc.INSTRUMENT_PARAMS,
+        # The LCO focus-offset limits muscat-db enforces when submitting. Only the
+        # LCO instruments have one; the page keeps its 0-6 mm range for the rest.
+        defocus_limits={name: lco._DEFOCUS_LIMIT_MM[name] for name in ('muscat3', 'muscat4', 'sinistro', 'qhy600')},
         model_summary={name: exp_calc.model_summary(name) for name in INSTRUMENTS},
     )
 
