@@ -132,6 +132,19 @@ def _write_log_banner(
                 logf.write(f"  {planet}: Uniform [{prior['lower_bjd']:.6f}, "
                            f"{prior['upper_bjd']:.6f}], center {prior['center_bjd']:.6f}, "
                            f"full width {prior['full_width_days']:.6f} d\n")
+                # Runs recorded before the width could follow the ephemeris
+                # have none of the keys below.
+                sigma = prior.get("sigma_days")
+                if sigma:
+                    how = (f"set as {prior['n_sigma']:g} sigma" if prior.get("mode") == "sigma"
+                           else "set directly")
+                    logf.write(f"    width {how}; propagated 1 sigma {sigma:.6f} d "
+                               f"at epoch {prior['epoch_number']}; the prior reaches "
+                               f"{prior['half_width_sigma']:.3g} sigma either side\n")
+                if prior.get("narrow"):
+                    logf.write(f"    WARNING: the prior reaches less than {TC_WARN_NSIGMA:g} sigma "
+                               "either side of the predicted center, so the transit may "
+                               "fall outside it\n")
         logf.write("\n")
 
     if narrowband_aliases:
@@ -588,7 +601,6 @@ _PLANET_TOKEN_RE = re.compile(r"^[A-Za-z]$")
 _FIT_NUMERIC_FIELDS: list[tuple[str, str, str]] = [
     ("trim_beg",     "Trim begin (days)",    "nonneg"),
     ("trim_end",     "Trim end (days)",      "nonneg"),
-    ("tc_pred_unc", "tc_pred uncertainty",  "pos"),
     ("teff",        "Teff (K)",             "pos"),
     ("teff_unc",    "Teff uncertainty",     "pos"),
     ("logg",        "log g",                "num"),
@@ -810,15 +822,60 @@ def validate_flare_times(options: dict | None, csvs) -> str | None:
 
 
 DEFAULT_TC_UNC = 0.04
+# Default reach of the transit-center prior either side of the predicted
+# center, in units of the propagated ephemeris uncertainty, and the reach
+# below which a launch warns.
+DEFAULT_TC_NSIGMA = 3.0
+TC_WARN_NSIGMA = 3.0
+_TC_WIDTH_MODES = ("sigma", "direct")
+
+
+def propagated_center_sigma(t0_unc: float | None, period_unc: float | None,
+                            epoch_number: int) -> float | None:
+    """Return the 1 sigma uncertainty of a transit *epoch_number* periods from t0.
+
+    A linear ephemeris predicts ``t0 + N * P``, so its uncertainty is
+    ``sqrt(sigma_t0**2 + (N * sigma_P)**2)``. Returns ``None`` unless both
+    uncertainties are finite and above zero: with either missing the result
+    would understate the uncertainty and look more trustworthy than it is.
+    """
+    for unc in (t0_unc, period_unc):
+        if unc is None or not math.isfinite(unc) or unc <= 0:
+            return None
+    return math.hypot(t0_unc, epoch_number * period_unc)
+
+
+def _planet_text(options: dict, key: str, planet: str, first_planet: str) -> str:
+    """Return a planet's text field, with the same first-planet broadcast as
+    :func:`_planet_value`."""
+    raw = options.get(f"{key}_{planet}")
+    if raw is None and planet == first_planet:
+        raw = options.get(key)
+    # Only a missing value is blank. A JSON 0 or False is an explicit value
+    # and must reach the caller's validation instead of becoming the default.
+    return "" if raw is None else str(raw).strip()
 
 
 def predict_transit_centers(options: dict | None, csvs) -> tuple[dict[str, dict], str | None]:
     """Return each planet's Uniform transit-center prior, or a user-facing error.
 
-    An explicit ``tc_pred`` wins. Otherwise the center is the transit of the
-    reference epoch plus an integer number of periods nearest the middle of
-    the selected light curves. A planet with neither is an error rather than a
-    silent fallback to the raw epoch or the data mean.
+    Center: an explicit ``tc_pred`` wins. Otherwise the center is the transit
+    of the reference epoch plus an integer number of periods nearest the middle
+    of the selected light curves. A planet with neither is an error rather than
+    a silent fallback to the raw epoch or the data mean.
+
+    Width: ``tc_pred_mode`` is ``sigma`` or ``direct``. In sigma mode the prior
+    reaches ``tc_pred_nsigma`` (default 3) times the propagated ephemeris
+    uncertainty either side of the center. In direct mode ``tc_pred_unc`` is
+    the full width in days. With no mode, an explicit ``tc_pred_unc`` means
+    direct, so callers that predate the mode keep the width they send;
+    otherwise the mode is sigma when the uncertainty can be propagated and
+    direct with ``DEFAULT_TC_UNC`` when it cannot.
+
+    The propagated uncertainty describes the ephemeris used to predict the
+    transit, so it uses the t0 and period uncertainties whether or not the fit
+    samples the period. A period entered as Uniform bounds carries no
+    uncertainty, so sigma mode is unavailable for that planet.
     """
     o = options or {}
     planets = [p.strip() for p in (o.get("planets") or "b").split(",") if p.strip()] or ["b"]
@@ -827,13 +884,14 @@ def predict_transit_centers(options: dict | None, csvs) -> tuple[dict[str, dict]
     time_range = None
     priors: dict[str, dict] = {}
     for p in planets:
+        epoch = _planet_value(o, "t0", p, first)
+        period_is_uniform = _prior_choice(o, "period", p, first) == "uniform"
+        if period_is_uniform:
+            period = sum(_uniform_bounds(o, "period", p, first)) / 2
+        else:
+            period = _planet_value(o, "period", p, first)
         center = _planet_value(o, "tc_pred", p, first)
         if center is None:
-            epoch = _planet_value(o, "t0", p, first)
-            if _prior_choice(o, "period", p, first) == "uniform":
-                period = sum(_uniform_bounds(o, "period", p, first)) / 2
-            else:
-                period = _planet_value(o, "period", p, first)
             if time_range is None:
                 time_range = lightcurve_time_range(csvs)
             if epoch is None or period is None or not period > 0 or time_range is None:
@@ -843,11 +901,55 @@ def predict_transit_centers(options: dict | None, csvs) -> tuple[dict[str, dict]
                 )
             middle = sum(time_range) / 2
             center = epoch + math.floor((middle - epoch) / period + 0.5) * period
-        width = _planet_value(o, "tc_pred_unc", p, first)
-        width = DEFAULT_TC_UNC if width is None else width
+
+        sigma = epoch_number = None
+        if epoch is not None and period is not None and period > 0:
+            epoch_number = math.floor((center - epoch) / period + 0.5)
+            if not period_is_uniform:
+                sigma = propagated_center_sigma(
+                    _planet_value(o, "t0_unc", p, first),
+                    _planet_value(o, "period_unc", p, first), epoch_number)
+
+        mode = _planet_text(o, "tc_pred_mode", p, first).lower()
+        if mode and mode not in _TC_WIDTH_MODES:
+            return {}, f"tc_pred_mode (planet {p}) must be sigma or direct"
+        raw_width = _planet_text(o, "tc_pred_unc", p, first)
+        if not mode:
+            mode = "sigma" if not raw_width and sigma is not None else "direct"
+
+        n_sigma = None
+        if mode == "sigma":
+            if sigma is None:
+                return {}, (
+                    f"planet {p}: a transit-center prior width in sigma needs an uncertainty on "
+                    "both the epoch t0 and the period (entered as mean,uncertainty). Enter them, "
+                    "or set the full width in days instead"
+                )
+            raw_n = _planet_text(o, "tc_pred_nsigma", p, first)
+            n_sigma = _to_float(raw_n) if raw_n else DEFAULT_TC_NSIGMA
+            if n_sigma is None or not math.isfinite(n_sigma) or n_sigma <= 0:
+                return {}, f"number of sigma for the transit-center prior (planet {p}) must be greater than 0"
+            width = 2 * n_sigma * sigma
+        else:
+            # The full width is checked only here, where it is used: a value
+            # left over in a sigma-mode request must not block the launch.
+            width = _to_float(raw_width) if raw_width else DEFAULT_TC_UNC
+            if width is None or not math.isfinite(width) or width <= 0:
+                return {}, (
+                    f"full width of the transit-center prior (planet {p}) must be a "
+                    "number of days greater than 0"
+                )
+
+        half_width_sigma = width / 2 / sigma if sigma is not None else None
+        # The relative tolerance keeps exactly 3 sigma from warning after the
+        # multiply and divide above.
+        narrow = (not fixed and half_width_sigma is not None
+                  and half_width_sigma < TC_WARN_NSIGMA * (1 - 1e-9))
         priors[p] = {"center_bjd": center, "full_width_days": width,
                      "lower_bjd": center - width / 2, "upper_bjd": center + width / 2,
-                     "fixed": fixed}
+                     "fixed": fixed, "mode": mode, "n_sigma": n_sigma,
+                     "sigma_days": sigma, "epoch_number": epoch_number,
+                     "half_width_sigma": half_width_sigma, "narrow": narrow}
     return priors, None
 
 

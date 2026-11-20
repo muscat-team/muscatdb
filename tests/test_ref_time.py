@@ -348,5 +348,5 @@ def test_saved_legacy_star_defaults_migrate_but_chosen_values_survive():
     collect = html.split("function collectOptions()")[1].split("function saveOptions()")[0]
     assert "_v" not in collect
     # only a pre-version save holding the old default (10) is dropped
-    assert "(saved._v || 1) < OPT_VERSION" in html
+    assert "(saved._v || 1) < 2" in html
     assert re.search(r"LEGACY_DEFAULTS_V1\s*=\s*\{\s*max_num_stars:\s*'10',\s*min_star_area:\s*'10'", html)

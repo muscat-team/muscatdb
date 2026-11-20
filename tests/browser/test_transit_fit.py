@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 from playwright.sync_api import expect
 import pytest
@@ -867,19 +868,198 @@ def test_transit_center_hint_explains_automatic_prediction(page, added_planet):
     field = page.locator('.planet-card').last.locator('.opt').filter(
         has=page.locator('.planet-tc_pred')
     )
-    # Timer's Uniform prior uses a full width, not a Gaussian uncertainty.
+    # With no ephemeris uncertainty on the card the width is the full width in
+    # days, which is what timer's Uniform prior takes.
     expect(field.get_by_role('spinbutton', name='Predicted transit center in BJD')).to_be_visible()
     expect(field.get_by_role('spinbutton', name='Uniform prior full width in days')).to_be_visible()
+    expect(field.get_by_role('spinbutton', name='Number of sigma either side of the center')).to_be_hidden()
     expect(field.locator('label')).to_contain_text('Transit-center prior')
     expect(field.get_by_role('button', name='Help')).to_have_accessible_description(
-        'timer samples t0 from a Uniform prior. The first value is its predicted center (BJD); '
-        'the second is its full width in days, not a Gaussian uncertainty. '
-        'The bounds are center minus/plus half the full width.',
+        re.compile(r'sqrt\(sigma_t0\^2 \+ \(N sigma_P\)\^2\).*full width in days.*transit timing variations'),
     )
-    expect(field.locator('.hint').first).to_have_text('full width')
-    expect(field.locator('.hint').last).to_have_text(
-        'Blank center: predicted from epoch and period. Blank full width: 0.04 d.'
+    mode = field.locator('.planet-tc_pred-mode')
+    expect(mode).to_have_value('direct')
+    expect(mode.locator('option[value="sigma"]')).to_be_disabled()
+    expect(field.locator('.planet-tc_pred-hint')).to_have_text(
+        'Blank center: predicted from epoch and period. Blank full width: 0.04 d. '
+        'To set the width in sigma, enter the epoch and the period as mean,uncertainty.'
     )
+
+
+# The seeded TOI-1000.01 ephemeris is 2461314.86 +/- 0.0006 with a period
+# uncertainty of 0.00002 d, and the light curve holds epoch 0, so the
+# propagated 1 sigma is 0.0006 d = 0.864 min.
+def _width_field(page):
+    return page.locator('.planet-card').first.locator('.opt').filter(has=page.locator('.planet-tc_pred'))
+
+
+def test_width_defaults_to_three_sigma_of_the_propagated_uncertainty(page, fitter):
+    page.goto(URL)
+    _query_toi_catalog(page)
+    _complete_priors(page)
+    field = _width_field(page)
+    expect(field.locator('.planet-tc_pred-mode')).to_have_value('sigma')
+    expect(field.locator('.planet-tc_pred-nsigma')).to_be_visible()
+    expect(field.locator('.planet-tc_pred-unc')).to_be_hidden()
+    expect(field.locator('.planet-tc_pred-hint')).to_contain_text(
+        '1 sigma = 0.864 min at epoch 0. The prior reaches ± 2.59 min (3.00 sigma).')
+    expect(field.locator('.planet-tc_pred-warn')).to_be_hidden()
+    with page.expect_response("**/api/transit-fit/run") as resp:
+        page.click('#run-test-btn')
+    assert resp.value.ok
+    options = fitter['start'][-1]['options']
+    # The page chose sigma mode itself, so the server applies its own default.
+    assert options['tc_pred_mode_b'] == 'sigma'
+    assert options['tc_pred_nsigma_b'] == ''
+    assert options['tc_pred_unc_b'] == ''
+
+
+def test_hint_follows_the_period_uncertainty(page):
+    page.goto(URL)
+    _query_toi_catalog(page)
+    field = _width_field(page)
+    # Move the reference epoch back 100 periods: N = 100 and the period term dominates.
+    page.locator('.planet-t0').first.fill('2461097.86,0.0006')
+    page.locator('.planet-period').first.fill('2.17,0.001')
+    page.locator('.planet-period').first.blur()
+    # sqrt(0.0006^2 + (100 * 0.001)^2) d = 144 min.
+    expect(field.locator('.planet-tc_pred-hint')).to_contain_text('1 sigma = 2.40 h at epoch 100.')
+
+
+def test_narrow_width_warns_and_still_launches(page, fitter):
+    page.goto(URL)
+    _query_toi_catalog(page)
+    _complete_priors(page)
+    field = _width_field(page)
+    field.locator('.planet-tc_pred-nsigma').fill('2')
+    warning = field.locator('.planet-tc_pred-warn')
+    expect(warning).to_be_visible()
+    expect(warning).to_contain_text('less than 3 sigma either side')
+    with page.expect_response("**/api/transit-fit/run") as resp:
+        page.click('#run-test-btn')
+    assert resp.value.ok
+    assert fitter['start'][-1]['options']['tc_pred_nsigma_b'] == '2'
+    # The full width in days warns by the same rule: 0.002 d is 1.67 sigma either side.
+    field.locator('.planet-tc_pred-mode').select_option('direct')
+    field.locator('.planet-tc_pred-unc').fill('0.002')
+    expect(warning).to_be_visible()
+    field.locator('.planet-tc_pred-unc').fill('0.04')
+    expect(warning).to_be_hidden()
+
+
+def test_width_mode_and_values_persist_across_reload(page, fitter):
+    page.goto(URL)
+    _query_toi_catalog(page)
+    field = _width_field(page)
+    field.locator('.planet-tc_pred-nsigma').fill('5')
+    page.reload()
+    expect(field.locator('.planet-tc_pred-mode')).to_have_value('sigma')
+    expect(field.locator('.planet-tc_pred-nsigma')).to_have_value('5')
+    field.locator('.planet-tc_pred-mode').select_option('direct')
+    field.locator('.planet-tc_pred-unc').fill('0.1')
+    page.reload()
+    expect(field.locator('.planet-tc_pred-mode')).to_have_value('direct')
+    expect(field.locator('.planet-tc_pred-unc')).to_have_value('0.1')
+    expect(field.locator('.planet-tc_pred-nsigma')).to_be_hidden()
+    # Clear values returns to the default: sigma mode with blank boxes.
+    reveal(page, '#clear-btn')
+    page.click('#clear-btn')
+    _query_toi_catalog(page)
+    expect(field.locator('.planet-tc_pred-mode')).to_have_value('sigma')
+    expect(field.locator('.planet-tc_pred-nsigma')).to_have_value('')
+    expect(field.locator('.planet-tc_pred-unc')).to_have_value('')
+
+
+def test_entered_full_width_survives_a_completed_ephemeris(page, fitter):
+    """A full width typed while sigma was unavailable is the observer's choice."""
+    page.goto(URL)
+    _query_toi_catalog(page)
+    _complete_priors(page)
+    field = _width_field(page)
+    mode = field.locator('.planet-tc_pred-mode')
+    period = page.locator('.planet-period').first
+    period.fill('2.17')
+    period.blur()
+    expect(mode).to_have_value('direct')
+    field.locator('.planet-tc_pred-unc').fill('0.2')
+    period.fill('2.17,0.00002')
+    period.blur()
+    expect(mode).to_have_value('direct')
+    expect(field.locator('.planet-tc_pred-unc')).to_be_visible()
+    with page.expect_response("**/api/transit-fit/run") as resp:
+        page.click('#run-test-btn')
+    assert resp.value.ok
+    options = fitter['start'][-1]['options']
+    assert options['tc_pred_mode_b'] == 'direct'
+    assert options['tc_pred_unc_b'] == '0.2'
+    # The choice also survives a reload.
+    page.reload()
+    expect(mode).to_have_value('direct')
+    expect(field.locator('.planet-tc_pred-unc')).to_have_value('0.2')
+
+
+@pytest.mark.parametrize('hidden,hidden_value,mode,visible,visible_value', [
+    ('.planet-tc_pred-nsigma', '0', 'direct', '.planet-tc_pred-unc', '0.1'),
+    ('.planet-tc_pred-unc', '-1', 'sigma', '.planet-tc_pred-nsigma', '4'),
+])
+def test_only_the_visible_width_box_is_validated(page, fitter, hidden, hidden_value, mode, visible, visible_value):
+    """An invalid value left in the hidden width box must not block a launch."""
+    page.goto(URL)
+    _query_toi_catalog(page)
+    _complete_priors(page)
+    field = _width_field(page)
+    other = 'sigma' if mode == 'direct' else 'direct'
+    field.locator('.planet-tc_pred-mode').select_option(other)
+    field.locator(hidden).fill(hidden_value)
+    expect(field.locator(hidden)).to_have_class(re.compile('is-invalid'))
+    field.locator('.planet-tc_pred-mode').select_option(mode)
+    field.locator(visible).fill(visible_value)
+    expect(field.locator(hidden)).not_to_have_class(re.compile('is-invalid'))
+    with page.expect_response("**/api/transit-fit/run") as resp:
+        page.click('#run-test-btn')
+    assert resp.value.ok
+    assert fitter['start'][-1]['options']['tc_pred_mode_b'] == mode
+
+
+def test_invalid_visible_width_still_blocks_and_names_the_problem(page, fitter):
+    page.goto(URL)
+    _query_toi_catalog(page)
+    _complete_priors(page)
+    field = _width_field(page)
+    field.locator('.planet-tc_pred-nsigma').fill('0')
+    page.click('#run-test-btn')
+    expect(field).to_contain_text('Number of sigma must be > 0')
+    assert fitter['start'] == []
+
+
+def test_zero_full_width_blocks_the_launch(page, fitter):
+    """The page and the server agree: a full width must be greater than 0."""
+    page.goto(URL)
+    _query_toi_catalog(page)
+    _complete_priors(page)
+    field = _width_field(page)
+    field.locator('.planet-tc_pred-mode').select_option('direct')
+    field.locator('.planet-tc_pred-unc').fill('0')
+    page.click('#run-test-btn')
+    expect(field).to_contain_text('Full width must be > 0')
+    assert fitter['start'] == []
+
+
+def test_sigma_mode_is_offered_only_with_both_uncertainties(page):
+    page.goto(URL)
+    _query_toi_catalog(page)
+    field = _width_field(page)
+    mode = field.locator('.planet-tc_pred-mode')
+    expect(mode).to_have_value('sigma')
+    period = page.locator('.planet-period').first
+    period.fill('2.17')
+    period.blur()
+    expect(mode).to_have_value('direct')
+    expect(mode.locator('option[value="sigma"]')).to_be_disabled()
+    # The fallback was the page's choice, so sigma comes back with the uncertainty.
+    period.fill('2.17,0.00002')
+    period.blur()
+    expect(mode).to_have_value('sigma')
 
 
 def _shift_epoch(page, days: float) -> None:

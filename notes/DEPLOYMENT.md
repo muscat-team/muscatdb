@@ -1073,7 +1073,7 @@ The current pins are:
 
 | Engine | Repository | Commit | Candidate environment |
 |---|---|---|---|
-| prose2 | `jpdeleon/prose2` | `454b3df8b446d954de7937826762a264203eaea0` (v3.8.0) | `prose-prod-454b3df8` |
+| prose2 | `jpdeleon/prose2` | `8598ad47c2eb96bc10594fcdd882209d9dc3087d` (v3.9.0) | `prose-prod-8598ad47` |
 | timer | `john-livingston/timer` | `b8428258c9b62266532173af4abd7fbafee6dcef` | `timer-prod-b8428258` |
 | harmonic | `john-livingston/harmonic` | `a32fb8e32ca776e0e6e7dc92ad4232cef1f12194` | `harmonic-prod-a32fb8e3` |
 
@@ -1162,6 +1162,15 @@ the candidate's scientific settings, then update the packaged YAML and both
 recorded SHA-256 values (`muscat_db/prose_config.py` and `engines.toml`) together.
 Never regenerate the production snapshot automatically at launch or by following
 live symlinks.
+
+### Prose2 3.9.0 candidate (2026-11-20)
+
+The owner release `jpdeleon/prose2` at `8598ad47c2eb96bc10594fcdd882209d9dc3087d`
+writes numbered reference charts for unmatched targets (jpdeleon/prose2#80).
+The worker environment is `prose-prod-8598ad47`. Keep `prose-prod-454b3df8`
+available for rollback. The frozen telescope configuration carries forward
+the 3.8.0 definitions with updated release provenance. Its SHA-256 is
+`299b371832128bdcd2fa672a787742b7548b4512fb05d6b29b8c11d49da0b130`.
 
 ### Prose2 3.8.0 candidate (2026-11-17)
 

@@ -118,7 +118,7 @@ RUN_DEFAULTS: dict = {
     "comp_min_flux_frac": 0.3,
     "clip_star_sigma": None,
     "clip_star_window": 11,
-    "save_flux_datacube": False,
+    "save_flux_datacube": True,
     "comparison_ids": "",      # "" -> auto, or "1,2,3"
     "avoid_comparison_ids": "",  # "" -> none; "1,2,3" -> --avoid_cids (requires --ref_band)
     "avoid_nearby_star_mode": "auto",  # off | auto | custom
@@ -162,6 +162,8 @@ POSTPROCESS_DEFAULTS: dict = {
     "post_poly_deg": 2,
     "post_exclude_before_jd": "",
     "post_exclude_after_jd": "",
+    # re-diff card: preview gap between default and custom curves; "" -> auto
+    "rediff_offset": "",
 }
 
 # LCO instruments deployed across multiple sites/telescope units, needing
@@ -250,6 +252,7 @@ _PID_FILE_NAME = "photometry.pid"
 _CONDA_ENV_DEFAULT = "prose"   # prose deps live in a conda env named "prose"
 _MODULE = "prose.scripts.run_photometry"
 _POSTPROCESS_MODULE = "prose.scripts.postprocess_lightcurves"
+_REDIFF_MODULE = "prose.scripts.rediff_lightcurves"
 
 _DATE_RE = re.compile(r"^\d{6}$")
 # A served filename is a single path segment of safe characters only.
@@ -267,6 +270,7 @@ _SUMMARY_SUFFIX = {
 # Per-band product suffixes -> short key.
 _BAND_SUFFIX = {
     "_ref.png": "ref",
+    "_unmatched_ref.png": "unmatched_ref",
     "_apertures.png": "apertures",
     "_cutouts.png": "cutouts",
     "_alignment.png": "alignment",
@@ -1601,6 +1605,12 @@ def _calculate_photometry_status(target: str, rdir: Path, outputs: dict) -> str:
     """Classify one run's products as ``full``/``test``/``none`` from its
     ``list_outputs`` result (``outputs``) and its output directory (``rdir``)."""
     if not outputs.get("has_any"):
+        return "none"
+
+    # A failed target match can leave a numbered finder chart without reducing a band.
+    bands = outputs.get("bands", {})
+    if (bands and all(products.keys() == {"unmatched_ref"} for products in bands.values())
+            and not (outputs.get("summary") or outputs.get("npz") or outputs.get("flux_datacube"))):
         return "none"
 
     # Fallback/Optimization: Check CSV files. If any CSV has more than 15 lines, it is a full run.

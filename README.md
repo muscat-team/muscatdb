@@ -48,6 +48,8 @@ for coordinated web/worker activation and rollback.
 | Transit fitting | [`timer`](https://github.com/john-livingston/timer) | PyMC (NUTS) | Posteriors, corner/trace/fit plots |
 | TTV fitting | [`harmonic`](https://github.com/john-livingston/harmonic) | emcee | Posteriors, corner/trace/fit plots |
 
+For runs with **Save per-star flux cube** enabled, open **Compare comparison stars & apertures** on the photometry page. **Test setting** reports scatter for the pipeline weights, the same stars and aperture with equal weights, and your selection with equal weights. You can test the defaults directly. **Apply setting** adopts a changed selection, and **Restore default** recovers the pipeline files. Three four-band staging runs produced compressed cubes of 4.87–7.46 MB. Size varies with the number of exposures, stars, and apertures.
+
 When scheduling from a saved harmonic fit, `fit_config.json`'s `t_offset`
 converts between the fit's time system and absolute BJD, including when extending
 the predictions to the requested end date. Successful model, ΔBIC, and ranking

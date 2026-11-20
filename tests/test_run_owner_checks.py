@@ -402,6 +402,17 @@ def test_postprocess_apply_and_restore_are_refused_to_another_user(lax):
     assert _tree(rdir) == before
 
 
+def test_rediff_apply_and_restore_are_refused_to_another_user(lax):
+    _own_all("alice")
+    rdir = ROUTES["photometry/delete"][1]()
+    before = _tree(rdir)
+    sel = [{"band": "g", "comparisons": [1, 2], "aperture": 0}]
+    for path, extra in (("rediff", {"apply": True, "selections": sel}), ("rediff/restore", {})):
+        resp = _post(lax, f"/api/photometry/{path}", {**POST, **extra}, user="bob")
+        assert resp.status_code == 403, path
+    assert _tree(rdir) == before
+
+
 def test_postprocess_dry_run_stays_open_to_anyone_who_can_see_the_run(lax):
     _own_all("alice")
     resp = _post(lax, "/api/photometry/postprocess", {**POST, "apply": False}, user="bob")

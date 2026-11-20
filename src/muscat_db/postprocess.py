@@ -277,8 +277,8 @@ def validate_params(
 _MANIFEST_NAME = "_clip_manifest.json"
 
 
-def _backup_dir(rdir: Path) -> Path:
-    return rdir / _BACKUP_DIRNAME
+def _backup_dir(rdir: Path, name: str = _BACKUP_DIRNAME) -> Path:
+    return rdir / name
 
 
 def _tracked_files(rdir: Path) -> list[Path]:
@@ -299,19 +299,22 @@ def _fingerprint(rdir: Path) -> dict[str, list[int]]:
     return out
 
 
-def _read_manifest(rdir: Path) -> dict[str, list[int]] | None:
+def _read_manifest(rdir: Path, name: str = _BACKUP_DIRNAME) -> dict[str, list[int]] | None:
     try:
-        return json.loads((_backup_dir(rdir) / _MANIFEST_NAME).read_text())
+        return json.loads((_backup_dir(rdir, name) / _MANIFEST_NAME).read_text())
     except (OSError, ValueError):
         return None
 
 
-def _write_manifest(rdir: Path) -> None:
-    (_backup_dir(rdir) / _MANIFEST_NAME).write_text(json.dumps(_fingerprint(rdir)))
+def _write_manifest(rdir: Path, name: str = _BACKUP_DIRNAME) -> None:
+    (_backup_dir(rdir, name) / _MANIFEST_NAME).write_text(json.dumps(_fingerprint(rdir)))
 
 
-def _snapshot_unclipped(rdir: Path) -> None:
-    """Copy the files apply may rewrite into ``.clip_backup``.
+def _snapshot_unclipped(rdir: Path, name: str = _BACKUP_DIRNAME) -> None:
+    """Copy the files apply may rewrite into ``.clip_backup`` (or *name*).
+
+    Re-differencing (:mod:`muscat_db.rediff`) keeps its own snapshot under
+    another *name* with the same rules.
 
     The first snapshot is kept: a later apply runs on already-clipped data, so
     only the original makes a too-aggressive clip recoverable. It is replaced
@@ -323,12 +326,12 @@ def _snapshot_unclipped(rdir: Path) -> None:
     snapshotting still leaves a backup a re-reduction can be detected against.
     A missing or unreadable manifest is treated as stale.
     """
-    final = _backup_dir(rdir)
+    final = _backup_dir(rdir, name)
     if final.is_dir():
-        if _read_manifest(rdir) == _fingerprint(rdir):
+        if _read_manifest(rdir, name) == _fingerprint(rdir):
             return
         shutil.rmtree(final)
-    part = rdir / (_BACKUP_DIRNAME + ".part")
+    part = rdir / (name + ".part")
     shutil.rmtree(part, ignore_errors=True)
     part.mkdir()
     try:
@@ -373,29 +376,39 @@ def restore_clip(
         err = _active_job_error(inst, date, target, run_id)
         if err:
             return {"ok": False, "error": err}
-    manifest = _read_manifest(rdir)
+    return _restore_backup(rdir, _BACKUP_DIRNAME, "clip")
+
+
+def _restore_backup(rdir: Path, name: str, what: str) -> dict:
+    """Copy the snapshot in *name* back over the run's files and drop it.
+
+    Refused when the run's files changed since the last apply (*what* names
+    it in the message): the snapshot is then older than the data on disk.
+    """
+    backup = _backup_dir(rdir, name)
+    manifest = _read_manifest(rdir, name)
     if manifest is not None and manifest != _fingerprint(rdir):
         return {
             "ok": False,
             "error": (
-                "the run's band CSVs changed after the clip (re-reduced or "
+                f"the run's band CSVs changed after the {what} (re-reduced or "
                 "edited), so the backup is stale and was not restored"
             ),
         }
     kept = {p.name for p in backup.iterdir() if p.is_file() and p.name != _MANIFEST_NAME}
     restored: list[str] = []
     try:
-        for name in sorted(kept):
-            tmp = rdir / (name + ".restoring")
-            shutil.copy2(backup / name, tmp)
-            os.replace(tmp, rdir / name)
-            restored.append(name)
-        # Files the clip created (e.g. a first summary figure) did not exist before.
-        for name in sorted(set(manifest or {}) - kept):
-            (rdir / name).unlink(missing_ok=True)
+        for fname in sorted(kept):
+            tmp = rdir / (fname + ".restoring")
+            shutil.copy2(backup / fname, tmp)
+            os.replace(tmp, rdir / fname)
+            restored.append(fname)
+        # Files the apply created (e.g. a first summary figure) did not exist before.
+        for fname in sorted(set(manifest or {}) - kept):
+            (rdir / fname).unlink(missing_ok=True)
         shutil.rmtree(backup)
     except OSError as exc:
-        logger.error("clip restore failed for %s: %s", rdir, exc)
+        logger.error("%s restore failed for %s: %s", what, rdir, exc)
         return {"ok": False, "error": f"restore failed: {exc}"}
     return {"ok": True, "restored": restored, "n_files": len(restored)}
 
