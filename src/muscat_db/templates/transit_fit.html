@@ -1276,20 +1276,28 @@
     // tc_pred is the centre of a Uniform prior. Its width is either a number of
     // sigma of the propagated ephemeris uncertainty, reached either side of the
     // centre, or the *full* width in days. timer takes centre ± width/2.
+    // Only the width box of the selected mode is checked: a value left in the
+    // hidden box is not used by the fit and must not block a launch. The three
+    // boxes share one message line, which shows the first problem found.
+    var tcModeEl = card.querySelector('.planet-tc_pred-mode');
+    var tcSigmaMode = tcModeEl && tcModeEl.value === 'sigma';
+    var tcMessage = '', tcOpt = null;
     [
-      { selector: '.planet-tc_pred', min: 0, inclusive: false, msg: 'Must be > 0' },
-      { selector: '.planet-tc_pred-nsigma', min: 0, inclusive: false, msg: 'Number of sigma must be > 0' },
-      { selector: '.planet-tc_pred-unc', min: 0, inclusive: true, msg: 'Must be ≥ 0' }
+      { selector: '.planet-tc_pred', min: 0, inclusive: false, msg: 'Center must be > 0', active: true },
+      { selector: '.planet-tc_pred-nsigma', min: 0, inclusive: false, msg: 'Number of sigma must be > 0', active: tcSigmaMode },
+      { selector: '.planet-tc_pred-unc', min: 0, inclusive: true, msg: 'Full width must be ≥ 0', active: !tcSigmaMode }
     ].forEach(function (chk) {
       var el = card.querySelector(chk.selector);
       if (!el) return;
+      tcOpt = tcOpt || el.closest('.opt');
       var v = el.value.trim();
-      if (v === '') { el.classList.remove('is-invalid'); setPlanetCardError(el.closest('.opt'), ''); return; }
+      if (!chk.active || v === '') { el.classList.remove('is-invalid'); return; }
       var n = parseFloat(v);
       var ok = !isNaN(n) && (chk.inclusive ? n >= chk.min : n > chk.min);
       setValid(el, ok);
-      setPlanetCardError(el.closest('.opt'), ok ? '' : chk.msg);
+      if (!ok && !tcMessage) tcMessage = chk.msg;
     });
+    if (tcOpt) setPlanetCardError(tcOpt, tcMessage);
 
     // t0 is a mean,unc epoch field: mean > 0, unc >= 0 (unc may be blank).
     var t0El = card.querySelector('.planet-t0');
@@ -2331,10 +2339,22 @@
     if (card) updateTransitWidth(card);
   });
   // A mode the user picks is theirs: it no longer follows the availability of
-  // the propagated uncertainty.
+  // the propagated uncertainty. Switching mode also changes which width box
+  // is validated.
   document.addEventListener('change', function (e) {
     if (e.target && e.target.classList && e.target.classList.contains('planet-tc_pred-mode')) {
       delete e.target.dataset.auto;
+      validatePlanetCard(e.target.closest('.planet-card'));
+    }
+  }, true);
+  // So is a full width they type while the page has fallen back to it: once
+  // the uncertainty becomes available the page must not replace that width
+  // with a sigma-based one. The capture phase runs before updateTransitWidth.
+  document.addEventListener('input', function (e) {
+    if (e.target && e.target.classList && e.target.classList.contains('planet-tc_pred-unc')
+        && e.target.value.trim() !== '') {
+      var modeEl = e.target.closest('.planet-card').querySelector('.planet-tc_pred-mode');
+      if (modeEl) delete modeEl.dataset.auto;
     }
   }, true);
 

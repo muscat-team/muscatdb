@@ -970,6 +970,68 @@ def test_width_mode_and_values_persist_across_reload(page, fitter):
     expect(field.locator('.planet-tc_pred-unc')).to_have_value('')
 
 
+def test_entered_full_width_survives_a_completed_ephemeris(page, fitter):
+    """A full width typed while sigma was unavailable is the observer's choice."""
+    page.goto(URL)
+    _query_toi_catalog(page)
+    _complete_priors(page)
+    field = _width_field(page)
+    mode = field.locator('.planet-tc_pred-mode')
+    period = page.locator('.planet-period').first
+    period.fill('2.17')
+    period.blur()
+    expect(mode).to_have_value('direct')
+    field.locator('.planet-tc_pred-unc').fill('0.2')
+    period.fill('2.17,0.00002')
+    period.blur()
+    expect(mode).to_have_value('direct')
+    expect(field.locator('.planet-tc_pred-unc')).to_be_visible()
+    with page.expect_response("**/api/transit-fit/run") as resp:
+        page.click('#run-test-btn')
+    assert resp.value.ok
+    options = fitter['start'][-1]['options']
+    assert options['tc_pred_mode_b'] == 'direct'
+    assert options['tc_pred_unc_b'] == '0.2'
+    # The choice also survives a reload.
+    page.reload()
+    expect(mode).to_have_value('direct')
+    expect(field.locator('.planet-tc_pred-unc')).to_have_value('0.2')
+
+
+@pytest.mark.parametrize('hidden,hidden_value,mode,visible,visible_value', [
+    ('.planet-tc_pred-nsigma', '0', 'direct', '.planet-tc_pred-unc', '0.1'),
+    ('.planet-tc_pred-unc', '-1', 'sigma', '.planet-tc_pred-nsigma', '4'),
+])
+def test_only_the_visible_width_box_is_validated(page, fitter, hidden, hidden_value, mode, visible, visible_value):
+    """An invalid value left in the hidden width box must not block a launch."""
+    page.goto(URL)
+    _query_toi_catalog(page)
+    _complete_priors(page)
+    field = _width_field(page)
+    other = 'sigma' if mode == 'direct' else 'direct'
+    field.locator('.planet-tc_pred-mode').select_option(other)
+    field.locator(hidden).fill(hidden_value)
+    expect(field.locator(hidden)).to_have_class(re.compile('is-invalid'))
+    field.locator('.planet-tc_pred-mode').select_option(mode)
+    field.locator(visible).fill(visible_value)
+    expect(field.locator(hidden)).not_to_have_class(re.compile('is-invalid'))
+    with page.expect_response("**/api/transit-fit/run") as resp:
+        page.click('#run-test-btn')
+    assert resp.value.ok
+    assert fitter['start'][-1]['options']['tc_pred_mode_b'] == mode
+
+
+def test_invalid_visible_width_still_blocks_and_names_the_problem(page, fitter):
+    page.goto(URL)
+    _query_toi_catalog(page)
+    _complete_priors(page)
+    field = _width_field(page)
+    field.locator('.planet-tc_pred-nsigma').fill('0')
+    page.click('#run-test-btn')
+    expect(field).to_contain_text('Number of sigma must be > 0')
+    assert fitter['start'] == []
+
+
 def test_sigma_mode_is_offered_only_with_both_uncertainties(page):
     page.goto(URL)
     _query_toi_catalog(page)
