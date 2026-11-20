@@ -524,7 +524,8 @@ def test_cube_default_migrates_old_options_and_keeps_new_opt_out(page):
     expect(page.locator("#opt-max_num_stars")).to_have_value("10")
     reveal(page, "#opt-save_flux_datacube")
     page.locator("#opt-save_flux_datacube").uncheck()
-    page.wait_for_function("key => JSON.parse(localStorage.getItem(key))._v === 3", arg=OPT_KEY)
+    saved = page.evaluate("key => JSON.parse(localStorage.getItem(key))", OPT_KEY)
+    assert saved["_v"] == 3 and saved["save_flux_datacube"] is False
     page.reload()
     expect(page.locator("#opt-save_flux_datacube")).not_to_be_checked()
 

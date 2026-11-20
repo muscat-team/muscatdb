@@ -1443,6 +1443,9 @@
     selInst.addEventListener('change', updateWcsMethod);
   }
 
+  var saveCube = document.getElementById('opt-save_flux_datacube');
+  if (saveCube) saveCube.addEventListener('change', saveOptions);
+
   var aperUnitEl = document.getElementById('opt-aper_unit');
   if (aperUnitEl) {
     aperUnitEl.addEventListener('change', function () {
