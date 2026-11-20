@@ -159,6 +159,15 @@ nav .nav-menu-btn, nav .nav-user { display: none; }
 }
 
 /* ---------- Cards ---------- */
+.drag-handle {
+  cursor: grab; color: var(--text-dim); font-size: 1rem; line-height: 1;
+  padding: 0 0.2rem; user-select: none; touch-action: none;
+}
+.drag-handle:hover { color: var(--accent); }
+.drag-handle:active { cursor: grabbing; }
+.drag-ghost { opacity: 0.4; }
+#project-grid .card { position: relative; padding-right: 2.5rem; }
+#project-grid .drag-handle { position: absolute; top: .65rem; right: .65rem; background: transparent; border: 0; }
 .card-grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
 .card {
   background: var(--surface);

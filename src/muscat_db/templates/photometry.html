@@ -32,13 +32,6 @@
   /* Default summary layout: one vertical column (light curve, stack, covariates). */
   .fig-grid.col { grid-template-columns: 1fr; max-width: 780px; }
   /* drag-to-reorder */
-  .drag-handle {
-    cursor: grab; color: var(--text-dim); font-size: 1rem; line-height: 1;
-    padding: 0 0.2rem; user-select: none; touch-action: none;
-  }
-  .drag-handle:hover { color: var(--accent); }
-  .drag-handle:active { cursor: grabbing; }
-  .fig.drag-ghost { opacity: 0.4; }
   .fig-grid.sortable .fig { will-change: transform; }
   .band-tabs { display: flex; gap: 0.4rem; flex-wrap: wrap; margin-bottom: 1rem; }
   .band-tab {

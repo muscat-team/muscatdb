@@ -1525,6 +1525,13 @@ def _project_target_rows(
             "fit_done": fit_done,
             "ttv_done": bool(ttv.list_ttv_runs(norm)),
         })
+    planned = set(_get_targets_for_tag(db, tag, planned_only=True))
+    for norm in planned - groups.keys():
+        rows.append({
+            "norm_name": norm, "placeholder": True, "dates": [], "n_dates": 0,
+            "filter_chips": [], "n_frames": 0, "phot_done": 0, "fit_done": 0,
+            "ttv_done": False,
+        })
     rows.sort(key=lambda r: r["norm_name"].casefold())
     return rows
 
@@ -1578,7 +1585,8 @@ def _visible_project_cards(db: str, denied: frozenset[str]) -> list[dict]:
         if not attached:
             cards.append(project)
             continue
-        count = len(attached - hidden)
+        planned = set(_get_targets_for_tag(db, project["tag"], planned_only=True))
+        count = len((attached - hidden) | planned)
         if count:
             cards.append({**project, "target_count": count})
     return cards
@@ -9157,10 +9165,8 @@ def api_target_norm_names():
 def api_get_target_tags(obj: str):
     db = _db_path()
     norm_name = _normalize_target_name(obj, _get_norm_name_overrides(db))
-    if _norm_name_hidden(db, norm_name, _viewer_denied()):
-        tags = []
-    else:
-        tags = get_tags_for_targets(db, [norm_name]).get(norm_name, [])
+    hidden = _norm_name_hidden(db, norm_name, _viewer_denied())
+    tags = get_tags_for_targets(db, [norm_name], planned_only=hidden).get(norm_name, [])
     return JSONResponse({"ok": True, "object": obj, "norm_name": norm_name, "tags": tags})
 
 
@@ -9171,9 +9177,12 @@ def api_add_target_tag(obj: str, payload: dict = Body(...)):
         raise HTTPException(400, "tag is required")
     db = _db_path()
     norm_name = _normalize_target_name(obj, _get_norm_name_overrides(db))
-    if norm_name not in _all_norm_names(db, _viewer_denied()):
+    if not norm_name:
+        raise HTTPException(400, "target name is required")
+    planned = norm_name not in _all_norm_names(db, _viewer_denied())
+    if planned and payload.get("allow_placeholder") is not True:
         raise HTTPException(404, f"target {norm_name!r} not found")
-    if not _add_target_tag(db, norm_name, tag):
+    if not _add_target_tag(db, norm_name, tag, planned=planned):
         raise HTTPException(404, f"project {tag!r} not found")
     return JSONResponse({"ok": True, "object": obj, "norm_name": norm_name, "tag": tag})
 
@@ -9186,15 +9195,15 @@ def api_remove_target_tag(obj: str, payload: dict = Body(...)):
     tag = (payload.get("tag") or "").strip()
     db = _db_path()
     norm_name = _normalize_target_name(obj, _get_norm_name_overrides(db))
-    # A hidden target answers like an unknown one: a successful no-op.
-    if not _norm_name_hidden(db, norm_name, _viewer_denied()):
-        _remove_target_tag(db, norm_name, tag)
+    # Detaching a planning name must preserve any hidden observed membership.
+    hidden = _norm_name_hidden(db, norm_name, _viewer_denied())
+    _remove_target_tag(db, norm_name, tag, planned_only=hidden)
     return JSONResponse({"ok": True, "object": obj, "norm_name": norm_name, "tag": tag})
 
 
 @tags_router.get("")
 def api_list_tags():
-    return JSONResponse({"ok": True, "tags": _list_project_tags(_db_path())})
+    return JSONResponse({"ok": True, "tags": _visible_project_cards(_db_path(), _viewer_denied())})
 
 
 @tags_router.post("")

@@ -686,3 +686,16 @@ def test_tags_alias_redirects_to_projects(mock_db):
 
     assert resp.status_code == 301
     assert resp.headers["location"] == "/projects"
+
+def test_planned_membership_resolves_when_observations_arrive(mock_db, monkeypatch):
+    client = TestClient(app)
+    create_tag(mock_db, "Long period")
+    payload = {"tag": "Long period", "allow_placeholder": True}
+    assert client.put("/api/targets/TESTOBJ/tags", json=payload).is_success
+    assert "TESTOBJ,,0,,0" in client.get("/api/tags/Long%20period/export.csv").text
+    _seed_one_target(monkeypatch)
+    assert rename_tag(mock_db, "Long period", "FollowUp") == "FollowUp"
+    assert 'href="/target?name=TESTOBJ' in client.get("/tag?name=FollowUp").text
+    assert get_tags_for_targets(mock_db, ["TESTOBJ"]) == {"TESTOBJ": ["FollowUp"]}
+    delete_tag(mock_db, "FollowUp")
+    assert get_targets_for_tag(mock_db, "FollowUp") == []
