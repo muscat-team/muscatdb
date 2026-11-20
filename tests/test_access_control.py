@@ -299,6 +299,17 @@ def test_fully_restricted_target_looks_like_a_never_observed_name(client, db):
     assert hidden.text.replace("HIDDENTGT", "X") == unknown.text.replace("NEVEROBSX", "X")
 
 
+def test_target_observations_csv_respects_proposal_access(client):
+    headers = _headers("alice")
+    response = client.get("/api/targets/observations.csv?name=MIXEDTGT", headers=headers)
+    assert response.status_code == 200
+    assert _OPEN in response.text and _RESTRICTED not in response.text
+    hidden = client.get("/api/targets/observations.csv?name=HIDDENTGT", headers=headers)
+    unknown = client.get("/api/targets/observations.csv?name=NEVEROBSX", headers=headers)
+    assert hidden.status_code == unknown.status_code == 404
+    assert hidden.json() == unknown.json()
+
+
 def test_mixed_target_page_lists_only_visible_nights(client, db):
     _set_admin(db, "root")
     denied = client.get("/target?name=MIXEDTGT", headers=_headers("alice")).text
