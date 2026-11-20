@@ -1109,14 +1109,30 @@ def test_only_the_creator_or_an_admin_may_reanalyze_a_test(client, db):
 
 def test_planning_name_does_not_disclose_restricted_membership(client, db):
     _tag_projects(client, db)
-    tag = {"tag": "beta", "allow_placeholder": True}
+    client.put("/api/targets/HIDDENTGT/tags", json={"tag": "alpha"}, headers=_headers("root"))
+    tag = {"tag": "alpha", "allow_placeholder": True}
     for name in ("HIDDENTGT", "TOI4406"):
         assert client.put(f"/api/targets/{name}/tags", json=tag, headers=_headers("alice")).is_success
-    page = client.get("/tag?name=beta", headers=_headers("alice")).text
+    page = client.get("/tag?name=alpha", headers=_headers("alice")).text
     assert page.count('class="hint">Planned') == 2
-    assert _project_cards(client.get("/projects", headers=_headers("alice")).text)["beta"] == "2 targets"
+    assert _project_cards(client.get("/projects", headers=_headers("alice")).text)["alpha"] == "3 targets"
     counts = client.get("/api/tags", headers=_headers("alice")).json()["tags"]
-    assert next(p["target_count"] for p in counts if p["tag"] == "beta") == 2
+    assert next(p["target_count"] for p in counts if p["tag"] == "alpha") == 3
     client.request("DELETE", "/api/targets/HIDDENTGT/tags", json=tag, headers=_headers("alice"))
-    assert "HIDDENTGT" not in client.get("/tag?name=beta", headers=_headers("alice")).text
-    assert "HIDDENTGT" in client.get("/tag?name=beta", headers=_headers("root")).text
+    assert "HIDDENTGT" not in client.get("/tag?name=alpha", headers=_headers("alice")).text
+    assert "HIDDENTGT" in client.get("/tag?name=alpha", headers=_headers("root")).text
+
+def test_planning_does_not_unhide_a_restricted_project(client, db):
+    _tag_projects(client, db)
+    admin, viewer = _headers("root"), _headers("alice")
+    tag = {"tag": "beta", "allow_placeholder": True}
+    assert client.put("/api/targets/TOI4406/tags", json=tag, headers=admin).is_success
+    assert "beta" not in _project_cards(client.get("/projects", headers=viewer).text)
+    assert "TOI4406" not in client.get("/tag?name=beta", headers=viewer).text
+    assert client.get("/api/tags/beta/export.csv", headers=viewer).status_code == 404
+    assert client.get("/api/targets/TOI4406/tags", headers=viewer).json()["tags"] == []
+    assert client.put("/api/targets/OPENTGT/tags", json=tag, headers=viewer).status_code == 404
+    for name in ("beta", " BETA "):
+        assert client.put(f"/api/tags/{name}", json={"description": "changed"}, headers=viewer).status_code == 404
+        assert client.delete(f"/api/tags/{name}", headers=viewer).is_success
+    assert "TOI4406" in client.get("/api/tags/beta/export.csv", headers=admin).text

@@ -163,6 +163,8 @@ def test_duplicate_project_and_rename_conflicts_leave_existing_data_intact(page,
 
 def test_planned_target_attachment(page):
     _create(page, 'planned-targets')
+    page.fill('#attach-target-input', 'X' * 101)
+    expect(page.locator('#attach-target-input')).to_have_value('X' * 100)
     for name in ('TOI-4406', 'TOI1859', 'TOI4406'):
         page.fill('#attach-target-input', name)
         with page.expect_navigation():
