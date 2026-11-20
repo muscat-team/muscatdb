@@ -267,6 +267,7 @@ _SUMMARY_SUFFIX = {
 # Per-band product suffixes -> short key.
 _BAND_SUFFIX = {
     "_ref.png": "ref",
+    "_unmatched_ref.png": "unmatched_ref",
     "_apertures.png": "apertures",
     "_cutouts.png": "cutouts",
     "_alignment.png": "alignment",
@@ -1536,6 +1537,12 @@ def _calculate_photometry_status(target: str, rdir: Path, outputs: dict) -> str:
     """Classify one run's products as ``full``/``test``/``none`` from its
     ``list_outputs`` result (``outputs``) and its output directory (``rdir``)."""
     if not outputs.get("has_any"):
+        return "none"
+
+    # A failed target match can leave a numbered finder chart without reducing a band.
+    bands = outputs.get("bands", {})
+    if (bands and all(products.keys() == {"unmatched_ref"} for products in bands.values())
+            and not (outputs.get("summary") or outputs.get("npz") or outputs.get("flux_datacube"))):
         return "none"
 
     # Fallback/Optimization: Check CSV files. If any CSV has more than 15 lines, it is a full run.

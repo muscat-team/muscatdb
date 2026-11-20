@@ -115,3 +115,36 @@ def test_scroll_band_animation_and_calibration(page):
     assert popup.url.endswith(original)
     assert popup.locator('img').evaluate('(i) => i.naturalWidth') == 3900
     popup.close()
+
+
+def test_unmatched_sources_shown_per_band_without_a_light_curve(page, live_server):
+    from muscat_db import photometry
+
+    run = live_server.root / 'prose/muscat2/261002/_runs/HAT-P-1/unmatched'
+    run.mkdir()
+    for band in ('gp', 'rp'):
+        Image.new('RGB', (300, 200)).save(run / f'HAT-P-1_muscat2_{band}_261003_unmatched_ref.png')
+    (run / 'run.log').write_text('HAT-P-1 --test_run: target not located')
+    page.goto(URL.replace('run=r1', 'run=unmatched'))
+    for band in ('gp', 'rp'):
+        page.get_by_role('button', name=band, exact=True).click(timeout=3000)
+        panel = page.locator('.band-panel.active')
+        reference = panel.get_by_role('img', name=f'{band} unmatched reference')
+        reference.scroll_into_view_if_needed()
+        page.wait_for_function('i => i.naturalWidth > 0', arg=reference.element_handle())
+        expect(panel).to_contain_text('Target ID')
+        assert '_unmatched_ref.png' in reference.locator('..').get_attribute('href')
+    outputs = photometry.list_outputs('muscat2', '261002', 'HAT-P-1', run_id='unmatched')
+    assert photometry._calculate_photometry_status('HAT-P-1', run, outputs) == 'none'
+
+
+def test_target_match_failure_without_a_saved_chart(page, live_server):
+    run = live_server.root / 'prose/muscat2/261002/_runs/HAT-P-1/no_chart'
+    run.mkdir()
+    page.route('**/api/photometry/status?**', lambda route: route.fulfill(json={
+        'state': 'error', 'error_desc': 'photometry FAILED: target not located, set --tID: gp, rp',
+        'log': 'reference persistence: registered 5/5 candidates', 'returncode': 3,
+    }))
+    page.goto(URL.replace('run=r1', 'run=no_chart'))
+    expect(page.locator('#output-area')).to_contain_text('This run saved no numbered reference frame.')
+    expect(page.locator('#run-status')).to_contain_text('Failed')
