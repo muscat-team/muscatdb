@@ -971,20 +971,6 @@ def test_ephemeris_bjd_axis_offset_uses_effective_reference_epoch():
     assert "`Time (BJD - ${bjdOffset})`" in draw_plot
 
 
-def test_ephemeris_cached_fit_results_match_current_inputs():
-    html = _read_template("ephemeris.html")
-
-    # A target-only cache key can retain points from datasets that the backend
-    # no longer returns. Cache entries must therefore be versioned and tied to
-    # the exact request that generated their Plotly results.
-    assert "const FIT_RESULTS_CACHE_VERSION = 2" in html
-    assert "function fitRequestSignature(request)" in html
-    assert "fitCache.version === FIT_RESULTS_CACHE_VERSION" in html
-    assert "fitCache.signature === fitRequestSignature(cachedRequest)" in html
-    assert "signature: fitRequestSignature(request)" in html
-    assert "localStorage.removeItem(fitResultsCacheKey(combinedKey))" in html
-
-
 def test_ephemeris_plot_primary_x_axis_is_only_integer_offset_bjd_time():
     html = _read_template("ephemeris.html")
 

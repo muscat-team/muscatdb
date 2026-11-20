@@ -1064,6 +1064,31 @@ def test_ephemeris_target_info_lists_only_full_transit_fit_runs(
     assert "run_type" not in datasets[0]
 
 
+def test_midtime_enriches_older_job_diagnostics(mock_db, monkeypatch, tmp_path, mock_target_coord_resolution):
+    from muscat_db import transit_fit
+
+    target = "ZZZ older health"
+    save_job(type_="transit_fit", inst="muscat4", date="260101", target=target,
+             state="done", returncode=0, elapsed=10, started_at=1000, run_type="full",
+             run_id="fit1", params=json.dumps({"fit_health": {"metrics": {
+                 "Detection SNR": 2, "Max R-hat": 1.01, "Divergences": None}}}))
+    monkeypatch.setattr(transit_fit, "sync_jobs", lambda: None)
+    monkeypatch.setattr(transit_fit, "_discover_orphan_fits", lambda keys: [])
+    monkeypatch.setattr(transit_fit, "fit_output_dir", lambda *args: tmp_path)
+    monkeypatch.setattr("muscat_db.web._get_run_fitted_params", lambda *args: {})
+    _write_timer_run(tmp_path, "b 2460114 0.001",
+                     summary=",ess_bulk,ess_tail\nt0[0],399,400\n")
+    with (tmp_path / "timer-fit.log").open("a") as log:
+        log.write("Sampling 4 chains for 1000 tune and 1000 draw iterations took 60 seconds.\n"
+                  "Timer-fit completed successfully in 90 seconds\n")
+    response = TestClient(app).get("/api/ephemeris/target-info", params={"target": target})
+    assert response.status_code == 200
+    dataset, = response.json()["datasets"]
+    assert dataset["fit_warnings"] == ["Min bulk ESS 399 below 400"]
+    assert dataset["unknown_diagnostics"] == []
+    assert dataset["detection_snr"] == 2
+
+
 def _write_timer_run(rdir, tc_line, ref_time=2460114, summary=None):
     """A minimal timer run directory: fit.yaml, timer-fit.log and out/tc.txt."""
     out = rdir / "out"

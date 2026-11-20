@@ -23,6 +23,7 @@ cycle: ``photometry`` and ``transit_fit`` import from here, never the reverse.
 from __future__ import annotations
 
 import io
+import json
 import logging
 import os
 import re
@@ -34,6 +35,18 @@ from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO
+
+
+def fit_params(row):
+    try:
+        params = json.loads((row or {}).get("params") or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return params if isinstance(params, dict) else {}
+
+
+def with_fit_health(row, outputs):
+    return json.dumps({**fit_params(row), "fit_health": outputs.get("health")})
 
 
 # --------------------------- core pinning (architecture issue #51, 2.4) ------
