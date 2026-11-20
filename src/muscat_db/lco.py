@@ -420,8 +420,8 @@ def archive_inclusive_end(end: str) -> str:
     day, so ``start=2021-03-10&end=2021-03-10`` matches nothing and any range
     loses its last day. A date is therefore moved to the next day. A value
     that already carries a time is an exact bound and is returned unchanged.
-    Raises ``ValueError`` for anything else, so a typo is reported instead of
-    being sent to the archive.
+    Raises ``ValueError`` for anything else, including a date with no next
+    day, so a typo is reported instead of being sent to the archive.
     """
     end = (end or "").strip()
     if not end:
@@ -429,7 +429,10 @@ def archive_inclusive_end(end: str) -> str:
     if "T" in end or " " in end:
         datetime.datetime.fromisoformat(end.replace("Z", "+00:00"))
         return end
-    return (datetime.date.fromisoformat(end) + datetime.timedelta(days=1)).isoformat()
+    try:
+        return (datetime.date.fromisoformat(end) + datetime.timedelta(days=1)).isoformat()
+    except OverflowError as exc:  # date.max has no following day
+        raise ValueError(f"end date {end!r} is out of range") from exc
 
 
 def _query_params(filters: dict) -> str:

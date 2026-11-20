@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from playwright.sync_api import expect
 import re
+import statistics
 
 import pytest
 
@@ -189,12 +190,42 @@ def test_ttv_amplitude_starts_from_the_largest_o_minus_c(page):
         page.fill('#planet-period-c', '3.3')
         page.locator('#planet-period-c').blur()
     points = [p for p in resp.value.json()['results']['b']['points'] if p.get('checked') is not False]
-    errs = sorted(abs(p['oc_err_min']) for p in points)
-    expected = max(max(abs(p['oc_min']) for p in points), errs[len(errs) // 2]) / 1440
+    expected = max(max(abs(p['oc_min']) for p in points),
+                   statistics.median(abs(p['oc_err_min']) for p in points)) / 1440
     assert expected > 0
     reveal(page, '#opt-ini_content')
-    expect(page.locator('#opt-ini_content')).to_have_value(re.compile(rf"a_bc = {expected:.5f}"))
+    page.wait_for_function("() => !/a_bc = 0\\.02\\b/.test(document.getElementById('opt-ini_content').value)")
+    assert _ini(page)['a_bc'] == pytest.approx(expected, rel=5e-3)
     assert _ini(page)['a_cb'] == 0.02
+
+
+def _seed_amplitudes(page, results) -> dict:
+    """Generate the [INIT] block from a given linear-fit result and parse it."""
+    _set_planets(page, [('b', '10'), ('c', '15.2')])
+    page.evaluate("results => { fitResults = results; rebuildINI(false); }", results)
+    return _ini(page)
+
+
+def _points(*pairs):
+    return {'points': [{'oc_min': oc, 'oc_err_min': err, 'checked': True} for oc, err in pairs]}
+
+
+def test_ttv_amplitude_keeps_a_small_positive_value(page):
+    """harmonic rejects a zero amplitude, so a tiny seed must not round to zero."""
+    ini = _seed_amplitudes(page, {'b': _points((0.0, 0.0043), (0.0, 0.0043))})   # 0.26 s
+    assert ini['a_bc'] == pytest.approx(0.0043 / 1440, rel=5e-3)
+    assert ini['a_bc'] > 0
+
+
+def test_ttv_amplitude_floor_is_the_median_uncertainty(page):
+    # Two timings with uncertainties of 1 and 9 minutes: the median is 5 minutes.
+    ini = _seed_amplitudes(page, {'b': _points((0.0, 1.0), (0.0, 9.0))})
+    assert ini['a_bc'] == pytest.approx(5 / 1440, rel=5e-3)
+    # harmonic takes the median over every timing in the fit, not per planet:
+    # 1, 9 and 21 minutes give 9. Planet c's own largest |O-C| is larger still.
+    ini = _seed_amplitudes(page, {'b': _points((0.0, 1.0), (0.0, 9.0)), 'c': _points((30.0, 21.0))})
+    assert ini['a_bc'] == pytest.approx(9 / 1440, rel=5e-3)
+    assert ini['a_cb'] == pytest.approx(30 / 1440, rel=5e-3)
 
 
 def test_harmonic_warning_follows_selected_run(page, live_server, request):

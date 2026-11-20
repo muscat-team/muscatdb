@@ -261,7 +261,8 @@
         <ul>
           <li><code>a_bc</code>, <code>a_cb</code> — TTV amplitude each planet induces on
             the other, in days. The starting value is the planet's largest
-            |O−C| in the current linear fit, or <code>0.02</code> before a fit exists.</li>
+            |O−C| in the current linear fit, but not less than the median timing uncertainty,
+            or <code>0.02</code> before a fit exists.</li>
           <li><code>per_bc</code> — TTV super-period, in days. The starting value is that of
             the nearest first-order resonance j:(j−1), 1 / |j/P<sub>c</sub> − (j−1)/P<sub>b</sub>|,
             or <code>1000</code> when the pair is far from one. It is sensitive to the
@@ -4530,16 +4531,29 @@
   }
 
   // Largest |O-C| of a planet in the current linear fit, in days, floored at
-  // its median timing uncertainty: the scale harmonic uses for the amplitude
-  // bound. Null before a fit, or when the planet has no selected timing.
+  // the median timing uncertainty of every selected timing in the fit. This is
+  // harmonic's own scale for the amplitude bound (maxoc in params.build_spec,
+  // where the median is taken over all planets). Null before a fit, or when
+  // the planet has no selected timing.
   function largestOminusC(pl) {
-    const points = ((fitResults || {})[pl] || {}).points || [];
-    const used = points.filter(p => p.checked !== false && Number.isFinite(p.oc_min));
+    const selected = planet => (((fitResults || {})[planet] || {}).points || [])
+      .filter(p => p.checked !== false && Number.isFinite(p.oc_min));
+    const used = selected(pl);
     if (!used.length) return null;
-    const errs = used.map(p => Math.abs(p.oc_err_min)).filter(Number.isFinite).sort((a, b) => a - b);
-    const medianErr = errs.length ? errs[Math.floor(errs.length / 2)] : 0;
+    const errs = Object.keys(fitResults || {})
+      .flatMap(planet => selected(planet).map(p => Math.abs(p.oc_err_min)))
+      .filter(Number.isFinite).sort((x, y) => x - y);
+    const middle = Math.floor(errs.length / 2);
+    const medianErr = !errs.length ? 0
+      : (errs.length % 2 ? errs[middle] : (errs[middle - 1] + errs[middle]) / 2);
     const days = Math.max(Math.max(...used.map(p => Math.abs(p.oc_min))), medianErr) / 1440.0;
     return days > 0 ? days : null;
+  }
+
+  // An amplitude for the INI with three significant digits. A fixed number of
+  // decimals would write a small positive value as 0, which harmonic rejects.
+  function formatAmplitude(days) {
+    return String(Number(days.toPrecision(3)));
   }
 
   function orderPlanetLetters() {
@@ -4711,8 +4725,8 @@
       for (let i = 0; i < letters.length - 1; i++) {
         const p1 = letters[i];
         const p2 = letters[i + 1];
-        const a1 = (largestOminusC(p1) ?? TTV_DEFAULT_AMPLITUDE).toFixed(5);
-        const a2 = (largestOminusC(p2) ?? TTV_DEFAULT_AMPLITUDE).toFixed(5);
+        const a1 = formatAmplitude(largestOminusC(p1) ?? TTV_DEFAULT_AMPLITUDE);
+        const a2 = formatAmplitude(largestOminusC(p2) ?? TTV_DEFAULT_AMPLITUDE);
         const per = (firstOrderSuperPeriod(planetPeriod(p1), planetPeriod(p2)) ?? TTV_DEFAULT_SUPER_PERIOD).toFixed(1);
         
         let t = '2450000.0';
