@@ -2540,7 +2540,11 @@ def nexsci_page():
 
 def _spreadsheet_cell(value):
     """Export formula-like text literally, preserving signed numbers and sky coordinates."""
-    if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@")):
+    if not isinstance(value, str):
+        return value
+    if value.startswith(("\t", "\r", "\n")):
+        return "'" + value
+    if value.lstrip().startswith(("=", "+", "-", "@")):
         if not re.fullmatch(r"[+-]\d+(?::\d{2}:\d{2})?(?:\.\d+)?", value):
             return "'" + value
     return value

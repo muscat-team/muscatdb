@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 from pathlib import Path
 
 from playwright.sync_api import expect
@@ -195,3 +196,24 @@ def test_drag_project_by_grip_and_restore_order(page):
     expect(cards.nth(1).locator('.name')).to_have_text(original[-1])
     cards.nth(1).get_by_role('link').click()
     expect(page.locator('#project-name-cell')).to_contain_text(original[-1])
+
+def test_spreadsheet_text_in_all_three_downloads(page, live_server):
+    live_server.sql("INSERT OR REPLACE INTO target_notes(object, obsdate, instrument, note) "
+                    "VALUES ('TOI-1000', '', '', ?)", ("\tobject note",))
+    live_server.sql("INSERT OR REPLACE INTO target_notes(object, obsdate, instrument, note) "
+                    "VALUES ('TOI-1000', '261001', 'muscat3', ?)", ("\rnight note",))
+    _create(page, "csv-guard")
+    page.fill("#attach-target-input", "@PLAN")
+    with page.expect_navigation():
+        page.click("#attach-target-btn")
+
+    for url, column, literal in [
+        ("/tag?name=csv-guard", "norm_name", "@PLAN"),
+        ("/targets", "note", "\tobject note"),
+        ("/target?name=TOI1000", "note", "\rnight note"),
+    ]:
+        page.goto(url)
+        with page.expect_download() as download:
+            page.locator("a.csv-btn").click()
+        with Path(download.value.path()).open(newline="", encoding="utf-8") as stream:
+            assert "'" + literal in [row[column] for row in csv.DictReader(stream)]
