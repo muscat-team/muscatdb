@@ -527,7 +527,8 @@ tr.filter-row th input.invalid { border-color: var(--red); }
   display: flex; align-items: center; gap: 0.35rem;
   cursor: pointer;
 }
-.search-bar .hint { color: var(--text-dim); font-size: 0.8rem; }
+.search-bar .hint,
+#precision-panel .hint { color: var(--text-dim); font-size: 0.8rem; }
 .search-bar .invalid { color: var(--red); font-size: 0.8rem; }
 .search-bar .csv-btn {
   display: inline-flex; align-items: center; gap: 0.25rem;

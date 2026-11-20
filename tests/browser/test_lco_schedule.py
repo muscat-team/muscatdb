@@ -961,6 +961,27 @@ def test_late_answer_for_a_previous_target_is_ignored(page):
     expect(page.locator('#sch-coords')).to_have_value('201.00000, -50.00000')
 
 
+def test_calculated_exposure_counts_and_type_help(page):
+    page.problems.allowed.extend(NO_TOKEN)
+    page.goto('/lco/schedule')
+    for kind, count_id in [('sinistro', 'sch-sin-count'), ('qhy600', 'sch-sin-count'), ('muscat', 'sch-count')]:
+        page.select_option('#sch-kind', kind)
+        count = page.locator('#' + count_id)
+        expect(count).to_be_visible()
+        expect(count).to_have_attribute('readonly', '')
+        tooltip = page.locator(f'label[for="{count_id}"] .help-tooltip')
+        tooltip.focus()
+        expect(tooltip).to_have_accessible_description(
+            'Calculated from the observing window and exposure time. REPEAT_EXPOSE repeats one exposure block '
+            'for the observing duration.' + (' Each exposure covers all 4 bands simultaneously.' if kind == 'muscat' else '')
+        )
+    type_help = page.locator('label[for="sch-type"] .help-tooltip')
+    type_help.focus()
+    expect(type_help).to_have_accessible_description(
+        'REPEAT_EXPOSE repeats the sequence for the observing duration. EXPOSE runs the calculated exposure count once.'
+    )
+
+
 def test_instrument_defaults_and_saved_guiding(page):
     page.problems.allowed.extend(NO_TOKEN)
     page.goto('/lco/schedule')

@@ -20,6 +20,8 @@ from typing import Annotated
 
 import socketio
 
+from muscat_db.exposure_recommend import RecommendationRequest
+
 sio = socketio.AsyncServer(async_mode="asgi")
 
 _DB_LOCK = threading.Lock()
@@ -4420,6 +4422,28 @@ def exposure_page(inst: str = "", target: str = ""):
     )
 
 
+@exposure_router.get("/recommend-defaults", response_class=JSONResponse)
+def exposure_recommend_defaults(instrument: str, band: str, mode: str, site: str):
+    from muscat_db.exposure_recommend import recommendation_defaults
+
+    if instrument not in ('muscat3', 'muscat4', 'sinistro', 'qhy600'):
+        return JSONResponse({'ok': False, 'error': 'Unsupported instrument'}, status_code=400)
+    try:
+        return recommendation_defaults(instrument, band, mode, site)
+    except ValueError as exc:
+        return JSONResponse({'ok': False, 'error': str(exc)}, status_code=400)
+
+
+@exposure_router.post("/recommend", response_class=JSONResponse)
+def exposure_recommend(payload: RecommendationRequest):
+    from muscat_db.exposure_recommend import recommend
+
+    try:
+        return recommend(payload)
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+
+
 @exposure_router.post("/calculate", response_class=JSONResponse)
 def exposure_calculate(payload: dict = Body(...)):
     inst = (payload.get("instrument") or "").strip()
@@ -7851,7 +7875,7 @@ def api_ephemeris_calculate(payload: dict = Body(...)):
         # ephemeris_math.fit_linear_ephemeris; only checked, positive-uncertainty
         # points may participate in the regression.
         fit_points = [p for p in points if p["checked"] and p["unc"] is not None and p["unc"] > 0]
-        fit_method = payload.get("fit_method", "unweighted")
+        fit_method = payload.get("fit_method", "weighted")
         fit_result = ephemeris_math.fit_linear_ephemeris(
             [p["epoch"] for p in fit_points],
             [p["tc"] for p in fit_points],
