@@ -2895,8 +2895,12 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
 
     # Presentation metadata is separate from the photometry product contract.
     image_info = {}
+    csv_time_note = ""
     if outputs:
         rdir = phot.run_output_dir(inst, date, target, sel_run or None)
+        csv_time_note = phot.csv_time_note(
+            rdir / prods["csv"]["file"] for prods in outputs.get("bands", {}).values() if prods.get("csv")
+        )
         for item in outputs.get("summary_items", []):
             image_info[item["file"]] = image_delivery.metadata(rdir / item["file"])
         for prods in outputs.get("bands", {}).values():
@@ -2946,6 +2950,7 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
         default_bands=phot.DEFAULT_BANDS,
         run_defaults=merged_defaults,
         target_coord_preview=phot.target_coord_preview(target) if target else "",
+        csv_time_note=csv_time_note,
         noise_columns=phot.NOISE_COLUMNS,
         postproc_defaults=phot.POSTPROCESS_DEFAULTS,
         cmap_choices=phot.CMAP_CHOICES,

@@ -52,10 +52,12 @@ def test_slow_resolver_bounds_the_whole_lookup(monkeypatch, mock_db, entry):
             assert response.json()["error"] is None
             assert "--target_coord" not in response.json()["command"]
         assert time.monotonic() - start < 0.2
-        assert calls == ["DS Tuc"]
+        # The command preview is display only and never goes online (#457);
+        # a launch command and its log note do, within the bounded wait.
+        assert calls == ([] if entry == "api" else ["DS Tuc"])
     finally:
         release.set()
-        assert finished.wait(1)
+        assert finished.wait(1) or not calls
         # Let the bounded worker exit before monkeypatch restores its dependencies.
         time.sleep(0.01)
 

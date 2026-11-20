@@ -240,8 +240,8 @@
         {% endif %}
       </h2>
       </summary>
-      {% if ns.has_csv %}
-      <p id="time-system-note" style="color: var(--text-dim); font-size: 0.78rem; margin: 0 0 0.5rem;">Times in the CSV files are BJD_TDB (first column), whichever conversion library is chosen. The light-curve figure from prose plots JD (UTC) on its time axis.</p>
+      {% if csv_time_note %}
+      <p id="time-system-note" style="color: var(--text-dim); font-size: 0.78rem; margin: 0 0 0.5rem;">{{ csv_time_note }} The light-curve figure from prose plots JD (UTC) on its time axis.</p>
       {% endif %}
       <div class="fig-grid col sortable" data-sort-key="summary">
         {% for item in outputs.summary_items %}
@@ -686,7 +686,7 @@
       </div>
       <div class="opt-check-row">
         <label class="opt-check-item"><input type="checkbox" id="opt-make_gif" checked> Make GIF <span class="help-tooltip" title="Generate an animated GIF showing target/alignment field over time (corresponds to --gif).">?</span></label>
-        <label class="opt-check-item"><input type="checkbox" id="opt-use_barycorrpy"> Compute BJD_TDB with barycorrpy (default: astropy) <span class="help-tooltip" title="BJD_TDB is always computed and is the first column of every light-curve CSV. This box only switches the conversion from astropy to barycorrpy (corresponds to --use_barycorrpy).">?</span></label>
+        <label class="opt-check-item"><input type="checkbox" id="opt-use_barycorrpy"> Compute BJD_TDB with barycorrpy (default: astropy) <span class="help-tooltip" title="BJD_TDB is always computed and written to the BJD_TDB column of every light-curve CSV. This box only switches the conversion from astropy to barycorrpy (corresponds to --use_barycorrpy).">?</span></label>
         <label class="opt-check-item"><input type="checkbox" id="opt-overwrite" checked> Overwrite existing products <span class="help-tooltip" title="Overwrite existing reduction products for this target (corresponds to --overwrite).">?</span></label>
         <label class="opt-check-item"><input type="checkbox" id="opt-plot_gaia_sources" checked> Plot Gaia sources <span class="help-tooltip" title="Overlay Gaia DR3 source catalog on check plots (corresponds to --plot_gaia_sources).">?</span></label>
         <label class="opt-check-item" for="opt-cmap">Colormap <span class="help-tooltip" title="Matplotlib colormap for image-display plots such as reference, stacks and cutouts (corresponds to --cmap). Names ending in '_r' are reversed.">?</span>

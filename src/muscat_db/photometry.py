@@ -633,6 +633,35 @@ def target_coord_preview(target: str) -> str:
     return _describe_target_coord(target, resolved)
 
 
+def csv_time_note(csv_paths) -> str:
+    """Where the BJD_TDB times are in a run's band CSVs, read from their headers.
+
+    prose2 has always computed BJD_TDB, but before jpdeleon/prose2@bce5f807 it
+    appended the column instead of writing it first, and the page serves those
+    older products too. The note therefore names the column and reports the
+    position the files actually have. Empty when no CSV can be read.
+    """
+    positions = []
+    for path in csv_paths:
+        try:
+            with open(path, errors="replace") as f:
+                header = [name.strip() for name in f.readline().split(",")]
+        except OSError:
+            continue
+        positions.append(header.index("BJD_TDB") + 1 if "BJD_TDB" in header else None)
+    if not positions:
+        return ""
+    if all(pos is None for pos in positions):
+        return "The CSV files of this run have no BJD_TDB column."
+    if any(pos is None for pos in positions):
+        where = "the column named BJD_TDB, which some files of this run lack"
+    elif len(set(positions)) == 1:
+        where = f"the column named BJD_TDB (column {positions[0]})"
+    else:
+        where = "the column named BJD_TDB (its position differs between the files)"
+    return f"Times in the CSV files are BJD_TDB, in {where}, whichever conversion library is chosen."
+
+
 def _auto_target_coord(target: str) -> tuple[float, float, str, str] | None:
     """Resolve host first within one bounded wait; preserve prose's fallback.
 
@@ -1958,8 +1987,14 @@ def build_command(
     *,
     test_run: bool = True,
     run_id: str | None = None,
+    allow_remote_coord: bool = True,
 ) -> list[str]:
     """argv for a prose reduction, including any non-default options.
+
+    A launch resolves an uncatalogued target online (bounded wait) so prose
+    gets ``--target_coord``. A command built only for display passes
+    ``allow_remote_coord=False`` and uses the local catalogs and cached
+    lookups, so opening a page never queries an external service.
 
     ``--overwrite`` (on by default) lets a new target coexist with others
     already reduced in the same inst/date directory.
@@ -2006,7 +2041,7 @@ def build_command(
 
     target_coord = (o.get("target_coord") or "").strip()
     if not target_coord:
-        resolved = _auto_target_coord(target)
+        resolved = _auto_target_coord(target) if allow_remote_coord else _local_target_coord(target)
         if resolved is not None:
             ra_deg, dec_deg, _source, _name = resolved
             target_coord = f"{ra_deg:.6f} {dec_deg:.6f}"
@@ -2139,7 +2174,11 @@ def command_str(
             inst, opts.get("site"), opts.get("mode"), opts.get("run_name"),
             telescope=opts.get("telescope"),
         )
-    return shlex.join(build_command(inst, date, target, options, test_run=test_run, run_id=run_id))
+    # Display only: the photometry page renders this on load and refreshes it
+    # on every option change, so it must not start a remote lookup.
+    return shlex.join(build_command(
+        inst, date, target, options, test_run=test_run, run_id=run_id, allow_remote_coord=False,
+    ))
 
 
 # --------------------------- background job runner ---------------------------

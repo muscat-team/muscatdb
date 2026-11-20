@@ -512,5 +512,21 @@ def test_barycorrpy_label_says_bjd_tdb_is_always_computed(page):
 
 def test_results_state_the_time_system(page):
     page.goto(URL)
-    expect(page.locator("#time-system-note")).to_contain_text("Times in the CSV files are BJD_TDB")
+    # The position comes from this run's own CSV headers, not from an assumption.
+    expect(page.locator("#time-system-note")).to_contain_text("column named BJD_TDB (column 1)")
     expect(page.locator("#time-system-note")).to_contain_text("JD (UTC)")
+
+
+def test_opening_an_uncatalogued_target_does_not_query_a_remote_service(page, monkeypatch):
+    """The page render and the first command refresh both build the command."""
+    from muscat_db import photometry as phot
+
+    remote = []
+    monkeypatch.setattr(phot.catalog_lookup, "resolve_target_astrometry", lambda name, allow_remote=True: None)
+    monkeypatch.setattr(phot, "_resolve_archive_coords", lambda name: remote.append(name))
+    with page.expect_response("**/api/photometry/command") as resp:
+        page.goto(URL)
+    assert resp.value.ok
+    expect(page.locator("#hint-target_coord")).to_contain_text("not in the local catalogs")
+    assert "--target_coord" not in resp.value.json()["command"]
+    assert remote == []
