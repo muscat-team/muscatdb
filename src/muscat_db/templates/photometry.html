@@ -1124,7 +1124,7 @@
   }
   // Bump when a default changes so options saved under the old default can be
   // told apart from a value the user chose (see restoreOptions).
-  var OPT_VERSION = 2;
+  var OPT_VERSION = 3;
   // Defaults that changed in OPT_VERSION 2 (10 -> 20, matching prose2's), by
   // option id. A save from before that holds the old default only because the
   // form was auto-saved, so it is dropped and the server default applies.
@@ -1140,11 +1140,13 @@
   function restoreOptions() {
     var saved = MuscatOptions.restore(OPT_KEY);
     if (!saved) return;
-    if ((saved._v || 1) < OPT_VERSION) {
+    if ((saved._v || 1) < 2) {
       Object.keys(LEGACY_DEFAULTS_V1).forEach(function (id) {
         if (String(saved[id]) === LEGACY_DEFAULTS_V1[id]) delete saved[id];
       });
     }
+    // v2 auto-saved the old false default. From v3 onward an opt-out persists.
+    if ((saved._v || 1) < 3 && saved.save_flux_datacube === false) delete saved.save_flux_datacube;
     // migrate legacy persisted value after the 'nova' -> 'astrometry.net' rename
     if (saved.wcs_method === 'nova') saved.wcs_method = 'astrometry.net';
     if (saved.avoid_nearby_star_mode === undefined && saved.avoid_nearby_stars !== undefined) {
@@ -2386,9 +2388,7 @@
     });
   }
   if (rediffSection) {
-    // Outside .run-panel, like #postproc-section: persist the offset field directly.
-    rediffSection.addEventListener('input', debounce(saveOptions, 400));
-    rediffSection.addEventListener('change', debounce(saveOptions, 150));
+    document.getElementById('opt-rediff_offset').addEventListener('input', saveOptions);
     rediffBands.addEventListener('change', function (e) {
       if (e.target.classList.contains('rediff-star')) rediffStarsSummary(e.target.closest('.rediff-band'));
     });

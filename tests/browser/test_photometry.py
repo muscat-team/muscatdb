@@ -515,6 +515,31 @@ def rediff_calls(monkeypatch, live_server):
     cube.unlink(missing_ok=True)
 
 
+def test_cube_default_migrates_old_options_and_keeps_new_opt_out(page):
+    page.goto(URL)
+    page.evaluate("key => localStorage.setItem(key, JSON.stringify({_v: 2, save_flux_datacube: false, max_num_stars: '10'}))", OPT_KEY)
+    page.reload()
+    expect(page.locator("#opt-save_flux_datacube")).to_be_checked()
+    expect(page.locator("#opt-max_num_stars")).to_have_value("10")
+    reveal(page, "#opt-save_flux_datacube")
+    page.locator("#opt-save_flux_datacube").uncheck()
+    page.wait_for_function("key => JSON.parse(localStorage.getItem(key))._v === 3", arg=OPT_KEY)
+    page.reload()
+    expect(page.locator("#opt-save_flux_datacube")).not_to_be_checked()
+
+
+def test_rediff_offset_saved_before_immediate_navigation(page, rediff_calls):
+    page.goto(URL)
+    page.locator("#rediff-section > summary").click()
+    page.locator("#opt-rediff_offset").evaluate("""el => {
+        el.value = '0.05';
+        el.dispatchEvent(new Event('input', {bubbles: true}));
+        location.reload();
+    }""")
+    page.wait_for_load_state("networkidle")
+    expect(page.locator("#opt-rediff_offset")).to_have_value("0.05")
+
+
 def test_rediff_card_test_apply_and_restore(page, rediff_calls):
     page.goto(URL)
     page.wait_for_load_state("networkidle")
