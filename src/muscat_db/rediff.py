@@ -21,10 +21,13 @@ undoing the clip returns to that base.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import math
 import re
+import shutil
+import tempfile
 from pathlib import Path
 
 from muscat_db import postprocess as pp
@@ -156,6 +159,58 @@ def _public_bands(report: dict) -> dict:
     }
 
 
+def _finish_publish(rdir: Path) -> None:
+    """Finish an interrupted publication before another Apply or Restore."""
+    backup = pp._backup_dir(rdir, _BACKUP_DIRNAME)
+    pending = backup / "publishing"
+    if not pending.is_dir():
+        return
+    journal = json.loads((pending / "publish.json").read_text())
+    before, after = journal["before"], journal["after"]
+    current = pp._fingerprint(rdir)
+    for name in current.keys() | before.keys() | after.keys():
+        if current.get(name) not in (before.get(name), after.get(name)):
+            raise OSError(f"{name} changed outside the interrupted Apply; backup preserved")
+    for source in pp._tracked_files(pending):
+        if before.get(source.name) != after[source.name]:
+            source.replace(rdir / source.name)
+    # Keep the journal until both the manifest and adopted selection are durable
+    # across a process exit. Replaying it after either write is idempotent.
+    pp._write_manifest(rdir, _BACKUP_DIRNAME)
+    state = pending / "selection.tmp"
+    state.write_text(json.dumps(journal["selection"]))
+    state.replace(rdir / _APPLIED_NAME)
+    finished = pending.rename(backup / "published")
+    shutil.rmtree(finished)
+
+
+def _apply(context: dict, args: list[str]) -> dict:
+    rdir = Path(context["results_dir"])
+    _finish_publish(rdir)
+    backup = pp._backup_dir(rdir, _BACKUP_DIRNAME)
+    if backup.exists() and pp._read_manifest(rdir, _BACKUP_DIRNAME) != pp._fingerprint(rdir):
+        (rdir / _APPLIED_NAME).unlink(missing_ok=True)
+    pp._snapshot_unclipped(rdir, _BACKUP_DIRNAME)
+    shutil.rmtree(backup / "published", ignore_errors=True)
+    before = pp._fingerprint(rdir)
+    with tempfile.TemporaryDirectory(dir=backup) as tmp:
+        stage = Path(tmp)
+        for source in pp._tracked_files(rdir):
+            shutil.copy2(source, stage / source.name)
+        for cube in rdir.glob("*_flux_datacube.npz"):
+            (stage / cube.name).symlink_to(cube.resolve())
+        report = _run({**context, "results_dir": str(stage)}, [*args, *_apply_args(context)])
+        if not report.get("ok") or not report.get("applied"):
+            return report
+        selection = _read_applied(rdir)
+        selection.update({b: part["custom"] for b, part in _public_bands(report).items()})
+        journal = {"before": before, "after": pp._fingerprint(stage), "selection": selection}
+        (stage / "publish.json").write_text(json.dumps(journal))
+        stage.rename(backup / "publishing")
+        _finish_publish(rdir)
+    return report
+
+
 def rediff(
     inst: str,
     date: str,
@@ -192,12 +247,12 @@ def rediff(
             if err:
                 return {"ok": False, "error": err, **_state(rdir)}
         try:
-            pp._snapshot_unclipped(rdir, _BACKUP_DIRNAME)
+            with (rdir / ".rediff.lock").open("a") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                report = _apply(context, args)
         except OSError as exc:
-            logger.error("could not back up %s before re-diff: %s", rdir, exc)
-            return {"ok": False, "error": f"could not back up band CSVs before re-differencing: {exc}"}
-        report = _run(context, [*args, *_apply_args(context)])
-        _record_apply(rdir, report)
+            logger.exception("could not apply re-diff in %s", rdir)
+            return {"ok": False, "error": str(exc), **_state(rdir)}
     else:
         preview_path = pp._preview_path()
         extra = [] if offset_val is None else ["--offset", repr(offset_val)]
@@ -217,24 +272,6 @@ def rediff(
     }
 
 
-def _record_apply(rdir: Path, report: dict) -> None:
-    """Record the on-disk state after an apply attempt, and what was adopted.
-
-    The manifest is written after every attempt that reached prose2 (as for
-    the clip), so a failure after the CSVs were rewritten still restores.
-    """
-    try:
-        pp._write_manifest(rdir, _BACKUP_DIRNAME)
-        if report.get("ok") and report.get("applied"):
-            applied = _read_applied(rdir)
-            for band, part in _public_bands(report).items():
-                if part.get("custom"):
-                    applied[band] = part["custom"]
-            (rdir / _APPLIED_NAME).write_text(json.dumps(applied))
-    except OSError as exc:
-        logger.error("could not record re-diff state for %s: %s", rdir, exc)
-
-
 def restore_rediff(
     inst: str, date: str, target: str, run_id: str, *, allow_active_job: bool = False
 ) -> dict:
@@ -251,7 +288,13 @@ def restore_rediff(
         err = pp._active_job_error(inst, date, target, run_id)
         if err:
             return {"ok": False, "error": err}
-    result = pp._restore_backup(rdir, _BACKUP_DIRNAME, "re-diff")
-    if result.get("ok"):
-        (rdir / _APPLIED_NAME).unlink(missing_ok=True)
-    return result
+    try:
+        with (rdir / ".rediff.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            _finish_publish(rdir)
+            result = pp._restore_backup(rdir, _BACKUP_DIRNAME, "re-diff")
+            if result.get("ok"):
+                (rdir / _APPLIED_NAME).unlink(missing_ok=True)
+            return result
+    except OSError as exc:
+        return {"ok": False, "error": str(exc)}

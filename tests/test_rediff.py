@@ -56,6 +56,7 @@ def _fake_prose(rdir: Path, calls: list):
         if "--info" in args:
             return {"ok": True, "bands": {"gp": {"aper_radii": [4.0, 6.0]}}}
         if "--apply" in args:
+            rdir = Path(args[args.index("--select") - 1])
             (rdir / GP_CSV).write_text("BJD_TDB,Flux,Err\n2460807.84,1.01,0.003\n2460807.85,0.99,0.003\n")
             (rdir / f"{TARGET}_{INST}_{DATE}_lightcurves.png").write_bytes(b"rediff-png")
             return _band_report(applied=True)
@@ -170,6 +171,66 @@ def test_apply_then_restore_returns_the_pipeline_files(run_dir, monkeypatch):
     assert not (run_dir / f"{TARGET}_{INST}_{DATE}_lightcurves.png").exists()  # created by the apply
     assert not (run_dir / rd._BACKUP_DIRNAME).exists()
     assert not (run_dir / rd._APPLIED_NAME).exists()
+
+
+@pytest.mark.parametrize("retry", [False, True])
+def test_interrupted_band_write_preserves_pipeline_files(run_dir, monkeypatch, retry):
+    originals = _files(run_dir)
+
+    def interrupt(args):
+        work = Path(args[args.index("--select") - 1])
+        (work / GP_CSV).write_text("partial band")
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(pp, "_run_sync", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        rd.rediff(INST, DATE, TARGET, RUN, SEL, apply=True)
+    monkeypatch.setattr(pp, "_run_sync", _fake_prose(run_dir, []))
+    if retry:
+        assert rd.rediff(INST, DATE, TARGET, RUN, SEL, apply=True)["ok"]
+    assert rd.restore_rediff(INST, DATE, TARGET, RUN)["ok"]
+    assert _files(run_dir) == originals
+
+
+def test_restore_refuses_running_job_and_keeps_backup(run_dir, monkeypatch):
+    original = _files(run_dir)
+    monkeypatch.setattr(pp, "_run_sync", _fake_prose(run_dir, []))
+    assert rd.rediff(INST, DATE, TARGET, RUN, SEL, apply=True)["ok"]
+    rediffed = _files(run_dir)
+    monkeypatch.setattr("muscat_db.photometry.job_status", lambda *a, **k: {"state": "running"})
+    result = rd.restore_rediff(INST, DATE, TARGET, RUN)
+    assert not result["ok"] and "running" in result["error"]
+    assert _files(run_dir) == rediffed
+    assert _files(run_dir / rd._BACKUP_DIRNAME) == original
+
+
+@pytest.mark.parametrize("external_edit", [False, True])
+def test_interrupted_publish_checks_live_files(run_dir, monkeypatch, external_edit):
+    original = _files(run_dir)
+    monkeypatch.setattr(pp, "_run_sync", _fake_prose(run_dir, []))
+    replace = Path.replace
+
+    def interrupt(source, dest):
+        result = replace(source, dest)
+        if source.name == GP_CSV:
+            raise KeyboardInterrupt
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "replace", interrupt)
+        with pytest.raises(KeyboardInterrupt):
+            rd.rediff(INST, DATE, TARGET, RUN, SEL, apply=True)
+    assert _files(run_dir) != original
+    if external_edit:
+        (run_dir / RP_CSV).write_text("new reduction")
+    result = rd.restore_rediff(INST, DATE, TARGET, RUN)
+    if external_edit:
+        assert not result["ok"] and "backup preserved" in result["error"]
+        assert (run_dir / RP_CSV).read_text() == "new reduction"
+        assert _files(run_dir / rd._BACKUP_DIRNAME) == original
+    else:
+        assert result["ok"] and _files(run_dir) == original
+        assert not list(run_dir.glob("*_lightcurves.png"))
 
 
 def test_second_apply_keeps_the_pipeline_snapshot(run_dir, monkeypatch):
