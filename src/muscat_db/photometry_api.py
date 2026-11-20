@@ -253,7 +253,7 @@ class RediffResponse(RediffState):
     ok: bool
     error: str | None = None
     applied: bool = False
-    bands: dict = Field(default_factory=dict, description="Band -> default and custom metrics")
+    bands: dict = Field(default_factory=dict, description="Band -> default and custom metrics, plus default_equal on preview")
     summary_png: str | None = None
     preview_png: str | None = Field(None, description="Base64 PNG preview")
     plot_offset: dict[str, float] | None = Field(None, description="Band -> preview offset used")

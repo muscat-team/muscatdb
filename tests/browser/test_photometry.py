@@ -504,7 +504,8 @@ def rediff_calls(monkeypatch, live_server):
         calls["rediff"].append({"selections": a[4], "apply": apply, "offset": offset})
         part = {"comparisons": a[4][0]["comparisons"], "aperture": 0, "aper_radius": 5.0,
                 "weighting": "equal", "metrics": {"n": 9, "std_ppt": 2.5, "p2p_ppt": 2.25}}
-        return {"ok": True, "applied": apply, "bands": {"gp": {"custom": part}},
+        return {"ok": True, "applied": apply, "bands": {"gp": {"default": {**part, "weighting": "broeg"},
+                "default_equal": {**part, "comparisons": [1, 2]}, "custom": part}},
                 "plot_offset": {"gp": float(offset) if offset else 0.0123}, **state}
 
     monkeypatch.setattr(web.rediff_mod, "info", info)
@@ -550,10 +551,16 @@ def test_rediff_card_test_apply_and_restore(page, rediff_calls):
     expect(band.locator(".rediff-aperture option")).to_have_text(["4.6 pix (default)"])
     expect(band.locator(".rediff-star:checked")).to_have_count(2)
 
-    page.click("#rediff-test-btn")  # nothing changed yet: no request
+    with page.expect_response("**/api/photometry/rediff"):
+        page.click("#rediff-test-btn")
+    expect(page.locator("#rediff-result tr td:nth-child(2)")).to_have_text([
+        "default stars (broeg)", "default stars (equal)", "custom stars (equal)"
+    ])
+    assert rediff_calls["rediff"][-1]["selections"] == [{"band": "gp", "comparisons": [1, 2], "aperture": 0}]
+    page.click("#rediff-apply-btn")  # unchanged defaults cannot be applied accidentally
     expect(page.locator("#message-modal")).to_contain_text("Change the comparison stars")
     page.click("#message-modal-ok")
-    assert rediff_calls["rediff"] == []
+    assert len(rediff_calls["rediff"]) == 1
 
     summary = band.locator(".rediff-stars-summary")
     expect(summary).to_have_text("1, 2 (2)")

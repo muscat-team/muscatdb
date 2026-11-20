@@ -821,7 +821,7 @@
       <button class="btn" type="button" id="rediff-restore-btn" title="Put back the pipeline's own band CSVs and summary figure" disabled>Restore default</button>
     </div>
     <p style="color: var(--text-dim); font-size: 0.78rem; margin: 0.4rem 0 0;">
-      Test setting writes nothing. Apply setting rewrites Flux and Err of the bands you changed and regenerates the summary <code>*_lightcurves.png</code>; the pipeline's files are kept, and Restore default puts them back. Apply is refused while a post-process clip is active. A clip applied afterwards sits on top of the adopted set.
+      Test setting compares the saved pipeline curve, the default stars with equal weights at the pipeline aperture, and your selection with equal weights. Apply setting rewrites Flux and Err of the bands you changed and regenerates the summary <code>*_lightcurves.png</code>; the pipeline's files are kept, and Restore default puts them back. Apply is refused while a post-process clip is active. A clip applied afterwards sits on top of the adopted set.
     </p>
     <div id="rediff-result" style="display:none; margin-top: 0.75rem; font-size: 0.85rem;"></div>
   </details>
@@ -2295,7 +2295,7 @@
   }
   // Bands whose choice differs from the pipeline default (a band already
   // re-differenced counts, so applying another band keeps its adopted set).
-  function rediffSelections() {
+  function rediffSelections(apply) {
     var out = [];
     rediffBands.querySelectorAll('.rediff-band').forEach(function (fs) {
       var band = fs.dataset.band;
@@ -2305,7 +2305,7 @@
       var defaults = (b.default_comparisons || []).map(function (c) { return c.id; });
       var same = aperture === b.default_aperture && ids.length === defaults.length &&
         ids.every(function (i) { return defaults.indexOf(i) >= 0; });
-      if (!same) out.push({ band: band, comparisons: ids, aperture: aperture });
+      if (!apply || !same) out.push({ band: band, comparisons: ids, aperture: aperture });
     });
     return out;
   }
@@ -2313,10 +2313,10 @@
     var html = d.applied ? '<p style="font-weight:600;color:var(--green);margin:0 0 0.4rem;">Applied into ' + escH(d.summary_png || 'summary figure') + '.</p>' : '';
     html += '<table class="mono" style="border-collapse:collapse;margin:0 0 0.5rem;"><tr><th>band</th><th>set</th><th>comparisons</th><th>aperture</th><th>std (ppt)</th><th>p2p (ppt)</th></tr>';
     Object.keys(d.bands || {}).forEach(function (band) {
-      ['default', 'custom'].forEach(function (kind) {
+      ['default', 'default_equal', 'custom'].forEach(function (kind) {
         var p = d.bands[band][kind];
         if (!p) return;
-        html += '<tr><td>' + escH(band) + '</td><td>' + kind + ' (' + escH(p.weighting) + ')</td><td>' + (p.comparisons || []).join(', ') +
+        html += '<tr><td>' + escH(band) + '</td><td>' + (kind === 'custom' ? 'custom stars' : 'default stars') + ' (' + escH(p.weighting) + ')</td><td>' + (p.comparisons || []).join(', ') +
           '</td><td>' + radiusLabel(band, p.aper_radius) + '</td><td>' + fmt(p.metrics && p.metrics.std_ppt, 2) + '</td><td>' + fmt(p.metrics && p.metrics.p2p_ppt, 2) + '</td></tr>';
       });
     });
@@ -2326,7 +2326,7 @@
   }
   async function runRediff(apply) {
     if (!rediffInfo) return;
-    var selections = rediffSelections();
+    var selections = rediffSelections(apply);
     if (!selections.length) {
       window.showMessageModal('Compare comparison stars', 'Change the comparison stars or the aperture of at least one band first.', 'notice');
       return;

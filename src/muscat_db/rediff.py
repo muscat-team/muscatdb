@@ -159,6 +159,29 @@ def _public_bands(report: dict) -> dict:
     }
 
 
+def _equal_baselines(context: dict, bands: dict) -> str | None:
+    """Compare weighting at the pipeline aperture, batching bands into one prose2 call."""
+    selections = []
+    for band, part in bands.items():
+        default, custom = part["default"], part["custom"]
+        if default["weighting"] == "equal":
+            part["default_equal"] = default
+        elif (default["aperture"] == custom["aperture"]
+              and set(default["comparisons"]) == set(custom["comparisons"])):
+            part["default_equal"] = custom
+        else:
+            selections.append({"band": band, **default})
+    if selections:
+        baseline = _run(context, _select_args(selections))
+        for selection in selections:
+            band = selection["band"]
+            equal = (baseline.get("bands") or {}).get(band, {}).get("custom")
+            if not baseline.get("ok") or not equal:
+                return baseline.get("error") or f"missing equal-weight comparison for {band}"
+            bands[band]["default_equal"] = equal
+    return None
+
+
 def _finish_publish(rdir: Path) -> None:
     """Finish an interrupted publication before another Apply or Restore."""
     backup = pp._backup_dir(rdir, _BACKUP_DIRNAME)
@@ -261,10 +284,15 @@ def rediff(
     if not report.get("ok"):
         return {"ok": False, "error": report.get("error") or "re-differencing failed",
                 **_state(rdir)}
+    bands = _public_bands(report)
+    if not apply:
+        error = _equal_baselines(context, bands)
+        if error:
+            return {"ok": False, "error": error, **_state(rdir)}
     return {
         "ok": True,
         "applied": bool(report.get("applied")),
-        "bands": _public_bands(report),
+        "bands": bands,
         "summary_png": report.get("summary_png"),
         "preview_png": preview_png,
         "plot_offset": report.get("plot_offset"),

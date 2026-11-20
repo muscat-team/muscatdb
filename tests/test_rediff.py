@@ -126,6 +126,31 @@ def test_test_mode_builds_select_and_preview_and_writes_nothing(run_dir, monkeyp
     assert _files(run_dir) == before and not (run_dir / rd._BACKUP_DIRNAME).exists()
 
 
+@pytest.mark.parametrize("unchanged", [True, False])
+def test_preview_compares_default_stars_with_equal_weights(run_dir, monkeypatch, unchanged):
+    calls = []
+
+    def run(context, args):
+        calls.append(args)
+        report = _band_report()
+        part = report["bands"]["gp"]
+        if args[args.index("--select") + 1] == "gp=1,2@1":
+            part["custom"] = {**part["custom"], "comparisons": [1, 2], "metrics": {"std_ppt": 2.0}}
+        return report
+
+    monkeypatch.setattr(rd, "_run", run)
+    selection = [{**SEL[0], "comparisons": [1, 2]}] if unchanged else SEL
+    result = rd.rediff(INST, DATE, TARGET, RUN, selection, apply=False)
+    band = result["bands"]["gp"]
+    assert band["default"]["weighting"] == "broeg"
+    assert band["default_equal"]["comparisons"] == [1, 2]
+    assert band["default_equal"]["metrics"]["std_ppt"] == 2.0
+    assert band["custom"]["comparisons"] == selection[0]["comparisons"]
+    assert len(calls) == (1 if unchanged else 2)
+    if not unchanged:
+        assert calls[1] == ["--select", "gp=1,2@1"]
+
+
 def test_test_mode_passes_a_set_offset_and_reports_the_one_used(run_dir, monkeypatch):
     calls = []
     fake = _fake_prose(run_dir, calls)
@@ -134,8 +159,9 @@ def test_test_mode_passes_a_set_offset_and_reports_the_one_used(run_dir, monkeyp
     res = rd.rediff(INST, DATE, TARGET, RUN, SEL, apply=False, offset="0.02")
     assert res["plot_offset"] == {"gp": 0.02}
     assert calls[0][calls[0].index("--offset") + 1] == "0.02"
+    calls.clear()
     rd.rediff(INST, DATE, TARGET, RUN, SEL, apply=False, offset="")
-    assert "--offset" not in calls[1]  # blank: prose2 chooses
+    assert "--offset" not in calls[0]  # blank: prose2 chooses
 
 
 @pytest.mark.parametrize("bad", ["-0.1", "nan", "inf", "2", "x"])
