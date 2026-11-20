@@ -1648,6 +1648,7 @@ def target_page(name: str = ""):
             logger.warning("failed to check membership for %s: %s", norm_name, e)
 
         html = jinja.get_template("target.html").render(
+            requested_name=name,
             target_name=norm_name,
             datasets=datasets,
             last_updated=last_updated,
@@ -2504,6 +2505,33 @@ def nexsci_page():
         n_jwst=sum(jwst),
         n_spectra=sum(spectra),
         nexsci_updated=cat["updated"],
+    )
+
+
+@target_router.get("/observations.csv")
+def export_target_observations_csv(name: str):
+    target = _normalize_target_name(name)
+    datasets, _ = _get_datasets_for_normalized_target(_db_path(), target, _viewer_denied())
+    if not datasets:
+        raise HTTPException(404, "No photometric observations for this target")
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow([
+        "date", "object", "instrument", "proposal_id", "filters", "airmass_min",
+        "airmass_max", "n_frames", "phot", "fit", "note",
+    ])
+    for row in datasets:
+        writer.writerow([
+            row["date"], row["object"], row["instrument"], row["proposal_id"],
+            ", ".join(c["label"] for c in row["filter_chips"]),
+            *(f"{row[k]:.2f}" if row[k] is not None else "" for k in ("airmass_min", "airmass_max")),
+            row["n_frames"],
+            row["phot"], row["fit"], row["note"],
+        ])
+    filename = quote(f"{target}-observations.csv", safe="")
+    return Response(
+        content=buf.getvalue(), media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
     )
 
 
