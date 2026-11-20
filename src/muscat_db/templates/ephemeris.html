@@ -4553,7 +4553,11 @@
   // Null when the planet has no timing in that set.
   function largestOminusC(pl) {
     const rows = harmonicTimingRows();
-    const own = rows.filter(r => r.planet === pl && Number.isFinite(r.point.oc_min));
+    // Match by Planet letters position, as the CSV does: a fit result keyed
+    // 'B' is planet b.
+    const letters = (document.getElementById('opt-planet_letters').value || '').toLowerCase().split('');
+    const index = letters.indexOf(String(pl).toLowerCase());
+    const own = rows.filter(r => r.index === index && Number.isFinite(r.point.oc_min));
     if (!own.length) return null;
     const errs = rows.map(r => Math.abs(Number(r.point.tc_unc))).filter(Number.isFinite).sort((x, y) => x - y);
     const middle = Math.floor(errs.length / 2);

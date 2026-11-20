@@ -253,6 +253,14 @@ def test_ttv_amplitude_floor_ignores_timings_without_an_uncertainty(page):
     assert _seed_amplitudes(page, results)['a_bc'] == pytest.approx(1 / 1440, rel=5e-3)
 
 
+def test_ttv_amplitude_matches_planet_letters_case_insensitively(page):
+    """The CSV matches Planet letters case-insensitively, so the seed must too:
+    a fit result keyed 'B' is planet b (review on #486)."""
+    ini = _seed_amplitudes(page, {'B': _points((20.0, 1.0)), 'c': _points((0.0, 1.0))})
+    assert ini['a_bc'] == pytest.approx(20 / 1440, rel=5e-3)
+    assert ini['a_cb'] == pytest.approx(1 / 1440, rel=5e-3)
+
+
 def test_harmonic_warning_follows_selected_run(page, live_server, request):
     import json
     from muscat_db import ttv_fit
