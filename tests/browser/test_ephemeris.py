@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from playwright.sync_api import expect
+import re
+import statistics
+
 import pytest
 
 # TOI-1000.01 in the fixture TOI catalog (seed.TOI_ROWS).
@@ -106,6 +109,156 @@ def test_ttv_initial_pairs_follow_periods(page):
     ini = page.input_value('#opt-ini_content')
     assert 'a_cd =' in ini and 'a_db =' in ini and 'a_be =' in ini
     assert 'a_bc =' not in ini
+
+
+def _ini(page) -> dict:
+    """The [INIT] block of the harmonic options as {key: float}."""
+    out = {}
+    for line in page.input_value('#opt-ini_content').splitlines():
+        if '=' in line and not line.strip().startswith('['):
+            key, value = (part.strip() for part in line.split('=', 1))
+            try:
+                out[key] = float(value)
+            except ValueError:
+                pass
+    return out
+
+
+def _set_planets(page, planets):
+    from tests.browser.helpers import reveal
+    _load_toi1000(page)
+    for _ in range(len(planets) - 1):
+        page.click('#add-planet-btn')
+    for planet, period in planets:
+        page.fill('#planet-t0-' + planet, str(T0))
+        page.fill('#planet-period-' + planet, period)
+        page.locator('#planet-period-' + planet).blur()
+    reveal(page, '#opt-ini_content')
+
+
+# V1298 Tau periods from the NASA Exoplanet Archive: c-d sits near 3:2 and
+# d-b and b-e near 2:1. The super-period is 1 / |j/P_outer - (j-1)/P_inner|.
+V1298 = [('b', '24.140006'), ('c', '8.249164'), ('d', '12.401394'), ('e', '48.677714')]
+
+
+def test_ttv_super_period_starts_from_the_nearest_first_order_resonance(page):
+    _set_planets(page, V1298)
+    expect(page.locator('#opt-planet_letters')).to_have_value('cdbe')
+    ini = _ini(page)
+    assert ini['per_cd'] == pytest.approx(1 / abs(3 / 12.401394 - 2 / 8.249164), abs=0.06)
+    assert ini['per_db'] == pytest.approx(1 / abs(2 / 24.140006 - 1 / 12.401394), abs=0.06)
+    assert ini['per_be'] == pytest.approx(1 / abs(2 / 48.677714 - 1 / 24.140006), abs=0.06)
+    # b-e is the longest of the three, c-d next, d-b far shorter.
+    assert ini['per_be'] > 2900 > ini['per_cd'] > 1800 > 500 > ini['per_db'] > 400
+
+
+def test_ttv_super_period_far_from_resonance_keeps_the_fixed_default(page):
+    # 5 d and 16 d: the nearest first-order term gives 13.3 d, below harmonic's
+    # lower bound of five outer periods, so the page does not pretend to know.
+    _set_planets(page, [('b', '5'), ('c', '16')])
+    assert _ini(page)['per_bc'] == 1000.0
+
+
+def test_ttv_super_period_follows_a_period_edit_until_the_block_is_edited(page):
+    _set_planets(page, [('b', '10'), ('c', '15.2')])
+    first = _ini(page)['per_bc']
+    assert first == pytest.approx(1 / abs(3 / 15.2 - 2 / 10), abs=0.06)
+    page.fill('#planet-period-c', '15.3')
+    page.locator('#planet-period-c').blur()
+    expect(page.locator('#opt-ini_content')).to_have_value(re.compile(r'per_bc = 255\.0'))
+    # Once the observer edits the block, a later period change leaves it alone.
+    edited = page.input_value('#opt-ini_content').replace('per_bc = 255.0', 'per_bc = 300.0')
+    page.fill('#opt-ini_content', edited)
+    page.fill('#planet-period-c', '15.4')
+    page.locator('#planet-period-c').blur()
+    page.wait_for_timeout(600)
+    assert _ini(page)['per_bc'] == 300.0
+
+
+def test_ttv_amplitude_starts_from_the_largest_o_minus_c(page):
+    """Planet b has timings, so its amplitude follows the linear fit; planet c
+    has none and keeps the fixed starting value."""
+    from tests.browser.helpers import reveal
+    _load_toi1000(page)
+    # Two manual timings 3 and 5 minutes late give planet b a non-zero O-C.
+    _add_transit_center(page, T0 + 2 * PERIOD + 3 / 1440)
+    with page.expect_response("**/api/ephemeris/calculate") as resp:
+        _add_transit_center(page, T0 + 5 * PERIOD + 5 / 1440)
+    page.click('#add-planet-btn')
+    page.fill('#planet-t0-c', str(T0))
+    with page.expect_response("**/api/ephemeris/calculate") as resp:
+        page.fill('#planet-period-c', '3.3')
+        page.locator('#planet-period-c').blur()
+    points = [p for p in resp.value.json()['results']['b']['points'] if p.get('checked') is not False]
+    expected = max(max(abs(p['oc_min']) for p in points),
+                   statistics.median(abs(p['oc_err_min']) for p in points)) / 1440
+    assert expected > 0
+    reveal(page, '#opt-ini_content')
+    page.wait_for_function("() => !/a_bc = 0\\.02\\b/.test(document.getElementById('opt-ini_content').value)")
+    assert _ini(page)['a_bc'] == pytest.approx(expected, rel=5e-3)
+    assert _ini(page)['a_cb'] == 0.02
+
+
+def _seed_amplitudes(page, results) -> dict:
+    """Generate the [INIT] block from a given linear-fit result and parse it."""
+    _set_planets(page, [('b', '10'), ('c', '15.2')])
+    page.evaluate("results => { fitResults = results; rebuildINI(false); }", results)
+    return _ini(page)
+
+
+def _points(*pairs):
+    """Checked timings as /api/ephemeris/calculate returns them: O-C and its
+    error in minutes, tc_unc in days."""
+    return {'points': [{'oc_min': oc, 'oc_err_min': err, 'tc_unc': err / 1440, 'checked': True,
+                        'epoch': i, 'bjd': T0 + i} for i, (oc, err) in enumerate(pairs)]}
+
+
+def test_ttv_amplitude_keeps_a_small_positive_value(page):
+    """harmonic rejects a zero amplitude, so a tiny seed must not round to zero."""
+    ini = _seed_amplitudes(page, {'b': _points((0.0, 0.0043), (0.0, 0.0043))})   # 0.26 s
+    assert ini['a_bc'] == pytest.approx(0.0043 / 1440, rel=5e-3)
+    assert ini['a_bc'] > 0
+
+
+def test_ttv_amplitude_floor_is_the_median_uncertainty(page):
+    # Two timings with uncertainties of 1 and 9 minutes: the median is 5 minutes.
+    ini = _seed_amplitudes(page, {'b': _points((0.0, 1.0), (0.0, 9.0))})
+    assert ini['a_bc'] == pytest.approx(5 / 1440, rel=5e-3)
+    # harmonic takes the median over every timing in the fit, not per planet:
+    # 1, 9 and 21 minutes give 9. Planet c's own largest |O-C| is larger still.
+    ini = _seed_amplitudes(page, {'b': _points((0.0, 1.0), (0.0, 9.0)), 'c': _points((30.0, 21.0))})
+    assert ini['a_bc'] == pytest.approx(9 / 1440, rel=5e-3)
+    assert ini['a_cb'] == pytest.approx(30 / 1440, rel=5e-3)
+
+
+def test_ttv_amplitude_floor_ignores_planets_harmonic_does_not_get(page):
+    """Only the timings sent to harmonic set the floor: planet d is not in
+    Planet letters, so its timings must not move the b-c seed (review on #486)."""
+    one_minute = {'b': _points((0.0, 1.0)), 'c': _points((0.0, 1.0))}
+    ini = _seed_amplitudes(page, one_minute)
+    assert ini['a_bc'] == pytest.approx(1 / 1440, rel=5e-3)
+    with_d = {**one_minute, 'd': _points((0.0, 60.0), (0.0, 60.0), (0.0, 60.0))}
+    page.evaluate("results => { fitResults = results; rebuildINI(false); }", with_d)
+    assert _ini(page)['a_bc'] == pytest.approx(1 / 1440, rel=5e-3)
+    assert 'd' not in page.input_value('#opt-planet_letters')
+
+
+def test_ttv_amplitude_floor_ignores_timings_without_an_uncertainty(page):
+    """A checked timing with no tc_unc is left out of harmonic's CSV, so it
+    must not count toward the floor either."""
+    results = {'b': _points((0.0, 1.0), (0.0, 1.0))}
+    for epoch in (5, 6):
+        results['b']['points'].append({'oc_min': 0.0, 'oc_err_min': 90.0, 'tc_unc': None,
+                                       'checked': True, 'epoch': epoch, 'bjd': T0 + epoch})
+    assert _seed_amplitudes(page, results)['a_bc'] == pytest.approx(1 / 1440, rel=5e-3)
+
+
+def test_ttv_amplitude_matches_planet_letters_case_insensitively(page):
+    """The CSV matches Planet letters case-insensitively, so the seed must too:
+    a fit result keyed 'B' is planet b (review on #486)."""
+    ini = _seed_amplitudes(page, {'B': _points((20.0, 1.0)), 'c': _points((0.0, 1.0))})
+    assert ini['a_bc'] == pytest.approx(20 / 1440, rel=5e-3)
+    assert ini['a_cb'] == pytest.approx(1 / 1440, rel=5e-3)
 
 
 def test_harmonic_warning_follows_selected_run(page, live_server, request):
