@@ -1064,6 +1064,31 @@ def test_ephemeris_target_info_lists_only_full_transit_fit_runs(
     assert "run_type" not in datasets[0]
 
 
+def test_midtime_enriches_older_job_diagnostics(mock_db, monkeypatch, tmp_path, mock_target_coord_resolution):
+    from muscat_db import transit_fit
+
+    target = "ZZZ older health"
+    save_job(type_="transit_fit", inst="muscat4", date="260101", target=target,
+             state="done", returncode=0, elapsed=10, started_at=1000, run_type="full",
+             run_id="fit1", params=json.dumps({"fit_health": {"metrics": {
+                 "Detection SNR": 2, "Max R-hat": 1.01, "Divergences": None}}}))
+    monkeypatch.setattr(transit_fit, "sync_jobs", lambda: None)
+    monkeypatch.setattr(transit_fit, "_discover_orphan_fits", lambda keys: [])
+    monkeypatch.setattr(transit_fit, "fit_output_dir", lambda *args: tmp_path)
+    monkeypatch.setattr("muscat_db.web._get_run_fitted_params", lambda *args: {})
+    _write_timer_run(tmp_path, "b 2460114 0.001",
+                     summary=",ess_bulk,ess_tail\nt0[0],399,400\n")
+    with (tmp_path / "timer-fit.log").open("a") as log:
+        log.write("Sampling 4 chains for 1000 tune and 1000 draw iterations took 60 seconds.\n"
+                  "Timer-fit completed successfully in 90 seconds\n")
+    response = TestClient(app).get("/api/ephemeris/target-info", params={"target": target})
+    assert response.status_code == 200
+    dataset, = response.json()["datasets"]
+    assert dataset["fit_warnings"] == ["Min bulk ESS 399 below 400"]
+    assert dataset["unknown_diagnostics"] == []
+    assert dataset["detection_snr"] == 2
+
+
 def _write_timer_run(rdir, tc_line, ref_time=2460114, summary=None):
     """A minimal timer run directory: fit.yaml, timer-fit.log and out/tc.txt."""
     out = rdir / "out"
@@ -1243,7 +1268,7 @@ def test_ephemeris_calculate_only_returns_requested_production_datasets(
     ]
 
 
-def _post_manual_calculate(planets_ephem, manual_points, fit_method="unweighted"):
+def _post_manual_calculate(planets_ephem, manual_points, fit_method=None):
     """POST /api/ephemeris/calculate for a target with no database fits, so the
     only points come from the manually entered transit centers under test."""
     return TestClient(app).post(
@@ -1253,7 +1278,7 @@ def _post_manual_calculate(planets_ephem, manual_points, fit_method="unweighted"
             "planets_ephem": planets_ephem,
             "datasets": [],
             "manual_points": manual_points,
-            "fit_method": fit_method,
+            **({"fit_method": fit_method} if fit_method else {}),
         },
     )
 
@@ -1301,6 +1326,7 @@ def test_manual_transit_centers_are_fitted_and_placed_on_epoch_grid(
     assert len(by_id["m0"]["date"]) == 6 and by_id["m0"]["date"].isdigit()
 
     # A perfectly linear series is fitted with no 5-sigma flags.
+    assert body["results"]["b"]["fit_method"] == "weighted"
     assert body["results"]["b"]["was_fit"] is True
     assert all(p["flagged"] is False for p in points)
 
@@ -1318,7 +1344,7 @@ def test_ephemeris_calculate_exposes_dof_for_two_point_fit(
         {"id": "m1", "planet": "b", "tc": 2458010.0, "tc_unc": 0.001, "checked": True},
     ]
 
-    body = _post_manual_calculate(planets_ephem, manual_points).json()
+    body = _post_manual_calculate(planets_ephem, manual_points, fit_method="unweighted").json()
     result = body["results"]["b"]
 
     assert result["was_fit"] is True

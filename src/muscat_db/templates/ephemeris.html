@@ -116,11 +116,11 @@
     <div class="opt-check-row" title="Unweighted fit treats all transits equally. Weighted fit uses individual fit uncertainties." style="padding: 0; display: flex; align-items: center; gap: 0.85rem; min-height: 34px;">
       <span style="font-size: 0.85rem; color: var(--text-dim); font-weight: 500; white-space: nowrap;">Linear Fitting Method</span>
       <label class="opt-check-item" style="display: inline-flex; align-items: center; gap: 0.35rem; cursor: pointer;">
-        <input type="radio" name="fit-method-type" value="unweighted" checked style="margin: 0;">
+        <input type="radio" name="fit-method-type" value="unweighted" style="margin: 0;">
         <span style="font-size: 0.85rem;">Unweighted</span>
       </label>
       <label class="opt-check-item" style="display: inline-flex; align-items: center; gap: 0.35rem; cursor: pointer;">
-        <input type="radio" name="fit-method-type" value="weighted" style="margin: 0;">
+        <input type="radio" name="fit-method-type" value="weighted" checked style="margin: 0;">
         <span style="font-size: 0.85rem;">Weighted</span>
       </label>
     </div>
@@ -260,8 +260,13 @@
         </p>
         <ul>
           <li><code>a_bc</code>, <code>a_cb</code> — TTV amplitude each planet induces on
-            the other, in days (default <code>0.02</code>).</li>
-          <li><code>per_bc</code> — TTV super-period, in days (default <code>1000</code>).</li>
+            the other, in days. The starting value is the planet's largest
+            |O−C| in the current linear fit, but not less than the median timing uncertainty,
+            or <code>0.02</code> before a fit exists.</li>
+          <li><code>per_bc</code> — TTV super-period, in days. The starting value is that of
+            the nearest first-order resonance j:(j−1), 1 / |j/P<sub>c</sub> − (j−1)/P<sub>b</sub>|,
+            or <code>1000</code> when the pair is far from one. It is sensitive to the
+            periods, and harmonic fits it.</li>
           <li><code>t_bc</code> — TTV phase reference, in BJD (seeded from the first
             planet's T<sub>0</sub>, else <code>2450000</code>).</li>
         </ul>
@@ -618,6 +623,7 @@
   let manualPoints = [];
   let manualIdSeq = 0;
   let fitResults = null;
+  let calculatedSignature = null;
   let pendingViewState = null;
   let viewSaveTimer = null;
   let lastSavedViewJson = '';
@@ -640,7 +646,9 @@
   }
 
   function datasetStateKey(d) {
-    return [d.target || '', d.instrument || '', d.date || '', d.run_id || ''].join('|');
+    const key = [d.target || '', d.instrument || '', d.date || '', d.run_id || ''].join('|');
+    // A saved selection from before these warnings appeared is not an opt-in.
+    return d.fit_warnings?.length ? key + '|' + JSON.stringify(d.fit_warnings) : key;
   }
 
   function legacyDatasetStateKey(d) {
@@ -795,7 +803,7 @@
       if (selectEl) planetOptions[pl + '_source'] = selectEl.value;
     });
 
-    const fitMethod = document.querySelector('input[name="fit-method-type"]:checked')?.value || 'unweighted';
+    const fitMethod = document.querySelector('input[name="fit-method-type"]:checked')?.value || 'weighted';
     const plotTitle = document.getElementById('plot-suptitle-input')?.value || '';
     const currentPlanetPlotSettings = {};
     combinedPlanets.forEach(pl => {
@@ -903,6 +911,23 @@
     }, delay);
   }
 
+  // A reload can cancel either the debounce timer or an in-flight save. Keep
+  // the unsaved snapshot in this tab until it can receive its own view URL.
+  const RELOAD_DRAFT_KEY = 'muscat-ephem-reload-draft';
+  window.addEventListener('pagehide', () => {
+    if (!currentViewSlug() || !loadedTargets.length || pendingViewState) return;
+    const state = collectEphemerisViewState();
+    try {
+      if (JSON.stringify(state) === lastSavedViewJson) {
+        sessionStorage.removeItem(RELOAD_DRAFT_KEY);
+      } else {
+        sessionStorage.setItem(RELOAD_DRAFT_KEY, JSON.stringify({url: location.href, state}));
+      }
+    } catch (error) {
+      console.warn('Could not preserve pending ephemeris edits for reload:', error);
+    }
+  });
+
   // 1. Initial Page Load Setup
   document.addEventListener('DOMContentLoaded', function() {
     const urlTargets = parseUrlTargets();
@@ -930,7 +955,19 @@
       }
     }
 
-    if (viewSlug) {
+    // Navigating to a saved link explicitly always opens its server snapshot.
+    const isReload = performance.getEntriesByType('navigation')[0]?.type === 'reload';
+    let draft;
+    try {
+      if (isReload && viewSlug) draft = JSON.parse(sessionStorage.getItem(RELOAD_DRAFT_KEY));
+      else sessionStorage.removeItem(RELOAD_DRAFT_KEY);
+    } catch (error) {
+      console.warn('Could not read pending ephemeris edits:', error);
+    }
+    if (draft?.url === location.href && Array.isArray(draft.state?.targets)) {
+      pendingViewState = draft.state;
+      loadMultipleTargets(draft.state.targets);
+    } else if (viewSlug) {
       fetch('/api/ephemeris/view/' + encodeURIComponent(viewSlug))
         .then(r => r.json())
         .then(res => {
@@ -1538,6 +1575,7 @@
       && fitCache.signature === fitRequestSignature(cachedRequest)
       && fitCache.results;
     if (cacheMatches) {
+      calculatedSignature = fitCache.signature;
       fitResults = fitCache.results;
       renderFitResults(fitResults);
       drawPlot();
@@ -1630,8 +1668,8 @@
         }
       }
       const ephemerisChangeHandler = isManualPlanet
-        ? 'saveTargetOpts(); if (orderPlanetLetters()) rebuildINI(false); scheduleComputeFitIfValid()'
-        : 'saveTargetOpts(); if (orderPlanetLetters()) rebuildINI(false); scheduleComputeFit()';
+        ? 'saveTargetOpts(); rebuildINI(!orderPlanetLetters()); scheduleComputeFitIfValid()'
+        : 'saveTargetOpts(); rebuildINI(!orderPlanetLetters()); scheduleComputeFit()';
       const durationChangeHandler = isManualPlanet
         ? 'scheduleComputeFitIfValid()'
         : 'scheduleComputeFit()';
@@ -1975,7 +2013,9 @@
       const tr = document.createElement('tr');
       const key = datasetStateKey(d);
       const legacyKey = legacyDatasetStateKey(d);
-      const isChecked = checkedMap[key] !== undefined ? checkedMap[key] : (checkedMap[legacyKey] !== undefined ? checkedMap[legacyKey] : true);
+      const warnings = d.fit_warnings || [];
+      const unknown = d.unknown_diagnostics || [];
+      const isChecked = checkedMap[key] ?? (warnings.length ? false : (checkedMap[legacyKey] ?? true));
       if (isChecked) tr.classList.add('selected-row');
 
       // Create label summary of transits in this dataset
@@ -2019,7 +2059,9 @@
         </td>
         <td class="mono" style="text-align: center;">${escapeAttr(d.planets_fitted)}</td>
         <td class="mono" style="text-align: center;">${epochsSummary}</td>
-        <td>${transitsSummary}</td>
+        <td>${transitsSummary} <small>Detection SNR: ${Number.isFinite(d.detection_snr) ? d.detection_snr.toFixed(1) : 'Unknown'}</small>
+          ${warnings.length ? ' <span class="badge badge-amber">' + escapeAttr(warnings.join(', ')) + '</span>' : ''}
+          ${unknown.length ? '<small>Unknown: ' + escapeAttr(unknown.join(', ')) + '</small>' : ''}</td>
       `;
       tbody.appendChild(tr);
     });
@@ -2582,7 +2624,9 @@
     }
     computeFitTimer = setTimeout(() => {
       computeFitTimer = null;
-      computeFit();
+      // Fields may have become incomplete since this automatic fit was queued.
+      if (collectFitRequest(false)) computeFit();
+      else clearFitPresentation();
     }, delay);
   }
 
@@ -2629,7 +2673,7 @@
       planets_ephem: planetsEphem,
       datasets: datasets,
       manual_points: collectManualPointsForRequest(),
-      fit_method: fitMethodRadio ? fitMethodRadio.value : 'unweighted'
+      fit_method: fitMethodRadio ? fitMethodRadio.value : 'weighted'
     };
   }
 
@@ -2648,7 +2692,7 @@
 
     const combinedKey = getCombinedStorageKey();
 
-    fetch('/api/ephemeris/calculate', {
+    return fetch('/api/ephemeris/calculate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(request)
@@ -2660,17 +2704,20 @@
         showMessageModal('Fit calculation failed', res.error || 'Unknown error');
         return;
       }
+      calculatedSignature = fitRequestSignature(request);
       fitResults = res.results;
       try {
         localStorage.setItem(fitResultsCacheKey(combinedKey), JSON.stringify({
           version: FIT_RESULTS_CACHE_VERSION,
-          signature: fitRequestSignature(request),
+          signature: calculatedSignature,
           results: fitResults
         }));
       } catch (e) {}
       renderFitResults(res.results);
       drawPlot();
       markFlaggedManualRows(res.results);
+      // The amplitude starting values come from this fit's O-C.
+      rebuildINI(true);
     })
     .catch(e => {
       if (requestSeq !== computeFitRequestSeq) return;
@@ -3697,7 +3744,7 @@
   window.addEventListener('load', function() {
     const runBtn = document.getElementById('run-ttv-btn');
     if (runBtn) {
-      runBtn.addEventListener('click', function() {
+      runBtn.addEventListener('click', async function() {
         const planetLetters = document.getElementById('opt-planet_letters').value;
         if (!planetLetters) {
           showMessageModal('Planet Letters Required', 'Please enter planet letters');
@@ -3710,6 +3757,15 @@
           return;
         }
         
+        // A click can beat the debounced O-C update after a checkbox change.
+        // Build harmonic's selection and CSV from the current O-C calculation.
+        if (!fitResults || calculatedSignature !== fitRequestSignature(collectFitRequest(false))) {
+          runBtn.disabled = true;
+          clearTimeout(computeFitTimer);
+          await computeFit();
+          runBtn.disabled = false;
+          if (!fitResults || calculatedSignature !== fitRequestSignature(collectFitRequest(false))) return;
+        }
         const options = collectOptions();
         if (!options.csv_content) {
           showMessageModal('No Transit Time Data', 'No transit time data. Please check at least one dataset to fit.');
@@ -4143,6 +4199,7 @@
   var selectedTTVRun = null;
   // run_name -> whether the viewer may delete it (from /api/ttv-fit/runs)
   var ttvRunCanModify = {};
+  var ttvRunWarnings = {};
   var ttvModelData = null;
   var ttvModelRun = null;
   var ttvModelAvailable = false;
@@ -4167,7 +4224,11 @@
       .then(res => {
         const runs = (res.ok && res.runs) ? res.runs.map(r => r.run_name) : [];
         ttvRunCanModify = {};
-        ((res.ok && res.runs) ? res.runs : []).forEach(r => { ttvRunCanModify[r.run_name] = r.can_modify !== false; });
+        ttvRunWarnings = {};
+        ((res.ok && res.runs) ? res.runs : []).forEach(r => {
+          ttvRunCanModify[r.run_name] = r.can_modify !== false;
+          ttvRunWarnings[r.run_name] = r.warnings || [];
+        });
         if (runs.length === 0) {
           const deleteBtn = document.getElementById('delete-btn');
           if (deleteBtn) deleteBtn.style.display = 'none';
@@ -4259,16 +4320,27 @@
     if (!container) return;
 
     let html = '<h2>TTV Fit Results <span style="font-size: 0.8rem; color: var(--text-dim); font-weight: 400;">— ' +
-               (runName || 'default') + '</span></h2>';
+               escapeAttr(runName || 'default') + '</span></h2>';
 
     // Chips to switch between stored runs, mirroring the transit-fit page.
     if (runs && runs.length > 1) {
       html += '<div class="site-chips"><span class="site-label">Run:</span>';
       runs.forEach(r => {
         const active = r === runName ? ' active' : '';
-        html += `<button type="button" class="site-chip${active}" data-run="${r}">${r}</button>`;
+        html += `<button type="button" class="site-chip${active}" data-run="${escapeAttr(r)}">${escapeAttr([r, ...(ttvRunWarnings[r] || [])].join(" — "))}</button>`;
       });
       html += '</div>';
+    }
+
+    if (outputs.health) {
+      const {warnings, metrics} = outputs.health;
+      if (warnings.length) html += '<p><strong>Done with warnings</strong> — ' + escapeAttr(warnings.join(', ')) + '</p>';
+      html += '<p>' + Object.entries(metrics).map(([label, value]) => {
+        let display = value ?? 'Unknown';
+        if (typeof value === 'number') display = Number(value.toFixed(6));
+        if (typeof value === 'boolean') display = value ? 'Yes' : 'No';
+        return escapeAttr(label) + ': ' + escapeAttr(String(display));
+      }).join(' · ') + '</p>';
     }
 
     if (outputs.plots && outputs.plots.length > 0) {
@@ -4456,13 +4528,78 @@
       });
   }
 
+  // A planet's period from its card, else the reference ephemeris; Infinity when unknown.
+  function planetPeriod(pl) {
+    const card = document.querySelector(`#planet-cards-container .planet-card[data-planet="${pl}"]`);
+    const value = card ? parseFloat(card.querySelector('.planet-period').value) : Number(combinedRefEphem[pl]?.period);
+    return Number.isFinite(value) && value > 0 ? value : Infinity;
+  }
+
   function periodOrderedLetters(letters) {
-    function period(pl) {
-      const card = document.querySelector(`#planet-cards-container .planet-card[data-planet="${pl}"]`);
-      const value = card ? parseFloat(card.querySelector('.planet-period').value) : Number(combinedRefEphem[pl]?.period);
-      return Number.isFinite(value) && value > 0 ? value : Infinity;
+    return letters.slice().sort((a, b) => planetPeriod(a) - planetPeriod(b));
+  }
+
+  // Starting values for harmonic's [INIT]. harmonic fits both and clips each
+  // into its own bounds, so these only decide where the sampler starts.
+  const TTV_DEFAULT_SUPER_PERIOD = 1000.0;  // days, when the periods give no estimate
+  const TTV_DEFAULT_AMPLITUDE = 0.02;       // days, before a linear fit exists
+  const TTV_MIN_SUPER_PERIOD_FACTOR = 5.0;  // harmonic's lower bound, in outer periods
+
+  // Super-period of the nearest first-order resonance j:(j-1),
+  // 1 / |j/P_outer - (j-1)/P_inner|. Null when a period is unknown, or when
+  // the pair is so far from that resonance that the value falls below
+  // harmonic's lower bound; the caller then keeps the fixed default.
+  function firstOrderSuperPeriod(pInner, pOuter) {
+    if (!Number.isFinite(pInner) || !Number.isFinite(pOuter) || !(pOuter > pInner)) return null;
+    const ratio = pOuter / pInner;
+    const j = Math.max(2, Math.round(ratio / (ratio - 1)));
+    const beat = Math.abs(j / pOuter - (j - 1) / pInner);
+    if (!(beat > 0)) return null;
+    const superPeriod = 1 / beat;
+    return superPeriod >= TTV_MIN_SUPER_PERIOD_FACTOR * pOuter ? superPeriod : null;
+  }
+
+  // The timings harmonic receives: planets named in Planet letters, checked,
+  // with an uncertainty. buildCSVContent, buildSelection and the amplitude
+  // seed all read this one list, so the seed can only see what harmonic sees.
+  function harmonicTimingRows() {
+    if (!fitResults) return [];
+    const letters = (document.getElementById('opt-planet_letters').value || '').toLowerCase().split('');
+    const rows = [];
+    for (const pl in fitResults) {
+      const index = letters.indexOf(pl.toLowerCase());
+      if (index === -1) continue;
+      ((fitResults[pl] || {}).points || []).forEach(p => {
+        if (p.checked && p.tc_unc !== null && p.tc_unc !== undefined) rows.push({ planet: pl, index: index, point: p });
+      });
     }
-    return letters.slice().sort((a, b) => period(a) - period(b));
+    return rows;
+  }
+
+  // Largest |O-C| of a planet among the timings harmonic receives, in days,
+  // floored at the median uncertainty of all of them. This is harmonic's own
+  // scale for the amplitude bound (maxoc and med_unc in params.build_spec).
+  // Null when the planet has no timing in that set.
+  function largestOminusC(pl) {
+    const rows = harmonicTimingRows();
+    // Match by Planet letters position, as the CSV does: a fit result keyed
+    // 'B' is planet b.
+    const letters = (document.getElementById('opt-planet_letters').value || '').toLowerCase().split('');
+    const index = letters.indexOf(String(pl).toLowerCase());
+    const own = rows.filter(r => r.index === index && Number.isFinite(r.point.oc_min));
+    if (!own.length) return null;
+    const errs = rows.map(r => Math.abs(Number(r.point.tc_unc))).filter(Number.isFinite).sort((x, y) => x - y);
+    const middle = Math.floor(errs.length / 2);
+    const medianErr = !errs.length ? 0
+      : (errs.length % 2 ? errs[middle] : (errs[middle - 1] + errs[middle]) / 2);
+    const days = Math.max(Math.max(...own.map(r => Math.abs(r.point.oc_min))) / 1440.0, medianErr);
+    return days > 0 ? days : null;
+  }
+
+  // An amplitude for the INI with three significant digits. A fixed number of
+  // decimals would write a small positive value as 0, which harmonic rejects.
+  function formatAmplitude(days) {
+    return String(Number(days.toPrecision(3)));
   }
 
   function orderPlanetLetters() {
@@ -4475,28 +4612,10 @@
   }
 
   function buildCSVContent() {
-    if (!fitResults) return '';
-    const letters = (document.getElementById('opt-planet_letters').value || '').toLowerCase().split('');
-    if (letters.length === 0) return '';
-    
     let csv = 'planet,epoch,tc,tc_unc\n';
-    let hasPoints = false;
-    for (const pl in fitResults) {
-      const plLower = pl.toLowerCase();
-      const idx = letters.indexOf(plLower);
-      if (idx === -1) continue;
-      
-      const res = fitResults[pl];
-      if (res && res.points) {
-        res.points.forEach(p => {
-          if (p.checked && p.tc_unc !== null && p.tc_unc !== undefined) {
-            csv += `${idx},${p.epoch},${p.bjd},${p.tc_unc}\n`;
-            hasPoints = true;
-          }
-        });
-      }
-    }
-    return hasPoints ? csv : '';
+    const rows = harmonicTimingRows();
+    rows.forEach(r => { csv += `${r.index},${r.point.epoch},${r.point.bjd},${r.point.tc_unc}\n`; });
+    return rows.length ? csv : '';
   }
 
   // The checked O-C points that buildCSVContent() sends, named so the server can
@@ -4506,27 +4625,13 @@
   // Same filter as the CSV: planets selected in planet_letters, checked, with an
   // uncertainty.
   function buildSelection() {
-    if (!fitResults) return [];
-    const letters = (document.getElementById('opt-planet_letters').value || '').toLowerCase().split('');
-    const selection = [];
-    for (const pl in fitResults) {
-      if (letters.indexOf(pl.toLowerCase()) === -1) continue;
-      const res = fitResults[pl];
-      ((res && res.points) || []).forEach(p => {
-        if (!p.checked || p.tc_unc === null || p.tc_unc === undefined) return;
-        if (p.manual) {
-          selection.push({
-            kind: 'manual', planet: pl, epoch: p.epoch, tc: p.bjd, tc_unc: p.tc_unc, note: p.note || ''
-          });
-        } else {
-          selection.push({
-            kind: 'product', planet: pl, instrument: p.instrument, date: p.date,
-            target: p.target, run_id: p.run_id || ''
-          });
-        }
-      });
-    }
-    return selection;
+    return harmonicTimingRows().map(r => {
+      const p = r.point;
+      return p.manual
+        ? { kind: 'manual', planet: r.planet, epoch: p.epoch, tc: p.bjd, tc_unc: p.tc_unc, note: p.note || '' }
+        : { kind: 'product', planet: r.planet, instrument: p.instrument, date: p.date,
+            target: p.target, run_id: p.run_id || '' };
+    });
   }
 
   function collectOptions() {
@@ -4597,7 +4702,11 @@
     
     let initSection = '';
     
-    if (onlyT14 && textarea.value) {
+    // An [INIT] the page generated and the user has not touched is refreshed
+    // when a new linear fit or period changes its inputs. An edited one is kept.
+    const untouched = textarea.dataset.generated !== undefined
+      && textarea.value.trim() === textarea.dataset.generated;
+    if (onlyT14 && textarea.value && !untouched) {
       // Extract existing sections other than [T14]
       const lines = textarea.value.split('\n');
       let currentSection = '';
@@ -4630,9 +4739,9 @@
       for (let i = 0; i < letters.length - 1; i++) {
         const p1 = letters[i];
         const p2 = letters[i + 1];
-        const a1 = '0.02';
-        const a2 = '0.02';
-        const per = '1000.0';
+        const a1 = formatAmplitude(largestOminusC(p1) ?? TTV_DEFAULT_AMPLITUDE);
+        const a2 = formatAmplitude(largestOminusC(p2) ?? TTV_DEFAULT_AMPLITUDE);
+        const per = (firstOrderSuperPeriod(planetPeriod(p1), planetPeriod(p2)) ?? TTV_DEFAULT_SUPER_PERIOD).toFixed(1);
         
         let t = '2450000.0';
         if (combinedRefEphem[p1] && combinedRefEphem[p1].t0) {
@@ -4648,7 +4757,10 @@
       }
     }
     
+    const generated = !(onlyT14 && textarea.value && !untouched);
     textarea.value = initSection.trim() + '\n' + t14Section.trim();
+    if (generated) textarea.dataset.generated = textarea.value.trim();
+    else delete textarea.dataset.generated;
   }
 </script>
 {% endblock %}

@@ -123,6 +123,13 @@ def _write_log_banner(
                 logf.write(f"  {k}: {v!r}\n")
         logf.write("\n")
 
+    defaulted = defaulted_prior_widths(options) if options else []
+    if defaulted:
+        logf.write("--- priors with no uncertainty entered (default width used) ---\n")
+        for planet, param, width in defaulted:
+            logf.write(f"  {planet}: {param} width {width:g} (default)\n")
+        logf.write("\n")
+
     if transit_center_priors:
         logf.write("--- transit-center priors (BJD) ---\n")
         for planet, prior in transit_center_priors.items():
@@ -132,6 +139,19 @@ def _write_log_banner(
                 logf.write(f"  {planet}: Uniform [{prior['lower_bjd']:.6f}, "
                            f"{prior['upper_bjd']:.6f}], center {prior['center_bjd']:.6f}, "
                            f"full width {prior['full_width_days']:.6f} d\n")
+                # Runs recorded before the width could follow the ephemeris
+                # have none of the keys below.
+                sigma = prior.get("sigma_days")
+                if sigma:
+                    how = (f"set as {prior['n_sigma']:g} sigma" if prior.get("mode") == "sigma"
+                           else "set directly")
+                    logf.write(f"    width {how}; propagated 1 sigma {sigma:.6f} d "
+                               f"at epoch {prior['epoch_number']}; the prior reaches "
+                               f"{prior['half_width_sigma']:.3g} sigma either side\n")
+                if prior.get("narrow"):
+                    logf.write(f"    WARNING: the prior reaches less than {TC_WARN_NSIGMA:g} sigma "
+                               "either side of the predicted center, so the transit may "
+                               "fall outside it\n")
         logf.write("\n")
 
     if narrowband_aliases:
@@ -564,6 +584,42 @@ _FIXABLE_PARAMS = {"t0", "period", "dur", "u_star", "b", "ror"}
 _DEFAULT_FIXED_PARAMS: tuple[str, ...] = ("period", "u_star")
 
 
+# Prior width written to sys.yaml when a Gaussian prior is entered as a mean
+# with no uncertainty, per planet parameter, in the parameter's own units
+# (days for period and duration). t0 is not here: timer samples it from the
+# Uniform transit-center prior (tc_pred, tc_pred_unc), whatever sys.yaml says.
+PRIOR_WIDTH_DEFAULTS = {"period": 0.001, "dur": 0.01, "ror": 0.005, "b": 0.1}
+# The t0 uncertainty written to sys.yaml when none is entered. timer does not
+# use it for the sampled t0, so it is not reported as a prior width.
+SYS_T0_UNC_DEFAULT = 0.01
+
+
+def defaulted_prior_widths(options: dict | None) -> list[tuple[str, str, float]]:
+    """``(planet, parameter, width)`` for each sampled Gaussian prior that has a
+    mean but no uncertainty, so the fit uses :data:`PRIOR_WIDTH_DEFAULTS`.
+
+    Fixed parameters have no prior width, and a Uniform prior carries its own
+    bounds, so neither is listed. Used to say so in the log banner (#458).
+    """
+    o = options or {}
+    planets = [p.strip() for p in (o.get("planets") or "b").split(",") if p.strip()] or ["b"]
+    first = planets[0]
+    fixed = set(_resolved_fixed_params(o))
+    out = []
+    for p in planets:
+        for param, width in PRIOR_WIDTH_DEFAULTS.items():
+            if param in fixed:
+                continue
+            if param in _PRIOR_PARAMS and _prior_choice(o, param, p, first) == "uniform":
+                continue
+            if _planet_value(o, param, p, first) is None:
+                continue
+            raw_unc = o.get(f"{param}_unc_{p}") or (o.get(f"{param}_unc") if p == first else None)
+            if str(raw_unc or "").strip() == "":
+                out.append((p, param, width))
+    return out
+
+
 def _resolved_fixed_params(options: dict) -> list:
     """The 'fixed' parameter list timer will actually fit with.
 
@@ -588,7 +644,6 @@ _PLANET_TOKEN_RE = re.compile(r"^[A-Za-z]$")
 _FIT_NUMERIC_FIELDS: list[tuple[str, str, str]] = [
     ("trim_beg",     "Trim begin (days)",    "nonneg"),
     ("trim_end",     "Trim end (days)",      "nonneg"),
-    ("tc_pred_unc", "tc_pred uncertainty",  "pos"),
     ("teff",        "Teff (K)",             "pos"),
     ("teff_unc",    "Teff uncertainty",     "pos"),
     ("logg",        "log g",                "num"),
@@ -810,15 +865,60 @@ def validate_flare_times(options: dict | None, csvs) -> str | None:
 
 
 DEFAULT_TC_UNC = 0.04
+# Default reach of the transit-center prior either side of the predicted
+# center, in units of the propagated ephemeris uncertainty, and the reach
+# below which a launch warns.
+DEFAULT_TC_NSIGMA = 3.0
+TC_WARN_NSIGMA = 3.0
+_TC_WIDTH_MODES = ("sigma", "direct")
+
+
+def propagated_center_sigma(t0_unc: float | None, period_unc: float | None,
+                            epoch_number: int) -> float | None:
+    """Return the 1 sigma uncertainty of a transit *epoch_number* periods from t0.
+
+    A linear ephemeris predicts ``t0 + N * P``, so its uncertainty is
+    ``sqrt(sigma_t0**2 + (N * sigma_P)**2)``. Returns ``None`` unless both
+    uncertainties are finite and above zero: with either missing the result
+    would understate the uncertainty and look more trustworthy than it is.
+    """
+    for unc in (t0_unc, period_unc):
+        if unc is None or not math.isfinite(unc) or unc <= 0:
+            return None
+    return math.hypot(t0_unc, epoch_number * period_unc)
+
+
+def _planet_text(options: dict, key: str, planet: str, first_planet: str) -> str:
+    """Return a planet's text field, with the same first-planet broadcast as
+    :func:`_planet_value`."""
+    raw = options.get(f"{key}_{planet}")
+    if raw is None and planet == first_planet:
+        raw = options.get(key)
+    # Only a missing value is blank. A JSON 0 or False is an explicit value
+    # and must reach the caller's validation instead of becoming the default.
+    return "" if raw is None else str(raw).strip()
 
 
 def predict_transit_centers(options: dict | None, csvs) -> tuple[dict[str, dict], str | None]:
     """Return each planet's Uniform transit-center prior, or a user-facing error.
 
-    An explicit ``tc_pred`` wins. Otherwise the center is the transit of the
-    reference epoch plus an integer number of periods nearest the middle of
-    the selected light curves. A planet with neither is an error rather than a
-    silent fallback to the raw epoch or the data mean.
+    Center: an explicit ``tc_pred`` wins. Otherwise the center is the transit
+    of the reference epoch plus an integer number of periods nearest the middle
+    of the selected light curves. A planet with neither is an error rather than
+    a silent fallback to the raw epoch or the data mean.
+
+    Width: ``tc_pred_mode`` is ``sigma`` or ``direct``. In sigma mode the prior
+    reaches ``tc_pred_nsigma`` (default 3) times the propagated ephemeris
+    uncertainty either side of the center. In direct mode ``tc_pred_unc`` is
+    the full width in days. With no mode, an explicit ``tc_pred_unc`` means
+    direct, so callers that predate the mode keep the width they send;
+    otherwise the mode is sigma when the uncertainty can be propagated and
+    direct with ``DEFAULT_TC_UNC`` when it cannot.
+
+    The propagated uncertainty describes the ephemeris used to predict the
+    transit, so it uses the t0 and period uncertainties whether or not the fit
+    samples the period. A period entered as Uniform bounds carries no
+    uncertainty, so sigma mode is unavailable for that planet.
     """
     o = options or {}
     planets = [p.strip() for p in (o.get("planets") or "b").split(",") if p.strip()] or ["b"]
@@ -827,13 +927,14 @@ def predict_transit_centers(options: dict | None, csvs) -> tuple[dict[str, dict]
     time_range = None
     priors: dict[str, dict] = {}
     for p in planets:
+        epoch = _planet_value(o, "t0", p, first)
+        period_is_uniform = _prior_choice(o, "period", p, first) == "uniform"
+        if period_is_uniform:
+            period = sum(_uniform_bounds(o, "period", p, first)) / 2
+        else:
+            period = _planet_value(o, "period", p, first)
         center = _planet_value(o, "tc_pred", p, first)
         if center is None:
-            epoch = _planet_value(o, "t0", p, first)
-            if _prior_choice(o, "period", p, first) == "uniform":
-                period = sum(_uniform_bounds(o, "period", p, first)) / 2
-            else:
-                period = _planet_value(o, "period", p, first)
             if time_range is None:
                 time_range = lightcurve_time_range(csvs)
             if epoch is None or period is None or not period > 0 or time_range is None:
@@ -843,11 +944,55 @@ def predict_transit_centers(options: dict | None, csvs) -> tuple[dict[str, dict]
                 )
             middle = sum(time_range) / 2
             center = epoch + math.floor((middle - epoch) / period + 0.5) * period
-        width = _planet_value(o, "tc_pred_unc", p, first)
-        width = DEFAULT_TC_UNC if width is None else width
+
+        sigma = epoch_number = None
+        if epoch is not None and period is not None and period > 0:
+            epoch_number = math.floor((center - epoch) / period + 0.5)
+            if not period_is_uniform:
+                sigma = propagated_center_sigma(
+                    _planet_value(o, "t0_unc", p, first),
+                    _planet_value(o, "period_unc", p, first), epoch_number)
+
+        mode = _planet_text(o, "tc_pred_mode", p, first).lower()
+        if mode and mode not in _TC_WIDTH_MODES:
+            return {}, f"tc_pred_mode (planet {p}) must be sigma or direct"
+        raw_width = _planet_text(o, "tc_pred_unc", p, first)
+        if not mode:
+            mode = "sigma" if not raw_width and sigma is not None else "direct"
+
+        n_sigma = None
+        if mode == "sigma":
+            if sigma is None:
+                return {}, (
+                    f"planet {p}: a transit-center prior width in sigma needs an uncertainty on "
+                    "both the epoch t0 and the period (entered as mean,uncertainty). Enter them, "
+                    "or set the full width in days instead"
+                )
+            raw_n = _planet_text(o, "tc_pred_nsigma", p, first)
+            n_sigma = _to_float(raw_n) if raw_n else DEFAULT_TC_NSIGMA
+            if n_sigma is None or not math.isfinite(n_sigma) or n_sigma <= 0:
+                return {}, f"number of sigma for the transit-center prior (planet {p}) must be greater than 0"
+            width = 2 * n_sigma * sigma
+        else:
+            # The full width is checked only here, where it is used: a value
+            # left over in a sigma-mode request must not block the launch.
+            width = _to_float(raw_width) if raw_width else DEFAULT_TC_UNC
+            if width is None or not math.isfinite(width) or width <= 0:
+                return {}, (
+                    f"full width of the transit-center prior (planet {p}) must be a "
+                    "number of days greater than 0"
+                )
+
+        half_width_sigma = width / 2 / sigma if sigma is not None else None
+        # The relative tolerance keeps exactly 3 sigma from warning after the
+        # multiply and divide above.
+        narrow = (not fixed and half_width_sigma is not None
+                  and half_width_sigma < TC_WARN_NSIGMA * (1 - 1e-9))
         priors[p] = {"center_bjd": center, "full_width_days": width,
                      "lower_bjd": center - width / 2, "upper_bjd": center + width / 2,
-                     "fixed": fixed}
+                     "fixed": fixed, "mode": mode, "n_sigma": n_sigma,
+                     "sigma_days": sigma, "epoch_number": epoch_number,
+                     "half_width_sigma": half_width_sigma, "narrow": narrow}
     return priors, None
 
 
@@ -1714,7 +1859,14 @@ def _write_fit_inputs(
     }
     for p in [p.strip() for p in planets_str.split(",") if p.strip()]:
         def get_val(key, default):
-            return options.get(f"{key}_{p}") or options.get(key) or default
+            # An unsuffixed key belongs to the first planet only, as in
+            # _planet_value. The form repeats the first planet's values
+            # unsuffixed, so broadcasting them would give a later planet the
+            # first planet's width instead of the advertised default.
+            value = options.get(f"{key}_{p}")
+            if not value and p == first_planet:
+                value = options.get(key)
+            return value or default
 
         def planet_pair(param, val_default, unc_default):
             # Uniform: derive a central [value, unc] from the [low, high] bounds
@@ -1726,11 +1878,11 @@ def _write_fit_inputs(
             return [float(get_val(param, val_default)), float(get_val(f"{param}_unc", unc_default))]
 
         sys_data["planets"][p] = {
-            "period": planet_pair("period", 1.0, 0.001),
-            "t0": [float(get_val("t0", 2450000.0)), float(get_val("t0_unc", 0.01))],
-            "dur": planet_pair("dur", 0.1, 0.01),
-            "ror": planet_pair("ror", 0.05, 0.005),
-            "b": planet_pair("b", 0.0, 0.1),
+            "period": planet_pair("period", 1.0, PRIOR_WIDTH_DEFAULTS["period"]),
+            "t0": [float(get_val("t0", 2450000.0)), float(get_val("t0_unc", SYS_T0_UNC_DEFAULT))],
+            "dur": planet_pair("dur", 0.1, PRIOR_WIDTH_DEFAULTS["dur"]),
+            "ror": planet_pair("ror", 0.05, PRIOR_WIDTH_DEFAULTS["ror"]),
+            "b": planet_pair("b", 0.0, PRIOR_WIDTH_DEFAULTS["b"]),
         }
 
     with open(rdir / "sys.yaml", "w") as f:
@@ -2493,6 +2645,7 @@ def empty_fit_outputs() -> dict:
         "systematics_plots": [],
         "summary": None,
         "detection_snr": None,
+        "health": None,
         "has_log": False,
         "has_fit_yaml": False,
         "has_sys_yaml": False,
@@ -2566,6 +2719,83 @@ def detection_snr(summary_rows: list[dict]) -> dict | None:
     return {"bands": bands, "combined": combined, "combined_text": f"{combined:.1f}"}
 
 
+_DIVERGENCES = re.compile(r"\b(\d+) divergences? after tuning\b", re.I)
+
+
+_SAMPLED_CHAINS = re.compile(r"\bSampling (\d+) chains? for [\d,_]+ tune", re.I)
+
+
+def midtime_review(health: dict) -> tuple[list[str], list[str]]:
+    """Reasons to opt in to this mid-time, and missing sampler diagnostics."""
+    metrics = health.get("metrics") or {}
+    divergences = metrics.get("Divergences")
+    rhat = metrics.get("Max R-hat")
+    reasons = []
+    if divergences:
+        noun = "divergence" if divergences == 1 else "divergences"
+        reasons.append(f"{divergences} {noun} after tuning")
+    if health.get("chains") == 1:
+        reasons.append("Single chain; convergence unverified")
+    if rhat is not None and rhat > 1.01:
+        reasons.append(f"Max R-hat {rhat:.6g} above 1.01")
+    for label in ("Min bulk ESS", "Min tail ESS"):
+        ess = metrics.get(label)
+        if ess is not None and ess < 400:
+            reasons.append(f"{label} {ess:.6g} below 400")
+    unknown = [label for label in ("Max R-hat", "Divergences", "Min bulk ESS", "Min tail ESS")
+               if metrics.get(label) is None]
+    return reasons, unknown
+
+
+def _timer_health(rdir, outputs):
+    summary = outputs["summary"] or {}
+    rows = summary.get("rows", [])
+    snr = outputs["detection_snr"] or {}
+    count = None
+    chains = None
+    sampling_finished = False
+    optimize_only = False
+    outer = rdir / "timer-fit.log"
+    log = outer if outer.is_file() else rdir / "out" / "timer-fit.log"
+    try:
+        with log.open(errors="replace") as lines:
+            for line in lines:
+                if " - INFO - Output directory: " in line:
+                    count = None
+                    chains = None
+                    sampling_finished = False
+                    optimize_only = False
+                if "Optimize-only test run started" in line:
+                    optimize_only = True
+                sampled = _SAMPLED_CHAINS.search(line)
+                if sampled:
+                    chains = int(sampled.group(1))
+                    sampling_finished = " took " in line
+                if sampling_finished and count is None and "Timer-fit completed successfully" in line:
+                    count = 0
+                match = _DIVERGENCES.search(line)
+                if match:
+                    count = int(match.group(1))
+    except OSError:
+        pass
+    if optimize_only:
+        # The optimize-only helper leaves any earlier posterior summary on disk.
+        rows = []
+        snr = {}
+        chains = None
+        count = None
+    def finite_values(column):
+        return (value for row in rows if (value := _finite_float(row.get(column))) is not None)
+
+    metrics = {"Detection SNR": snr.get("combined"), "Divergences": count,
+               "Max R-hat": max(finite_values("r_hat"), default=None),
+               "Min bulk ESS": min(finite_values("ess_bulk"), default=None),
+               "Min tail ESS": min(finite_values("ess_tail"), default=None)}
+    health = {"chains": chains, "metrics": metrics}
+    health["warnings"], _ = midtime_review(health)
+    return health
+
+
 def get_fit_outputs(inst: str, date: str, target: str, run_id: str | None = None) -> dict:
     """Check and retrieve output files, plots, and summary values from a completed run.
 
@@ -2584,7 +2814,7 @@ def get_fit_outputs(inst: str, date: str, target: str, run_id: str | None = None
         return _get_fit_outputs_mtime(inst, date, target, run_id, -1.0)
 
     mtime = 0.0
-    for d in (rdir, rdir / "out"):
+    for d in (rdir, rdir / "out", rdir / "out/summary.csv", rdir / "timer-fit.log", rdir / "out/timer-fit.log"):
         try:
             mtime = max(mtime, d.stat().st_mtime)
         except OSError:
@@ -2683,6 +2913,7 @@ def _get_fit_outputs_mtime(
         except Exception:
             logger.debug("failed to read timer summary preview from %s", out_dir / "summary.csv", exc_info=True)
 
+    outputs["health"] = _timer_health(rdir, outputs)
     return outputs
 
 
@@ -3102,6 +3333,7 @@ def sync_jobs() -> None:
                 date=job.date,
                 target=job.target,
                 run_id=job.run_id,
+                params=jobs.with_fit_health(existing, get_fit_outputs(job.inst, job.date, job.target, job.run_id)) if persist_state == "done" else "",
                 state=persist_state,
                 returncode=persist_rc,
                 elapsed=round(elapsed),
@@ -3164,6 +3396,7 @@ def sync_jobs() -> None:
                 
             if completed_ok:
                 store.save(
+                    params=jobs.with_fit_health(row, get_fit_outputs(inst, date, target, run_id)),
                     type_="transit_fit",
                     inst=inst,
                     date=date,

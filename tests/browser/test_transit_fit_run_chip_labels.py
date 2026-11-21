@@ -52,3 +52,22 @@ def test_fit_runs_sharing_a_name_get_distinct_chips(page, live_server, scope_key
         page.context.close()
         for run_id in runs:
             shutil.rmtree(parent / run_id)
+
+def test_divergent_fit_on_jobs_chip_and_results(page, live_server):
+    parent = _add_same_name_fit_runs(live_server, runs={"divergent": "1m0-06"})
+    try:
+        log = parent / FIT_RUN_ID / "timer-fit.log"
+        log.write_text("There was 1 divergence after tuning.")
+        page.goto(URL)
+        chip = page.locator("a.site-chip", has_text="1 divergence after tuning")
+        chip.click()
+        result = page.locator(".phot-section").filter(has=page.get_by_role("heading", name="Transit Fit Results"))
+        expect(result).to_contain_text("Done with warnings")
+        expect(result).to_contain_text("Max R-hat: Unknown")
+        page.goto("/jobs")
+        row = page.locator('tr.job-row[data-key$="/fit1"]')
+        expect(row).to_contain_text("Done with warnings")
+        expect(row).to_contain_text("1 divergence after tuning")
+    finally:
+        (parent / FIT_RUN_ID / "timer-fit.log").unlink(missing_ok=True)
+        shutil.rmtree(parent / "divergent")

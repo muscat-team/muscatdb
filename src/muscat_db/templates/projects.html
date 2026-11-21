@@ -9,9 +9,10 @@
 </div>
 
 {% if projects %}
-<div class="card-grid">
+<div class="card-grid" id="project-grid">
 {% for p in projects %}
-  <div class="card">
+  <div class="card" data-project="{{ p.tag }}">
+    <button type="button" class="drag-handle" draggable="true" title="Drag to reorder or use the arrow keys" aria-label="Reorder {{ p.tag }}">⠿</button>
     <a href="/tag?name={{ p.tag | urlencode }}">
       <div class="name">{{ p.tag }}</div>
       <div class="meta">{{ p.target_count }} target{{ '' if p.target_count == 1 else 's' }}</div>
@@ -48,6 +49,60 @@
 
 <script>
 (function () {
+  const grid = document.getElementById('project-grid');
+  if (grid) {
+    const orderKey = 'projects:card-order';
+    const saved = MuscatStorage.getJSON(orderKey, []);
+    const cards = new Map(Array.from(grid.children, card => [card.dataset.project, card]));
+    if (Array.isArray(saved)) {
+      const ordered = saved.map(name => cards.get(name)).filter(Boolean);
+      grid.prepend(...ordered);
+    }
+
+    function move(card, target, after) {
+      if (!target || card === target) return;
+      if (after) target.after(card);
+      else target.before(card);
+      MuscatStorage.setJSON(orderKey, Array.from(grid.children, el => el.dataset.project));
+    }
+
+    let dragged;
+    grid.addEventListener('dragstart', event => {
+      if (!event.target.matches('.drag-handle')) return;
+      dragged = event.target.closest('.card');
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData('text/plain', dragged.dataset.project);
+      event.dataTransfer.setDragImage(dragged, dragged.offsetWidth - 16, 16);
+      dragged.classList.add('drag-ghost');
+    });
+    grid.addEventListener('dragover', event => {
+      if (dragged) event.preventDefault();
+    });
+    grid.addEventListener('drop', event => {
+      if (!dragged) return;
+      event.preventDefault();
+      const target = event.target.closest('.card');
+      // Dropping onto another card takes its position in reading order.
+      const card = dragged;
+      dragged = null;
+      card.classList.remove('drag-ghost');
+      if (target) move(card, target, Boolean(card.compareDocumentPosition(target) & Node.DOCUMENT_POSITION_FOLLOWING));
+    });
+    grid.addEventListener('dragend', () => {
+      if (dragged) dragged.classList.remove('drag-ghost');
+      dragged = null;
+    });
+    grid.addEventListener('keydown', event => {
+      if (!event.target.matches('.drag-handle')) return;
+      const forward = ['ArrowRight', 'ArrowDown'].includes(event.key);
+      if (!forward && !['ArrowLeft', 'ArrowUp'].includes(event.key)) return;
+      event.preventDefault();
+      const handle = event.target;
+      const card = handle.closest('.card');
+      move(card, forward ? card.nextElementSibling : card.previousElementSibling, forward);
+      handle.focus();
+    });
+  }
   const openBtn = document.getElementById('create-project-btn');
   const overlay = document.getElementById('create-project-overlay');
   const nameInput = document.getElementById('create-project-name');

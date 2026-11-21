@@ -35,6 +35,9 @@
       <div class="search-bar">
         <input id="dataset-search" type="text" placeholder="Search by date or instrument…" autocomplete="off">
         <span id="search-status" class="hint"></span>
+        {% if datasets %}
+        <a href="/api/targets/observations.csv?name={{ requested_name | urlencode }}" class="csv-btn" download title="Download all photometric observations for this target">CSV</a>
+        {% endif %}
       </div>
 
       {% if datasets %}

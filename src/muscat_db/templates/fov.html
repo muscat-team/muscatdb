@@ -178,6 +178,11 @@
         <button id="fov-check-saturation" class="fov-btn ghost" type="button" style="display: none;" title="Send the target and brightest in-field stars to the Exposure Calculator to check whether any of them would saturate">Check saturation in Exp Calc &rarr;</button>
       </div>
       <div class="fov-note" id="r-note"></div>
+      <div id="fov-exp-stars" role="group" aria-labelledby="fov-exp-heading" hidden>
+        <div class="opt-section-title" id="fov-exp-heading">Stars to include in Exp Calc</div>
+        <div class="opt-check-row" id="fov-exp-options"></div>
+        <p class="fov-note">Uncheck a star if you accept that it may saturate. The exposure limit uses the target and the checked stars.</p>
+      </div>
       <div class="fov-note" id="r-bright-note" style="display: none;"></div>
     </div>
 
@@ -372,6 +377,7 @@
   const $ = (id) => document.getElementById(id);
   const msg = $('fov-msg');
 
+  let A;  // Keep the initialized viewer even if a timed-out script arrives later.
   let aladin = null;
   let footprintOverlay = null;
   let observedFootprintOverlay = null;
@@ -419,32 +425,38 @@
 
   function loadSkyView() {
     const status = $('fov-sky-status');
-    let finished = false;
-    const unavailable = () => {
-      if (finished) return;
-      finished = true;
-      clearTimeout(timer);
-      aladin = null;
-      $('aladin-lite-div').replaceChildren();
-      status.textContent = 'Sky view unavailable (CDS unreachable)';
-    };
-    // Includes script download and A.init's WASM initialization. A late load
-    // after the deadline must not replace the unavailable state.
-    const timer = setTimeout(unavailable, 8000);
     const script = document.createElement('script');
-    script.async = true;
     script.src = 'https://aladin.cds.unistra.fr/AladinLite/api/v3/3.8.1/aladin.js';
-    script.onerror = unavailable;
-    script.onload = () => {
-      Promise.resolve().then(() => window.A.init).then(() => {
-        if (finished) return;
+    const primary = new Promise((resolve, reject) => {
+      script.onload = () => resolve(window.A);
+      script.onerror = reject;
+      document.head.appendChild(script);
+    });
+    async function start(load) {
+      let timer;
+      try {
+        const api = await Promise.race([
+          load.then(async api => { await api.init; return api; }),
+          new Promise((_, reject) => { timer = setTimeout(reject, 8000); })
+        ]);
+        A = api;
         initializeSkyView();
-        finished = true;
-        clearTimeout(timer);
         status.textContent = '';
-      }).catch(unavailable);
-    };
-    document.head.appendChild(script);
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    start(primary).catch(async () => {
+      script.remove();
+      $('aladin-lite-div').replaceChildren();
+      try {
+        await start(import('https://cdn.jsdelivr.net/npm/aladin-lite@3.8.1/dist/aladin.js').then(module => module.default));
+      } catch {
+        aladin = null;
+        $('aladin-lite-div').replaceChildren();
+        status.textContent = 'Sky view unavailable. The viewer could not initialize.';
+      }
+    });
   }
 
   function setMsg(text, kind) {
@@ -481,6 +493,20 @@
     const brightest = result.brightest_in_field || [];
     const brightNote = $('r-bright-note');
     const satBtn = $('fov-check-saturation');
+    const choices = $('fov-exp-options');
+    choices.replaceChildren();
+    $('fov-exp-stars').hidden = !brightest.length;
+    brightest.slice(0, COMP_HANDOFF_N).forEach((star, i) => {
+      const label = document.createElement('label');
+      const checkbox = document.createElement('input');
+      label.className = 'opt-check-item';
+      checkbox.type = 'checkbox';
+      checkbox.checked = true;
+      checkbox.value = i;
+      label.append(checkbox, ' Comp ' + (i + 1) + ' · G ' + star.gmag.toFixed(2) +
+        ' · ' + star.sep_arcsec.toFixed(0) + '″ from target');
+      choices.appendChild(label);
+    });
     if (brightest.length) {
       const b0 = brightest[0];
       brightNote.textContent = `Brightest in-field star: Gmag ${b0.gmag.toFixed(2)}, ${b0.sep_arcsec.toFixed(0)}″ away` +
@@ -1107,7 +1133,10 @@
       dec: lastResult.dec,
       instrument: inst,
       sinistro_mode: READOUT_MODES[inst] ? $('fov-sinistro-mode').value : null,
-      comps: (lastResult.brightest_in_field || []).slice(0, COMP_HANDOFF_N),
+      comps: Array.from($('fov-exp-options').querySelectorAll('input:checked'), input => {
+        const index = Number(input.value);
+        return {...lastResult.brightest_in_field[index], field_index: index};
+      }),
     };
     try {
       sessionStorage.setItem(COMP_HANDOFF_KEY, JSON.stringify(payload));

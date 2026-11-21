@@ -299,6 +299,17 @@ def test_fully_restricted_target_looks_like_a_never_observed_name(client, db):
     assert hidden.text.replace("HIDDENTGT", "X") == unknown.text.replace("NEVEROBSX", "X")
 
 
+def test_target_observations_csv_respects_proposal_access(client):
+    headers = _headers("alice")
+    response = client.get("/api/targets/observations.csv?name=MIXEDTGT", headers=headers)
+    assert response.status_code == 200
+    assert _OPEN in response.text and _RESTRICTED not in response.text
+    hidden = client.get("/api/targets/observations.csv?name=HIDDENTGT", headers=headers)
+    unknown = client.get("/api/targets/observations.csv?name=NEVEROBSX", headers=headers)
+    assert hidden.status_code == unknown.status_code == 404
+    assert hidden.json() == unknown.json()
+
+
 def test_mixed_target_page_lists_only_visible_nights(client, db):
     _set_admin(db, "root")
     denied = client.get("/target?name=MIXEDTGT", headers=_headers("alice")).text
@@ -444,7 +455,7 @@ def _tag_projects(client, db) -> None:
 def _project_cards(html: str) -> dict[str, str]:
     """Card name -> the card's meta text, from /projects."""
     cards = {}
-    for block in html.split('<div class="card">')[1:]:
+    for block in html.split('<div class="card"')[1:]:
         name = re.search(r'<div class="name">([^<]+)</div>', block)
         meta = re.search(r'<div class="meta">([^<]+)</div>', block)
         if name:
@@ -1095,3 +1106,33 @@ def test_only_the_creator_or_an_admin_may_reanalyze_a_test(client, db):
         response = client.post(url, headers=_headers(user))
         assert response.status_code == 400, user
         assert "cannot re-analyze" in response.json()["error"]
+
+def test_planning_name_does_not_disclose_restricted_membership(client, db):
+    _tag_projects(client, db)
+    client.put("/api/targets/HIDDENTGT/tags", json={"tag": "alpha"}, headers=_headers("root"))
+    tag = {"tag": "alpha", "allow_placeholder": True}
+    for name in ("HIDDENTGT", "TOI4406"):
+        assert client.put(f"/api/targets/{name}/tags", json=tag, headers=_headers("alice")).is_success
+    page = client.get("/tag?name=alpha", headers=_headers("alice")).text
+    assert page.count('class="hint">Planned') == 2
+    assert _project_cards(client.get("/projects", headers=_headers("alice")).text)["alpha"] == "3 targets"
+    counts = client.get("/api/tags", headers=_headers("alice")).json()["tags"]
+    assert next(p["target_count"] for p in counts if p["tag"] == "alpha") == 3
+    client.request("DELETE", "/api/targets/HIDDENTGT/tags", json=tag, headers=_headers("alice"))
+    assert "HIDDENTGT" not in client.get("/tag?name=alpha", headers=_headers("alice")).text
+    assert "HIDDENTGT" in client.get("/tag?name=alpha", headers=_headers("root")).text
+
+def test_planning_does_not_unhide_a_restricted_project(client, db):
+    _tag_projects(client, db)
+    admin, viewer = _headers("root"), _headers("alice")
+    tag = {"tag": "beta", "allow_placeholder": True}
+    assert client.put("/api/targets/TOI4406/tags", json=tag, headers=admin).is_success
+    assert "beta" not in _project_cards(client.get("/projects", headers=viewer).text)
+    assert "TOI4406" not in client.get("/tag?name=beta", headers=viewer).text
+    assert client.get("/api/tags/beta/export.csv", headers=viewer).status_code == 404
+    assert client.get("/api/targets/TOI4406/tags", headers=viewer).json()["tags"] == []
+    assert client.put("/api/targets/OPENTGT/tags", json=tag, headers=viewer).status_code == 404
+    for name in ("beta", " BETA "):
+        assert client.put(f"/api/tags/{name}", json={"description": "changed"}, headers=viewer).status_code == 404
+        assert client.delete(f"/api/tags/{name}", headers=viewer).is_success
+    assert "TOI4406" in client.get("/api/tags/beta/export.csv", headers=admin).text

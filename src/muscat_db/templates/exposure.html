@@ -262,17 +262,20 @@
     <div class="exp-section" id="mags-section">
       <div class="mag-head">
         <h3 style="margin:0;">Magnitudes per band <span class="help-icon multiline" data-help="Broadband filter magnitudes (gp, rp, ip, zs). Narrowband filters (g_narrow, i_narrow, z_narrow, Na_D) use these same magnitudes with filter-width-dependent peak count adjustments in the calculation.">?</span></h3>
-        <button class="copy-btn" type="button" id="clear-mags">Clear</button>
+        <button class="copy-btn" type="button" id="clear-mags">Clear target mags</button>
       </div>
       <p class="hint" style="margin-bottom:0.6rem;">Enter magnitudes manually or look up measured griz from Pan-STARRS, SkyMapper, TIC or SDSS. Gaia estimates are labeled and explain why measurements were unavailable.</p>
       <div class="mag-grid" id="mag-broad"></div>
+      <p class="hint" style="font-size:0.8rem">To include comparison stars, open the <a href="/fov">FOV Optimizer</a>,
+        run <strong>Optimize FOV</strong>, then choose <strong>Check saturation in Exp Calc</strong>.
+        A brighter star can set a shorter exposure for its band. With no comparisons, only the target sets the limit.</p>
     </div>
 
     {# ---- Comparison stars (handed off from the FOV optimizer) ---- #}
     <div class="exp-section" id="comps-section" style="display:none;">
       <div class="mag-head">
         <h3 style="margin:0;">Comparison stars <span class="help-icon multiline" data-help="Bright in-field stars sent over from the FOV Optimizer. MuSCAT instruments expose every star in the field at once, so a comparison star brighter than the target can saturate first and cap the usable exposure — these are included in the calculation below.">?</span></h3>
-        <button class="copy-btn" type="button" id="clear-comps">Clear</button>
+        <button class="copy-btn" type="button" id="clear-comps">Remove comparisons</button>
       </div>
       <div id="comps-status" class="msg dim"></div>
       <div id="comps-list"></div>
@@ -310,6 +313,47 @@
       </div>
     </div>
 
+    <section class="exp-section" id="precision-panel">
+      <h3>Recommend for precision</h3>
+      <p class="hint">Search exposure time and defocus for one band in the selected readout mode.
+        On MuSCAT3 and MuSCAT4, the telescope applies one defocus setting to all four bands.
+        Uses the target magnitude and comparison stars above, with archive seeing.
+        MuSCAT and MuSCAT2 await calibration; SBIG has no measured readout overhead.</p>
+      <div class="exp-grid">
+        <div class="exp-field"><label for="rec-band">Band</label><select id="rec-band">
+          <option>gp</option><option selected>rp</option><option>ip</option><option>zs</option>
+        </select></div>
+        <div class="exp-field"><label for="rec-site">Site</label><select id="rec-site">
+          <option value="ogg">Haleakala (ogg)</option><option value="coj">Siding Spring (coj)</option>
+          <option value="lsc">Cerro Tololo (lsc)</option><option value="cpt">Sutherland (cpt)</option>
+          <option value="tfn">Teide (tfn)</option><option value="elp">McDonald (elp)</option>
+        </select></div>
+        <div class="exp-field" id="rec-muscat-mode-field"><label for="rec-muscat-mode">MuSCAT readout</label>
+          <select id="rec-muscat-mode"><option value="MUSCAT_FAST">Fast</option><option value="MUSCAT_SLOW">Slow</option></select>
+        </div>
+        {% for key, label, value, minimum, maximum in [
+          ('airmass_min', 'Minimum airmass', '1', '1', '3'),
+          ('airmass_max', 'Maximum airmass', '2', '1', '3'),
+          ('sky_rate', 'Measured sky (e−/pixel/s)', '', '0', '1000000'),
+          ('read_noise_e', 'Read noise (e−/pixel)', '', '0', '1000'),
+          ('dark_rate', 'Dark current (e−/pixel/s)', '0', '0', '1000000'),
+          ('max_cycle_s', 'Maximum cycle incl. readout (s)', '120', '1', '3600'),
+          ('bin_s', 'Precision time bin (s)', '600', '1', '86400') ] %}
+        <div class="exp-field"><label for="rec-{{ key }}">{{ label }}</label>
+          <input id="rec-{{ key }}" data-recommend="{{ key }}" type="number" min="{{ minimum }}" max="{{ maximum }}" step="any" value="{{ value }}" required>
+        </div>
+        {% endfor %}
+      </div>
+      <p class="hint">Sky, read noise and dark current default to medians from up to 200 recent matching FITS headers
+        for this instrument, site, band and readout mode. Edit them for your observing conditions.
+        Maximum cycle is your cadence limit. Uses the saturation fraction above; custom ADU limits are not supported here.</p>
+      <p id="recommend-defaults-status" class="hint" role="status"></p>
+      <button class="btn primary" type="button" id="recommend-btn">Recommend settings</button>
+      <button class="btn" type="button" id="recommend-reset">Reset recommendation inputs</button>
+      <p id="recommend-status" class="msg" role="status"></p>
+      <div id="recommend-result" hidden></div>
+    </section>
+
     <div class="exp-actions">
       <div class="primary-row">
         <button class="btn primary" type="button" id="calc-btn" style="padding:0.6rem 1.6rem; flex:1;">▶ Calculate exposure times</button>
@@ -337,7 +381,12 @@
         <p>Fill in the form and click <strong>Calculate</strong> to get recommended exposure times per band.</p>
       </div>
       <div id="results-content" style="display:none;">
-        <div style="overflow-x:auto;">
+        <div class="coeff-toolbar" role="group" aria-label="Results view">
+          <button type="button" class="coeff-view-btn active" data-results-view="table" aria-pressed="true">Table</button>
+          <button type="button" class="coeff-view-btn" data-results-view="plot" aria-pressed="false">Plot</button>
+        </div>
+        <div id="results-plot" hidden></div>
+        <div id="results-table-view" style="overflow-x:auto;">
           <table class="results" id="results-table">
             <thead>
               <tr>
@@ -517,6 +566,17 @@
 
   // ---- Range value displays ----
   function syncFocus() { focusVal.textContent = parseFloat(focusMm.value).toFixed(1) + ' mm'; }
+  // The slider reaches the instrument's focus-offset limit (the one LCO
+  // submission enforces). Instruments without a known limit keep 0 to 6 mm.
+  var DEFOCUS_LIMITS = {{ defocus_limits | tojson }};
+  var DEFAULT_FOCUS_MAX = 6;
+  function applyFocusLimits() {
+    var limit = DEFOCUS_LIMITS[selInst.value] || DEFAULT_FOCUS_MAX;
+    focusMm.max = String(limit);
+    focusMm.step = limit < 1 ? '0.1' : '0.5';
+    if (parseFloat(focusMm.value) > limit) focusMm.value = String(limit);
+    syncFocus();
+  }
   function syncAirmass() { airmassVal.textContent = parseFloat(airmass.value).toFixed(2); }
   focusMm.addEventListener('input', function () { syncFocus(); saveState(); });
   airmass.addEventListener('input', function () { syncAirmass(); saveState(); });
@@ -538,7 +598,8 @@
         magnitudeProvenance: magnitudeProvenance,
         focus: focusMm.value, airmass: airmass.value, seeing: seeingInput.value, satFrac: satFrac.value, customAdu: customAdu.value,
         showNarrow: showNarrow.checked, comps: currentComps,
-        coeffView: coeffView, coeffParameter: coeffParameter
+        coeffView: coeffView, coeffParameter: coeffParameter,
+        recommendation: recommendationState()
       }));
     } catch (e) {}
   }
@@ -555,6 +616,8 @@
       lookupStatus.className = 'msg ok';
       lookupStatus.textContent = magnitudeProvenance;
     }
+    // Set the limit first: a range input clamps a value above its current max.
+    applyFocusLimits();
     if (s.focus !== undefined) focusMm.value = s.focus;
     if (s.airmass !== undefined) airmass.value = s.airmass;
     if (s.seeing !== undefined) seeingInput.value = s.seeing;
@@ -564,6 +627,13 @@
     if (s.coeffView === 'table' || s.coeffView === 'plot') coeffView = s.coeffView;
     if (s.coeffParameter === 'coef' || s.coeffParameter === 'fwhm_pix') coeffParameter = s.coeffParameter;
     if (Array.isArray(s.comps) && s.comps.length) { currentComps = s.comps; renderComps(); }
+    Object.entries(s.recommendation || {}).forEach(function (entry) {
+      var el = document.getElementById(entry[0]);
+      if (recommendInputs.indexOf(el) >= 0) { el.value = entry[1]; if (el.value !== '') el.dataset.preserved = '1'; }
+    });
+    if ((s.inst && s.inst !== selInst.value) || (s.target && s.target !== targetName.value)) {
+      clearMeasuredConditions();
+    }
     syncFocus(); syncAirmass();
   }
 
@@ -581,7 +651,7 @@
     }
   }
 
-  selInst.addEventListener('change', function () { updateConfmodeVisibility(); saveState(); });
+  selInst.addEventListener('change', function () { updateConfmodeVisibility(); applyFocusLimits(); saveState(); });
   selConfmode.addEventListener('change', function () { saveState(); renderInstParams(selInst.value); });
   seeingInput.addEventListener('input', saveState);
   targetName.addEventListener('input', saveState);
@@ -685,6 +755,11 @@
     var payload;
     try { payload = JSON.parse(raw); } catch (e) { return; }
     var comps = payload && payload.comps ? payload.comps : [];
+    if (!Array.isArray(payload?.comps)) return;
+    currentComps = [];
+    compsStatus.textContent = '';
+    renderComps();
+    saveState();
     if (!comps.length) return;
 
     compsSection.style.display = '';
@@ -705,7 +780,7 @@
       currentComps = comps.map(function (c, i) {
         var res = data.results[i] || {};
         return {
-          label: 'Comp ' + (i + 1),
+          label: 'Comp ' + (Number.isInteger(c.field_index) ? c.field_index + 1 : i + 1),
           sepArcsec: c.sep_arcsec, gmag: c.gmag,
           mags: res.mags || null, source: res.source || null, isApprox: !!res.is_approx,
         };
@@ -778,6 +853,9 @@
       .map(function (c) { return { label: c.label, mags: c.mags }; });
     if (extraSources.length) payload.extra_sources = extraSources;
 
+    var plotLimit = satFrac.value === 'custom'
+      ? {field: 'peak_adu', label: 'Peak (ADU)', value: Number(customAdu.value)}
+      : {field: 'pct_full_well', label: 'Full well (%)', value: 100 * Number(satFrac.value)};
     var btn = mode === 'exptime' ? calcBtn : calcPeakBtn;
     var label = mode === 'exptime' ? 'Calculating' : 'Calculating';
     return withLoading(btn, label, function () {
@@ -787,6 +865,7 @@
       }).then(function (r) { return r.json(); }).then(function (data) {
         if (!data.ok) { calcStatus.className = 'msg err'; calcStatus.textContent = 'Error: ' + (data.error || 'calculation failed'); return; }
         calcStatus.textContent = '';
+        renderResults.plotLimit = plotLimit;
         renderResults(data, mode);
       }).catch(function (err) {
         calcStatus.className = 'msg err'; calcStatus.textContent = 'Error: ' + err.message;
@@ -802,6 +881,87 @@
 
   // ---- Render results ----
   function fwClass(pct) { return pct >= 100 ? 'sat' : (pct >= 70 ? 'warn' : 'safe'); }
+
+  var resultsPlot = document.getElementById('results-plot');
+  var resultsViews = document.querySelectorAll('[data-results-view]');
+  resultsViews.forEach(function (button) {
+    button.addEventListener('click', function () {
+      var plot = button.dataset.resultsView === 'plot';
+      resultsPlot.hidden = !plot;
+      document.getElementById('results-table-view').hidden = plot;
+      resultsContent.querySelector('.legend').style.display = plot ? 'none' : '';
+      resultsViews.forEach(function (b) {
+        b.classList.toggle('active', b === button);
+        b.setAttribute('aria-pressed', String(b === button));
+      });
+    });
+  });
+
+  function plotResults(rows, mode, limit) {
+    resultsPlot.replaceChildren();
+    if (!rows.length) { resultsPlot.textContent = 'No results for the visible bands.'; return; }
+    var exposureMode = mode === 'exptime';
+    var field = exposureMode ? 'exptime' : limit.field;
+    var unit = exposureMode ? 'Exposure (s)' : limit.label;
+    var bands = Array.from(new Set(rows.map(r => r.band)));
+    function source(r) { return r.is_target === false ? r.source_label : 'Target'; }
+    var stars = Array.from(new Set(rows.map(source)));
+    var maximum = Math.max(1, exposureMode ? 0 : limit.value, ...rows.map(r => r[field])) * 1.08;
+    var width = Math.max(480, 65 + bands.length * Math.max(60, stars.length * 12));
+    var step = (width - 66) / bands.length;
+    var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', '0 0 ' + width + ' 230');
+    svg.setAttribute('role', 'img'); svg.setAttribute('aria-label', unit + ' by band and star');
+    svg.style.width = '100%'; svg.style.minWidth = width + 'px';
+    var scroll = document.createElement('div'); scroll.style.overflowX = 'auto';
+    resultsPlot.appendChild(scroll); scroll.appendChild(svg);
+    function mark(tag, attrs, label, parent) {
+      var el = document.createElementNS(svg.namespaceURI, tag);
+      Object.entries(attrs).forEach(([key, value]) => el.setAttribute(key, value));
+      if (label !== undefined) el.textContent = label;
+      (parent || svg).appendChild(el); return el;
+    }
+    function y(value) { return 198 - 167 * value / maximum; }
+    function textAt(x, yPos, label, anchor) {
+      mark('text', {x: x, y: yPos, 'text-anchor': anchor, fill: 'var(--text)', 'font-size': 12}, label);
+    }
+    function color(i) { return 'hsl(' + (212 + i * 137.5) % 360 + ',70%,55%)'; }
+    textAt(4, 15, unit, 'start');
+    for (var tick = 0; tick <= 4; tick++) {
+      var v = maximum * tick / 4;
+      mark('line', {x1: 55, x2: width - 8, y1: y(v), y2: y(v), stroke: 'var(--border)'});
+      textAt(51, y(v) + 4, Number(v.toPrecision(3)), 'end');
+    }
+    if (!exposureMode) mark('line', {x1: 55, x2: width - 8, y1: y(limit.value), y2: y(limit.value),
+      stroke: 'var(--text)', 'stroke-dasharray': '5 4'});
+    bands.forEach(function (band, b) {
+      var center = 55 + step * (b + 0.5);
+      textAt(center, 219, band, 'middle');
+      var bandRows = rows.filter(r => r.band === band);
+      var shortest = Math.min(...bandRows.map(r => r.exptime));
+      bandRows.forEach(function (r) {
+        var i = stars.indexOf(source(r));
+        var x = center + (i - (stars.length - 1) / 2) * Math.min(step / stars.length, 14);
+        var cy = y(r[field]);
+        var point = r.is_target === false
+          ? mark('circle', {cx: x, cy: cy, r: 4, fill: color(i)})
+          : mark('rect', {x: x - 4, y: cy - 4, width: 8, height: 8, fill: color(i)});
+        mark('title', {}, source(r) + ' · ' + band + ' · ' + unit + ' ' + r[field], point);
+        if (exposureMode && r.exptime === shortest) mark('circle', {cx: x, cy: cy, r: 7,
+          stroke: 'var(--text)', fill: 'none', 'pointer-events': 'none'});
+      });
+    });
+    stars.forEach(function (star, i) {
+      var label = document.createElement('span');
+      var symbol = document.createElement('b');
+      symbol.style.color = color(i); symbol.textContent = star === 'Target' ? '■ ' : '● ';
+      label.append(symbol, star); label.style.marginRight = '1em'; resultsPlot.appendChild(label);
+    });
+    var caption = document.createElement('p');
+    caption.textContent = exposureMode ? 'Ring = shortest exposure in each band.'
+      : 'Dashed line = selected limit (' + limit.value + (field === 'peak_adu' ? ' ADU).' : '% full well).');
+    resultsPlot.appendChild(caption);
+  }
 
   function renderResults(data, mode) {
     // Save for re-render on checkbox toggle
@@ -827,6 +987,7 @@
       return showNarrow.checked;  // Show narrowband only if checked
     });
 
+    plotResults(rows, mode, renderResults.plotLimit);
     var minExp = mode === 'exptime' && rows.length
       ? Math.min.apply(null, rows.map(function (r) { return r.exptime; })) : null;
 
@@ -1123,10 +1284,129 @@
 
   selInst.addEventListener('change', function () { renderInstParams(this.value); });
 
+  var recommendInputs = Array.from(document.querySelectorAll('#precision-panel input, #precision-panel select'));
+  var recommendResult = document.getElementById('recommend-result');
+  var recommendStatus = document.getElementById('recommend-status');
+  function recommendationState() {
+    return Object.fromEntries(recommendInputs.map(function (el) { return [el.id, el.value]; }));
+  }
+  var recommendationVersion = 0;
+  function clearRecommendation() { recommendationVersion++; recommendResult.hidden = true; recommendStatus.textContent = ''; }
+  document.querySelector('.exp-form').addEventListener('input', clearRecommendation);
+  document.querySelector('.exp-form').addEventListener('change', clearRecommendation);
+  [lookupBtn, clearMags, document.getElementById('clear-comps')].forEach(function (el) { el.addEventListener('click', clearRecommendation); });
+  recommendInputs.forEach(function (el) { el.addEventListener('change', function () { clearRecommendation(); saveState(); }); });
+  var defaultsVersion = 0;
+  var measuredKeys = ['sky_rate', 'read_noise_e', 'dark_rate'];
+  measuredKeys.forEach(function (key) {
+    document.getElementById('rec-' + key).addEventListener('input', function () { this.dataset.preserved = '1'; });
+  });
+  async function loadMedianConditions() {
+    var version = ++defaultsVersion;
+    var status = document.getElementById('recommend-defaults-status');
+    if (['muscat3', 'muscat4', 'sinistro', 'qhy600'].indexOf(selInst.value) < 0) { status.textContent = ''; return; }
+    var query = new URLSearchParams({instrument: selInst.value, band: document.getElementById('rec-band').value,
+      site: document.getElementById('rec-site').value,
+      mode: CONFMODES_BY_INST[selInst.value] ? selConfmode.value : document.getElementById('rec-muscat-mode').value});
+    status.textContent = 'Loading archive medians…';
+    try {
+      var response = await fetch('/api/exposure/recommend-defaults?' + query);
+      var data = await response.json();
+      if (version !== defaultsVersion) return;
+      if (!response.ok || !data.ok) throw new Error();
+      var labels = {sky_rate: 'Sky', read_noise_e: 'Read noise', dark_rate: 'Dark current'};
+      var changed = false;
+      status.textContent = measuredKeys.map(function (key) {
+        var el = document.getElementById('rec-' + key), value = data.values[key];
+        if (value != null && !el.dataset.preserved) {
+          var formatted = String(Number(value.toFixed(6)));
+          changed = changed || el.value !== formatted; el.value = formatted;
+        }
+        return labels[key] + ': ' + (value == null ? 'unavailable' : 'median from ' + data.counts[key] + ' frames');
+      }).join('; ') + '. Editable archive estimates, not current conditions. Missing dark current assumes zero.';
+      if (changed) clearRecommendation();
+      saveState();
+    } catch (_) {
+      if (version === defaultsVersion) status.textContent = 'Archive medians unavailable; enter measured conditions. Missing dark current assumes zero.';
+    }
+  }
+  function clearMeasuredConditions() {
+    defaultsVersion++;
+    measuredKeys.forEach(function (key) { delete document.getElementById('rec-' + key).dataset.preserved; });
+    ['sky_rate', 'read_noise_e'].forEach(function (key) { document.getElementById('rec-' + key).value = ''; });
+    document.getElementById('rec-dark_rate').value = '0';
+    clearRecommendation(); saveState();
+  }
+  [selInst, selConfmode, document.getElementById('rec-band'), document.getElementById('rec-site'),
+    document.getElementById('rec-muscat-mode')].forEach(function (el) { el.addEventListener('change', clearMeasuredConditions); });
+  function syncRecommendationInstrument() {
+    var fixedSite = {muscat3: 'ogg', muscat4: 'coj'}[selInst.value];
+    var site = document.getElementById('rec-site');
+    site.disabled = !!fixedSite;
+    if (fixedSite && site.value !== fixedSite) { site.value = fixedSite; clearMeasuredConditions(); }
+    document.getElementById('rec-muscat-mode-field').style.display = fixedSite ? '' : 'none';
+  }
+  selInst.addEventListener('change', syncRecommendationInstrument);
+  [selInst, selConfmode, document.getElementById('rec-band'), document.getElementById('rec-site'),
+    document.getElementById('rec-muscat-mode')].forEach(function (el) { el.addEventListener('change', loadMedianConditions); });
+  document.getElementById('recommend-reset').addEventListener('click', function () {
+    recommendInputs.forEach(function (el) {
+      if (el.tagName === 'SELECT') el.selectedIndex = el.id === 'rec-band' ? 1 : 0;
+      else el.value = el.defaultValue;
+    });
+    clearMeasuredConditions(); syncRecommendationInstrument(); clearRecommendation(); saveState(); loadMedianConditions();
+  });
+  document.getElementById('recommend-btn').addEventListener('click', async function () {
+    clearRecommendation();
+    var band = document.getElementById('rec-band').value;
+    var mags = collectMags();
+    if (mags[band] === undefined) { recommendStatus.textContent = 'Enter the target magnitude for ' + band; return; }
+    if (satFrac.value === 'custom') { recommendStatus.textContent = 'Select a saturation fraction above instead of Custom ADU'; return; }
+    var payload = {instrument: selInst.value, band: band, mag: mags[band],
+      site: document.getElementById('rec-site').value, sat_frac: Number(satFrac.value),
+      mode: CONFMODES_BY_INST[selInst.value] ? selConfmode.value : document.getElementById('rec-muscat-mode').value,
+      comp_mags: []};
+    for (var comp of currentComps) {
+      if (!comp.mags || !Number.isFinite(Number(comp.mags[band])) || comp.mags[band] == null) {
+        recommendStatus.textContent = 'A selected comparison has no ' + band + ' magnitude. Resolve or remove it before recommending.'; return;
+      }
+      payload.comp_mags.push(Number(comp.mags[band]));
+    }
+    for (var el of recommendInputs.filter(function (input) { return input.dataset.recommend; })) {
+      if (!el.reportValidity()) return;
+      payload[el.dataset.recommend] = Number(el.value);
+    }
+    var version = recommendationVersion;
+    saveState(); this.disabled = true; recommendStatus.textContent = 'Searching…';
+    try {
+      var response = await fetch('/api/exposure/recommend', {method: 'POST',
+        headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
+      var data = await response.json();
+      if (version !== recommendationVersion) return;
+      if (!response.ok || !data.ok) throw new Error(data.error || 'Check instrument, band, readout mode and measured inputs');
+      recommendResult.replaceChildren();
+      var summary = document.createElement('p');
+      summary.textContent = data.exptime_s + ' s exposure; ' + data.defocus_mm.toFixed(6) + ' mm defocus; ' +
+        data.cycle_s.toFixed(1) + ' s cycle. Predicted ' + data.budget_ppm.total.toFixed(1) + ' ppm in ' +
+        payload.bin_s + ' s at airmass ' + payload.airmass_max + '. Dominant term: ' + data.dominant + '.';
+      recommendResult.appendChild(summary);
+      var budget = document.createElement('ul');
+      Object.entries(data.budget_ppm).forEach(function (term) {
+        var li = document.createElement('li'); li.textContent = term[0] + ': ' + term[1].toFixed(1) + ' ppm'; budget.appendChild(li);
+      });
+      recommendResult.appendChild(budget);
+      data.notes.forEach(function (note) { var p = document.createElement('p'); p.textContent = note; recommendResult.appendChild(p); });
+      recommendResult.hidden = false; recommendStatus.textContent = 'Recommendation ready';
+    } catch (error) { if (version === recommendationVersion) recommendStatus.textContent = error.message; }
+    finally { this.disabled = false; }
+  });
+
   // ---- Init ----
   loadState();
+  syncRecommendationInstrument();
   consumeFovHandoff();
   if (selInst.value) renderInstParams(selInst.value);
+  loadMedianConditions();
 })();
 </script>
 {% endblock %}

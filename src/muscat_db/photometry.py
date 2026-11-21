@@ -118,7 +118,7 @@ RUN_DEFAULTS: dict = {
     "comp_min_flux_frac": 0.3,
     "clip_star_sigma": None,
     "clip_star_window": 11,
-    "save_flux_datacube": False,
+    "save_flux_datacube": True,
     "comparison_ids": "",      # "" -> auto, or "1,2,3"
     "avoid_comparison_ids": "",  # "" -> none; "1,2,3" -> --avoid_cids (requires --ref_band)
     "avoid_nearby_star_mode": "auto",  # off | auto | custom
@@ -162,6 +162,8 @@ POSTPROCESS_DEFAULTS: dict = {
     "post_poly_deg": 2,
     "post_exclude_before_jd": "",
     "post_exclude_after_jd": "",
+    # re-diff card: preview gap between default and custom curves; "" -> auto
+    "rediff_offset": "",
 }
 
 # LCO instruments deployed across multiple sites/telescope units, needing
@@ -250,6 +252,7 @@ _PID_FILE_NAME = "photometry.pid"
 _CONDA_ENV_DEFAULT = "prose"   # prose deps live in a conda env named "prose"
 _MODULE = "prose.scripts.run_photometry"
 _POSTPROCESS_MODULE = "prose.scripts.postprocess_lightcurves"
+_REDIFF_MODULE = "prose.scripts.rediff_lightcurves"
 
 _DATE_RE = re.compile(r"^\d{6}$")
 # A served filename is a single path segment of safe characters only.
@@ -267,6 +270,7 @@ _SUMMARY_SUFFIX = {
 # Per-band product suffixes -> short key.
 _BAND_SUFFIX = {
     "_ref.png": "ref",
+    "_unmatched_ref.png": "unmatched_ref",
     "_apertures.png": "apertures",
     "_cutouts.png": "cutouts",
     "_alignment.png": "alignment",
@@ -592,6 +596,76 @@ _COORD_LOOKUPS: dict[str, tuple[Future, float]] = {}
 _COORD_LOOKUP_LOCK = threading.Lock()
 
 
+def _local_target_coord(target: str) -> tuple[float, float, str, str] | None:
+    """Resolve a target from the local catalogs and cached lookups only.
+
+    This never initiates a remote request, so it is safe to call while
+    rendering a page.
+    """
+    for name in _coord_names(target):
+        coords = catalog_lookup.resolve_target_astrometry(name, allow_remote=False)
+        if coords is not None:
+            return float(coords["ra"]), float(coords["dec"]), str(coords.get("source") or "catalog"), name
+    return None
+
+
+def _describe_target_coord(target: str, resolved: tuple[float, float, str, str]) -> str:
+    """Coordinates and their source, in the words the run log uses."""
+    ra_deg, dec_deg, source, name = resolved
+    text = f"{ra_deg:.6f} {dec_deg:.6f} deg from {_COORD_SOURCE_LABELS.get(source, source)}"
+    if name != target.strip():
+        text += f", resolved as {name!r} for OBJECT {target.strip()!r}"
+    return text
+
+
+def target_coord_preview(target: str) -> str:
+    """What a run would send as ``--target_coord`` when the box is left empty.
+
+    Shown on the photometry page before launch. It uses only the local
+    catalogs and cached lookups, so viewing the page never queries an external
+    service. A target found only by the online lookup at launch is reported as
+    not yet known here; the run log then records what was sent.
+    """
+    if not (target or "").strip():
+        return ""
+    resolved = _local_target_coord(target)
+    if resolved is None:
+        return (
+            "not in the local catalogs; muscat-db tries an online lookup at launch, "
+            "and prose resolves the name itself if that fails"
+        )
+    return _describe_target_coord(target, resolved)
+
+
+def csv_time_note(csv_paths) -> str:
+    """Where the BJD_TDB times are in a run's band CSVs, read from their headers.
+
+    prose2 has always computed BJD_TDB, but before jpdeleon/prose2@bce5f807 it
+    appended the column instead of writing it first, and the page serves those
+    older products too. The note therefore names the column and reports the
+    position the files actually have. Empty when no CSV can be read.
+    """
+    positions = []
+    for path in csv_paths:
+        try:
+            with open(path, errors="replace") as f:
+                header = [name.strip() for name in f.readline().split(",")]
+        except OSError:
+            continue
+        positions.append(header.index("BJD_TDB") + 1 if "BJD_TDB" in header else None)
+    if not positions:
+        return ""
+    if all(pos is None for pos in positions):
+        return "The CSV files of this run have no BJD_TDB column."
+    if any(pos is None for pos in positions):
+        where = "the column named BJD_TDB, which some files of this run lack"
+    elif len(set(positions)) == 1:
+        where = f"the column named BJD_TDB (column {positions[0]})"
+    else:
+        where = "the column named BJD_TDB (its position differs between the files)"
+    return f"Times in the CSV files are BJD_TDB, in {where}, whichever conversion library is chosen."
+
+
 def _auto_target_coord(target: str) -> tuple[float, float, str, str] | None:
     """Resolve host first within one bounded wait; preserve prose's fallback.
 
@@ -602,11 +676,10 @@ def _auto_target_coord(target: str) -> tuple[float, float, str, str] | None:
     """
     deadline = time.monotonic() + _COORD_LOOKUP_TIMEOUT_S
     # Local and cached positions remain available even when every network
-    # worker is occupied. This pass never initiates a remote request.
-    for name in _coord_names(target):
-        coords = catalog_lookup.resolve_target_astrometry(name, allow_remote=False)
-        if coords is not None:
-            return float(coords["ra"]), float(coords["dec"]), str(coords.get("source") or "catalog"), name
+    # worker is occupied.
+    local = _local_target_coord(target)
+    if local is not None:
+        return local
     key = target.strip()
     with _COORD_LOOKUP_LOCK:
         pending = _COORD_LOOKUPS.get(key)
@@ -672,11 +745,7 @@ def target_coord_note(target: str, options: dict | None = None, *, command: list
             f"target coordinates: not resolved by muscat-db (tried {tried}); "
             "prose resolves --target_name itself"
         )
-    ra_deg, dec_deg, source, name = resolved
-    note = f"target coordinates: {ra_deg:.6f} {dec_deg:.6f} deg from {_COORD_SOURCE_LABELS.get(source, source)}"
-    if name != target.strip():
-        note += f", resolved as {name!r} for OBJECT {target.strip()!r}"
-    return note
+    return f"target coordinates: {_describe_target_coord(target, resolved)}"
 
 
 def _frozen_prose_prefix(explicit: str | None, module: str) -> list[str]:
@@ -1538,6 +1607,12 @@ def _calculate_photometry_status(target: str, rdir: Path, outputs: dict) -> str:
     if not outputs.get("has_any"):
         return "none"
 
+    # A failed target match can leave a numbered finder chart without reducing a band.
+    bands = outputs.get("bands", {})
+    if (bands and all(products.keys() == {"unmatched_ref"} for products in bands.values())
+            and not (outputs.get("summary") or outputs.get("npz") or outputs.get("flux_datacube"))):
+        return "none"
+
     # Fallback/Optimization: Check CSV files. If any CSV has more than 15 lines, it is a full run.
     csv_found = False
     max_rows = 0
@@ -1922,8 +1997,14 @@ def build_command(
     *,
     test_run: bool = True,
     run_id: str | None = None,
+    allow_remote_coord: bool = True,
 ) -> list[str]:
     """argv for a prose reduction, including any non-default options.
+
+    A launch resolves an uncatalogued target online (bounded wait) so prose
+    gets ``--target_coord``. A command built only for display passes
+    ``allow_remote_coord=False`` and uses the local catalogs and cached
+    lookups, so opening a page never queries an external service.
 
     ``--overwrite`` (on by default) lets a new target coexist with others
     already reduced in the same inst/date directory.
@@ -1970,7 +2051,7 @@ def build_command(
 
     target_coord = (o.get("target_coord") or "").strip()
     if not target_coord:
-        resolved = _auto_target_coord(target)
+        resolved = _auto_target_coord(target) if allow_remote_coord else _local_target_coord(target)
         if resolved is not None:
             ra_deg, dec_deg, _source, _name = resolved
             target_coord = f"{ra_deg:.6f} {dec_deg:.6f}"
@@ -2103,7 +2184,11 @@ def command_str(
             inst, opts.get("site"), opts.get("mode"), opts.get("run_name"),
             telescope=opts.get("telescope"),
         )
-    return shlex.join(build_command(inst, date, target, options, test_run=test_run, run_id=run_id))
+    # Display only: the photometry page renders this on load and refreshes it
+    # on every option change, so it must not start a remote lookup.
+    return shlex.join(build_command(
+        inst, date, target, options, test_run=test_run, run_id=run_id, allow_remote_coord=False,
+    ))
 
 
 # --------------------------- background job runner ---------------------------

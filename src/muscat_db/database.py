@@ -412,6 +412,17 @@ CREATE TABLE IF NOT EXISTS target_tags (
 CREATE INDEX IF NOT EXISTS idx_target_tags_tag       ON target_tags(tag);
 CREATE INDEX IF NOT EXISTS idx_target_tags_norm_name ON target_tags(norm_name);
 
+-- Planning names are supplied by project users independently of observation
+-- access. A name can be planned even if all its exposures are restricted.
+CREATE TABLE IF NOT EXISTS planned_project_targets (
+    norm_name TEXT NOT NULL,
+    tag TEXT NOT NULL COLLATE NOCASE,
+    PRIMARY KEY (norm_name, tag)
+);
+CREATE VIEW IF NOT EXISTS project_members AS
+    SELECT norm_name, tag FROM target_tags
+    UNION SELECT norm_name, tag FROM planned_project_targets;
+
 -- Issue #144, PR1 (schema only -- nothing reads or gates on these yet).
 -- A proposal only gates access once an admin opts it in here; everything
 -- else (including '' for muscat/muscat2, which carry no PROPID) stays
@@ -1049,6 +1060,7 @@ _APP_OWNED_TABLES = (
     "chat_messages",
     "chat_reactions",
     "target_tags",
+    "planned_project_targets",
     "tag_descriptions",
     "restricted_proposals",
     "user_proposal_access",
@@ -2084,6 +2096,7 @@ def delete_tag(db_path: str, tag: str) -> None:
         _apply_schema(conn)
         conn.execute("DELETE FROM tag_descriptions WHERE tag = ?", (tag,))
         conn.execute("DELETE FROM target_tags WHERE tag = ?", (tag,))
+        conn.execute("DELETE FROM planned_project_targets WHERE tag = ?", (tag,))
         conn.commit()
     clear_all_caches()
 
@@ -2108,6 +2121,7 @@ def rename_tag(db_path: str, tag: str, new_tag: str) -> str | None:
             return "conflict"
         conn.execute("UPDATE tag_descriptions SET tag = ? WHERE tag = ?", (new_tag, tag))
         conn.execute("UPDATE target_tags SET tag = ? WHERE tag = ?", (new_tag, tag))
+        conn.execute("UPDATE planned_project_targets SET tag = ? WHERE tag = ?", (new_tag, tag))
         conn.commit()
     clear_all_caches()
     return new_tag
@@ -2151,7 +2165,7 @@ def list_project_tags(db_path: str) -> list[dict]:
         _apply_schema(conn)
         desc_rows = conn.execute("SELECT tag, description FROM tag_descriptions").fetchall()
         count_rows = conn.execute(
-            "SELECT tag, COUNT(DISTINCT norm_name) FROM target_tags GROUP BY tag"
+            "SELECT tag, COUNT(DISTINCT norm_name) FROM project_members GROUP BY tag"
         ).fetchall()
     descriptions = {r[0]: r[1] or "" for r in desc_rows}
     counts = {r[0]: r[1] for r in count_rows}
@@ -2162,7 +2176,7 @@ def list_project_tags(db_path: str) -> list[dict]:
     ]
 
 
-def add_target_tag(db_path: str, norm_name: str, tag: str) -> bool:
+def add_target_tag(db_path: str, norm_name: str, tag: str, *, planned: bool = False) -> bool:
     """Attach `tag` to `norm_name`. Returns False if `tag` is not an existing
     project (projects must be created via create_tag first); True on success,
     idempotently (re-tagging an already-tagged target is not an error)."""
@@ -2174,9 +2188,9 @@ def add_target_tag(db_path: str, norm_name: str, tag: str) -> bool:
         _apply_schema(conn)
         if not conn.execute("SELECT 1 FROM tag_descriptions WHERE tag = ?", (tag,)).fetchone():
             return False
+        table = "planned_project_targets" if planned else "target_tags"
         conn.execute(
-            "INSERT OR IGNORE INTO target_tags(norm_name, tag, created_at) "
-            "VALUES (?, ?, CURRENT_TIMESTAMP)",
+            f"INSERT OR IGNORE INTO {table}(norm_name, tag) VALUES (?, ?)",
             (norm_name, tag),
         )
         conn.commit()
@@ -2184,30 +2198,41 @@ def add_target_tag(db_path: str, norm_name: str, tag: str) -> bool:
     return True
 
 
-def remove_target_tag(db_path: str, norm_name: str, tag: str) -> None:
+def remove_target_tag(db_path: str, norm_name: str, tag: str, *, planned_only: bool = False) -> None:
     """Detach `tag` from `norm_name`. Idempotent if it wasn't attached."""
     with get_conn(db_path) as conn:
         _apply_schema(conn)
-        conn.execute(
-            "DELETE FROM target_tags WHERE norm_name = ? AND tag = ?",
-            ((norm_name or "").strip(), (tag or "").strip()),
-        )
+        params = ((norm_name or "").strip(), (tag or "").strip())
+        conn.execute("DELETE FROM planned_project_targets WHERE norm_name = ? AND tag = ?", params)
+        if not planned_only:
+            conn.execute("DELETE FROM target_tags WHERE norm_name = ? AND tag = ?", params)
         conn.commit()
     clear_all_caches()
 
 
-def get_targets_for_tag(db_path: str, tag: str) -> list[str]:
+def project_memberships(db_path: str) -> list[tuple[str, str, int]]:
+    """Project key (SQLite NOCASE), target name and planning flag for each membership."""
+    with get_conn(db_path) as conn:
+        _apply_schema(conn)
+        return conn.execute(
+            "SELECT lower(tag), norm_name, 0 FROM target_tags UNION ALL "
+            "SELECT lower(tag), norm_name, 1 FROM planned_project_targets"
+        ).fetchall()
+
+
+def get_targets_for_tag(db_path: str, tag: str, *, planned_only: bool = False) -> list[str]:
     """Sorted list of norm_names currently attached to `tag`."""
     with get_conn(db_path) as conn:
         _apply_schema(conn)
+        table = "planned_project_targets" if planned_only else "project_members"
         cur = conn.execute(
-            "SELECT norm_name FROM target_tags WHERE tag = ? ORDER BY norm_name",
+            f"SELECT norm_name FROM {table} WHERE tag = ? ORDER BY norm_name",
             ((tag or "").strip(),),
         )
         return [r[0] for r in cur.fetchall()]
 
 
-def get_tags_for_targets(db_path: str, norm_names: list[str]) -> dict[str, list[str]]:
+def get_tags_for_targets(db_path: str, norm_names: list[str], *, planned_only: bool = False) -> dict[str, list[str]]:
     """Batched {norm_name: [tag, ...]} for every norm_name that has >=1 tag.
     Mirrors _reactions_by_message's one-query/fan-out-in-Python template so a
     caller iterating many targets (e.g. the homepage) issues one query, not
@@ -2218,8 +2243,9 @@ def get_tags_for_targets(db_path: str, norm_names: list[str]) -> dict[str, list[
     placeholders = ",".join("?" for _ in names)
     with get_conn(db_path) as conn:
         _apply_schema(conn)
+        table = "planned_project_targets" if planned_only else "project_members"
         cur = conn.execute(
-            f"SELECT norm_name, tag FROM target_tags WHERE norm_name IN ({placeholders}) "
+            f"SELECT norm_name, tag FROM {table} WHERE norm_name IN ({placeholders}) "
             "ORDER BY tag COLLATE NOCASE",
             names,
         )

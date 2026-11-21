@@ -195,6 +195,18 @@ driven by `deploy/pull-deploy.sh` from cron, which restarts the matching session
 after a `git reset --hard` in the dedicated checkout; since `--reload` is gone,
 HTML/JavaScript changes require that deploy restart before they are live.
 
+### Production rollout of release #467, 2026-11-19
+
+The production cron deployed `bf12bd26b51b5607a46cc0ca39053c4ecc8ec043` to ut2 and recorded a healthy web process on port 8001 at 05:25:09 UTC. The release was already merged when the rollout began. The production checkout was still on `54b8136` when the fleet stopped. [Release PR #467](https://github.com/muscat-team/muscatdb/pull/467)
+
+The production job store had no pending, running, cancelling or finalizing rows before shutdown. The guarded `workers.py --profile prod down` stopped all 18 units on ut3 through ut7. Fleet status confirmed all were inactive. After the web health check, `up` started all 18. Systemd activation times ranged from 05:25:16 to 05:26:13 UTC, and fleet status confirmed every configured pipeline was active.
+
+The full-fit canary used the archived Sinistro ELP light curve for TOI-6109.44 from observing night 241113. The submitter received a queued response and worker `muscat-ut6` claimed job `transit_fit:sinistro/241113/TIC384984325.44(TOI6109.44)/elp-tel06-full_frame-release_467_canary`.
+
+With the predicted center blank, the selected data had midpoint BJD 2460628.836783. The nearest transit was cycle 117 of reference epoch 2458792.113800 and period 15.698700 days. For planet e, `meta.yaml` recorded center 2460628.861700, full width 0.080000 days, bounds [2460628.821700, 2460628.901700] and `fixed: false`. The worker log printed the same interval. In `fit.yaml`, `tc_pred` and `tc_pred_unc` reproduced the center and full width.
+
+The production job store recorded `done`, exit code 0, elapsed time 386 s and zero retries. Timer saved the results and reported three divergences after tuning across four chains (maximum reported R-hat 1.00). The queued worker and prior checks passed. Review the sampler warning before using this canary timing for science.
+
 ### Release order (test → main)
 
 Merging to `main` deploys nothing by itself; the cron entry for `main` takes the
@@ -1061,7 +1073,7 @@ The current pins are:
 
 | Engine | Repository | Commit | Candidate environment |
 |---|---|---|---|
-| prose2 | `jpdeleon/prose2` | `454b3df8b446d954de7937826762a264203eaea0` (v3.8.0) | `prose-prod-454b3df8` |
+| prose2 | `jpdeleon/prose2` | `8598ad47c2eb96bc10594fcdd882209d9dc3087d` (v3.9.0) | `prose-prod-8598ad47` |
 | timer | `john-livingston/timer` | `b8428258c9b62266532173af4abd7fbafee6dcef` | `timer-prod-b8428258` |
 | harmonic | `john-livingston/harmonic` | `a32fb8e32ca776e0e6e7dc92ad4232cef1f12194` | `harmonic-prod-a32fb8e3` |
 
@@ -1150,6 +1162,15 @@ the candidate's scientific settings, then update the packaged YAML and both
 recorded SHA-256 values (`muscat_db/prose_config.py` and `engines.toml`) together.
 Never regenerate the production snapshot automatically at launch or by following
 live symlinks.
+
+### Prose2 3.9.0 candidate (2026-11-20)
+
+The owner release `jpdeleon/prose2` at `8598ad47c2eb96bc10594fcdd882209d9dc3087d`
+writes numbered reference charts for unmatched targets (jpdeleon/prose2#80).
+The worker environment is `prose-prod-8598ad47`. Keep `prose-prod-454b3df8`
+available for rollback. The frozen telescope configuration carries forward
+the 3.8.0 definitions with updated release provenance. Its SHA-256 is
+`299b371832128bdcd2fa672a787742b7548b4512fb05d6b29b8c11d49da0b130`.
 
 ### Prose2 3.8.0 candidate (2026-11-17)
 
