@@ -592,7 +592,7 @@
           </div>
           <div class="opt check" style="margin-top: 0; white-space: nowrap;">
             <input type="checkbox" id="opt-quadratic">
-            <label for="opt-quadratic">Quadratic <span class="help-tooltip" title="Add a 2nd-order (quadratic) term to the trend basis. Default off.">?</span></label>
+            <label for="opt-quadratic">Quadratic covariates <span class="help-tooltip" title="Add the square of each covariate (airmass, centroid shifts and the others selected) to the systematics basis. It does not change the time trend, which the Trend option sets. Default off.">?</span></label>
           </div>
           <div class="opt check" style="margin-top: 0; white-space: nowrap;">
             <input type="checkbox" id="opt-clip">
@@ -1255,6 +1255,43 @@
     return 'c';
   }
 
+  // Width used for a Gaussian prior entered as a mean only, in the units the
+  // page shows (duration in hours). Mirrors PRIOR_WIDTH_DEFAULTS in transit_fit.py.
+  // t0 has none: its sampled width is the transit-center prior's.
+  var PRIOR_WIDTH_NOTES = {
+    'planet-period': { param: 'period', text: '0.001 d' },
+    'planet-dur': { param: 'dur', text: '0.24 h' },
+    'planet-ror': { param: 'ror', text: '0.005' },
+    'planet-b': { param: 'b', text: '0.1' }
+  };
+
+  function updatePriorWidthNotes(card) {
+    var fixed = {};
+    document.querySelectorAll('input[name="fixed-params"]:checked').forEach(function (c) { fixed[c.value] = true; });
+    Object.keys(PRIOR_WIDTH_NOTES).forEach(function (cls) {
+      var field = card.querySelector('.' + cls);
+      var note = field && field.closest('.opt').querySelector('.prior-width-note');
+      if (!note) return;
+      var spec = PRIOR_WIDTH_NOTES[cls];
+      var prior = card.querySelector('.' + cls + '-prior');
+      var pair = splitPair(field.value);
+      var show = pair[0] !== '' && pair[1] === '' && !fixed[spec.param]
+        && !(prior && prior.value === 'uniform');
+      note.textContent = show ? 'No uncertainty entered: ' + spec.text + ' is used.' : '';
+      note.hidden = !show;
+    });
+  }
+
+  // Fixing or freeing a parameter, or changing its prior shape, changes
+  // whether a default width applies.
+  document.addEventListener('change', function (e) {
+    var t = e.target;
+    if (!t) return;
+    if (t.name === 'fixed-params' || (t.className && /-prior$/.test(t.className))) {
+      document.querySelectorAll('.planet-card').forEach(updatePriorWidthNotes);
+    }
+  });
+
   function setPlanetCardError(optDiv, msg) {
     var err = optDiv.querySelector('.field-error');
     if (!err) return;
@@ -1266,6 +1303,7 @@
   // fit cannot start with missing planet priors. Live calls omit it, so typing
   // an empty card does not flash "Required" on every field.
   function validatePlanetCard(card, requireFilled) {
+    updatePriorWidthNotes(card);
     function setValid(el, ok) {
       if (!el) return;
       if (el.value.trim() === '' || ok) el.classList.remove('is-invalid');
@@ -1627,6 +1665,16 @@
       err.className = 'field-error';
       optDiv.appendChild(err);
     });
+    // Where a Gaussian prior can be entered without an uncertainty, say what
+    // width the fit then uses (PRIOR_WIDTH_DEFAULTS in transit_fit.py).
+    Object.keys(PRIOR_WIDTH_NOTES).forEach(function (cls) {
+      var field = card.querySelector('.' + cls);
+      if (!field) return;
+      var note = document.createElement('span');
+      note.className = 'hint prior-width-note';
+      note.hidden = true;
+      field.closest('.opt').appendChild(note);
+    });
 
     var letterInput = card.querySelector('.planet-letter-input');
     var queryTargetInput = card.querySelector('.planet-query-target');
@@ -1952,11 +2000,12 @@
       if (stellarRefEl) stellarRefEl.innerHTML = '';
       setFieldSource('src-stellar', '');
 
+      // Back to the form's defaults, which have both on.
       var cEl = document.getElementById('opt-chromatic');
-      if (cEl) cEl.checked = false;
+      if (cEl) cEl.checked = true;
 
       var trEl = document.getElementById('opt-trend');
-      if (trEl) trEl.checked = false;
+      if (trEl) trEl.checked = true;
 
       var selectEl = document.getElementById('run-mode-select');
       if (selectEl) selectEl.value = 'new';

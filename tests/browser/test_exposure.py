@@ -347,3 +347,31 @@ def test_results_views_plot_limiting_stars_and_selected_peak_limit(page):
     expect(plot).to_contain_text('80% full well')
     page.locator('[data-results-view="table"]').click()
     expect(page.locator('#results-table')).to_be_visible()
+
+
+@pytest.mark.parametrize("inst,maximum,step", [
+    # LCO limits from lco._DEFOCUS_LIMIT_MM; no known limit keeps 0 to 6 mm (#458).
+    ("muscat3", "8", "0.5"), ("muscat4", "8", "0.5"), ("sinistro", "5", "0.5"),
+    ("qhy600", "0.5", "0.1"), ("muscat2", "6", "0.5"), ("muscat", "6", "0.5"),
+])
+def test_focus_slider_follows_the_instrument_limit(page, inst, maximum, step):
+    page.goto(URL)
+    page.select_option("#sel-inst", inst)
+    slider = page.locator("#focus-mm")
+    expect(slider).to_have_attribute("max", maximum)
+    expect(slider).to_have_attribute("step", step)
+
+
+def test_focus_beyond_the_new_limit_is_clamped_and_restored_within_it(page):
+    page.goto(URL)
+    slider = page.locator("#focus-mm")
+    slider.fill("8")
+    expect(page.locator("#focus-val")).to_have_text("8.0 mm")
+    page.select_option("#sel-inst", "sinistro")
+    expect(page.locator("#focus-val")).to_have_text("5.0 mm")
+    # A saved 8 mm for MuSCAT3 survives a reload: the limit is set before the value.
+    page.select_option("#sel-inst", "muscat3")
+    slider.fill("8")
+    page.wait_for_timeout(300)
+    page.reload()
+    expect(page.locator("#focus-val")).to_have_text("8.0 mm")

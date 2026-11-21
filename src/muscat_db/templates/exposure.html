@@ -566,6 +566,17 @@
 
   // ---- Range value displays ----
   function syncFocus() { focusVal.textContent = parseFloat(focusMm.value).toFixed(1) + ' mm'; }
+  // The slider reaches the instrument's focus-offset limit (the one LCO
+  // submission enforces). Instruments without a known limit keep 0 to 6 mm.
+  var DEFOCUS_LIMITS = {{ defocus_limits | tojson }};
+  var DEFAULT_FOCUS_MAX = 6;
+  function applyFocusLimits() {
+    var limit = DEFOCUS_LIMITS[selInst.value] || DEFAULT_FOCUS_MAX;
+    focusMm.max = String(limit);
+    focusMm.step = limit < 1 ? '0.1' : '0.5';
+    if (parseFloat(focusMm.value) > limit) focusMm.value = String(limit);
+    syncFocus();
+  }
   function syncAirmass() { airmassVal.textContent = parseFloat(airmass.value).toFixed(2); }
   focusMm.addEventListener('input', function () { syncFocus(); saveState(); });
   airmass.addEventListener('input', function () { syncAirmass(); saveState(); });
@@ -605,6 +616,8 @@
       lookupStatus.className = 'msg ok';
       lookupStatus.textContent = magnitudeProvenance;
     }
+    // Set the limit first: a range input clamps a value above its current max.
+    applyFocusLimits();
     if (s.focus !== undefined) focusMm.value = s.focus;
     if (s.airmass !== undefined) airmass.value = s.airmass;
     if (s.seeing !== undefined) seeingInput.value = s.seeing;
@@ -638,7 +651,7 @@
     }
   }
 
-  selInst.addEventListener('change', function () { updateConfmodeVisibility(); saveState(); });
+  selInst.addEventListener('change', function () { updateConfmodeVisibility(); applyFocusLimits(); saveState(); });
   selConfmode.addEventListener('change', function () { saveState(); renderInstParams(selInst.value); });
   seeingInput.addEventListener('input', saveState);
   targetName.addEventListener('input', saveState);
