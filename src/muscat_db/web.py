@@ -4502,6 +4502,18 @@ def exposure_page(inst: str = "", target: str = ""):
     )
 
 
+@app.get("/exposure/precision-calibration", response_class=HTMLResponse)
+def precision_calibration_page():
+    from muscat_db.precision_calibration import visible_comparisons
+
+    conn = exp_calc._conn()
+    try:
+        groups = visible_comparisons(conn, _product_visibility())
+    finally:
+        conn.close()
+    return _render("precision_calibration.html", groups=groups)
+
+
 @exposure_router.get("/recommend-defaults", response_class=JSONResponse)
 def exposure_recommend_defaults(instrument: str, band: str, mode: str, site: str):
     from muscat_db.exposure_recommend import recommendation_defaults

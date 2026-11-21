@@ -2324,5 +2324,24 @@ def worker(
     run_worker(pipeline, interval=interval, once=once)
 
 
+@app.command()
+def calibrate_precision(
+    manifest: Path = typer.Argument(..., exists=True, dir_okay=False),
+    db: str = _db_option(),
+):
+    """Fit MuSCAT3 precision factors from reviewed archive products."""
+    from muscat_db.database import get_conn
+    from muscat_db.precision_calibration import calibrate
+
+    if not Path(db).is_file():
+        raise typer.BadParameter(f"Database does not exist: {db}")
+    try:
+        with get_conn(db) as conn:
+            calibrate(conn, manifest)
+    except (ValueError, OSError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo("Calibration saved. See /exposure/precision-calibration for the comparison.")
+
+
 if __name__ == "__main__":
     app()
