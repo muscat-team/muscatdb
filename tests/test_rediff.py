@@ -367,3 +367,42 @@ class TestEndpoints:
         assert info.status_code == 200 and info.json()["restorable"] is True
         restore = self._post("rediff/restore", body)
         assert restore.status_code == 400 and "nothing to restore" in restore.json()["error"]
+
+
+def test_transit_fit_records_each_copied_selection_across_restore(run_dir, tmp_path, monkeypatch):
+    import numpy as np
+    from muscat_db import transit_fit as fit
+
+    fields = {}
+    for band in ("gp", "rp"):
+        for key, value in {
+            "aperture": 0, "aper_radii": [4., 6.], "aper_unit": "px",
+            "star_ids": [9, 1, 2], "target_index": 0, "weights": [[0., .8, .2]],
+        }.items():
+            fields[f"{band}__{key}"] = value
+    np.savez(run_dir / f"{TARGET}_{INST}_gp_rp_{DATE}_flux_datacube.npz",
+             __bands__=["gp", "rp"], **fields)
+    monkeypatch.setattr(pp, "_run_sync", _fake_prose(run_dir, []))
+    csvs = [run_dir / GP_CSV, run_dir / RP_CSV]
+
+    def snapshot(name):
+        dest = tmp_path / name
+        dest.mkdir()
+        fit._write_fit_inputs(dest, INST, DATE, TARGET, csvs, {"tc_pred": "2460807.84"})
+        return fit._read_run_meta(dest)["input_selections"]
+
+    assert rd.rediff(INST, DATE, TARGET, RUN, SEL, apply=True)["ok"]
+    applied = snapshot("custom")
+    assert applied[GP_CSV] == dict(source="Custom", comparisons=[3, 5], aperture=1,
+                                   aper_radius=6., aper_unit="px", weighting="equal")
+    assert applied[RP_CSV] == dict(source="Pipeline", comparisons=[1, 2], aperture=0,
+                                   aper_radius=4., aper_unit="px", weighting="broeg")
+    monkeypatch.setattr(pp, "_run_sync", _fake_clip(run_dir))
+    assert pp.postprocess(INST, DATE, TARGET, RUN, 5., 2, 5, apply=True)["ok"]
+    assert snapshot("clipped") == applied
+    assert pp.restore_clip(INST, DATE, TARGET, RUN)["ok"]
+    assert rd.restore_rediff(INST, DATE, TARGET, RUN)["ok"]
+    restored = snapshot("restored")
+    assert restored[GP_CSV] == restored[RP_CSV] == applied[RP_CSV]
+    assert fit._read_run_meta(tmp_path / "custom")["input_selections"] == applied
+    assert (tmp_path / "custom" / GP_CSV).read_bytes() != (tmp_path / "restored" / GP_CSV).read_bytes()

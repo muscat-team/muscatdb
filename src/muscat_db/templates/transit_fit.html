@@ -1,5 +1,8 @@
 {% extends "base.html" %}
 {% block title %}Transit Fit — MuSCAT-db{% endblock %}
+{% macro selection_label(s) -%}
+  {% if s %}{{ s.source }} · stars {{ s.comparisons | join(', ') }} · aperture {{ '%g' | format(s.aper_radius) }} {{ s.aper_unit }} · {{ 'Broeg' if s.weighting == 'broeg' else s.weighting }} weights{% else %}Selection not recorded{% endif %}
+{%- endmacro %}
 {% block content %}
 <style>
   /* Page-specific styles only. Shared components (buttons, .opt* form fields,
@@ -342,6 +345,7 @@
         <div class="lightcurve-card csv-card" data-csv-path="{{ csv.path }}" data-csv-name="{{ csv.name }}" data-tmin="{{ '%.5f' % csv.t_min if csv.t_min is not none else '' }}" data-tmax="{{ '%.5f' % csv.t_max if csv.t_max is not none else '' }}" role="button" tabindex="0">
           <input type="checkbox" class="csv-checkbox" checked style="margin-right: 0.5rem;">
           <span class="lc-name">📄 {{ csv.name }}{% if csv.run_id %} <span style="font-size: 0.8rem; color: var(--text-dim);">({{ csv.run_id }})</span>{% endif %}</span>
+          <span class="lc-date">{{ selection_label(csv.selection) }}</span>
           <span class="lc-date">Created: {{ csv.created_at }}</span>
         </div>
       {% endfor %}
@@ -371,6 +375,14 @@
   <div class="phot-section">
     <h2>Transit Fit Results{% if sel_run %} <span style="font-size:0.8rem;color:var(--text-dim);font-weight:400;">— {{ sel_run }}</span>{% endif %}</h2>
 
+    <details class="result-collapse">
+      <summary>Photometry used by this fit</summary>
+      {% if outputs.input_selections %}
+      <ul>{% for name, selection in outputs.input_selections.items() %}
+        <li>{{ name }} · {{ selection_label(selection) }}</li>
+      {% endfor %}</ul>
+      {% else %}<p>Selection not recorded</p>{% endif %}
+    </details>
     {% if outputs.health %}
     {% if outputs.health.warnings %}<p><strong>Done with warnings</strong> — {{ outputs.health.warnings | join(', ') }}</p>{% endif %}
     <p>{% for label, value in outputs.health.metrics.items() %}{{ label }}: {{ 'Unknown' if value is none else value | round(6) }}{% if not loop.last %} · {% endif %}{% endfor %}</p>

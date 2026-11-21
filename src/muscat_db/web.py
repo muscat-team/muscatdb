@@ -3178,6 +3178,7 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
                     and (not sel_mode or r["_mode"] == sel_mode)]
 
         csvs = [{"path": r["path"], "name": r["name"], "created_at": r["created_at"], "run_id": r["run_id"],
+                 "selection": rediff_mod.input_selection(pathlib.Path(r["path"]), inst),
                  "t_min": r["t_min"], "t_max": r["t_max"]} for r in rows]
 
         # Existing runs (each isolated in its own dir); show one run's results at
@@ -3220,6 +3221,9 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
 
         if sel_run is not None:
             outputs = fit.get_fit_outputs(inst, date, target, run_id=sel_run or None)
+            if outputs.get("has_any"):
+                saved = fit._read_run_meta(fit.fit_output_dir(inst, date, target, sel_run or None))
+                outputs = {**outputs, "input_selections": saved.get("input_selections", {})}
         else:
             outputs = None
 

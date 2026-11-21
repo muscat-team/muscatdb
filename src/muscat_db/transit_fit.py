@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from typing import IO
 import yaml
 
-from muscat_db import jobs, database
+from muscat_db import jobs, database, rediff
 from muscat_db._optimize_helper import DONE_MARKER as _OPTIMIZE_DONE_MARKER
 from muscat_db.job_store import (
     abandon_claimed_launch,
@@ -1463,8 +1463,15 @@ def _write_fit_inputs(
     allowed = tuple(col for name in covariates for col in _TIMER_COVARIATE_CHOICES[name])
     covariates_fitted: dict[str, list[str]] = {}
     covariates_dropped: dict[str, dict[str, str]] = {}
+    input_selections = {}
     for c in csvs:
+        before = c.stat()
+        selection = rediff.input_selection(c, inst)
         copied = _copy_lightcurve_for_timer(c, rdir / c.name, upload_covariates(c), allowed)
+        after = c.stat()
+        if (before.st_ino, before.st_ctime_ns) != (after.st_ino, after.st_ctime_ns):
+            raise ValueError(f"{c.name} changed while preparing fit inputs. Retry the fit.")
+        input_selections[c.name] = selection
         if copied is not None:
             covariates_fitted[c.name], drops = copied
             if drops:
@@ -1859,6 +1866,7 @@ def _write_fit_inputs(
         "run_type": run_type or "",
         "transit_center_priors": transit_center_priors,
         "covariates": list(covariates),
+        "input_selections": input_selections,
         "covariates_fitted": covariates_fitted,
         "covariates_dropped": covariates_dropped,
     }
