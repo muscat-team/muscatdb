@@ -375,3 +375,23 @@ def test_focus_beyond_the_new_limit_is_clamped_and_restored_within_it(page):
     page.wait_for_timeout(300)
     page.reload()
     expect(page.locator("#focus-val")).to_have_text("8.0 mm")
+
+
+def test_open_precision_comparison(page, live_server):
+    import json
+    import sqlite3
+
+    page.goto(URL)
+    page.get_by_role("link", name="Compare predictions with achieved MuSCAT3 precision").click()
+    expect(page.get_by_role("heading", name="Achieved MuSCAT3 precision")).to_be_visible()
+    expect(page.get_by_text("No calibration products are available to display.")).to_be_visible()
+    sample = dict(product=dict(night="2025-01-01", target="Star"), run_id="",
+                  bins=4, predicted_ppm=100, achieved_ppm=180, held_out=True)
+    with sqlite3.connect(live_server.db) as conn:
+        conn.execute("INSERT INTO precision_calibration VALUES (?, ?, ?, ?, ?)",
+                     ("muscat3", "rp", "MUSCAT_FAST", 2, json.dumps([sample])))
+    page.reload()
+    cells = page.get_by_role("row").filter(has_text="Star").get_by_role("cell")
+    expect(cells).to_have_text(["2025-01-01", "Star", "Held out", "4", "100.0", "180.0", "200.0"])
+    page.get_by_role("link", name="Exposure calculator", exact=True).last.click()
+    expect(page.locator("#calc-btn")).to_be_visible()
