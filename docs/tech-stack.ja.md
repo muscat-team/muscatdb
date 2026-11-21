@@ -38,6 +38,17 @@ FastAPI、uvicorn、Jinja2、Typer のほか、astropy は FITS の読み書き�
 
 中央ホストは 24 コア、メモリ 100 GB で、tmux と cron を使って運用します。日々の観測ログの走査と索引作成には `muscat-db scan-yesterday` と `muscat-db build-db` を使用します。配備とホストの詳細は[システムの運用](running.md)を参照してください。
 
+### システム構成図
+
+```text
+ブラウザー
+    ↓
+nginx (:8000) ── proxy_pass ──→ uvicorn (:8001) / FastAPI
+                                   ├─ Jinja2 テンプレートと静的ファイル (CSS/JS)
+                                   ├─ 観測索引の読み書き → SQLite (muscat.db, WAL)
+                                   └─ 解析ジョブの起動 → prose2 / timer / harmonic
+```
+
 ### 外部パイプラインとワーカー
 
 測光は別リポジトリの prose2（conda の prose 環境で run_photometry.py を実行）、トランジットフィットは timer、TTV は harmonic が受け持ちます。ウェブアプリは uv 環境から独立した解析環境を起動します。重い処理は `deploy/workers.py` と `deploy/workers.toml` に定義したワーカー群で実行し、PostgreSQL の管理データベースで調整します。Celery と Redis への移行案は #424 で取り下げられました。
