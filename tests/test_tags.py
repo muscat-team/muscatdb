@@ -8,6 +8,8 @@ membership.
 
 from __future__ import annotations
 
+import csv
+import io
 import sqlite3
 
 from fastapi.testclient import TestClient
@@ -699,3 +701,38 @@ def test_planned_membership_resolves_when_observations_arrive(mock_db, monkeypat
     assert get_tags_for_targets(mock_db, ["TESTOBJ"]) == {"TESTOBJ": ["FollowUp"]}
     delete_tag(mock_db, "FollowUp")
     assert get_targets_for_tag(mock_db, "FollowUp") == []
+
+def test_csv_exports_keep_formula_like_text_literal(mock_db, monkeypatch):
+    client = TestClient(app)
+    _seed_one_target(monkeypatch)
+    create_tag(mock_db, "  =1+1")
+    add_target_tag(mock_db, "TESTOBJ", "=1+1")
+    add_target_tag(mock_db, "@PLAN", "=1+1", planned=True)
+
+    def rows(path):
+        response = client.get(path)
+        assert response.is_success
+        return list(csv.DictReader(io.StringIO(response.text)))
+
+    target = rows("/api/targets/export.csv")[0]
+    assert target["tags"] == "'=1+1"
+    assert target["dec"] == "+20:11:36.595"
+    assert rows("/api/tags/=1+1/export.csv")[0]["norm_name"] == "'@PLAN"
+
+    with sqlite3.connect(mock_db) as conn:
+        conn.execute("INSERT INTO target_notes (object, obsdate, instrument, note) VALUES (?, ?, ?, ?)",
+                     ("TESTOBJ", "260101", "muscat3", "  -1+2"))
+    monkeypatch.setattr("muscat_db.web.phot.get_photometry_status", lambda *_: "test")
+    observation = rows("/api/targets/observations.csv?name=TESTOBJ")[0]
+    assert observation["photometry_run_status"] == "test_run"
+    assert observation["note"] == "'  -1+2"
+
+
+def test_planned_target_name_length(mock_db):
+    create_tag(mock_db, "Long period")
+    client = TestClient(app)
+    payload = {"tag": "Long period", "allow_placeholder": True}
+    assert client.put("/api/targets/" + "X" * 100 + "/tags", json=payload).is_success
+    assert client.put("/api/targets/" + "X" * 101 + "/tags", json=payload).status_code == 400
+    assert client.put("/api/targets/TOI" + "9" * 5000 + "/tags", json=payload).status_code == 400
+    assert get_targets_for_tag(mock_db, "Long period") == ["X" * 100]

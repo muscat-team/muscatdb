@@ -25,7 +25,7 @@
   </div>
 
   <div class="search-bar">
-    <input id="attach-target-input" type="text" list="attach-target-options" placeholder="Observed or planned target name…" autocomplete="off">
+    <input id="attach-target-input" type="text" maxlength="100" list="attach-target-options" placeholder="Observed or planned target name…" autocomplete="off">
     <datalist id="attach-target-options"></datalist>
     <button id="attach-target-btn" class="btn" type="button">Add to Project</button>
     <a href="/api/tags/{{ tag | urlencode }}/export.csv" class="csv-btn" download>CSV</a>

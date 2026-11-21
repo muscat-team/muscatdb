@@ -2210,6 +2210,16 @@ def remove_target_tag(db_path: str, norm_name: str, tag: str, *, planned_only: b
     clear_all_caches()
 
 
+def project_memberships(db_path: str) -> list[tuple[str, str, int]]:
+    """Project key (SQLite NOCASE), target name and planning flag for each membership."""
+    with get_conn(db_path) as conn:
+        _apply_schema(conn)
+        return conn.execute(
+            "SELECT lower(tag), norm_name, 0 FROM target_tags UNION ALL "
+            "SELECT lower(tag), norm_name, 1 FROM planned_project_targets"
+        ).fetchall()
+
+
 def get_targets_for_tag(db_path: str, tag: str, *, planned_only: bool = False) -> list[str]:
     """Sorted list of norm_names currently attached to `tag`."""
     with get_conn(db_path) as conn:

@@ -52,7 +52,7 @@ def test_download_target_observations_csv(page):
     assert download.value.suggested_filename == "TOI1000-observations.csv"
     with download.value.path().open(newline="", encoding="utf-8") as stream:
         rows = list(csv.DictReader(stream))
-    assert sorted((r["date"], r["instrument"], r["phot"]) for r in rows) == [
+    assert sorted((r["date"], r["instrument"], r["photometry_run_status"]) for r in rows) == [
         ("261001", "muscat3", "full"), ("261003", "sinistro", "none"),
     ]
 

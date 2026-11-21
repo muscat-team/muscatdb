@@ -228,6 +228,7 @@ from muscat_db.database import (
     add_target_tag as _add_target_tag,
     remove_target_tag as _remove_target_tag,
     get_targets_for_tag as _get_targets_for_tag,
+    project_memberships,
     get_tags_for_targets,
 )
 from muscat_db.jobs import fit_params
@@ -1560,6 +1561,31 @@ def _render_markdown(text: str) -> str:
     )
 
 
+def _project_visibility(db: str, denied: frozenset[str]) -> tuple[set[str], set[str]]:
+    """Hidden target names and projects with only restricted observed members."""
+    if not denied:
+        return set(), set()
+    visible = _all_norm_names(db, denied)
+    hidden = _all_norm_names(db) - visible
+    restricted_projects = set()
+    visible_projects = set()
+    for tag, norm, planned in project_memberships(db):
+        if norm in visible:
+            visible_projects.add(tag)
+        elif not planned and norm in hidden:
+            # A planning-only name must look the same as an unobserved name.
+            restricted_projects.add(tag)
+    return hidden, restricted_projects - visible_projects
+
+
+# SQLite NOCASE and lower() fold only ASCII letters for project identities.
+_ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
+
+def _project_hidden(db: str, tag: str) -> bool:
+    return tag.strip().translate(_ASCII_LOWER) in _project_visibility(db, _viewer_denied())[1]
+
+
 def _visible_project_cards(db: str, denied: frozenset[str]) -> list[dict]:
     """``list_project_tags`` narrowed to what a viewer denied *denied* may see.
 
@@ -1572,15 +1598,11 @@ def _visible_project_cards(db: str, denied: frozenset[str]) -> list[dict]:
     projects = _list_project_tags(db)
     if not denied:
         return projects
-    overrides = _get_norm_name_overrides(db)
-    observed = {_normalize_target_name(t["object"], overrides) for t in _get_targets(db)}
-    visible = {
-        _normalize_target_name(t["object"], overrides)
-        for t in _visible_targets(db, denied)
-    }
-    hidden = observed - visible
+    hidden, hidden_projects = _project_visibility(db, denied)
     cards = []
     for project in projects:
+        if project["tag"].translate(_ASCII_LOWER) in hidden_projects:
+            continue
         attached = set(_get_targets_for_tag(db, project["tag"]))
         if not attached:
             cards.append(project)
@@ -1609,7 +1631,7 @@ def tag_page(name: str = ""):
     if not tag:
         return RedirectResponse("/projects", status_code=303)
     db = _db_path()
-    description = _get_tag_description(db, tag)
+    description = None if _project_hidden(db, tag) else _get_tag_description(db, tag)
     exists = description is not None
     rows = _project_target_rows(db, tag, _viewer_denied()) if exists else []
     description = description or ""
@@ -2516,6 +2538,18 @@ def nexsci_page():
     )
 
 
+def _spreadsheet_cell(value):
+    """Export formula-like text literally, preserving signed numbers and sky coordinates."""
+    if not isinstance(value, str):
+        return value
+    if value.startswith(("\t", "\r", "\n")):
+        return "'" + value
+    if value.lstrip().startswith(("=", "+", "-", "@")):
+        if not re.fullmatch(r"[+-]\d+(?::\d{2}:\d{2})?(?:\.\d+)?", value):
+            return "'" + value
+    return value
+
+
 @target_router.get("/observations.csv")
 def export_target_observations_csv(name: str):
     target = _normalize_target_name(name)
@@ -2526,16 +2560,16 @@ def export_target_observations_csv(name: str):
     writer = csv.writer(buf)
     writer.writerow([
         "date", "object", "instrument", "proposal_id", "filters", "airmass_min",
-        "airmass_max", "n_frames", "phot", "fit", "note",
+        "airmass_max", "n_frames", "photometry_run_status", "fit", "note",
     ])
     for row in datasets:
-        writer.writerow([
+        writer.writerow(_spreadsheet_cell(value) for value in (
             row["date"], row["object"], row["instrument"], row["proposal_id"],
             ", ".join(c["label"] for c in row["filter_chips"]),
             *(f"{row[k]:.2f}" if row[k] is not None else "" for k in ("airmass_min", "airmass_max")),
             row["n_frames"],
-            row["phot"], row["fit"], row["note"],
-        ])
+            "test_run" if row["phot"] == "test" else row["phot"], row["fit"], row["note"],
+        ))
     filename = quote(f"{target}-observations.csv", safe="")
     return Response(
         content=buf.getvalue(), media_type="text/csv",
@@ -2560,7 +2594,7 @@ def export_targets_csv():
     ])
     for t in targets:
         filters = ", ".join(c["label"] for c in t["filter_chips"])
-        w.writerow([
+        w.writerow(_spreadsheet_cell(value) for value in (
             t["object"],
             t["ra"],
             t["declination"],
@@ -2575,7 +2609,7 @@ def export_targets_csv():
             t["note"],
             "yes" if t["is_identified"] else "no",
             ", ".join(tags_by_norm.get(t["norm_name"], [])),
-        ])
+        ))
     return Response(
         content=buf.getvalue(),
         media_type="text/csv",
@@ -9195,6 +9229,9 @@ def api_get_target_tags(obj: str):
     norm_name = _normalize_target_name(obj, _get_norm_name_overrides(db))
     hidden = _norm_name_hidden(db, norm_name, _viewer_denied())
     tags = get_tags_for_targets(db, [norm_name], planned_only=hidden).get(norm_name, [])
+    if tags:
+        _, hidden_projects = _project_visibility(db, _viewer_denied())
+        tags = [tag for tag in tags if tag.translate(_ASCII_LOWER) not in hidden_projects]
     return JSONResponse({"ok": True, "object": obj, "norm_name": norm_name, "tags": tags})
 
 
@@ -9203,13 +9240,19 @@ def api_add_target_tag(obj: str, payload: dict = Body(...)):
     tag = (payload.get("tag") or "").strip()
     if not tag:
         raise HTTPException(400, "tag is required")
+    if payload.get("allow_placeholder") is True and len(obj.strip()) > 100:
+        raise HTTPException(400, "planned target name must be at most 100 characters")
     db = _db_path()
     norm_name = _normalize_target_name(obj, _get_norm_name_overrides(db))
     if not norm_name:
         raise HTTPException(400, "target name is required")
+    if _project_hidden(db, tag):
+        raise HTTPException(404, f"project {tag!r} not found")
     planned = norm_name not in _all_norm_names(db, _viewer_denied())
     if planned and payload.get("allow_placeholder") is not True:
         raise HTTPException(404, f"target {norm_name!r} not found")
+    if planned and len(norm_name) > 100:
+        raise HTTPException(400, "planned target name must be at most 100 characters")
     if not _add_target_tag(db, norm_name, tag, planned=planned):
         raise HTTPException(404, f"project {tag!r} not found")
     return JSONResponse({"ok": True, "object": obj, "norm_name": norm_name, "tag": tag})
@@ -9225,7 +9268,8 @@ def api_remove_target_tag(obj: str, payload: dict = Body(...)):
     norm_name = _normalize_target_name(obj, _get_norm_name_overrides(db))
     # Detaching a planning name must preserve any hidden observed membership.
     hidden = _norm_name_hidden(db, norm_name, _viewer_denied())
-    _remove_target_tag(db, norm_name, tag, planned_only=hidden)
+    if not _project_hidden(db, tag):
+        _remove_target_tag(db, norm_name, tag, planned_only=hidden)
     return JSONResponse({"ok": True, "object": obj, "norm_name": norm_name, "tag": tag})
 
 
@@ -9252,14 +9296,15 @@ def api_update_tag_description(tag: str, payload: dict = Body(...)):
     description = payload.get("description") or ""
     if len(description) > 4000:
         raise HTTPException(400, "description too long (max 4000 chars)")
-    if not _set_tag_description(_db_path(), tag, description):
+    if _project_hidden(_db_path(), tag) or not _set_tag_description(_db_path(), tag, description):
         raise HTTPException(404, f"project {tag!r} not found")
     return JSONResponse({"ok": True, "tag": tag, "description": description.strip()})
 
 
 @tags_router.delete("/{tag}")
 def api_delete_tag(tag: str):
-    _delete_tag(_db_path(), tag)
+    if not _project_hidden(_db_path(), tag):
+        _delete_tag(_db_path(), tag)
     return JSONResponse({"ok": True, "tag": tag})
 
 
@@ -9270,6 +9315,8 @@ def api_rename_tag(tag: str, payload: dict = Body(...)):
         raise HTTPException(400, "new_tag is required (max 100 chars)")
     if "/" in new_tag:
         raise HTTPException(400, "new_tag must not contain '/'")
+    if _project_hidden(_db_path(), tag):
+        raise HTTPException(404, f"project {tag!r} not found")
     result = _rename_tag(_db_path(), tag, new_tag)
     if result is None:
         raise HTTPException(404, f"project {tag!r} not found")
@@ -9281,17 +9328,17 @@ def api_rename_tag(tag: str, payload: dict = Body(...)):
 @tags_router.get("/{tag}/export.csv")
 def api_export_tag_csv(tag: str):
     db = _db_path()
-    if _get_tag_description(db, tag) is None:
+    if _project_hidden(db, tag) or _get_tag_description(db, tag) is None:
         raise HTTPException(404, f"project {tag!r} not found")
     rows = _project_target_rows(db, tag, _viewer_denied())
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(["norm_name", "dates", "n_dates", "filters", "n_frames"])
     for r in rows:
-        w.writerow([
+        w.writerow(_spreadsheet_cell(value) for value in (
             r["norm_name"], ", ".join(r["dates"]), r["n_dates"],
             ", ".join(c["label"] for c in r["filter_chips"]), r["n_frames"],
-        ])
+        ))
     # Quoted per RFC 6266: an unquoted filename breaks on tag names containing
     # spaces (e.g. "Empty Project.csv") or other non-token characters.
     safe_tag = tag.replace("\\", "\\\\").replace('"', '\\"')
