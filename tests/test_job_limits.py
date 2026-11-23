@@ -7,8 +7,6 @@ from the CLI, handed to the job store by the pipelines, and reported over HTTP.
 
 from __future__ import annotations
 
-import pathlib
-
 import pytest
 from typer.testing import CliRunner
 
@@ -156,10 +154,9 @@ def _transit_fit_launch(monkeypatch, store, user, tmp_path):
     monkeypatch.setattr(transit_fit, "_MAX_FULL_JOBS", 1)
     monkeypatch.setattr(transit_fit, "_FIT_JOBS", {})
     monkeypatch.setattr(transit_fit, "validate_fit_options", lambda options: None)
-    monkeypatch.setattr(
-        transit_fit, "get_csv_lightcurves",
-        lambda *a, **k: [pathlib.Path("TOI-123_muscat3_g.csv")],
-    )
+    csv = tmp_path / "TOI-123_muscat3_g.csv"
+    csv.write_text("")  # _write_fit_inputs stats each selected light curve
+    monkeypatch.setattr(transit_fit, "get_csv_lightcurves", lambda *a, **k: [csv])
     monkeypatch.setattr(transit_fit, "validate_no_duplicate_datasets", lambda *a, **k: None)
     monkeypatch.setattr(transit_fit, "fit_output_dir", lambda *a, **k: tmp_path / "run")
     monkeypatch.setattr(transit_fit, "_fit_reduction_exists", lambda *a, **k: False)
