@@ -8,7 +8,7 @@ from muscat_db import transit_fit as fit
 
 def test_defaulted_widths_lists_sampled_mean_only_priors():
     options = {"planets": "b", "fixed": [], "period": "2.17", "t0": "2461314.86",
-               "dur": "0.0875", "ror": "0.065,0.01", "b": "0.2"}
+               "dur": "0.0875", "ror": "0.065", "ror_unc": "0.01", "b": "0.2"}
     # t0 is not listed: timer samples it from the Uniform transit-center prior,
     # whose width is tc_pred_unc, not the sys.yaml uncertainty.
     assert fit.defaulted_prior_widths(options) == [
@@ -17,7 +17,7 @@ def test_defaulted_widths_lists_sampled_mean_only_priors():
 
 def test_fixed_and_uniform_parameters_are_not_listed():
     options = {"planets": "b,c", "fixed": ["period", "t0"], "period": "2.17", "t0": "2461314.86",
-               "dur_b": "0.0875", "dur_prior_b": "uniform", "ror_c": "0.05", "b_c": "0.1,0.1"}
+               "dur_b": "0.0875", "dur_prior_b": "uniform", "ror_c": "0.05", "b_c": "0.1", "b_unc_c": "0.1"}
     assert fit.defaulted_prior_widths(options) == [("c", "ror", 0.005)]
 
 
