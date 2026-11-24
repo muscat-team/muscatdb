@@ -129,6 +129,8 @@ GOOD_SEEING_PERCENTILE = 16.0
 # Defocused image size varies frame to frame; a narrow donut gives the highest
 # peak, so saturation uses this percentile of the FWHM-vs-defocus slope.
 SAFE_DEFOCUS_PERCENTILE = 16.0
+# Upper support of the frames used for the defocus slope.
+DEFOCUS_RANGE_PERCENTILE = 95
 # The saturation level is the lowest MAXLIN seen recently: cameras within one
 # instrument class differ (QHY600 units span 42000-47400 e-).
 LEVEL_RECENT_DAYS = 365
@@ -153,6 +155,7 @@ class BandModel:
     level: float            # saturation (MAXLIN), e-
     n_frames: int
     source: str = "archive"
+    max_defocus_mm: float = 0.0  # measured support; legacy models stay in focus
 
     def as_dict(self) -> dict:
         return dict(self.__dict__)
@@ -190,6 +193,7 @@ def fit_band(samples: list[FrameSample], extinction: float) -> BandModel | None:
 
     far = defocus >= DEFOCUS_FIT_MIN_MM
     a_defocus = c = c_safe = None
+    max_defocus = 0.0
     if far.sum() >= MIN_DEFOCUS_FRAMES and focused.sum() >= MIN_FOCUS_FRAMES:
         # Each slope is measured against the seeing the prediction pairs it
         # with: the median for the typical image, good seeing for the safe one.
@@ -205,11 +209,16 @@ def fit_band(samples: list[FrameSample], extinction: float) -> BandModel | None:
         # than the typical one at any defocus.
         c_safe = min(c_safe, c)
         a_defocus = float(np.median(a[defocus >= IN_FOCUS_MM]))
+        if c > 0 and c_safe > 0 and a_defocus > 0:
+            # Use an observed offset. Interpolating toward the largest offset
+            # lets a single outlier extend the search on small samples.
+            max_defocus = float(np.percentile(defocus[far], DEFOCUS_RANGE_PERCENTILE, method="lower"))
     return BandModel(
         band=samples[0].band, mode="", zp_safe=float(np.percentile(zp, SAFE_ZP_PERCENTILE)),
         zp_median=float(np.median(zp)), a_focus=a_focus, a_defocus=a_defocus, defocus_c=c, defocus_c_safe=c_safe,
         seeing_good=float(np.percentile(seeing, GOOD_SEEING_PERCENTILE)), seeing_median=float(np.median(seeing)),
         pixscale=float(np.median(pix)), level=_recent_level(samples), n_frames=len(samples),
+        max_defocus_mm=max_defocus,
     )
 
 

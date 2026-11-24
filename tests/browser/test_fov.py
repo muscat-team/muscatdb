@@ -118,8 +118,21 @@ def test_cds_outage_keeps_resolve_and_run_working(page, gaia, failure):
     assert response.value.json()["ok"]
     expect(page.locator("#fov-results")).to_be_visible()
     expect(page.locator("#fov-sky-status")).to_have_text(
-        "Sky view unavailable (CDS unreachable)", timeout=12_000,
+        "Sky view unavailable. The viewer could not initialize.", timeout=12_000,
     )
+
+
+def test_sky_view_uses_mirror_when_cds_asset_is_missing(page):
+    from pathlib import Path
+
+    stub = (Path(__file__).parent / "stubs" / "aladin.js").read_text()
+    page.route("https://aladin.cds.unistra.fr/**", lambda r: r.abort("blockedbyclient"))
+    page.route("https://cdn.jsdelivr.net/npm/aladin-lite@3.8.1/dist/aladin.js",
+               lambda r: r.fulfill(body=stub + "\nexport default window.A;",
+                                   content_type="application/javascript", headers={"Access-Control-Allow-Origin": "*"}))
+    page.goto("/fov")
+    expect(page.locator("#fov-sky-status")).to_have_text("")
+    assert page.evaluate("A.__calls.some(call => call.fn === 'addCatalog')")
 
 
 def test_late_viewer_initialization_plots_existing_results(page, gaia):
@@ -173,3 +186,29 @@ def test_fov_uses_exofop_when_catalogs_and_cds_cannot_resolve(page, gaia, monkey
     expect(page.locator("#fov-results")).to_be_visible()
     assert calls
     exofop._exofop_cache.clear()
+
+
+def test_exposure_handoff_uses_only_checked_stars(page, gaia, monkeypatch):
+    from muscat_db import exposure
+    monkeypatch.setattr(exposure, 'lookup_magnitudes_with_fallback',
+                        lambda *args: ({'gp': 12}, 'catalog', False))
+    page.goto('/exposure')
+    page.locator('#mags-section a[href="/fov"]').click()
+    page.fill('#fov-target', 'TOI-1000')
+    page.select_option('#fov-inst', 'muscat3')
+    page.click('#fov-run')
+    checks = page.locator('#fov-exp-options input')
+    expect(checks).to_have_count(3)
+    checks.first.uncheck()
+    page.click('#fov-check-saturation')
+    expect(page.locator('.comp-card strong')).to_have_text(['Comp 2', 'Comp 3'])
+    page.go_back()
+    page.click('#fov-run')
+    expect(checks).to_have_count(3)
+    for checkbox in checks.all():
+        checkbox.uncheck()
+    page.click('#fov-check-saturation')
+    page.wait_for_url('**/exposure?**')
+    expect(page.locator('#comps-section')).to_be_hidden()
+    page.reload()
+    expect(page.locator('#comps-section')).to_be_hidden()

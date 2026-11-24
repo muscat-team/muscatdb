@@ -25,7 +25,7 @@
   </div>
 
   <div class="search-bar">
-    <input id="attach-target-input" type="text" list="attach-target-options" placeholder="Add a target by normalized name…" autocomplete="off">
+    <input id="attach-target-input" type="text" maxlength="100" list="attach-target-options" placeholder="Observed or planned target name…" autocomplete="off">
     <datalist id="attach-target-options"></datalist>
     <button id="attach-target-btn" class="btn" type="button">Add to Project</button>
     <a href="/api/tags/{{ tag | urlencode }}/export.csv" class="csv-btn" download>CSV</a>
@@ -50,18 +50,24 @@
       <tr data-norm-name="{{ t.norm_name }}" data-phot-done="{{ t.phot_done }}" data-fit-done="{{ t.fit_done }}" data-ttv-done="{{ t.ttv_done }}">
         <td class="mono" style="text-align:center; color: var(--text-dim);">{{ loop.index }}</td>
         <td>
+          {% if t.placeholder %}
+            <strong>{{ t.norm_name }}</strong> <span class="hint">Planned</span>
+          {% else %}
           <a href="/target?name={{ t.norm_name | urlencode }}&amp;from=project&amp;project={{ tag | urlencode }}" style="text-decoration:none;">
             <strong>{{ t.norm_name }}</strong>
           </a>
+          {% endif %}
         </td>
         <td class="mono" style="text-align:center;">{{ t.phot_done }}</td>
         <td class="mono" style="text-align:center;">{{ t.fit_done }}</td>
         <td style="text-align:center;">
+          {% if t.placeholder %}—{% else %}
           <a href="/ephemeris?targets={{ t.norm_name | urlencode }}" title="To ephemeris" style="text-decoration:none;">⏱️</a>
           {% if t.ttv_done %}
             <span style="color: var(--green); font-weight: bold;" title="TTV fit exists">Y</span>
           {% else %}
             <span style="color: var(--red);" title="No TTV fit">N</span>
+          {% endif %}
           {% endif %}
         </td>
         <td style="text-align:center;">
@@ -240,7 +246,7 @@
         const res = await fetch('/api/targets/' + encodeURIComponent(norm_name) + '/tags', {
           method: 'PUT',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({tag}),
+          body: JSON.stringify({tag, allow_placeholder: true}),
         });
         if (!res.ok) throw new Error('HTTP ' + res.status);
         location.reload();

@@ -16,6 +16,10 @@ and NExScI catalogs. Supported workflow pages expose a unique, shareable view st
 allowing configurations, selections, and results to be reviewed transparently,
 reproduced consistently, and communicated easily among collaborators.
 
+On `/projects`, drag a card by its upper-right grip to save its position in this browser.
+Open a project and enter a target name to include it before observations arrive.
+Planned names such as TOI4406 become linked targets when matching observations are visible.
+
 ## Pipeline engines
 
 muscat-db orchestrates three external packages. Development uses editable
@@ -48,12 +52,18 @@ for coordinated web/worker activation and rollback.
 | Transit fitting | [`timer`](https://github.com/john-livingston/timer) | PyMC (NUTS) | Posteriors, corner/trace/fit plots |
 | TTV fitting | [`harmonic`](https://github.com/john-livingston/harmonic) | emcee | Posteriors, corner/trace/fit plots |
 
+For runs with **Save per-star flux cube** enabled, open **Compare comparison stars & apertures** on the photometry page. **Test setting** reports scatter for the pipeline weights, the same stars and aperture with equal weights, and your selection with equal weights. You can test the defaults directly. **Apply setting** adopts a changed selection, and **Restore default** recovers the pipeline files. Three four-band staging runs produced compressed cubes of 4.87–7.46 MB. Size varies with the number of exposures, stars, and apertures.
+
 When scheduling from a saved harmonic fit, `fit_config.json`'s `t_offset`
 converts between the fit's time system and absolute BJD, including when extending
 the predictions to the requested end date. Successful model, ΔBIC, and ranking
 results are cached for five minutes; failed evaluations can be retried immediately.
 Invalid ranking uncertainties leave the transit windows available with a ranking
 error instead of failing the scheduling request.
+
+On the ephemeris page, reloading the same tab preserves timing selections made
+while a view save is pending. Opening a shared view link restores the snapshot
+identified by that link.
 
 The schedule page can also take mid-transit times from outside muscat-db: choose
 **Uploaded mid-times** as the ephemeris source and paste or load a list (full

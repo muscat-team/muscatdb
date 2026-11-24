@@ -20,6 +20,8 @@ from typing import Annotated
 
 import socketio
 
+from muscat_db.exposure_recommend import RecommendationRequest
+
 sio = socketio.AsyncServer(async_mode="asgi")
 
 _DB_LOCK = threading.Lock()
@@ -85,6 +87,7 @@ from muscat_db import transit_fit_api as fit_api
 from muscat_db import ttv_fit_api as ttv_api
 from muscat_db import ref_time as ref_time_lib
 from muscat_db import postprocess as postproc
+from muscat_db import rediff as rediff_mod
 from muscat_db import exposure as exp_calc
 from muscat_db.admin import router as admin_router
 from muscat_db.access import (
@@ -225,8 +228,10 @@ from muscat_db.database import (
     add_target_tag as _add_target_tag,
     remove_target_tag as _remove_target_tag,
     get_targets_for_tag as _get_targets_for_tag,
+    project_memberships,
     get_tags_for_targets,
 )
+from muscat_db.jobs import fit_params
 from muscat_db.job_store import get_job_store, notify_enabled, set_owner, uses_shared_control_plane, wait_for_work_or_sleep
 from muscat_db.target_refresh import FinishedJobWatcher, refresh_worker_finished_targets
 from muscat_db.cache import LRUCache, TTLCache
@@ -1521,6 +1526,13 @@ def _project_target_rows(
             "fit_done": fit_done,
             "ttv_done": bool(ttv.list_ttv_runs(norm)),
         })
+    planned = set(_get_targets_for_tag(db, tag, planned_only=True))
+    for norm in planned - groups.keys():
+        rows.append({
+            "norm_name": norm, "placeholder": True, "dates": [], "n_dates": 0,
+            "filter_chips": [], "n_frames": 0, "phot_done": 0, "fit_done": 0,
+            "ttv_done": False,
+        })
     rows.sort(key=lambda r: r["norm_name"].casefold())
     return rows
 
@@ -1549,6 +1561,31 @@ def _render_markdown(text: str) -> str:
     )
 
 
+def _project_visibility(db: str, denied: frozenset[str]) -> tuple[set[str], set[str]]:
+    """Hidden target names and projects with only restricted observed members."""
+    if not denied:
+        return set(), set()
+    visible = _all_norm_names(db, denied)
+    hidden = _all_norm_names(db) - visible
+    restricted_projects = set()
+    visible_projects = set()
+    for tag, norm, planned in project_memberships(db):
+        if norm in visible:
+            visible_projects.add(tag)
+        elif not planned and norm in hidden:
+            # A planning-only name must look the same as an unobserved name.
+            restricted_projects.add(tag)
+    return hidden, restricted_projects - visible_projects
+
+
+# SQLite NOCASE and lower() fold only ASCII letters for project identities.
+_ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
+
+def _project_hidden(db: str, tag: str) -> bool:
+    return tag.strip().translate(_ASCII_LOWER) in _project_visibility(db, _viewer_denied())[1]
+
+
 def _visible_project_cards(db: str, denied: frozenset[str]) -> list[dict]:
     """``list_project_tags`` narrowed to what a viewer denied *denied* may see.
 
@@ -1561,20 +1598,17 @@ def _visible_project_cards(db: str, denied: frozenset[str]) -> list[dict]:
     projects = _list_project_tags(db)
     if not denied:
         return projects
-    overrides = _get_norm_name_overrides(db)
-    observed = {_normalize_target_name(t["object"], overrides) for t in _get_targets(db)}
-    visible = {
-        _normalize_target_name(t["object"], overrides)
-        for t in _visible_targets(db, denied)
-    }
-    hidden = observed - visible
+    hidden, hidden_projects = _project_visibility(db, denied)
     cards = []
     for project in projects:
+        if project["tag"].translate(_ASCII_LOWER) in hidden_projects:
+            continue
         attached = set(_get_targets_for_tag(db, project["tag"]))
         if not attached:
             cards.append(project)
             continue
-        count = len(attached - hidden)
+        planned = set(_get_targets_for_tag(db, project["tag"], planned_only=True))
+        count = len((attached - hidden) | planned)
         if count:
             cards.append({**project, "target_count": count})
     return cards
@@ -1597,7 +1631,7 @@ def tag_page(name: str = ""):
     if not tag:
         return RedirectResponse("/projects", status_code=303)
     db = _db_path()
-    description = _get_tag_description(db, tag)
+    description = None if _project_hidden(db, tag) else _get_tag_description(db, tag)
     exists = description is not None
     rows = _project_target_rows(db, tag, _viewer_denied()) if exists else []
     description = description or ""
@@ -1644,6 +1678,7 @@ def target_page(name: str = ""):
             logger.warning("failed to check membership for %s: %s", norm_name, e)
 
         html = jinja.get_template("target.html").render(
+            requested_name=name,
             target_name=norm_name,
             datasets=datasets,
             last_updated=last_updated,
@@ -2503,6 +2538,45 @@ def nexsci_page():
     )
 
 
+def _spreadsheet_cell(value):
+    """Export formula-like text literally, preserving signed numbers and sky coordinates."""
+    if not isinstance(value, str):
+        return value
+    if value.startswith(("\t", "\r", "\n")):
+        return "'" + value
+    if value.lstrip().startswith(("=", "+", "-", "@")):
+        if not re.fullmatch(r"[+-]\d+(?::\d{2}:\d{2})?(?:\.\d+)?", value):
+            return "'" + value
+    return value
+
+
+@target_router.get("/observations.csv")
+def export_target_observations_csv(name: str):
+    target = _normalize_target_name(name)
+    datasets, _ = _get_datasets_for_normalized_target(_db_path(), target, _viewer_denied())
+    if not datasets:
+        raise HTTPException(404, "No photometric observations for this target")
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow([
+        "date", "object", "instrument", "proposal_id", "filters", "airmass_min",
+        "airmass_max", "n_frames", "photometry_run_status", "fit", "note",
+    ])
+    for row in datasets:
+        writer.writerow(_spreadsheet_cell(value) for value in (
+            row["date"], row["object"], row["instrument"], row["proposal_id"],
+            ", ".join(c["label"] for c in row["filter_chips"]),
+            *(f"{row[k]:.2f}" if row[k] is not None else "" for k in ("airmass_min", "airmass_max")),
+            row["n_frames"],
+            "test_run" if row["phot"] == "test" else row["phot"], row["fit"], row["note"],
+        ))
+    filename = quote(f"{target}-observations.csv", safe="")
+    return Response(
+        content=buf.getvalue(), media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
+    )
+
+
 @target_router.get("/export.csv")
 def export_targets_csv():
     db = _db_path()
@@ -2520,7 +2594,7 @@ def export_targets_csv():
     ])
     for t in targets:
         filters = ", ".join(c["label"] for c in t["filter_chips"])
-        w.writerow([
+        w.writerow(_spreadsheet_cell(value) for value in (
             t["object"],
             t["ra"],
             t["declination"],
@@ -2535,7 +2609,7 @@ def export_targets_csv():
             t["note"],
             "yes" if t["is_identified"] else "no",
             ", ".join(tags_by_norm.get(t["norm_name"], [])),
-        ])
+        ))
     return Response(
         content=buf.getvalue(),
         media_type="text/csv",
@@ -2893,8 +2967,12 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
 
     # Presentation metadata is separate from the photometry product contract.
     image_info = {}
+    csv_time_note = ""
     if outputs:
         rdir = phot.run_output_dir(inst, date, target, sel_run or None)
+        csv_time_note = phot.csv_time_note(
+            rdir / prods["csv"]["file"] for prods in outputs.get("bands", {}).values() if prods.get("csv")
+        )
         for item in outputs.get("summary_items", []):
             image_info[item["file"]] = image_delivery.metadata(rdir / item["file"])
         for prods in outputs.get("bands", {}).values():
@@ -2943,6 +3021,8 @@ def photometry_page(inst: str = "", date: str = "", target: str = "", site: str 
         command=command, raw_missing=raw_missing,
         default_bands=phot.DEFAULT_BANDS,
         run_defaults=merged_defaults,
+        target_coord_preview=phot.target_coord_preview(target) if target else "",
+        csv_time_note=csv_time_note,
         noise_columns=phot.NOISE_COLUMNS,
         postproc_defaults=phot.POSTPROCESS_DEFAULTS,
         cmap_choices=phot.CMAP_CHOICES,
@@ -3212,6 +3292,8 @@ def transit_fit_page(inst: str = "", date: str = "", target: str = "", site: str
         sel_site=sel_site, sel_telescope=sel_telescope, sel_mode=sel_mode,
         csv_sites=csv_sites, csv_telescopes=csv_telescopes, csv_modes=csv_modes,
         runs=runs, run_labels=phot.run_chip_labels(runs), sel_run=sel_run,
+        run_warnings={r.run_id: (fit.get_fit_outputs(inst, date, target, r.run_id).get("health") or {}).get("warnings", [])
+                      for r in runs if len(runs) > 1},
         missing_run=missing_run,
         can_modify_run=_viewer_may_modify_run("transit_fit", inst, date, target, sel_run or ""),
         runs_json=runs_json,
@@ -4413,8 +4495,33 @@ def exposure_page(inst: str = "", target: str = ""):
         sel_target=target,
         calibrations=calibrations,
         inst_params=exp_calc.INSTRUMENT_PARAMS,
+        # The LCO focus-offset limits muscat-db enforces when submitting. Only the
+        # LCO instruments have one; the page keeps its 0-6 mm range for the rest.
+        defocus_limits={name: lco._DEFOCUS_LIMIT_MM[name] for name in ('muscat3', 'muscat4', 'sinistro', 'qhy600')},
         model_summary={name: exp_calc.model_summary(name) for name in INSTRUMENTS},
     )
+
+
+@exposure_router.get("/recommend-defaults", response_class=JSONResponse)
+def exposure_recommend_defaults(instrument: str, band: str, mode: str, site: str):
+    from muscat_db.exposure_recommend import recommendation_defaults
+
+    if instrument not in ('muscat3', 'muscat4', 'sinistro', 'qhy600'):
+        return JSONResponse({'ok': False, 'error': 'Unsupported instrument'}, status_code=400)
+    try:
+        return recommendation_defaults(instrument, band, mode, site)
+    except ValueError as exc:
+        return JSONResponse({'ok': False, 'error': str(exc)}, status_code=400)
+
+
+@exposure_router.post("/recommend", response_class=JSONResponse)
+def exposure_recommend(payload: RecommendationRequest):
+    from muscat_db.exposure_recommend import recommend
+
+    try:
+        return recommend(payload)
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
 
 
 @exposure_router.post("/calculate", response_class=JSONResponse)
@@ -6540,6 +6647,11 @@ def api_lco_archive_frames(
     except (TypeError, ValueError):
         return JSONResponse({"ok": False, "error": "Limit must be all or a number from 1 to 10000."}, status_code=400)
     max_frames = requested_limit
+    try:
+        # The page's End (UTC) is the last day wanted; the archive's is exclusive.
+        end = lco.archive_inclusive_end(end)
+    except ValueError:
+        return JSONResponse({"ok": False, "error": "End (UTC) must be a date, YYYY-MM-DD."}, status_code=400)
     filters = {
         "proposal_id": proposal_id,
         "SITEID": SITEID,
@@ -7449,9 +7561,6 @@ def api_ephemeris_target_info(target: str, request: Request):
             and j["state"] == "done"
             and _is_full_transit_fit_job(j)
             and _normalize_target_name(j["target"], norm_overrides) == norm_t
-            and fit.get_fit_outputs(
-                j["instrument"], j["obsdate"], j["target"], (j.get("run_id") or "") or None
-            ).get("has_any")
         ]
     
     # 1. Query all planets from catalog
@@ -7469,6 +7578,19 @@ def api_ephemeris_target_info(target: str, request: Request):
         date = j["obsdate"]
         run_id = j.get("run_id") or ""
         
+        outputs = fit.get_fit_outputs(inst, date, j["target"], run_id or None)
+        if not outputs.get("has_any"):
+            continue
+        # Keep persisted diagnostics when an artifact has aged out. Older
+        # records omit ESS and may have a null count for a clean sampling run.
+        stored = fit_params(j).get("fit_health") or {}
+        current = outputs.get("health") or {}
+        metrics = dict(stored.get("metrics") or {})
+        metrics.update({k: v for k, v in (current.get("metrics") or {}).items() if v is not None})
+        chains = current.get("chains")
+        health = {"metrics": metrics, "chains": stored.get("chains") if chains is None else chains}
+        warnings, unknown = fit.midtime_review(health)
+
         # Discover planets fitted and their periods/t0 in dataset
         planets_fitted = "b"
         planets_ephem = {}
@@ -7550,6 +7672,9 @@ def api_ephemeris_target_info(target: str, request: Request):
             "run_name": j.get("run_name") or (run_id if run_id else "legacy"),
             "target": j["target"],
             "planets_fitted": planets_fitted,
+            "fit_warnings": warnings,
+            "unknown_diagnostics": unknown,
+            "detection_snr": metrics.get("Detection SNR"),
             "fitted_tcs": fitted,
             "planets_ephem": planets_ephem,
             "transit_coverage": _classify_transit_coverage(
@@ -7842,7 +7967,7 @@ def api_ephemeris_calculate(payload: dict = Body(...)):
         # ephemeris_math.fit_linear_ephemeris; only checked, positive-uncertainty
         # points may participate in the regression.
         fit_points = [p for p in points if p["checked"] and p["unc"] is not None and p["unc"] > 0]
-        fit_method = payload.get("fit_method", "unweighted")
+        fit_method = payload.get("fit_method", "weighted")
         fit_result = ephemeris_math.fit_linear_ephemeris(
             [p["epoch"] for p in fit_points],
             [p["tc"] for p in fit_points],
@@ -8191,6 +8316,20 @@ def _all_job_rows() -> list[dict]:
     return [dict(row) for row in rows]
 
 
+def _fit_warnings(row):
+    kind = row.get("type")
+    if row.get("state") != "done" or kind not in ("transit_fit", "ttv_fit"):
+        return []
+    params = fit_params(row)
+    if "fit_health" in params:
+        health = params["fit_health"]
+    elif kind == "transit_fit":
+        health = fit.get_fit_outputs(row["inst"], row["date"], row["target"], row.get("run_id")).get("health")
+    else:
+        health = ttv.get_ttv_outputs(row["target"], row.get("run_name") or row.get("run_id") or "").get("health")
+    return (health or {}).get("warnings", [])
+
+
 @app.get("/jobs", response_class=HTMLResponse)
 def jobs_page():
     all_jobs = _visible_jobs(_all_job_rows())
@@ -8201,6 +8340,7 @@ def jobs_page():
     is_admin = _jobs_user_is_admin(user)
     for j in all_jobs:
         j["elapsed"] = _live_elapsed(j)
+        j["fit_warnings"] = _fit_warnings(j)
         j["stored"] = j["key"] in stored_keys
         j["can_delete"] = j["stored"] and _may_delete_job(j, user, is_admin)
         j["can_cancel"] = _may_cancel_job_row(j)
@@ -8255,6 +8395,7 @@ def jobs_status(active_only: bool = False, watch: Annotated[list[str] | None, Qu
         )
         if (j["key"] in watched_keys and j.get("state") in _JOB_TERMINAL_STATES) or is_terminal_lco_archive:
             finished[j["key"]] = {
+                "fit_warnings": _fit_warnings(j),
                 "key": j["key"],
                 "type": j.get("type", ""),
                 "inst": j.get("inst", ""),
@@ -8800,6 +8941,67 @@ def photometry_postprocess_restore(payload: phot_api.RestoreRequest):
     return phot_api.response(phot_api.RestoreResponse, result)
 
 
+def _rediff_target(payload: dict, model) -> tuple[tuple | None, JSONResponse | None]:
+    """Validate the dataset and run of a re-diff request and check visibility."""
+    inst = (payload.get("inst") or "").strip()
+    date = (payload.get("date") or "").strip()
+    target = (payload.get("target") or "").strip()
+    run = (payload.get("run") or "").strip()
+    if inst not in INSTRUMENTS or not phot.valid_date(date) or not target:
+        return None, phot_api.response(model, {"ok": False, "error": "invalid instrument, date or target"}, status_code=400)
+    if not run:
+        return None, phot_api.response(model, {"ok": False, "error": "a run is required"}, status_code=400)
+    _require_visible_run("photometry", inst, date, target, run)
+    return (inst, date, target, run), None
+
+
+def _rediff_reply(model, result: dict) -> JSONResponse:
+    return phot_api.response(model, result, status_code=200 if result.get("ok") else 400)
+
+
+@photometry_router.post("/rediff/info", response_model=phot_api.RediffInfoResponse,
+                        responses={400: {"model": phot_api.RediffInfoResponse}})
+def photometry_rediff_info(payload: phot_api.RestoreRequest):
+    """Selectable comparison stars, default comparisons and weights, and
+    aperture radii per band from the run's flux datacube."""
+    key, error = _rediff_target(payload.model_dump(exclude_unset=True), phot_api.RediffInfoResponse)
+    if error:
+        return error
+    return _rediff_reply(phot_api.RediffInfoResponse, rediff_mod.info(*key))
+
+
+@photometry_router.post("/rediff", response_model=phot_api.RediffResponse,
+                        responses={400: {"model": phot_api.RediffResponse}})
+def photometry_rediff(payload: phot_api.RediffRequest):
+    """Re-difference a run against chosen comparison stars and aperture.
+
+    ``apply=false`` compares with the default light curve (metrics and a
+    base64 overlay); ``apply=true`` rewrites the selected bands' Flux/Err and
+    the summary figure, keeping the pipeline's files for restore.
+    """
+    payload = payload.model_dump(exclude_unset=True)
+    key, error = _rediff_target(payload, phot_api.RediffResponse)
+    if error:
+        return error
+    apply = bool(payload.get("apply", False))
+    if apply:  # a comparison only reads the run
+        _require_may_modify_run("photometry", *key, action="re-difference")
+    return _rediff_reply(phot_api.RediffResponse,
+                         rediff_mod.rediff(*key, payload.get("selections"), apply=apply,
+                                           offset=payload.get("offset")))
+
+
+@photometry_router.post("/rediff/restore", response_model=phot_api.RestoreResponse,
+                        responses={400: {"model": phot_api.RestoreResponse}})
+def photometry_rediff_restore(payload: phot_api.RestoreRequest):
+    """Undo the run's re-diff: put back the pipeline's band CSVs and summary figure."""
+    key, error = _rediff_target(payload.model_dump(exclude_unset=True), phot_api.RestoreResponse)
+    if error:
+        return error
+    _require_may_modify_run("photometry", *key, action="restore")
+    return _rediff_reply(phot_api.RestoreResponse, rediff_mod.restore_rediff(*key))
+
+
 @photometry_router.get("/status", response_model=phot_api.JobStatus)
 def photometry_status(inst: str, date: str, target: str, run: str = ""):
     # Drain the queue so a pending full job is promoted once the slot frees,
@@ -9033,10 +9235,11 @@ def api_target_norm_names():
 def api_get_target_tags(obj: str):
     db = _db_path()
     norm_name = _normalize_target_name(obj, _get_norm_name_overrides(db))
-    if _norm_name_hidden(db, norm_name, _viewer_denied()):
-        tags = []
-    else:
-        tags = get_tags_for_targets(db, [norm_name]).get(norm_name, [])
+    hidden = _norm_name_hidden(db, norm_name, _viewer_denied())
+    tags = get_tags_for_targets(db, [norm_name], planned_only=hidden).get(norm_name, [])
+    if tags:
+        _, hidden_projects = _project_visibility(db, _viewer_denied())
+        tags = [tag for tag in tags if tag.translate(_ASCII_LOWER) not in hidden_projects]
     return JSONResponse({"ok": True, "object": obj, "norm_name": norm_name, "tags": tags})
 
 
@@ -9045,11 +9248,20 @@ def api_add_target_tag(obj: str, payload: dict = Body(...)):
     tag = (payload.get("tag") or "").strip()
     if not tag:
         raise HTTPException(400, "tag is required")
+    if payload.get("allow_placeholder") is True and len(obj.strip()) > 100:
+        raise HTTPException(400, "planned target name must be at most 100 characters")
     db = _db_path()
     norm_name = _normalize_target_name(obj, _get_norm_name_overrides(db))
-    if norm_name not in _all_norm_names(db, _viewer_denied()):
+    if not norm_name:
+        raise HTTPException(400, "target name is required")
+    if _project_hidden(db, tag):
+        raise HTTPException(404, f"project {tag!r} not found")
+    planned = norm_name not in _all_norm_names(db, _viewer_denied())
+    if planned and payload.get("allow_placeholder") is not True:
         raise HTTPException(404, f"target {norm_name!r} not found")
-    if not _add_target_tag(db, norm_name, tag):
+    if planned and len(norm_name) > 100:
+        raise HTTPException(400, "planned target name must be at most 100 characters")
+    if not _add_target_tag(db, norm_name, tag, planned=planned):
         raise HTTPException(404, f"project {tag!r} not found")
     return JSONResponse({"ok": True, "object": obj, "norm_name": norm_name, "tag": tag})
 
@@ -9062,15 +9274,16 @@ def api_remove_target_tag(obj: str, payload: dict = Body(...)):
     tag = (payload.get("tag") or "").strip()
     db = _db_path()
     norm_name = _normalize_target_name(obj, _get_norm_name_overrides(db))
-    # A hidden target answers like an unknown one: a successful no-op.
-    if not _norm_name_hidden(db, norm_name, _viewer_denied()):
-        _remove_target_tag(db, norm_name, tag)
+    # Detaching a planning name must preserve any hidden observed membership.
+    hidden = _norm_name_hidden(db, norm_name, _viewer_denied())
+    if not _project_hidden(db, tag):
+        _remove_target_tag(db, norm_name, tag, planned_only=hidden)
     return JSONResponse({"ok": True, "object": obj, "norm_name": norm_name, "tag": tag})
 
 
 @tags_router.get("")
 def api_list_tags():
-    return JSONResponse({"ok": True, "tags": _list_project_tags(_db_path())})
+    return JSONResponse({"ok": True, "tags": _visible_project_cards(_db_path(), _viewer_denied())})
 
 
 @tags_router.post("")
@@ -9091,14 +9304,15 @@ def api_update_tag_description(tag: str, payload: dict = Body(...)):
     description = payload.get("description") or ""
     if len(description) > 4000:
         raise HTTPException(400, "description too long (max 4000 chars)")
-    if not _set_tag_description(_db_path(), tag, description):
+    if _project_hidden(_db_path(), tag) or not _set_tag_description(_db_path(), tag, description):
         raise HTTPException(404, f"project {tag!r} not found")
     return JSONResponse({"ok": True, "tag": tag, "description": description.strip()})
 
 
 @tags_router.delete("/{tag}")
 def api_delete_tag(tag: str):
-    _delete_tag(_db_path(), tag)
+    if not _project_hidden(_db_path(), tag):
+        _delete_tag(_db_path(), tag)
     return JSONResponse({"ok": True, "tag": tag})
 
 
@@ -9109,6 +9323,8 @@ def api_rename_tag(tag: str, payload: dict = Body(...)):
         raise HTTPException(400, "new_tag is required (max 100 chars)")
     if "/" in new_tag:
         raise HTTPException(400, "new_tag must not contain '/'")
+    if _project_hidden(_db_path(), tag):
+        raise HTTPException(404, f"project {tag!r} not found")
     result = _rename_tag(_db_path(), tag, new_tag)
     if result is None:
         raise HTTPException(404, f"project {tag!r} not found")
@@ -9120,17 +9336,17 @@ def api_rename_tag(tag: str, payload: dict = Body(...)):
 @tags_router.get("/{tag}/export.csv")
 def api_export_tag_csv(tag: str):
     db = _db_path()
-    if _get_tag_description(db, tag) is None:
+    if _project_hidden(db, tag) or _get_tag_description(db, tag) is None:
         raise HTTPException(404, f"project {tag!r} not found")
     rows = _project_target_rows(db, tag, _viewer_denied())
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(["norm_name", "dates", "n_dates", "filters", "n_frames"])
     for r in rows:
-        w.writerow([
+        w.writerow(_spreadsheet_cell(value) for value in (
             r["norm_name"], ", ".join(r["dates"]), r["n_dates"],
             ", ".join(c["label"] for c in r["filter_chips"]), r["n_frames"],
-        ])
+        ))
     # Quoted per RFC 6266: an unquoted filename breaks on tag names containing
     # spaces (e.g. "Empty Project.csv") or other non-token characters.
     safe_tag = tag.replace("\\", "\\\\").replace('"', '\\"')
@@ -9160,7 +9376,8 @@ def ttv_fit_runs(target: str = ""):
         return JSONResponse({"ok": False, "error": "target is required"}, status_code=400)
     products = _product_visibility()
     runs = [
-        {**r, "can_modify": _viewer_may_modify_run("ttv_fit", "", "", target.strip(), r["run_name"])}
+        {**r, "warnings": (ttv.get_ttv_outputs(target.strip(), r["run_name"]).get("health") or {}).get("warnings", []),
+         "can_modify": _viewer_may_modify_run("ttv_fit", "", "", target.strip(), r["run_name"])}
         for r in ttv.list_ttv_runs(target.strip())
         if not _ttv_run_hidden(target, r["run_name"], products)
     ]

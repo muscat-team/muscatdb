@@ -3,16 +3,13 @@
 # while workers may still be using it.
 [engines.prose]
 repository = "https://github.com/jpdeleon/prose2"
-# Release v3.8.0: aperture-based peak measurement (jpdeleon/prose2#53), the
-# jpdeleon/prose2#55 robustness fixes, per-frame comparison saturation
-# screening, target identification at the observing epoch, exit 3 on a
-# partial-band failure, and opt-in comparison-ensemble options (off by default).
-commit = "454b3df8b446d954de7937826762a264203eaea0"
-environment = "prose-prod-454b3df8"
+# v3.9.0 writes numbered reference charts when target identification fails (#479).
+commit = "8598ad47c2eb96bc10594fcdd882209d9dc3087d"
+environment = "prose-prod-8598ad47"
 source_environment = "prose"
 module = "prose"
 # Frozen instrument definitions include the MuSCAT3/4 camera-ID aliases.
-frozen_config_sha256 = "71d3a5fc82523b32d51fb9377b808175c122c0a178f7f6a1206b3cb5d33e8d5c"
+frozen_config_sha256 = "299b371832128bdcd2fa672a787742b7548b4512fb05d6b29b8c11d49da0b130"
 # The working editable metadata predates prose2's matplotlib<3.9 requirement.
 # Pin the newest compatible 3.8 release rather than bypassing pip check.
 [engines.prose.dependency_overrides]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 from pathlib import Path
 
 from playwright.sync_api import expect
@@ -161,11 +162,58 @@ def test_duplicate_project_and_rename_conflicts_leave_existing_data_intact(page,
     assert live_server.sql("SELECT description FROM tag_descriptions WHERE tag='conflict-project'") == [('keep this description',)]
 
 
-def test_unknown_target_attachment_is_reported_without_adding_a_row(page):
-    page.problems.allowed += ['HTTP 404: PUT /api/targets/', 'status of 404']
-    _create(page, 'unknown-target')
-    page.fill('#attach-target-input', 'does-not-exist')
-    page.click('#attach-target-btn')
-    expect(page.locator('#message-modal-text')).to_contain_text('Could not attach target')
-    page.click('#message-modal-ok')
-    expect(page.get_by_role('heading', name='No targets attached yet')).to_be_visible()
+def test_planned_target_attachment(page):
+    _create(page, 'planned-targets')
+    page.fill('#attach-target-input', 'X' * 101)
+    expect(page.locator('#attach-target-input')).to_have_value('X' * 100)
+    for name in ('TOI-4406', 'TOI1859', 'TOI4406'):
+        page.fill('#attach-target-input', name)
+        with page.expect_navigation():
+            page.click('#attach-target-btn')
+    rows = page.locator('#project-targets-table tbody tr')
+    expect(rows).to_have_count(2)
+    row = rows.filter(has_text='TOI4406')
+    expect(row).to_contain_text('Planned')
+    expect(row.locator('a')).to_have_count(0)
+    row.get_by_role('button', name='Detach').click()
+    with page.expect_navigation():
+        _confirm(page)
+    expect(rows).to_have_count(1)
+    expect(rows).to_contain_text('TOI1859')
+
+
+def test_drag_project_by_grip_and_restore_order(page):
+    _create(page, 'zz-reorder')
+    page.goto('/projects')
+    cards = page.locator('#project-grid .card')
+    original = cards.locator('.name').all_text_contents()
+    cards.last.locator('.drag-handle').drag_to(cards.first)
+    expected = [original[-1], *original[:-1]]
+    expect(cards.locator('.name')).to_have_text(expected)
+    page.reload()
+    expect(cards.locator('.name')).to_have_text(expected)
+    cards.first.locator('.drag-handle').press('ArrowRight')
+    expect(cards.nth(1).locator('.name')).to_have_text(original[-1])
+    cards.nth(1).get_by_role('link').click()
+    expect(page.locator('#project-name-cell')).to_contain_text(original[-1])
+
+def test_spreadsheet_text_in_all_three_downloads(page, live_server):
+    live_server.sql("INSERT OR REPLACE INTO target_notes(object, obsdate, instrument, note) "
+                    "VALUES ('TOI-1000', '', '', ?)", ("\tobject note",))
+    live_server.sql("INSERT OR REPLACE INTO target_notes(object, obsdate, instrument, note) "
+                    "VALUES ('TOI-1000', '261001', 'muscat3', ?)", ("\rnight note",))
+    _create(page, "csv-guard")
+    page.fill("#attach-target-input", "@PLAN")
+    with page.expect_navigation():
+        page.click("#attach-target-btn")
+
+    for url, column, literal in [
+        ("/tag?name=csv-guard", "norm_name", "@PLAN"),
+        ("/targets", "note", "\tobject note"),
+        ("/target?name=TOI1000", "note", "\rnight note"),
+    ]:
+        page.goto(url)
+        with page.expect_download() as download:
+            page.locator("a.csv-btn").click()
+        with Path(download.value.path()).open(newline="", encoding="utf-8") as stream:
+            assert "'" + literal in [row[column] for row in csv.DictReader(stream)]

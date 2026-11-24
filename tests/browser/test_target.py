@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import csv
+
 from playwright.sync_api import expect
 import pytest
 
@@ -40,6 +42,19 @@ def test_datasets_show_pipeline_status_and_filter(page):
     page.fill('#datasets-table tr.filter-row input[data-col="phot"]', "")
     page.fill("#dataset-search", "sinistro")
     assert _visible_dates(page) == ["261003"]
+
+
+def test_download_target_observations_csv(page):
+    page.goto(URL)
+    page.fill("#dataset-search", "sinistro")
+    with page.expect_download() as download:
+        page.get_by_role("link", name="CSV").click()
+    assert download.value.suggested_filename == "TOI1000-observations.csv"
+    with download.value.path().open(newline="", encoding="utf-8") as stream:
+        rows = list(csv.DictReader(stream))
+    assert sorted((r["date"], r["instrument"], r["photometry_run_status"]) for r in rows) == [
+        ("261001", "muscat3", "full"), ("261003", "sinistro", "none"),
+    ]
 
 
 def test_dataset_links_open_photometry_and_fit(page):
