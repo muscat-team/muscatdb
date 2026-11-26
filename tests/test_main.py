@@ -1321,6 +1321,19 @@ class TestDatabase:
         finally:
             os.unlink(db_path)
 
+    def test_build_db_preserves_precision_calibration(self, tmp_path, tmp_obslog):
+        from muscat_db.database import build_db, get_conn
+
+        db = str(tmp_path / "catalog.db")
+        build_db(db)
+        row = ("muscat3", "gp", "MUSCAT_FAST", 1.25, "[]")
+        with get_conn(db) as conn:
+            conn.execute("INSERT INTO precision_calibration VALUES (?, ?, ?, ?, ?)", row)
+            conn.commit()
+        build_db(db)
+        with get_conn(db) as conn:
+            assert conn.execute("SELECT * FROM precision_calibration").fetchone() == row
+
     def test_build_db_skips_noncanonical_obslog_dirs(self, tmp_obslog):
         from muscat_db.database import build_db, get_dates
         junk_dir = f"{tmp_obslog}/muscat/csv_old_220914"

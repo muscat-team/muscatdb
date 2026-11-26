@@ -65,6 +65,17 @@ CREATE TABLE IF NOT EXISTS exposure_models (
 
 # Who overwrote, deleted or cancelled a run (issue #307; muscat_db.run_events).
 # Append-only and app-owned, so a delete's row outlives the run it removed.
+PRECISION_CALIBRATION_SCHEMA = """
+CREATE TABLE IF NOT EXISTS precision_calibration (
+    instrument TEXT NOT NULL,
+    band TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    factor REAL NOT NULL,
+    samples_json TEXT NOT NULL,
+    PRIMARY KEY (instrument, band, mode)
+);
+"""
+
 RUN_EVENTS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS run_events (
     id      INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -215,7 +226,7 @@ CREATE TABLE IF NOT EXISTS exposure_coeffs (
     updated_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (instrument, band, focus_mm)
 );
-""" + EXPOSURE_MODELS_SCHEMA + RUN_EVENTS_SCHEMA + """
+""" + EXPOSURE_MODELS_SCHEMA + PRECISION_CALIBRATION_SCHEMA + RUN_EVENTS_SCHEMA + """
 CREATE TABLE IF NOT EXISTS exposure_jobs (
     id          TEXT PRIMARY KEY,
     instrument  TEXT NOT NULL,
@@ -1052,6 +1063,7 @@ _APP_OWNED_TABLES = (
     "target_overrides",
     "exposure_coeffs",
     "exposure_models",
+    "precision_calibration",
     "test_observations",
     "lco_observation_requests",
     "lco_observation_frames",
