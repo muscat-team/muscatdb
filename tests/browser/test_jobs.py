@@ -196,3 +196,30 @@ def test_ttv_and_archive_sections_render_their_job_types(page, live_server):
     page.goto('/jobs')
     expect(page.locator('table[data-job-type="ttv_fit"] tr.job-row')).to_have_count(1)
     expect(page.locator('table[data-job-type="lco_archive_download"] tr.job-row')).to_have_count(1)
+
+
+def test_done_run_without_gaia_shows_a_warning_not_an_error(page, live_server, monkeypatch):
+    # The stored warning reads as "Done with warnings", never as red error text (#502).
+    from muscat_db import photometry, transit_fit, ttv_fit
+    for engine in (photometry, transit_fit, ttv_fit):
+        monkeypatch.setattr(engine, 'sync_jobs', lambda: None)
+    live_server.sql("UPDATE jobs SET error_desc = ? WHERE key = ?", (photometry.NO_GAIA_WARNING, DONE_KEY))
+    page.goto('/jobs')
+    row = _row(page, DONE_KEY)
+    expect(row.locator('.status-cell')).to_contain_text('Done with warnings')
+    expect(row.locator('.status-cell')).to_contain_text('Reduced without Gaia')
+    expect(row.locator('.error-desc')).to_have_count(0)
+
+
+def test_run_finishing_without_gaia_updates_to_a_warning(page, active_job):
+    from muscat_db import photometry
+    state = {'finished': {}, 'running': {}, 'counts': {}}
+    page.route('**/api/jobs/status', lambda r: r.fulfill(json=state))
+    page.goto('/jobs')
+    row = _row(page, active_job)
+    state['finished'][active_job] = {
+        'state': 'done', 'elapsed': 42, 'error_desc': '', 'warnings': [photometry.NO_GAIA_WARNING],
+    }
+    expect(row).to_have_attribute('data-status', 'done', timeout=15000)
+    expect(row.locator('.status-cell')).to_contain_text('Done with warnings')
+    expect(row.locator('.error-desc')).to_have_count(0)

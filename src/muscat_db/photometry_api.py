@@ -192,6 +192,8 @@ class JobStatus(ResponseModel):
     returncode: int | None
     elapsed: int
     error_desc: str = ""
+    # Set on a done run, e.g. one reduced without Gaia (#502).
+    warnings: list[str] = []
     run_type: Literal["test", "full"] | None = None
 
 

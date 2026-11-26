@@ -1859,6 +1859,103 @@ class TestFinalizeGrace:
             self._clear_jobs()
 
 
+# Line prose2 logs when it reaches no Gaia service and has no cached catalog.
+NO_GAIA_LINE = (
+    "2026-11-25 23:31:16 - WARNING: Gaia query unavailable (GaiaCatalog) and no "
+    "cache; using FWHM-only geometry\n"
+)
+SUCCESS_LINE = "2026-11-25 23:34:03 - INFO: photometry SUCCEEDED: 4/4 bands (1796s elapsed)\n"
+
+
+class TestReducedWithoutGaia:
+    """A run that lost Gaia still logs SUCCEEDED; it stays done but carries a
+    warning instead of reading as a normal success (#502)."""
+
+    def _finished_job(self, monkeypatch, tmp_path, log_text):
+        monkeypatch.setattr(phot, "_FINALIZE_GRACE_S", 0)
+        monkeypatch.setattr(phot, "_FINALIZE_GRACE_TERMINAL_S", 0)
+        _job, proc, log = TestFinalizeGrace._make_job(self, monkeypatch, tmp_path)
+        with open(log, "a") as f:
+            f.write(log_text)
+        proc._rc = 0
+        os.utime(log, (1.0, 1.0))  # quiescent: the job is terminal
+        return log
+
+    _clear_jobs = staticmethod(TestFinalizeGrace._clear_jobs)
+
+    def _sync(self, monkeypatch, db_rows=()):
+        saved: list[dict] = []
+        monkeypatch.setattr("muscat_db.database.get_persisted_jobs", lambda: list(db_rows))
+        monkeypatch.setattr("muscat_db.database.save_job", lambda **kw: saved.append(kw))
+        monkeypatch.setattr("muscat_db.database.refresh_target_status", lambda *a: None)
+        phot.sync_jobs()
+        return [s for s in saved if s.get("target") == TARGET]
+
+    def test_done_run_without_gaia_is_saved_with_the_warning(self, monkeypatch, tmp_path):
+        self._finished_job(monkeypatch, tmp_path, NO_GAIA_LINE + "INFO: more\n" * 2000 + SUCCESS_LINE)
+        try:
+            saves = self._sync(monkeypatch)
+            assert saves[-1]["state"] == "done"
+            assert saves[-1]["error_desc"] == phot.NO_GAIA_WARNING
+        finally:
+            self._clear_jobs()
+
+    def test_run_with_cached_gaia_has_no_warning(self, monkeypatch, tmp_path):
+        cached = (
+            "WARNING: Gaia query unavailable (GaiaCatalog); using cached result "
+            "/cache/gaia.parquet\n"
+        )
+        self._finished_job(monkeypatch, tmp_path, cached + SUCCESS_LINE)
+        try:
+            saves = self._sync(monkeypatch)
+            assert saves[-1]["state"] == "done"
+            assert saves[-1]["error_desc"] == ""
+        finally:
+            self._clear_jobs()
+
+    def test_status_of_a_finished_run_reports_the_warning(self, monkeypatch, tmp_path):
+        self._finished_job(monkeypatch, tmp_path, NO_GAIA_LINE + SUCCESS_LINE)
+        try:
+            s = phot.job_status(INST, DATE, TARGET)
+            assert s["state"] == "done"
+            assert s["warnings"] == [phot.NO_GAIA_WARNING]
+            assert s["error_desc"] == ""
+        finally:
+            self._clear_jobs()
+
+    def test_status_of_a_persisted_run_reports_the_warning(self, monkeypatch, tmp_path):
+        self._clear_jobs()
+        rdir = tmp_path / INST / DATE
+        rdir.mkdir(parents=True)
+        phot._run_log_path(rdir, INST, DATE, TARGET).write_text(NO_GAIA_LINE + SUCCESS_LINE)
+        monkeypatch.setattr(phot, "results_dir", lambda inst, date: rdir)
+        row = dict(
+            key=f"photometry:{INST}/{DATE}/{TARGET}", type="photometry", inst=INST,
+            date=DATE, target=TARGET, state="done", returncode=0, elapsed=10,
+            started_at=1.0, error_desc=phot.NO_GAIA_WARNING, run_type="full", params="",
+        )
+        monkeypatch.setattr("muscat_db.database.get_persisted_jobs", lambda: [row])
+        s = phot.job_status(INST, DATE, TARGET)
+        assert s["state"] == "done"
+        assert s["warnings"] == [phot.NO_GAIA_WARNING]
+        assert s["error_desc"] == ""
+
+    def test_lost_parent_success_keeps_the_warning(self, monkeypatch, tmp_path):
+        self._clear_jobs()
+        rdir = tmp_path / INST / DATE
+        rdir.mkdir(parents=True)
+        phot._run_log_path(rdir, INST, DATE, TARGET).write_text(NO_GAIA_LINE + SUCCESS_LINE)
+        monkeypatch.setattr(phot, "results_dir", lambda inst, date: rdir)
+        row = dict(
+            key=f"photometry:{INST}/{DATE}/{TARGET}", type="photometry", inst=INST,
+            date=DATE, target=TARGET, state="running", returncode=None, elapsed=10,
+            started_at=1.0, error_desc="", run_type="full", params="",
+        )
+        saves = self._sync(monkeypatch, [row])
+        assert saves[-1]["state"] == "done"
+        assert saves[-1]["error_desc"] == phot.NO_GAIA_WARNING
+
+
 # ── routes (FastAPI TestClient) ──────────────────────────────────────────────
 
 class TestRoutes:

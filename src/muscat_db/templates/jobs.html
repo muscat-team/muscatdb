@@ -92,8 +92,8 @@
       </td>
       <td class="status-cell">
         {% if j.state == 'done' %}
-          {% if j.fit_warnings %}
-          <span class="badge badge-amber status-badge">Done with warnings</span> {{ j.fit_warnings | join(', ') }}
+          {% if j.warnings %}
+          <span class="badge badge-amber status-badge">Done with warnings</span> {{ j.warnings | join(', ') }}
           {% else %}<span class="badge badge-green status-badge">Done</span>{% endif %}
         {% elif j.state == 'error' %}
           <span class="badge badge-error status-badge">Failed</span>
@@ -494,7 +494,7 @@
     tbody.insertBefore(logRow, empty || null);
     allRows.push(row);
     addInstFilterIfMissing(job.inst || '');
-    replaceStatusBadge(row, job.state || '', job.fit_warnings);
+    replaceStatusBadge(row, job.state || '', job.warnings);
     updateRunName(row, job.run_name || '');
     updateDetails(row, job.details || '');
     replaceActions(row, job.state || '', job.key || '', 'lco_archive_download', job.inst || '', job.date || '', job.target || '', '');
@@ -1055,7 +1055,7 @@
           if (f.action_date != null) row.setAttribute('data-action-date', f.action_date || '');
           if (f.photometry_url != null) row.setAttribute('data-photometry-url', f.photometry_url || '');
           if (f.obslog_url) setLcoObslogLink(row, f.obslog_url, f.action_date || f.date || '');
-          replaceStatusBadge(row, f.state, f.fit_warnings);
+          replaceStatusBadge(row, f.state, f.warnings);
           var td = row.querySelector('.elapsed-cell');
           if (td && f.elapsed != null) {
             td.setAttribute('data-elapsed', f.elapsed);

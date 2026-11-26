@@ -2614,6 +2614,40 @@ _PARTIAL_FAILURE_MARKER = "photometry PARTIAL FAILURE"
 # parent was lost/killed (server --reload, watchdog) before muscat-db saw it exit.
 _SUCCESS_MARKER = "photometry SUCCEEDED"
 
+# prose2 logs this line once, early in the run, when it reaches no Gaia service
+# and has no cached catalog. The run still ends "photometry SUCCEEDED", so the
+# job stays done; NO_GAIA_WARNING is stored in its error_desc and shown as a
+# warning (#502).
+_NO_GAIA_MARKERS = ("Gaia query unavailable", "and no cache; using FWHM-only geometry")
+NO_GAIA_WARNING = (
+    "Reduced without Gaia: apertures sized from the FWHM only. "
+    "Rerun when Gaia is available."
+)
+
+
+def _done_warning(path: Path | None) -> str:
+    """The warning to store on a done job, or "" when its log shows none.
+
+    Reads the whole log, not its tail, because the line comes early in the run.
+    """
+    if path is None:
+        return ""
+    try:
+        with open(path, errors="replace") as log:
+            for line in log:
+                if all(marker in line for marker in _NO_GAIA_MARKERS):
+                    return NO_GAIA_WARNING
+    except OSError:
+        pass
+    return ""
+
+
+def _status_warnings(state: str, error_desc: str) -> tuple[list[str], str]:
+    """Split a done job's stored warning out of ``error_desc`` for display."""
+    if state == "done" and error_desc:
+        return [error_desc], ""
+    return [], error_desc
+
 
 def _finalize_config() -> jobs.FinalizeConfig:
     """Build the finalizing config from the current module-level, env-tunable
@@ -2740,12 +2774,14 @@ def _persisted_status(inst: str, date: str, target: str, run_id: str = "") -> di
                 error_desc = _get_error_desc(lp, entry.get("returncode"))
             elif state == "cancelled" and not error_desc:
                 error_desc = "Cancelled by user"
+            warnings, error_desc = _status_warnings(state, error_desc)
             return {
                 "state": state,
                 "returncode": entry.get("returncode"),
                 "log": _tail(lp) if lp else "",
                 "elapsed": round(entry.get("elapsed") or 0),
                 "error_desc": error_desc,
+                "warnings": warnings,
             }
     except Exception:
         logger.debug("failed to read persisted photometry status for %s/%s/%s/%s", inst, date, target, run_id, exc_info=True)
@@ -2788,16 +2824,20 @@ def job_status(inst: str, date: str, target: str, run_id: str = "") -> dict:
         job_log = job.log_path
         elapsed = job.elapsed if job.state not in ("running", "cancelling") and job.elapsed is not None else round(time.time() - job.started_at)
     error_desc = ""
+    warnings: list[str] = []
     if state == "error" and job_log:
         error_desc = _get_error_desc(job_log, rc)
     elif state == "cancelled":
         error_desc = "Cancelled by user"
+    elif state == "done":
+        warnings, error_desc = _status_warnings(state, _done_warning(job_log))
     return {
         "state": state,
         "returncode": rc,
         "log": _tail(job_log),
         "elapsed": round(elapsed),
         "error_desc": error_desc,
+        "warnings": warnings,
         "run_type": job.run_type if job else "full",
     }
 
@@ -3054,6 +3094,8 @@ def sync_jobs() -> None:
                 error_desc = _get_error_desc(job.log_path, persist_rc)
             elif persist_state == "cancelled":
                 error_desc = "Cancelled by user"
+            elif persist_state == "done":
+                error_desc = _done_warning(job.log_path)
 
             store.save(
                 type_="photometry",
@@ -3134,7 +3176,7 @@ def sync_jobs() -> None:
                     returncode=0,
                     elapsed=elapsed,
                     started_at=started_at,
-                    error_desc="",
+                    error_desc=_done_warning(lp),
                     run_id=run_id,
                 )
                 database.refresh_target_status(target)

@@ -37,3 +37,20 @@ def test_watching_a_key_does_not_bypass_visibility(monkeypatch):
     monkeypatch.setattr(web, '_visible_jobs', lambda _: [])
     data = TestClient(web.app).post('/api/jobs/status', json={'watch': ['private']}).json()
     assert data['finished'] == {}
+
+
+def test_done_photometry_warning_is_reported_as_a_warning(monkeypatch):
+    # A run reduced without Gaia stays done; its stored text is a warning, not
+    # an error, so the page's red error text must stay empty (#502).
+    from muscat_db import photometry
+
+    key = 'photometry:muscat3/261020/T/r1'
+    job = dict(key=key, type='photometry', inst='muscat3', date='261020', target='T',
+               state='done', elapsed=10, started_at=0, error_desc=photometry.NO_GAIA_WARNING)
+    monkeypatch.setattr(web, '_jobs_with_lco_archive_rows', lambda: [job])
+    monkeypatch.setattr(web.fit, '_discover_orphan_fits', lambda _: [])
+    monkeypatch.setattr(web, '_visible_jobs', lambda rows: rows)
+    monkeypatch.setattr(web, '_live_elapsed', lambda _: 10)
+    finished = TestClient(web.app).get('/api/jobs/status', params={'watch': key}).json()['finished'][key]
+    assert finished['warnings'] == [photometry.NO_GAIA_WARNING]
+    assert finished['error_desc'] == ''
