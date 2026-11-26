@@ -1172,6 +1172,25 @@ ut2 from the owner tag and commit listed above. It loaded the frozen configurati
 read-only with 102 telescope aliases and passed `pip check`. Compared with the
 3.9.0 record, the explicit conda packages are identical and the pip freeze
 differs only in the prose commit. Keep `prose-prod-8598ad47` for rollback.
+The frozen telescope configuration carries forward the 3.9.0 definitions with
+updated release provenance. Its SHA-256 is
+`8d37fd24fcf8ef4aa98d524ffe83029a2c77a35b3f155f428ecb121957aded6d`.
+
+Before activation:
+
+- Run `deploy/engines.py verify prose` on ut3–ut7; only ut2 is recorded above.
+- Run `tests/test_pinned_engines_slow.py` and compare known datasets with 3.9.0,
+  including a sparse MuSCAT2 field and a muscat4 night. No real-data comparison
+  is recorded for this candidate.
+
+Behaviour changes to announce, described under
+[target identification](../docs/science.md#target-identification):
+
+- An undetected target can be added at a trusted WCS position, and the web
+  interface does not flag the run.
+- Under `--ref_select quality`, the `--tID` value that adds the target is the
+  anchor frame's detection count. Saved values can be rejected or select a
+  detected star.
 
 ### Prose2 3.9.0 candidate (2026-11-20)
 

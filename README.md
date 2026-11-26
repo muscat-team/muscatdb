@@ -33,8 +33,11 @@ This release reports per-band outcomes and can add an undetected target at
 its position from a trusted WCS. It also improves Gaia querying and frame
 alignment for sparse fields. Photometry retains per-frame saturation screening,
 exposure-midpoint timestamps, and comparison-star selection controls in the
-**Precision** section. A band whose target cannot be located fails and produces
-a numbered reference chart for selecting the target with `--tID`.
+**Precision** section. A band whose target cannot be located, either as a
+detected source or at a trusted on-detector position, fails and produces a
+numbered reference chart for selecting the target with `--tID`. See
+[target identification](docs/science.md#target-identification) before relying
+on a target that was not detected.
 Existing reductions and transit fits keep their original results; rerun them
 under a new run name to obtain the corrections while preserving the comparison.
 CSV/NPZ formats and existing command options remain compatible. The new
