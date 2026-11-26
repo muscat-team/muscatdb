@@ -1069,11 +1069,13 @@ interpreter, import location, and `pip check`. It refuses to overwrite an existi
 environment. A failed provision leaves an unapproved environment for diagnosis;
 do not select it for production. An existing environment must pass `verify` before use.
 
+Use the full prose2 release version for each new Miniconda environment (`prose-prod-<major>.<minor>.<patch>`). The full upstream commit remains the installation pin.
+
 The current pins are:
 
 | Engine | Repository | Commit | Candidate environment |
 |---|---|---|---|
-| prose2 | `jpdeleon/prose2` | `8598ad47c2eb96bc10594fcdd882209d9dc3087d` (v3.9.0) | `prose-prod-8598ad47` |
+| prose2 | `jpdeleon/prose2` | `d1ee10bc58de2d14d0812c350d9ee421f8565b9c` (v3.10.0) | `prose-prod-3.10.0` |
 | timer | `john-livingston/timer` | `b8428258c9b62266532173af4abd7fbafee6dcef` | `timer-prod-b8428258` |
 | harmonic | `john-livingston/harmonic` | `a32fb8e32ca776e0e6e7dc92ad4232cef1f12194` | `harmonic-prod-a32fb8e3` |
 
@@ -1162,6 +1164,33 @@ the candidate's scientific settings, then update the packaged YAML and both
 recorded SHA-256 values (`muscat_db/prose_config.py` and `engines.toml`) together.
 Never regenerate the production snapshot automatically at launch or by following
 live symlinks.
+
+### Prose2 3.10.0 candidate (2026-11-26)
+
+The candidate environment `prose-prod-3.10.0` was provisioned and verified on
+ut2 from the owner tag and commit listed above. It loaded the frozen configuration
+read-only with 102 telescope aliases and passed `pip check`. Compared with the
+3.9.0 record, the explicit conda packages are identical and the pip freeze
+differs only in the prose commit. Keep `prose-prod-8598ad47` for rollback.
+The frozen telescope configuration carries forward the 3.9.0 definitions with
+updated release provenance. Its SHA-256 is
+`8d37fd24fcf8ef4aa98d524ffe83029a2c77a35b3f155f428ecb121957aded6d`.
+
+Before activation:
+
+- Run `deploy/engines.py verify prose` on ut3–ut7; only ut2 is recorded above.
+- Run `tests/test_pinned_engines_slow.py` and compare known datasets with 3.9.0,
+  including a sparse MuSCAT2 field and a muscat4 night. No real-data comparison
+  is recorded for this candidate.
+
+Behaviour changes to announce, described under
+[target identification](../docs/science.md#target-identification):
+
+- An undetected target can be added at a trusted WCS position, and the web
+  interface does not flag the run.
+- Under `--ref_select quality`, the `--tID` value that adds the target is the
+  anchor frame's detection count. Saved values can be rejected or select a
+  detected star.
 
 ### Prose2 3.9.0 candidate (2026-11-20)
 

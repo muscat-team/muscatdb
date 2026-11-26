@@ -64,9 +64,34 @@ its existing fallback; the launch log does not repeat the failed lookup or claim
 that a late coordinate result was passed to prose. Enter explicit coordinates
 when a reduction must proceed without external name resolution.
 
+## Target identification
+
+prose2 3.10.0 checks the reference frame's WCS against Gaia before matching the
+target, and tries to solve the frame against Gaia when that check fails. These
+rules apply when neither a **Target ID** nor a position from another band selects
+the source.
+
+- If no detected source lies within 5 arcsec of the target coordinate, but a
+  trusted WCS places that coordinate on the detector, prose2 adds a source there
+  and reduces it. The run can therefore succeed without a detected target.
+- A WCS is trusted when it passes the Gaia check. A solved BANZAI header
+  (`WCSERR=0`) also qualifies for adding the target when Gaia cannot check it,
+  for example during a Gaia outage. A WCS offset would then go unnoticed.
+- The web interface does not flag such a run. Check the reference image, or look
+  for `added_at_trusted_wcs` in `band_outcomes.json` in the run's results
+  directory. The log reports `undetected target added at trusted WCS pixel`.
+- Without a trusted on-detector position, prose2 can use the target position
+  found in another band. If the target is still not located, the band fails.
+
+**Target ID** (`--tID`) is the source number on the numbered reference chart.
+With quality-based reference selection, some numbers can be missing from the
+chart, and the value that adds the target at the target coordinate is the number
+of sources detected in the anchor frame, not the number kept. Check a saved
+Target ID against the new chart before reusing it.
+
 ## Photometry precision controls
 
-The photometry page's **Precision** section exposes prose2 v3.8.0's optional
+The photometry page's **Precision** section exposes prose2's optional
 comparison-star processing. Defaults retain the greedy ensemble, selection by
 target scatter, and no per-star clipping. The controls persist per dataset and
 **Use default settings** resets them.
@@ -85,7 +110,7 @@ target scatter, and no per-star clipping. The controls persist per dataset and
   in a separate `*_flux_datacube.npz` download after a full run. It can be large;
   reprocessing those arrays belongs to prose2, not this page.
 
-Completed v3.8.0 runs also log the expected noise per band and save it in the main
+Completed runs from prose2 3.8.0 onward also log the expected noise per band and save it in the main
 NPZ archive. The page displays the photon, sky, read, comparison, and expected-total
 terms alongside the achieved point-to-point scatter, in ppt, and their
 dimensionless ratio. Missing or non-finite terms display as unavailable; older

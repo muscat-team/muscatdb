@@ -170,7 +170,7 @@ def parse_config(data: dict, profile: str | None = None) -> Config:
     for engine, env_name in engine_envs.items():
         if (engine not in {"prose", "timer", "harmonic"}
                 or not isinstance(env_name, str)
-                or not re.fullmatch(r"[A-Za-z0-9_-]+", env_name)):
+                or not re.fullmatch(r"[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*", env_name)):
             raise ConfigError(f"engine_envs contains an invalid engine or environment: {engine!r}")
     for need in ("pg_host", "database"):
         if not d.get(need):

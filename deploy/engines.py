@@ -56,7 +56,7 @@ def load_pins(path: Path) -> dict:
         if not re.fullmatch(r"[0-9a-f]{40}", pin["commit"]):
             raise ValueError(f"{name}: commit must be a full SHA")
         for key in ("environment", "source_environment"):
-            if not re.fullmatch(r"[A-Za-z0-9_-]+", pin[key]):
+            if not re.fullmatch(r"[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*", pin[key]):
                 raise ValueError(f"{name}: invalid {key}")
         if pin["environment"] == pin["source_environment"]:
             raise ValueError(f"{name}: production and development environments must differ")

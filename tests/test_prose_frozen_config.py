@@ -96,6 +96,7 @@ def test_checked_in_snapshot_matches_its_digest_and_deployment_pin():
     data = prose_config.snapshot_bytes()
     assert hashlib.sha256(data).hexdigest() == pin["frozen_config_sha256"]
     snapshot = yaml.load(data, Loader=yaml.FullLoader)
+    assert pin["environment"] == f"prose-prod-{snapshot['engine_version']}"
     assert snapshot["engine_commit"] == pin["commit"]
     assert snapshot["repository"] == pin["repository"]
     workers = tomllib.loads((root / "deploy/workers.toml").read_text())
