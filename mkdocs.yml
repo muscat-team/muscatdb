@@ -13,39 +13,6 @@ theme:
       toggle:
         icon: material/weather-sunny
         name: Switch to light mode
-plugins:
-  - search
-  - i18n:
-      docs_structure: suffix
-      languages:
-        - locale: en
-          name: English
-          default: true
-          build: true
-        - locale: ja
-          name: 日本語
-          build: true
-          theme:
-            palette:
-              - scheme: default
-                toggle:
-                  icon: material/weather-night
-                  name: ダークモードに切り替える
-              - scheme: slate
-                toggle:
-                  icon: material/weather-sunny
-                  name: ライトモードに切り替える
-          nav_translations:
-            Home: ホーム
-            Using muscat-db: 使い方
-            Getting started: はじめに
-            Signing in and access: ログインと閲覧権限
-            Browse a night: 一晩の観測を確認する
-            Scheduling LCO observations: LCO の観測予約
-            Exposure magnitude lookup: 露出計算と等級の取得
-            Science: 科学解析
-            Tech stack: 技術構成
-            Running the system: システムの運用
 nav:
   - Home: index.md
   - Using muscat-db:
