@@ -3,15 +3,18 @@
 {% block content %}
 <a href="/exposure">Exposure calculator</a>
 <h1>Achieved MuSCAT3 precision</h1>
-<p>Measurements use out-of-transit differential flux in 10-minute bins. The fitted factor is the median measured-to-predicted ratio on training nights. Held-out nights provide an independent check.</p>
+<p>The fitted factor is the median measured-to-predicted ratio on training nights. Held-out nights provide an independent check.</p>
 {% for group in groups %}
 <h2>{{ group.instrument }} · {{ group.band }} · {{ group.mode }}</h2>
 {% if group.factor is not none %}<p>Fitted factor {{ "%.3f"|format(group.factor) }}×</p>{% endif %}
+{% set point_to_point = group.rows[0].pairs is defined %}
+{% if point_to_point %}<p>10-minute precision assuming white noise. Measured scatter uses adjacent frame pairs across the light curve.</p>
+{% else %}<p>Earlier calibration using RMS in 10-minute out-of-transit bins.</p>{% endif %}
 <table>
-<thead><tr><th>Night</th><th>Target</th><th>Sample</th><th>Bins</th><th>Predicted (ppm)</th><th>Measured (ppm)</th>{% if group.factor is not none %}<th>Factor × predicted (ppm)</th>{% endif %}</tr></thead>
+<thead><tr><th>Night</th><th>Target</th><th>Sample</th><th>{{ "Frame pairs" if point_to_point else "Bins" }}</th><th>Predicted (ppm)</th><th>Measured (ppm)</th>{% if group.factor is not none %}<th>Factor × predicted (ppm)</th>{% endif %}</tr></thead>
 <tbody>
 {% for s in group.rows %}
-<tr><td>{{ s.product.night }}</td><td>{{ s.product.target }}</td><td>{{ "Held out" if s.held_out else "Training" }}</td><td>{{ s.bins }}</td><td>{{ "%.1f"|format(s.predicted_ppm) }}</td><td>{{ "%.1f"|format(s.achieved_ppm) }}</td>{% if group.factor is not none %}<td>{{ "%.1f"|format(group.factor * s.predicted_ppm) }}</td>{% endif %}</tr>
+<tr><td>{{ s.product.night }}</td><td>{{ s.product.target }}</td><td>{{ "Held out" if s.held_out else "Training" }}</td><td>{{ s.pairs if point_to_point else s.bins }}</td><td>{{ "%.1f"|format(s.predicted_ppm) }}</td><td>{{ "%.1f"|format(s.achieved_ppm) }}</td>{% if group.factor is not none %}<td>{{ "%.1f"|format(group.factor * s.predicted_ppm) }}</td>{% endif %}</tr>
 {% endfor %}
 </tbody></table>
 {% else %}

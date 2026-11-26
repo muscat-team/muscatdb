@@ -6,7 +6,7 @@ from datetime import date
 import json
 import math
 from pathlib import Path
-from statistics import mean, median
+from statistics import median, stdev
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
@@ -27,7 +27,8 @@ class Product(BaseModel):
     band: Literal["gp", "rp", "ip", "zs"]
     mode: Literal["MUSCAT_FAST", "MUSCAT_SLOW"]
     csv_path: Path
-    oot_bjd: list[tuple[float, float]] = Field(min_length=1)
+    # Accepted for manifests made by the earlier binned estimator.
+    oot_bjd: list[tuple[float, float]] | None = Field(default=None, exclude=True)
     mag: float = Field(ge=-10, le=40)
     comp_mags: list[float] = Field(min_length=1)
     exptime_s: float = Field(gt=0, lt=BIN_S)
@@ -37,16 +38,10 @@ class Product(BaseModel):
     dark_rate: float = Field(ge=0)
 
 
-def _oot_bins(product, path):
-    """Group valid frames into wall-time bins contained in one OOT interval."""
-    windows = sorted(product.oot_bjd)
-    if any(lo >= hi for lo, hi in windows) or any(
-        right[0] < left[1] for left, right in zip(windows, windows[1:])
-    ):
-        raise ValueError("OOT windows must be ordered pairs without overlap")
+def measure(product, path, model):
     if any(not -10 <= m <= 40 for m in product.comp_mags):
         raise ValueError("Invalid comparison magnitude")
-    bins = defaultdict(list)
+    frames = []
     with path.open(newline="") as stream:
         reader = csv.DictReader(stream)
         if not {"BJD_TDB", "Flux", "Airmass"}.issubset(reader.fieldnames or []):
@@ -55,61 +50,48 @@ def _oot_bins(product, path):
             t, flux, airmass = (float(row[k]) for k in ("BJD_TDB", "Flux", "Airmass"))
             if not all(map(math.isfinite, (t, flux, airmass))) or flux <= 0 or airmass < 1:
                 continue
-            for lo, hi in windows:
-                if lo <= t < hi:
-                    index = math.floor(round((t - lo) * 86400, 4) / BIN_S)
-                    if (index + 1) * BIN_S <= round((hi - lo) * 86400, 4):
-                        bins[lo, index].append((t, flux, airmass))
-                    break
+            frames.append((t, flux, airmass))
 
-    return bins
-
-
-def measure(product, path, model):
-    bins = _oot_bins(product, path)
+    frames.sort()
     cycle = product.exptime_s + precision.readout_overhead(product.instrument, product.mode)
-    means, variances, fluxes = [], [], []
-    for (lo, index), frames in sorted(bins.items()):
-        times = sorted(frame[0] for frame in frames)
-        if len(set(times)) != len(times):
+    differences = []
+    pair_counts = [0] * len(frames)
+    for i, (left, right) in enumerate(zip(frames, frames[1:])):
+        gap = (right[0] - left[0]) * 86400
+        if gap == 0:
             raise ValueError("Duplicate frame timestamps")
-        start = lo + index * BIN_S / 86400
-        gaps = [86400 * (b - a) for a, b in zip(times, times[1:])]
-        gaps.extend([(times[0] - start) * 86400, BIN_S - (times[-1] - start) * 86400])
-        if len(times) < 2 or max(gaps) > 1.5 * cycle:
+        if round(gap, 4) <= 1.5 * cycle:
+            differences.append(right[1] - left[1])
+            pair_counts[i] += 1
+            pair_counts[i + 1] += 1
+    if len(differences) < 2:
+        raise ValueError("Need at least two adjacent frame pairs within 1.5 cadences")
+
+    fluxes = []
+    variance_sum = 0.0
+    for (_, flux, airmass), count in zip(frames, pair_counts):
+        if not count:
             continue
-        fluxes.extend(f for _, f, _ in frames)
-        means.append(mean(f for _, f, _ in frames))
-        # Independent per-frame variances add. Use the actual frame count and
-        # airmasses in this wall-time bin, including real readout losses.
-        frame_variances = []
-        for _, _, airmass in frames:
-            budget = precision.noise_budget(
-                model,
-                product.mag,
-                product.exptime_s,
-                airmass=airmass,
-                extinction=exposure.EXTINCTION[product.band],
-                diameter_m=exposure.INSTRUMENT_PARAMS[product.instrument]["aperture_m"],
-                altitude_m=LCO_SITES["ogg"][2],
-                read_noise_e=product.read_noise_e,
-                sky_rate=product.sky_rate,
-                dark_rate=product.dark_rate,
-                defocus_mm=product.defocus_mm,
-                comp_mags=product.comp_mags,
-            )
-            frame_variances.append(budget.total**2)
-        variances.append(sum(frame_variances) / len(frames) ** 2)
-    if len(means) < 2:
-        raise ValueError("Need at least two complete out-of-transit bins")
-    baseline = median(fluxes)
-    achieved = precision.ppm(math.sqrt(mean((v / baseline - 1) ** 2 for v in means)))
-    predicted = precision.ppm(math.sqrt(mean(variances)))
+        fluxes.append(flux)
+        budget = precision.noise_budget(
+            model, product.mag, product.exptime_s, airmass=airmass,
+            extinction=exposure.EXTINCTION[product.band],
+            diameter_m=exposure.INSTRUMENT_PARAMS[product.instrument]["aperture_m"],
+            altitude_m=LCO_SITES["ogg"][2], read_noise_e=product.read_noise_e,
+            sky_rate=product.sky_rate, dark_rate=product.dark_rate,
+            defocus_mm=product.defocus_mm, comp_mags=product.comp_mags,
+        )
+        # Each independent pair contributes both endpoint variances.
+        variance_sum += count * budget.total**2
+
+    frames_per_bin = BIN_S / cycle
+    achieved = precision.ppm(stdev(differences) / median(fluxes) / math.sqrt(2 * frames_per_bin))
+    predicted = precision.ppm(math.sqrt(variance_sum / (2 * len(differences) * frames_per_bin)))
     if not all(math.isfinite(rms) and rms > 0 for rms in (achieved, predicted)):
         raise ValueError("Invalid achieved or predicted RMS")
     return dict(
         product=product.model_dump(mode="json"),
-        bins=len(means),
+        pairs=len(differences),
         predicted_ppm=predicted,
         achieved_ppm=achieved,
     )

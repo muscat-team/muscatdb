@@ -393,5 +393,14 @@ def test_open_precision_comparison(page, live_server):
     page.reload()
     cells = page.get_by_role("row").filter(has_text="Star").get_by_role("cell")
     expect(cells).to_have_text(["2025-01-01", "Star", "Held out", "4", "100.0", "180.0", "200.0"])
+    expect(page.get_by_role("columnheader", name="Bins")).to_be_visible()
+    sample.pop("bins")
+    sample["pairs"] = 12
+    with sqlite3.connect(live_server.db) as conn:
+        conn.execute("UPDATE precision_calibration SET samples_json = ?", (json.dumps([sample]),))
+    page.reload()
+    expect(page.get_by_text("10-minute precision assuming white noise.", exact=False)).to_be_visible()
+    expect(page.get_by_role("columnheader", name="Frame pairs")).to_be_visible()
+    expect(cells).to_have_text(["2025-01-01", "Star", "Held out", "12", "100.0", "180.0", "200.0"])
     page.get_by_role("link", name="Exposure calculator", exact=True).last.click()
     expect(page.locator("#calc-btn")).to_be_visible()
