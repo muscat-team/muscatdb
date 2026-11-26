@@ -60,19 +60,15 @@ def test_mkdocs_plus_snapshot_compose(tmp_path, mock_target_coord_resolution):
     assert "snapshot-banner" not in docs_index
     assert "Pipeline Guide" not in docs_index
 
-    # Every English guide has its own Japanese edition, including deep links.
+    # The docs are English only (#504), and every page has the light/dark switch.
+    assert not (site / "ja").exists()
     for source in (REPO_ROOT / "docs").rglob("*.md"):
-        if source.name.endswith(".ja.md"):
-            continue
-        assert source.with_suffix(".ja.md").is_file()
         relative = source.relative_to(REPO_ROOT / "docs").with_suffix("")
         if relative.name == "index":
             relative = relative.parent
-        for locale, root in (("en", site), ("ja", site / "ja")):
-            html = (root / relative / "index.html").read_text(encoding="utf-8")
-            assert f'lang="{locale}"' in html
-            assert f'hreflang="{locale}" class="md-select__link"' in html
-            assert 'data-md-component="palette"' in html
+        html = (site / relative / "index.html").read_text(encoding="utf-8")
+        assert 'lang="en"' in html
+        assert 'data-md-component="palette"' in html
 
     build_site(
         site / "home",
