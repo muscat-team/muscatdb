@@ -253,7 +253,7 @@ def _arrival_signature(inst_name: str, obsdate: str) -> int | None:
     """
     try:
         return os.stat(os.path.join(INSTRUMENTS[inst_name].data_dir, obsdate)).st_ctime_ns
-    except OSError:
+    except FileNotFoundError:
         return None
 
 
@@ -279,23 +279,25 @@ def rescan_recent(max_workers: int | None = None, today: date | None = None) -> 
     for obsdate in window:
         for name in INSTRUMENTS:
             key = f"{name}/{obsdate}"
-            signature = _arrival_signature(name, obsdate)
-            if signature is None:
-                continue
-            if state.get(key) == signature:
-                result.unchanged += 1
-                continue
             try:
+                signature = _arrival_signature(name, obsdate)
+                if signature is None:
+                    continue
+                if state.get(key) == signature:
+                    result.unchanged += 1
+                    continue
                 why = _hold_reason(name, obsdate, known)
                 if why:
                     result.held.append((name, obsdate, why))
                     continue
-                wrote = scan_date(name, obsdate, max_workers=max_workers)
+                wrote = scan_date(name, obsdate, max_workers=max_workers, preserve_frames=True)
             except Exception:
                 logger.warning("rescan of %s %s failed", name, obsdate, exc_info=True)
                 result.failed.append((name, obsdate))
                 continue
-            if wrote.get("write_errors"):
+            if reason := wrote.get("held"):
+                result.held.append((name, obsdate, reason))
+            elif wrote.get("write_errors"):
                 result.failed.append((name, obsdate))
             elif wrote:
                 result.scanned.setdefault(name, []).append(obsdate)

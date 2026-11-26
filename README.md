@@ -262,7 +262,8 @@ once, and again whenever its raw directory's ctime changes (the transfer
 preserves mtimes, so those do not show an arrival). What was last seen is kept
 in `$MUSCAT_OBSLOG_DIR/.recent-scan-state.json`, and only after a scan that
 wrote every CSV, so a failed scan is retried the next night. A date is held,
-not rescanned, on the same two conditions as in the weekly sweep below. Like
+not rescanned, on the same two conditions as in the weekly sweep below. Before replacing any CSV, the nightly rescan also
+checks that its parsed rows include every existing frame ID for each CCD. Like
 any rescan, this overwrites the date's obslog CSVs, so a manual edit to a CSV
 from the last 7 days does not survive. The following `build-db` picks up the
 new rows.

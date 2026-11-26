@@ -200,3 +200,39 @@ def test_nightly_command_still_exits_zero_when_the_lookback_breaks(env, monkeypa
 
     assert r.exit_code == 0, r.output
     assert "lookback" in r.output.lower()
+
+
+def test_rescan_preserves_frames_from_another_root(env, tmp_path):
+    archive = tmp_path / "archive"
+    directory = archive / INSTRUMENTS["sinistro"].data_subdir / RECENT
+    directory.mkdir(parents=True)
+    (directory / "original-e91.fits").touch()
+    scanner.scan_date("sinistro", RECENT, max_workers=1, data_root=archive)
+    csv_path = next(env.rglob("*.csv"))
+    original = csv_path.read_bytes()
+    canonical = tmp_path / "data" / INSTRUMENTS["sinistro"].data_subdir / RECENT
+    canonical.mkdir(parents=True)
+    (canonical / "different-e91.fits").touch()
+
+    result = _run()
+
+    assert [(i, d) for i, d, _ in result.held] == [("sinistro", RECENT)]
+    assert csv_path.read_bytes() == original
+
+
+def test_stat_error_is_reported_and_other_dates_are_scanned(env, monkeypatch, caplog):
+    _arrive(1, obsdate="261118")
+    inaccessible = _raw_dir()
+    real_stat = os.stat
+
+    def stat(path, *args, **kwargs):
+        if path == inaccessible:
+            raise PermissionError("cannot stat raw directory")
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", stat)
+    result = _run()
+
+    assert result.failed == [("muscat2", RECENT)]
+    assert "cannot stat raw directory" in caplog.text
+    assert result.scanned == {"muscat2": ["261118"]}
