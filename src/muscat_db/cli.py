@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import getpass
+import logging
 import os
 import re
 import signal
@@ -291,7 +292,8 @@ def scan_all(
 def scan_yesterday_cmd(
     workers: int | None = _WORKER_OPTION,
 ):
-    """Scan yesterday's data for all instruments (cron-friendly)."""
+    """Scan yesterday's data for all instruments, then rescan late or partial
+    deliveries from the days before (cron-friendly)."""
     _log_startup_banner("scan-yesterday")
     obsdate = scanner.yesterday_obsdate()
     scanned = scan_yesterday(max_workers=workers)
@@ -310,6 +312,25 @@ def scan_yesterday_cmd(
             f"[red]Scan failed for {obsdate}: {', '.join(failed)} "
             "-- recorded for retry; see `muscat-db scan-failures`[/]"
         )
+    _report_recent_rescan(workers)
+
+
+def _report_recent_rescan(workers: int | None) -> None:
+    from muscat_db.sweep import rescan_recent
+
+    try:
+        result = rescan_recent(max_workers=workers)
+    except Exception as exc:  # same reason as above: never stop the rebuild
+        logging.getLogger(__name__).warning("lookback rescan failed", exc_info=True)
+        console.print(f"[red]Lookback rescan failed: {type(exc).__name__}: {exc}[/]", soft_wrap=True)
+        return
+    for name, dates in result.scanned.items():
+        for obsdate in dates:
+            console.print(f"[green]Rescanned {name} {obsdate}[/]")
+    for name, obsdate in result.failed:
+        console.print(f"[red]Rescan of {name} {obsdate} failed; it is retried next run[/]")
+    for name, obsdate, why in result.held:
+        console.print(f"[yellow]Held {name} {obsdate}, not rescanned: {why}[/]", soft_wrap=True)
 
 
 @app.command(name="build-status", cls=_Cmd)

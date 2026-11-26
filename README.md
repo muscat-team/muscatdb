@@ -253,9 +253,19 @@ run by hand: it prints the age of the last build and exits 1 when stale.
 
 `MUSCAT_OBSLOG_DIR` is exported inline rather than left to `.env` because cron
 runs with a minimal environment; pin it in `.env` too for manual/GUI runs (see
-[Configuration](#configuration)). `scan-yesterday` only scans the previous
-day's obslog, so a one-off manual `build-db` or `scan` never gets silently
-overwritten by the next nightly run of this job.
+[Configuration](#configuration)).
+
+`scan-yesterday` scans the previous day, then looks back at the dates 2 to 7
+days ago, because the nightly can run while a night is still being transferred
+and some deliveries arrive days late (#500). Each of those dates is scanned
+once, and again whenever its raw directory's ctime changes (the transfer
+preserves mtimes, so those do not show an arrival). What was last seen is kept
+in `$MUSCAT_OBSLOG_DIR/.recent-scan-state.json`, and only after a scan that
+wrote every CSV, so a failed scan is retried the next night. A date is held,
+not rescanned, on the same two conditions as in the weekly sweep below. Like
+any rescan, this overwrites the date's obslog CSVs, so a manual edit to a CSV
+from the last 7 days does not survive. The following `build-db` picks up the
+new rows.
 
 A scan that fails for one instrument is logged at WARNING with its traceback
 in `scan.log`, and `scan-yesterday` names it in its output. It is also
@@ -268,9 +278,9 @@ complete to `scan-missing`. `muscat-db scan-failures` lists the open entries.
 
 ## Cron (weekly): backfill sweep and ingestion audit
 
-`scan-yesterday` looks at each date once, so a date that fails or arrives late
-is never revisited, and nothing used to notice. Two weekly jobs close that gap
-(#196). Run them at low priority, well clear of the 17:30 nightly:
+The nightly looks back only 7 days, so a date that fails for longer or arrives
+later than that is not revisited by it. Two weekly jobs close that gap (#196).
+Run them at low priority, well clear of the 17:30 nightly:
 
 ```
 0 3 * * 0 cd $MUSCATDB_ROOT && nice -n 19 ionice -c3 uv run muscat-db sweep --build-db >> $MUSCATDB_ROOT/logs/sweep.log 2>&1

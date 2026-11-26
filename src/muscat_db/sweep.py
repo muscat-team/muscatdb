@@ -1,7 +1,9 @@
-"""Periodic backfill sweep across the whole raw archive (issue #196, part 2).
+"""Backfill of missed and partial scans: the weekly sweep (issue #196, part 2)
+and the nightly lookback (:func:`rescan_recent`, issue #500).
 
-The nightly ``scan-yesterday`` looks at each date once, so a date that fails
-or whose data arrives late is never revisited. The sweep closes that loop:
+The plain nightly scan of yesterday looks at a date once, so on its own a date
+that fails or whose data arrives late is never revisited. The sweep closes that
+loop across the whole raw archive:
 
 1. Every date ``scan-missing <inst> all`` would pick up, for every
    instrument. Since #163 that includes empty marker directories and CSVs a
@@ -39,6 +41,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 
 from muscat_db import scan_failures
 from muscat_db.audit import known_issues
@@ -52,6 +55,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_WORKERS = 8
 LOCK_NAME = ".sweep.lock"
 STATE_NAME = ".sweep-state.json"
+# Sinistro reaches the host about two days late and one delivery spanned ~62 h
+# (see scanner._DEFAULT_STALE_CSV_GRACE_S); an unchanged date costs one stat.
+LOOKBACK_DAYS = 7
+RECENT_STATE_NAME = ".recent-scan-state.json"
 
 
 @dataclass
@@ -149,9 +156,9 @@ def _raw_signature(inst_name: str, obsdate: str) -> int | None:
         return None
 
 
-def _load_state() -> dict[str, int]:
+def _load_state(name: str = STATE_NAME) -> dict[str, int]:
     try:
-        with open(os.path.join(OBSLOG_BASE, STATE_NAME)) as f:
+        with open(os.path.join(OBSLOG_BASE, name)) as f:
             return json.load(f)
     except FileNotFoundError:
         return {}
@@ -160,8 +167,8 @@ def _load_state() -> dict[str, int]:
         return {}
 
 
-def _save_state(state: dict[str, int]) -> None:
-    path = os.path.join(OBSLOG_BASE, STATE_NAME)
+def _save_state(state: dict[str, int], name: str = STATE_NAME) -> None:
+    path = os.path.join(OBSLOG_BASE, name)
     tmp = f"{path}.tmp.{os.getpid()}"
     try:
         with open(tmp, "w") as f:
@@ -233,3 +240,65 @@ def _retry_failures(result: SweepResult, known, max_workers: int) -> None:
             result.failed.append(key)
             continue
         (result.retried if ok else result.failed).append(key)
+
+
+# -- the nightly lookback ----------------------------------------------------------
+
+
+def _arrival_signature(inst_name: str, obsdate: str) -> int | None:
+    """The raw directory's ctime, which changes when a file is added to it.
+
+    Not its mtime: the transfer preserves that from the telescope. The value is
+    only compared with an earlier reading of itself, so no clock is involved.
+    """
+    try:
+        return os.stat(os.path.join(INSTRUMENTS[inst_name].data_dir, obsdate)).st_ctime_ns
+    except OSError:
+        return None
+
+
+def rescan_recent(max_workers: int | None = None, today: date | None = None) -> SweepResult:
+    """Rescan the dates before yesterday whose raw files may have moved on (#500).
+
+    Covers 2 to ``LOOKBACK_DAYS`` days ago. A date is scanned the first time it
+    is seen here, because the scan on the following day may have run during its
+    transfer, and again whenever its raw directory changes. The signature is
+    read *before* the scan lists any file, so a frame that arrives while the
+    scan runs differs from it next time. It is kept only after a scan that
+    wrote every CSV, so failures are retried.
+    """
+    today = today or date.today()
+    window = [
+        (today - timedelta(days=n)).strftime("%y%m%d") for n in range(2, LOOKBACK_DAYS + 1)
+    ]
+    previous = _load_state(RECENT_STATE_NAME)
+    # Dates that left the window are dropped, so the file does not grow.
+    state = {key: sig for key, sig in previous.items() if key.rsplit("/", 1)[-1] in window}
+    known = known_issues()
+    result = SweepResult()
+    for obsdate in window:
+        for name in INSTRUMENTS:
+            key = f"{name}/{obsdate}"
+            signature = _arrival_signature(name, obsdate)
+            if signature is None:
+                continue
+            if state.get(key) == signature:
+                result.unchanged += 1
+                continue
+            try:
+                why = _hold_reason(name, obsdate, known)
+                if why:
+                    result.held.append((name, obsdate, why))
+                    continue
+                wrote = scan_date(name, obsdate, max_workers=max_workers)
+            except Exception:
+                logger.warning("rescan of %s %s failed", name, obsdate, exc_info=True)
+                result.failed.append((name, obsdate))
+                continue
+            if wrote.get("write_errors"):
+                result.failed.append((name, obsdate))
+            elif wrote:
+                result.scanned.setdefault(name, []).append(obsdate)
+                state = {**state, key: signature}
+                _save_state(state, RECENT_STATE_NAME)  # a killed run keeps its progress
+    return result
