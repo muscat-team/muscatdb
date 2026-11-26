@@ -667,3 +667,17 @@ def test_rediff_card_is_hidden_without_a_flux_cube(page):
     page.goto(URL)
     page.wait_for_load_state("networkidle")
     expect(page.locator("#rediff-section")).to_have_count(0)
+
+
+def test_run_reduced_without_gaia_shows_a_warning(page):
+    # A done run that lost Gaia is flagged under the run status (#502).
+    from muscat_db import photometry
+    page.route('**/api/photometry/status?*', lambda r: r.fulfill(json={
+        'state': 'done', 'returncode': 0, 'elapsed': 10, 'log': 'photometry SUCCEEDED',
+        'error_desc': '', 'warnings': [photometry.NO_GAIA_WARNING],
+    }))
+    page.goto(URL)
+    status = page.locator('#run-status')
+    expect(status).to_contain_text('Done with warnings')
+    expect(status).to_contain_text('Reduced without Gaia')
+    expect(status.locator('.error-desc')).to_have_count(0)

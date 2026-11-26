@@ -179,6 +179,16 @@ def test_status_responses_match_contract_without_adding_keys(client, monkeypatch
     api.JobStatus.model_validate(response.json())
 
 
+def test_status_of_a_done_run_carries_its_warnings(client, monkeypatch):
+    # A run reduced without Gaia is done with a warning (#502).
+    body = {"state": "done", "log": "tail", "returncode": 0, "elapsed": 9,
+            "error_desc": "", "warnings": [phot.NO_GAIA_WARNING]}
+    monkeypatch.setattr(phot, "job_status", lambda *a, **k: body)
+    response = client.get("/api/photometry/status", params=DATASET)
+    assert response.status_code == 200
+    assert response.json()["warnings"] == [phot.NO_GAIA_WARNING]
+
+
 def test_direct_json_responses_are_validated(client, monkeypatch):
     monkeypatch.setattr(phot, "job_status", lambda *a, **k: {"state": "typo"})
     with pytest.raises(ValidationError):

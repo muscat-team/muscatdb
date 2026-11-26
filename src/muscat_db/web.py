@@ -8316,9 +8316,15 @@ def _all_job_rows() -> list[dict]:
     return [dict(row) for row in rows]
 
 
-def _fit_warnings(row):
+def _job_warnings(row):
+    """Warnings for a done job: fit-health warnings for transit and TTV fits,
+    the stored warning for photometry (#502)."""
     kind = row.get("type")
-    if row.get("state") != "done" or kind not in ("transit_fit", "ttv_fit"):
+    if row.get("state") != "done":
+        return []
+    if kind == "photometry":
+        return phot._status_warnings("done", row.get("error_desc") or "")[0]
+    if kind not in ("transit_fit", "ttv_fit"):
         return []
     params = fit_params(row)
     if "fit_health" in params:
@@ -8340,7 +8346,7 @@ def jobs_page():
     is_admin = _jobs_user_is_admin(user)
     for j in all_jobs:
         j["elapsed"] = _live_elapsed(j)
-        j["fit_warnings"] = _fit_warnings(j)
+        j["warnings"] = _job_warnings(j)
         j["stored"] = j["key"] in stored_keys
         j["can_delete"] = j["stored"] and _may_delete_job(j, user, is_admin)
         j["can_cancel"] = _may_cancel_job_row(j)
@@ -8394,8 +8400,11 @@ def jobs_status(active_only: bool = False, watch: Annotated[list[str] | None, Qu
             and j.get("state") in {"done", "error", "cancelled"}
         )
         if (j["key"] in watched_keys and j.get("state") in _JOB_TERMINAL_STATES) or is_terminal_lco_archive:
+            warnings = _job_warnings(j)
+            # A done photometry job keeps its warning in error_desc (#502).
+            error_desc = "" if warnings and j.get("type") == "photometry" else j.get("error_desc", "") or ""
             finished[j["key"]] = {
-                "fit_warnings": _fit_warnings(j),
+                "warnings": warnings,
                 "key": j["key"],
                 "type": j.get("type", ""),
                 "inst": j.get("inst", ""),
@@ -8403,7 +8412,7 @@ def jobs_status(active_only: bool = False, watch: Annotated[list[str] | None, Qu
                 "target": j.get("target", ""),
                 "state": j["state"],
                 "elapsed": j["elapsed"],
-                "error_desc": j.get("error_desc", "") or "",
+                "error_desc": error_desc,
                 "returncode": j.get("returncode"),
                 "started_at": j.get("started_at"),
                 "started_at_str": _datetime_from_timestamp(int(j["started_at"])) if j.get("started_at") else "—",

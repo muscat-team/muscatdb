@@ -910,7 +910,7 @@
       var cqs = 'inst=' + encodeURIComponent(inst) + '&date=' + encodeURIComponent(date) + '&target=' + encodeURIComponent(target);
       if (runId) cqs += '&run=' + encodeURIComponent(runId);
       fetch('/api/photometry/status?' + cqs).then(function (r) { return r.json(); }).then(function (s) {
-        renderRunStatus(s.state, s.error_desc);
+        renderRunStatus(s.state, s.error_desc, s.warnings);
         if (s.state === 'pending' || s.state === 'running' || s.state === 'cancelling' || s.state === 'finalizing') {
           saveJob();
           setRunning(true);
@@ -1544,7 +1544,7 @@
     error:      ['Failed',      'badge-error'],
     cancelled:  ['Cancelled',   'badge-cancelled']
   };
-  function renderRunStatus(state, errorDesc) {
+  function renderRunStatus(state, errorDesc, warnings) {
     if (!statusEl) return;
     var noReference = document.getElementById('phot-no-reference');
     if (noReference) {
@@ -1559,6 +1559,11 @@
       return;
     }
     var html = '<span class="badge ' + info[1] + ' status-badge">' + info[0] + '</span>';
+    if (state === 'done' && warnings && warnings.length) {
+      // Same wording as the Jobs page (#502).
+      html = '<span class="badge badge-amber status-badge">Done with warnings</span> ' +
+        MuscatDom.escapeHtml(warnings.join(', '));
+    }
     if (state === 'error' && errorDesc) {
       html += ' <span class="error-desc mono" style="color:var(--red);margin-left:0.5rem;">' + MuscatDom.escapeHtml(errorDesc) + '</span>';
     }
@@ -1892,7 +1897,7 @@
   function handleStatusResponse(jobSpec, s) {
     // Update current target's log if this is the job we're monitoring on this page
     if (jobSpec.inst === inst && jobSpec.date === date && jobSpec.target === target && (jobSpec.run || '') === (runId || '')) {
-      renderRunStatus(s.state, s.error_desc);
+      renderRunStatus(s.state, s.error_desc, s.warnings);
       if (s.log) {
         logEl.innerHTML = MuscatDom.ansiToHtml(s.log);
         logEl.scrollTop = logEl.scrollHeight;
