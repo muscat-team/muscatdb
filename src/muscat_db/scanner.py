@@ -456,10 +456,15 @@ def scan_date(
     max_workers: int | None = None,
     progress=None,
     data_root: str | os.PathLike[str] | None = None,
+    *,
+    preserve_frames: bool = False,
 ) -> dict:
     """Scan all CCDs for a date.
 
     Returns {"total": int, "per_ccd": {ccd: count}} — falsy if no files found.
+
+    With preserve_frames, returns {"held": reason} before writing if a CSV
+    would lose a frame. A hold leaves the failure ledger intact.
 
     Every outcome is reflected in the scan-failure ledger (issue #196): an
     exception, or a CCD whose CSV could not be written, records the date; a
@@ -470,7 +475,7 @@ def scan_date(
     """
     root = None if data_root is None else os.fspath(data_root)
     try:
-        result = _scan_date(inst_name, obsdate, max_workers, progress, data_root)
+        result = _scan_date(inst_name, obsdate, max_workers, progress, data_root, preserve_frames)
     except Exception as exc:
         scan_failures.record(
             OBSLOG_BASE, inst_name, obsdate, f"{type(exc).__name__}: {exc}", data_root=root,
@@ -482,7 +487,7 @@ def scan_date(
         )
         if "total" not in result:
             return {}  # nothing was written; callers read truthy as "had data"
-    elif result:
+    elif result and not result.get("held"):
         scan_failures.clear(OBSLOG_BASE, inst_name, obsdate)
     return result
 
@@ -493,6 +498,7 @@ def _scan_date(
     max_workers: int | None,
     progress,
     data_root: str | os.PathLike[str] | None,
+    preserve_frames: bool,
 ) -> dict:
     inst = INSTRUMENTS[inst_name]
 
@@ -518,7 +524,7 @@ def _scan_date(
         # different from MUSCAT_DATA_DIR. Removing the canonical CSV on a
         # zero-match result from that *other* tree would delete a CSV that
         # still correctly describes real files under MUSCAT_DATA_DIR.
-        if inst.nccd == 1 and data_root is None:
+        if inst.nccd == 1 and data_root is None and not preserve_frames:
             _maybe_remove_stale_single_ccd_csv(inst_name, obsdate)
         return {}
 
@@ -572,6 +578,20 @@ def _scan_date(
     finally:
         if executor is not None:
             executor.shutdown()
+
+    if preserve_frames:
+        # Check every CCD before replacing the first CSV. Separate archive
+        # roots can hold different frames for the same instrument and night.
+        for ccd in range(inst.nccd):
+            frames = {row["FRAME"] for row in rows_by_ccd.get(ccd, [])}
+            path = f"{logdir}/obslog-{inst_name}-{obsdate}-ccd{ccd}.csv"
+            try:
+                with open(path, newline="") as f:
+                    for row in csv.DictReader(f):
+                        if row["FRAME"] not in frames:
+                            return {"held": f"rescan would drop ccd{ccd} frame {row['FRAME']}"}
+            except FileNotFoundError:
+                continue
 
     # A CCD whose CSV cannot be written leaves the date looking complete to
     # scan-missing (the sibling CCDs' CSVs are fine), so it is never retried

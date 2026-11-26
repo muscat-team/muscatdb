@@ -77,13 +77,19 @@ def test_failing_instrument_is_logged_at_warning_and_recorded(obslog, fake_files
     assert "stale NFS handle" in entry["reason"]
 
 
-def test_scan_yesterday_cli_names_failed_instruments_but_exits_zero(obslog, fake_files, monkeypatch):
+def test_scan_yesterday_cli_names_failed_instruments_but_exits_zero(
+    obslog, fake_files, monkeypatch, tmp_path,
+):
     """Exit 0 on purpose: the cron chains ``scan-yesterday && build-db``, and
     one instrument's failure must not also skip every other instrument's rebuild."""
     from typer.testing import CliRunner
 
+    from muscat_db import sweep
     from muscat_db.cli import app
 
+    # The command also looks back over recent dates; keep it off the host's data.
+    monkeypatch.setenv("MUSCAT_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setattr(sweep, "OBSLOG_BASE", str(obslog))
     _, broken = fake_files
     broken.add("sinistro")
     fake_date = type("D", (), {"today": staticmethod(lambda: datetime.date(2026, 5, 15))})

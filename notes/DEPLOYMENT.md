@@ -941,8 +941,9 @@ SQLite's backup API and runs an isolated staging `scan-yesterday` against
 staging's own `MUSCAT_OBSLOG_DIR`. A failed catalog download does not stop that
 chain: `nightly.sh run` posts it as a warning and still exits 0. The README's
 [Cron section](../README.md#cron-daily) gives the generic, host-agnostic form
-for anyone else deploying this repo; the literal nightly entries installed on
-this host, staging refresh included, are (`crontab -l`, 2026-10-25):
+for anyone else deploying this repo; the literal nightly and weekly entries
+installed on this host, staging refresh included, are (`crontab -l`,
+2026-11-25):
 
 ```
 MUSCAT_OBSLOG_DIR=/ut2/muscat/obslog
@@ -950,9 +951,20 @@ MUSCATDB_ROOT=/ut2/jerome/deploy/main/app
 MUSCAT_TEST_ROOT=/ut2/jerome/deploy/test/app
 MUSCAT_TEST_DB=/ut2/jerome/deploy/test/muscat_test.db
 MUSCAT_TEST_OBSLOG_DIR=/ut2/jerome/deploy/test/obslog
-30 17 * * * cd $MUSCATDB_ROOT && UV_BIN=/ut2/jerome/.local/bin/uv bash deploy/nightly.sh run && /usr/bin/python3 -c "import sqlite3; s=sqlite3.connect('file:/ut2/jerome/github/research/project/muscat-db/muscat.db?mode=ro',uri=True); d=sqlite3.connect('$MUSCAT_TEST_DB'); s.backup(d); d.close(); s.close()" >> $MUSCAT_TEST_ROOT/logs/staging-refresh.log 2>&1 && cd $MUSCAT_TEST_ROOT && MUSCAT_OBSLOG_DIR=$MUSCAT_TEST_OBSLOG_DIR /ut2/jerome/.local/bin/uv run muscat-db scan-yesterday >> $MUSCAT_TEST_ROOT/logs/scan.log 2>&1
+30 17 * * * cd $MUSCATDB_ROOT && { /ut2/jerome/.local/bin/uv run muscat-db lco-sync KEY2026B-001 --user jerome --no-ingest >> logs/lco-sync.log 2>&1; UV_BIN=/ut2/jerome/.local/bin/uv bash deploy/nightly.sh run && /usr/bin/python3 -c "import sqlite3; s=sqlite3.connect('file:/ut2/jerome/github/research/project/muscat-db/muscat.db?mode=ro',uri=True); d=sqlite3.connect('$MUSCAT_TEST_DB'); s.backup(d); d.close(); s.close()" >> $MUSCAT_TEST_ROOT/logs/staging-refresh.log 2>&1 && cd $MUSCAT_TEST_ROOT && MUSCAT_OBSLOG_DIR=$MUSCAT_TEST_OBSLOG_DIR /ut2/jerome/.local/bin/uv run muscat-db scan-yesterday >> $MUSCAT_TEST_ROOT/logs/scan.log 2>&1; }
 30 21 * * * cd $MUSCATDB_ROOT && UV_BIN=/ut2/jerome/.local/bin/uv MAX_BUILD_AGE_HOURS=24 bash deploy/nightly.sh check
+0 3 * * 0 cd $MUSCATDB_ROOT && nice -n 19 ionice -c3 /ut2/jerome/.local/bin/uv run muscat-db sweep --build-db >> $MUSCATDB_ROOT/logs/sweep.log 2>&1
+0 6 * * 0 cd $MUSCATDB_ROOT && nice -n 19 ionice -c3 /ut2/jerome/.local/bin/uv run muscat-db audit >> $MUSCATDB_ROOT/logs/audit.log 2>&1
 ```
+
+The two weekly entries (Sunday 03:00 `sweep --build-db`, 06:00 `audit`) are the
+README's [Cron (weekly)](../README.md#cron-weekly-backfill-sweep-and-ingestion-audit) jobs from #196/#200. They
+were documented there in October but only installed on this host on
+2026-11-24, after #500 found MuSCAT2 and Sinistro nights left partially
+ingested by the nightly scan. Before that date neither had ever run here. The
+17:30 entry also gained the `lco-sync` prefix (README "LCO proposal sync") since the
+2026-10-25 snapshot. The `*/5` pull-deploy and tunnel-check entries are
+recorded in their own sections and are not repeated here.
 
 `cronjob.txt` itself is not tracked (it was a root-level file that only ever
 made sense as this host's literal crontab, never as example config); this
